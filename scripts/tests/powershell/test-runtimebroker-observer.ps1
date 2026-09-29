@@ -21,6 +21,16 @@ Assert-ObserverTest ([DrRuntimeBrokerNative]::MatchesCapturedLifetime(50,50,'134
 Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesCapturedLifetime(50,50,'134351000000000003','134351000000000002')) 'Old event attached to reused PID.'
 Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesCapturedLifetime(50,51,'134351000000000003',$null)) 'Wrong native PID attached.'
 Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesCapturedLifetime(50,50,$null,$null)) 'Unknown native creation attached.'
+Assert-ObserverTest ([DrRuntimeBrokerNative]::ExistingAtSubscriptionStart('134351000000000001','134351000000000002')) 'Pre-subscription lifetime was misclassified.'
+Assert-ObserverTest (-not [DrRuntimeBrokerNative]::ExistingAtSubscriptionStart('134351000000000003','134351000000000002')) 'Subscription/snapshot gap lifetime was labelled pre-observation.'
+Assert-ObserverTest ($null -eq [DrRuntimeBrokerNative]::ExistingAtSubscriptionStart('134351000000000001',$null)) 'Unknown start boundary became existing-at-start.'
+Assert-ObserverTest ([DrRuntimeBrokerNative]::MatchesSnapshotLifetime(50,50,'134351000000000000','134351000000000009',2,2)) 'Same snapshot/native lifetime failed microsecond corroboration.'
+Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesSnapshotLifetime(50,50,'134351000000000000','134351000000000010',2,2)) 'Reused snapshot PID attached to a later native lifetime.'
+Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesSnapshotLifetime(50,50,'134351000000000000','134351000000000001',2,3)) 'Snapshot session mismatch attached.'
+Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesSnapshotLifetime(50,50,$null,'134351000000000001',2,2)) 'Missing snapshot creation became a lifetime match.'
+Assert-ObserverTest ([DrRuntimeBrokerNative]::IsRuntimeBrokerImage('C:\Windows\System32\RuntimeBroker.exe')) 'Native target image leaf failed.'
+Assert-ObserverTest (-not [DrRuntimeBrokerNative]::IsRuntimeBrokerImage('C:\Windows\System32\cmd.exe')) 'Unrelated native process image was enriched.'
+
 
 # Exercise the actual common target/parent reservation counter, with no process opens.
 $session = [DrRuntimeBrokerSession]::new('S-1-5-21-1')
@@ -49,20 +59,21 @@ function New-FakeLease([uint32]$ProcessId, [string]$Creation, [uint32]$Wait = 0,
 }
 function New-FakeRecord($Lease, [string]$Scope = 'runner', [string]$Kind = 'capture') {
     [pscustomobject]@{ Kind = $Kind; Source = 'initial-snapshot'; Pid = $Lease.Life.Identity.pid; EventTime = $null;
-        ReceivedUtc = '2026-09-30T00:00:00.0000000Z'; OwnerScope = $Scope; ErrorType = $null; ErrorHResult = 0; Lease = $Lease }
+        ReceivedUtc = '2026-09-30T00:00:00.0000000Z'; OwnerScope = $Scope; ErrorType = $null; ErrorHResult = 0; Lease = $Lease; TraceAuxiliary = @{ parent_process_id=55; event_sid='S-1-5-21-1'; event_sid_base64='AA=='; sid_status='observed'; exit_status=1; field_errors=@() }; NativeCaptureStartedUtc='2026-09-30T00:00:00.0000000Z'; NativeIdentityCompletedUtc='2026-09-30T00:00:00.0000001Z'; SubscriptionStartFileTime='134351000000000000'; ExistingAtStart=$false; OriginClassification='born-since-subscription-start' }
 }
 function New-FakeBackend([string]$Root, [object[]]$Records = @(), [bool]$SnapshotFailure = $false, [bool]$WrongStop = $false) {
-    $context = @{ Root = $Root; Rows = $Records; Calls = [Collections.Generic.List[string]]::new(); CloseCount = 0;
-        EnrichCount = 0; SnapshotFailure = $SnapshotFailure; WrongStop = $WrongStop; ProviderFailures = 0 }
+    $context = @{ Root = $Root; Rows = $Records; Calls = [Collections.Generic.List[string]]::new(); CloseCount = 0; CompilerCleanup = @{ completed=$true; owned_temp_artifacts_remaining=0; errors=@(); compilation_succeeded=$true };
+        EnrichCount = 0; SnapshotFailure = $SnapshotFailure; WrongStop = $WrongStop; ProviderFailures = 0; ProviderFailOnSnapshot=$false; ProviderFailOnEnrich=$false; ProviderFailOnDelay=$false }
     $backend = @{
         Context = $context
         Start = { $context.Calls.Add('subscriptions-started') }.GetNewClosure()
-        Ready = { $true }
-        Snapshot = { $context.Calls.Add('snapshot'); if ($context.SnapshotFailure) { throw 'Snapshot failed.' }; @(50) }.GetNewClosure()
+        Ready = { $context.ProviderFailures -eq 0 }.GetNewClosure()
+        Snapshot = { $context.Calls.Add('snapshot'); if ($context.ProviderFailOnSnapshot) { $context.ProviderFailures=1 }; if ($context.SnapshotFailure) { throw 'Snapshot failed.' }; @(50) }.GetNewClosure()
         Capture = { param($ProcessId) $context.Calls.Add('capture') }.GetNewClosure()
         Drain = { $records = $context.Rows; $context.Rows = @(); return $records }.GetNewClosure()
-        Enrich = { param($Record,$Backend) $context.EnrichCount++; @{ command_line_sha256 = 'redacted-fake'; marker = 'preserved' } }.GetNewClosure()
+        Enrich = { param($Record,$Backend) $context.EnrichCount++; if ($context.ProviderFailOnEnrich) { $context.ProviderFailures=1 }; @{ command_line_sha256 = 'redacted-fake'; marker = 'preserved' } }.GetNewClosure()
         Delay = {
+            if ($context.ProviderFailOnDelay) { $context.ProviderFailures=1 }
             Assert-ObserverTest (Test-Path (Join-Path $context.Root 'ready.json')) 'Delay preceded readiness.'
             $id = if ($context.WrongStop) { 'ffffffffffffffffffffffffffffffff' } else { '11111111111111111111111111111111' }
             [IO.File]::WriteAllText((Join-Path $context.Root 'stop-request.json'), (@{ schema_version = 1; run_id = $id } | ConvertTo-Json -Compress))
@@ -77,7 +88,7 @@ function New-FakeBackend([string]$Root, [object[]]$Records = @(), [bool]$Snapsho
     return $backend
 }
 function Invoke-FakeRun($Backend, [int]$Limit = 14MB, [int]$Reserve = 256KB) {
-    Invoke-DrRuntimeBrokerObserverCore -Root $Backend.Context.Root -RunId '11111111111111111111111111111111' -RunnerSid 'S-1-5-21-1' -ExpectedVmId '00000000-0000-0000-0000-000000000001' -DurationSeconds 5 -Backend $Backend -MetadataLimit $Limit -TerminalReserve $Reserve
+    Invoke-DrRuntimeBrokerObserverCore -Root $Backend.Context.Root -RunId '11111111111111111111111111111111' -RunnerSid 'S-1-5-21-1' -ExpectedVmId '00000000-0000-0000-0000-000000000001' -DurationSeconds 5 -Backend $Backend -MetadataLimit $Limit -TerminalReserve $Reserve -CompilerCleanup $Backend.Context.CompilerCleanup
 }
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('runtimebroker-tests-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($testRoot)
@@ -97,6 +108,9 @@ try {
     Assert-ObserverTest ($rows[0].native_identity.package_first_status -eq 15700 -and $rows[0].native_identity.aumid_first_status -eq 15703) 'Raw no-identity API codes lost.'
     Assert-ObserverTest ($rows[0].identity_status -ceq 'no-package-identity') 'No-identity confused with capture failure.'
     Assert-ObserverTest ($rows[-1].native_exit.exit_code -eq 1) 'Observed nonzero exit code changed.'
+    Assert-ObserverTest ($rows[0].trace_auxiliary.parent_process_id -eq 55 -and $rows[0].trace_auxiliary.exit_status -eq 1 -and -not $rows[0].existing_at_start) 'Auxiliary trace or actual start boundary data was lost.'
+    Assert-ObserverTest ($result.compiler_cleanup.completed -and $result.compiler_cleanup.owned_temp_artifacts_remaining -eq 0 -and $result.output_staging.published_before_result -eq 1 -and $result.output_staging.remaining_before_result -eq 0) 'Compiler/staging resource receipt lost.'
+    Assert-ObserverTest (@(Get-ChildItem $backend.Context.Root -Filter '*.tmp').Count -eq 0) 'Atomic publication leaked staging files.'
 
     $foreign = New-FakeLease 51 '134351000000000003'; $foreign.Close(); $unknown = New-FakeLease 52 '134351000000000004' 258
     $backend = New-FakeBackend (New-TestRoot 'scope') @((New-FakeRecord $foreign 'foreign'),(New-FakeRecord $unknown 'unknown'))
@@ -118,9 +132,9 @@ try {
     $result = Invoke-FakeRun $backend
     Assert-ObserverTest ($result.status -ceq 'diagnostic-incomplete' -and $backend.Context.CloseCount -eq 1) 'Foreign stop request was accepted.'
     $backend = New-FakeBackend (New-TestRoot 'provider-failure')
-    $backend.Context.ProviderFailures = 1
+    $backend.Context.ProviderFailOnDelay = $true
     $result = Invoke-FakeRun $backend
-    Assert-ObserverTest ($result.issues -contains 'coverage-or-close-loss:provider_failures') 'Provider loss was silently treated as lossless.'
+    Assert-ObserverTest ($result.ready_written -and $result.issues -contains 'coverage-or-close-loss:provider_failures') 'Provider loss was silently treated as lossless.'
 
     $backend = New-FakeBackend (New-TestRoot 'phase')
     $phaseRoot = Join-Path $backend.Context.Root 'phases'; [void][IO.Directory]::CreateDirectory($phaseRoot)
@@ -153,7 +167,8 @@ try {
     $savedWindir = $env:windir
     $env:windir = '/mockWindows'
     function Get-DrRuntimeBrokerImageEvidence { param($Path,$ExpectedLeaf) @{ status = 'mock-image'; image_path = $Path; leaf = $ExpectedLeaf } }
-    function Get-CimInstance { param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) return $script:cimRows[$Filter] }
+    function Get-CimInstance { param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) if ($script:cimFailure -ceq $Filter) { throw 'Mocked CIM failure.' }; return $script:cimRows[$Filter] }
+    $script:cimFailure = ''
     try {
         $child = New-FakeLease 50 '134351000000000003' 258
         $child.Life.Identity.session_id = 2; $child.Life.Identity.image_path = '/mockWindows/System32/RuntimeBroker.exe'
@@ -166,19 +181,67 @@ try {
             'ProcessId=55' = [pscustomobject]@{ CreationDate = [DateTime]::FromFileTimeUtc(134350999999000000); SessionId = 0; Name = 'svchost.exe' }
         }
         $row = Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session = $fakeSession }
-        Assert-ObserverTest ($row.native_minus_cim_ticks -ceq '3' -and $row.parent.cim.native_minus_cim_ticks -ceq '3') 'Native 100ns precision was lost.'
+        Assert-ObserverTest ($row.native_minus_cim_ticks -ceq '3' -and $row.parent.cim.value.native_minus_cim_ticks -ceq '3') 'Native 100ns precision was lost.'
         Assert-ObserverTest ($row.parent.association_status -ceq 'creation-order-corroborated-not-causality' -and $row.parent.native_identity.owner_sid -ceq 'S-1-5-18' -and $row.parent.handle_closed -and $parent.CloseCount -eq 1) 'Parent evidence or guaranteed close failed.'
-        Assert-ObserverTest (-not $row.command_line_redacted) 'Fixed canonical command was unnecessarily redacted.'
+        Assert-ObserverTest ($row.command_line -ceq '/mockWindows/System32/RuntimeBroker.exe -Embedding') 'First captured command was lost.'
         $parent = New-FakeLease 55 '134351000000000010' 258
         $parent.Life.Identity.open_error = 0; $fakeSession.Parent = $parent
         $script:cimRows['ProcessId=50'].CommandLine = 'unexpected private command'
         $row = Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session = $fakeSession }
         Assert-ObserverTest ($row.parent.association_status -ceq 'invalid-parent-newer-than-child' -and $parent.Closed) 'Reused parent PID was associated or leaked.'
-        Assert-ObserverTest ($row.command_line_redacted -and $null -eq $row.command_line -and $row.command_line_length -eq 26) 'Unexpected command was emitted raw.'
+        Assert-ObserverTest ($row.command_line -ceq 'unexpected private command' -and $row.command_line_length -eq 26) 'Bounded noncanonical runner command was lost.'
+        $parent = New-FakeLease 55 '134350999999000003' 258
+        $parent.Life.Identity.open_error=0; $parent.Life.Identity.session_id=0; $fakeSession.Parent=$parent
+        $script:cimFailure='ProcessId=55'
+        $row=Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session=$fakeSession }
+        Assert-ObserverTest ($row.command_line -ceq 'unexpected private command' -and $row.parent_pid -eq 55 -and $row.image_evidence.status -ceq 'mock-image') 'Parent CIM failure discarded target fields.'
+        Assert-ObserverTest (-not $row.parent.cim.succeeded -and $null -ne $row.parent.cim.error_hresult -and $row.parent.cim.started_guest_utc -and $row.parent.cim.completed_guest_utc -and $parent.Closed) 'Independent parent query failure or close was lost.'
+        $script:cimFailure=''
+        $script:cimRows['ProcessId=50'].CommandLine=$null
+        $row=Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session=$fakeSession }
+        Assert-ObserverTest ($row.command_line_present -and $row.command_line_status -ceq 'null' -and $null -eq $row.command_line) 'Null command was converted to empty.'
+        $script:cimRows['ProcessId=50'].PSObject.Properties.Remove('CommandLine')
+        $row=Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session=$fakeSession }
+        Assert-ObserverTest (-not $row.command_line_present -and $row.command_line_status -ceq 'absent') 'Missing command was conflated with null.'
+        $script:cimRows['ProcessId=50'] | Add-Member NoteProperty CommandLine ''
+        $row=Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session=$fakeSession }
+        Assert-ObserverTest ($row.command_line_status -ceq 'observed' -and $row.command_line -ceq '' -and $row.command_line_length -eq 0) 'Empty command was converted to null.'
         $child.Life.Identity.creation_filetime_100ns = '134351000000000010'
         $calls = $fakeSession.Calls
         $row = Get-DrRuntimeBrokerEnrichment (New-FakeRecord $child) @{ Session = $fakeSession }
-        Assert-ObserverTest ($row.status -ceq 'CIM-native-lifetime-mismatch' -and $fakeSession.Calls -eq $calls) 'Mismatched child lifetime obtained parent evidence.'
+        Assert-ObserverTest ($row.status -ceq 'CIM-native-lifetime-mismatch' -and $fakeSession.Calls -eq $calls -and $null -eq $row.target_cim.value.command_line -and $null -eq $row.target_cim.value.parent_pid) 'Mismatched child lifetime obtained unrelated command or parent evidence.'
     } finally { $env:windir = $savedWindir; Set-Item Function:Get-DrRuntimeBrokerImageEvidence $savedEnrichmentImage; Remove-Item Function:Get-CimInstance }
+
+    $savedReader=${function:Read-DrRuntimeBrokerJsonBytes}; $savedWindir=$env:windir; $env:windir='/mockWindows'
+    function Read-DrRuntimeBrokerJsonBytes { param($Path,$Limit) return ,([byte[]]@(1,2,3)) }
+    function Get-AuthenticodeSignature { param($LiteralPath,$ErrorAction) throw 'Mocked signature failure.' }
+    try {
+        $image=Get-DrRuntimeBrokerImageEvidence '/mockWindows/System32/RuntimeBroker.exe' 'RuntimeBroker.exe'
+        Assert-ObserverTest ($image.content.succeeded -and $image.content.value.bytes -eq 3 -and $image.content.value.sha256.Length -eq 64) 'Signature failure discarded captured file hash.'
+        Assert-ObserverTest (-not $image.signature.succeeded -and $image.signature.error_type -and $null -ne $image.signature.error_hresult -and $image.signature.started_guest_utc -and $image.signature.completed_guest_utc) 'Signature error metadata or timing was lost.'
+    } finally { Set-Item Function:Read-DrRuntimeBrokerJsonBytes $savedReader; Remove-Item Function:Get-AuthenticodeSignature; $env:windir=$savedWindir }
+    $backend=New-FakeBackend (New-TestRoot 'publication-collision')
+    [IO.File]::WriteAllText((Join-Path $backend.Context.Root 'ready.json'),'existing evidence')
+    $result=Invoke-FakeRun $backend
+    Assert-ObserverTest (-not $result.ready_written -and [IO.File]::ReadAllText((Join-Path $backend.Context.Root 'ready.json')) -ceq 'existing evidence') 'Atomic publication overwrote a ready record.'
+    Assert-ObserverTest ($result.output_staging.discarded_before_result -eq 1 -and $result.output_staging.remaining_before_result -eq 0 -and @(Get-ChildItem $backend.Context.Root -Filter '*.tmp').Count -eq 0) 'Publication failure leaked its owned stage.'
+
+    $compilerRoot=New-TestRoot 'compiler-temp'; $artifact=Join-Path $compilerRoot 'known.tmp'; $outside=Join-Path $testRoot 'unrelated.tmp'
+    [IO.File]::WriteAllText($artifact,'owned compiler bytes'); [IO.File]::WriteAllText($outside,'unrelated retained bytes')
+    $receipt=Remove-DrRuntimeBrokerCompilerArtifacts @($artifact) $compilerRoot
+    Assert-ObserverTest ($receipt.completed -and $receipt.owned_temp_artifacts_remaining -eq 0 -and -not (Test-Path $artifact)) 'Known owned compiler artifact was not removed/read back.'
+    $receipt=Remove-DrRuntimeBrokerCompilerArtifacts @($outside) $compilerRoot
+    Assert-ObserverTest (-not $receipt.completed -and -not $receipt.all_paths_inside_owned_root -and [IO.File]::ReadAllText($outside) -ceq 'unrelated retained bytes') 'Compiler cleanup removed an unowned path.'
+    $directory=Join-Path $compilerRoot 'ordinary-directory'; [void][IO.Directory]::CreateDirectory($directory)
+    $receipt=Remove-DrRuntimeBrokerCompilerArtifacts @($directory) $compilerRoot
+    Assert-ObserverTest (-not $receipt.completed -and (Test-Path $directory)) 'Compiler cleanup recursively removed a directory.'
+
+    foreach ($case in @('Snapshot','Enrich')) {
+        $lease=New-FakeLease 56 '134351000000000007' 258
+        $backend=New-FakeBackend (New-TestRoot ('provider-before-ready-' + $case)) @((New-FakeRecord $lease))
+        $backend.Context['ProviderFailOn' + $case]=$true
+        $result=Invoke-FakeRun $backend
+        Assert-ObserverTest (-not $result.ready_written -and -not (Test-Path (Join-Path $backend.Context.Root 'ready.json')) -and $lease.Closed -and $backend.Context.CloseCount -eq 1) 'Known provider failure during initial work published READY or leaked a lifetime.'
+    }
     'RuntimeBroker observer focused checks passed (fake backend; C# compilation only; no native invocation).'
 } finally { [IO.Directory]::Delete($testRoot, $true) }

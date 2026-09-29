@@ -1,7 +1,36 @@
 # Diagnostic observer only. No acceptance classification or process intervention.
+function Remove-DrRuntimeBrokerCompilerArtifacts {
+    param($TempFiles, [string]$CompilerRoot)
+    $known=@($TempFiles)
+    $receipt=@{ completed=$false; owned_temp_artifacts_remaining=0; errors=@(); owned_temp_artifacts_count=$known.Count; all_paths_inside_owned_root=$true }
+    $prefix=[IO.Path]::GetFullPath($CompilerRoot).TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)) + [IO.Path]::DirectorySeparatorChar
+    if ($known.Count -gt 128) {
+        $receipt.errors += 'compiler-temp-count-exceeded'; $receipt.owned_temp_artifacts_remaining=$known.Count
+        $receipt.all_paths_inside_owned_root=$false
+        return $receipt
+    }
+    foreach ($path in $known) {
+        try {
+            $full=[IO.Path]::GetFullPath($path)
+            if (-not $full.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) {
+                $receipt.all_paths_inside_owned_root=$false
+                throw 'Compiler artifact escaped its owned root.'
+            }
+            if (Test-Path -LiteralPath $full) {
+                $item=Get-Item -LiteralPath $full -Force -ErrorAction Stop
+                if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Compiler artifact is not ordinary.' }
+                [IO.File]::Delete($full)
+            }
+            if (Test-Path -LiteralPath $full) { $receipt.owned_temp_artifacts_remaining++ }
+        } catch { $receipt.errors += $_.Exception.GetType().FullName; $receipt.owned_temp_artifacts_remaining++ }
+    }
+    $receipt.completed=$receipt.errors.Count -eq 0 -and $receipt.owned_temp_artifacts_remaining -eq 0
+    return $receipt
+}
+
 function Initialize-DrRuntimeBrokerNative {
     param([string]$CompilerRoot)
-    if ('DrRuntimeBrokerNative' -as [type]) { return }
+    if ('DrRuntimeBrokerNative' -as [type]) { return @{ completed=$true; owned_temp_artifacts_remaining=0; errors=@(); compilation_succeeded=$true; type_reused=$true } }
     $code = @'
 using System;
 using System.Collections.Generic;
@@ -155,6 +184,22 @@ public static class DrRuntimeBrokerNative {
             }
         }
     }
+    public static bool IsRuntimeBrokerImage(string path) {
+        if(String.IsNullOrEmpty(path)) return false;
+        int separator=path.LastIndexOfAny(new[]{'\\','/'});
+        return String.Equals(path.Substring(separator+1),"RuntimeBroker.exe",StringComparison.OrdinalIgnoreCase);
+    }
+    public static bool MatchesSnapshotLifetime(uint expectedPid,uint nativePid,string cimCreation,string nativeCreation,uint? cimSession,uint? nativeSession) {
+        ulong cim, native;
+        return expectedPid==nativePid && ulong.TryParse(cimCreation,out cim) && cim>0 &&
+            ulong.TryParse(nativeCreation,out native) && native>=cim && native-cim<=9 &&
+            cimSession.HasValue && nativeSession.HasValue && cimSession.Value==nativeSession.Value;
+    }
+    public static bool? ExistingAtSubscriptionStart(string creation, string subscriptionStart) {
+        ulong created, start;
+        if(!ulong.TryParse(creation,out created) || !ulong.TryParse(subscriptionStart,out start) || created==0 || start==0) return null;
+        return created<start;
+    }
     public static bool MatchesCapturedLifetime(uint expectedPid, uint nativePid, string creation, string eventTime) {
         ulong created, occurred;
         return nativePid == expectedPid && ulong.TryParse(creation, out created) && created > 0 &&
@@ -167,13 +212,13 @@ public static class DrRuntimeBrokerNative {
         WindowsOnly(); if (pid == 0) throw new ArgumentOutOfRangeException("pid");
         DrRuntimeBrokerHandle handle = OpenProcess(ProcessAccess, false, pid);
         int openError = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
-        try {
-            var row = new Dictionary<string, object> {
+        var row = new Dictionary<string, object> {
                 {"pid", 0u}, {"creation_filetime_100ns", null}, {"owner_sid", null}, {"session_id", null}, {"image_path", null},
                 {"open_error", openError}, {"pid_error", 0}, {"times_error", 0}, {"image_error", 0},
                 {"token_error", 0}, {"token_close_error", 0}, {"token_sid_error", 0}, {"token_session_error", 0}
             };
             if (package) { row["package_first_status"] = null; row["package_status"] = null; row["aumid_first_status"] = null; row["aumid_status"] = null; row["package_full_name"] = null; row["aumid"] = null; }
+        try {
             if (!handle.IsInvalid) {
                 uint actual = GetProcessId(handle); int error = actual == 0 ? Marshal.GetLastWin32Error() : 0;
                 row["pid"] = actual; row["pid_error"] = error;
@@ -189,7 +234,7 @@ public static class DrRuntimeBrokerNative {
                 if (package) { Name(handle, true, row); Name(handle, false, row); }
             }
             return new DrRuntimeBrokerLifetime(handle, row);
-        } catch { handle.Dispose(); throw; }
+        } catch(Exception error) { handle.Dispose(); error.Data["process_close_error"]=handle.CloseError; error.Data["token_close_error"]=row["token_close_error"]; throw; }
     }
 }
 
@@ -202,7 +247,11 @@ public sealed class DrRuntimeBrokerLease {
     public void Close() { try { Life.Dispose(); } finally { if (System.Threading.Interlocked.Exchange(ref released,1)==0) owner.Release(this); } }
 }
 public sealed class DrRuntimeBrokerRecord {
-    public string Kind, Source, EventTime, ReceivedUtc, OwnerScope, ErrorType;
+    public string Kind, Source, EventTime, ReceivedUtc, OwnerScope, ErrorType, NativeCaptureStartedUtc, NativeIdentityCompletedUtc, SubscriptionStartFileTime, OriginClassification;
+    public bool? ExistingAtStart;
+    public string SnapshotCreationFileTime;
+    public uint? SnapshotSessionId;
+    public Dictionary<string,object> TraceAuxiliary, FailureClose;
     public int ErrorHResult;
     public uint Pid;
     public uint? EventSessionId;
@@ -219,14 +268,23 @@ public sealed class DrRuntimeBrokerSession : IDisposable {
     private int slots, inFlight;
     public long Dropped, CapacityMisses, CaptureFailures, ProviderFailures, Duplicates, NativeCloseFailures;
     public bool Started { get; private set; }
+    public string SubscriptionStartFileTime { get; private set; }
     public int OpenHandles { get { lock(gate) { return slots; } } }
     public DrRuntimeBrokerSession(string sid) { runnerSid=sid; }
-    internal void Release(DrRuntimeBrokerLease lease) { lock(gate) { slots--; if(lease!=null) { leases.Remove(lease); if(lease.Life.CloseError!=0) NativeCloseFailures++; } } }
+    internal void Release(DrRuntimeBrokerLease lease) { lock(gate) { slots--; if(lease!=null) { leases.Remove(lease); if(lease.Life.CloseError!=0 || (int)lease.Life.Identity["token_close_error"]!=0) NativeCloseFailures++; } } }
     private bool Reserve() { lock(gate) { if(disposing || slots>=64) { CapacityMisses++; return false; } slots++; return true; } }
     private void Put(DrRuntimeBrokerRecord row) {
         bool dropped=false;
         lock(gate) { if(disposing || queue.Count>=256) { Dropped++; dropped=true; } else queue.Enqueue(row); }
         if(dropped && row.Lease!=null) row.Lease.Close();
+    }
+    private Dictionary<string,object> AccountFailedClose(Exception error) {
+        var evidence=new Dictionary<string,object> {{"process_close_error",0},{"token_close_error",0}};
+        foreach(string key in new[]{"process_close_error","token_close_error"}) {
+            if(error.Data.Contains(key)) evidence[key]=Convert.ToInt32(error.Data[key],CultureInfo.InvariantCulture);
+        }
+        if((int)evidence["process_close_error"]!=0 || (int)evidence["token_close_error"]!=0) lock(gate) { NativeCloseFailures++; }
+        return evidence;
     }
     public DrRuntimeBrokerLease OpenParent(uint pid) {
         if(!Reserve()) return null;
@@ -234,25 +292,34 @@ public sealed class DrRuntimeBrokerSession : IDisposable {
             var lease=new DrRuntimeBrokerLease(this,DrRuntimeBrokerNative.Open(pid,false));
             lock(gate) { leases.Add(lease); }
             return lease;
-        } catch { Release(null); throw; }
+        } catch(Exception error) { Release(null); AccountFailedClose(error); throw; }
     }
-    public void Capture(uint pid, string eventTime, string source) { Capture(pid,eventTime,source,null); }
-    private void Capture(uint pid, string eventTime, string source, uint? eventSession) {
+    public void Capture(uint pid, string eventTime, string source) { Capture(pid,eventTime,source,null,null,null,null); }
+    public void CaptureSnapshot(uint pid,string cimCreation,uint? cimSession) { Capture(pid,null,"initial-snapshot",null,null,cimCreation,cimSession); }
+    private void Capture(uint pid, string eventTime, string source, uint? eventSession, Dictionary<string,object> auxiliary,string snapshotCreation,uint? snapshotSession) {
         lock(gate) { if(disposing) { Dropped++; return; } inFlight++; }
         try {
-        var row=new DrRuntimeBrokerRecord { Kind="capture",Pid=pid,Source=source,EventTime=eventTime,EventSessionId=eventSession,ReceivedUtc=DateTime.UtcNow.ToString("o") };
+        var row=new DrRuntimeBrokerRecord { Kind="capture",Pid=pid,Source=source,EventTime=eventTime,EventSessionId=eventSession,ReceivedUtc=DateTime.UtcNow.ToString("o"),TraceAuxiliary=auxiliary,SubscriptionStartFileTime=SubscriptionStartFileTime,SnapshotCreationFileTime=snapshotCreation,SnapshotSessionId=snapshotSession };
         if(!Reserve()) { row.Kind="handle-cap"; Put(row); return; }
         DrRuntimeBrokerLease lease=null;
         try {
+            row.NativeCaptureStartedUtc=DateTime.UtcNow.ToString("o");
             lease=new DrRuntimeBrokerLease(this,DrRuntimeBrokerNative.Open(pid,false));
-            row.Lease=lease;
+            row.Lease=lease; row.NativeIdentityCompletedUtc=DateTime.UtcNow.ToString("o");
             lock(gate) { leases.Add(lease); }
             var id=lease.Life.Identity;
             string created=id["creation_filetime_100ns"] as string;
+            string sid=id["owner_sid"] as string;
+            row.OwnerScope=sid==null ? "unknown" : (sid==runnerSid ? "runner" : "foreign");
             if(!DrRuntimeBrokerNative.MatchesCapturedLifetime(pid,(uint)id["pid"],created,eventTime) ||
-                (eventSession.HasValue && id["session_id"]!=null && (uint)id["session_id"]!=eventSession.Value)) {
+                (eventSession.HasValue && id["session_id"]!=null && (uint)id["session_id"]!=eventSession.Value) ||
+                !DrRuntimeBrokerNative.IsRuntimeBrokerImage(id["image_path"] as string) ||
+                (source=="initial-snapshot" && !DrRuntimeBrokerNative.MatchesSnapshotLifetime(pid,(uint)id["pid"],snapshotCreation,created,snapshotSession,id["session_id"] as uint?))) {
                 row.Kind="capture-mismatch-or-failure"; lock(gate) { CaptureFailures++; } lease.Close(); Put(row); return;
             }
+            row.ExistingAtStart=DrRuntimeBrokerNative.ExistingAtSubscriptionStart(created,SubscriptionStartFileTime);
+            row.OriginClassification=!row.ExistingAtStart.HasValue ? "subscription-start-unknown" :
+                (row.ExistingAtStart.Value ? "born-before-subscription-start" : "born-since-subscription-start");
             string key=pid.ToString(CultureInfo.InvariantCulture)+"|"+created;
             lock(gate) {
                 if(seen.Contains(key)) { row.Kind="duplicate"; Duplicates++; }
@@ -260,19 +327,54 @@ public sealed class DrRuntimeBrokerSession : IDisposable {
                 else seen.Add(key);
             }
             if(row.Kind!="capture") { lease.Close(); Put(row); return; }
-            string sid=id["owner_sid"] as string;
-            row.OwnerScope=sid==null ? "unknown" : (sid==runnerSid ? "runner" : "foreign");
             if(row.OwnerScope=="runner") DrRuntimeBrokerNative.CompletePackage(lease.Life);
             else if(row.OwnerScope=="foreign") lease.Close();
+            row.NativeIdentityCompletedUtc=DateTime.UtcNow.ToString("o");
             Put(row);
         } catch(Exception error) {
             if(lease!=null) lease.Close(); else Release(null);
+            row.NativeIdentityCompletedUtc=DateTime.UtcNow.ToString("o");
+            row.FailureClose=AccountFailedClose(error);
             row.Kind="capture-error"; row.ErrorType=error.GetType().FullName; row.ErrorHResult=error.HResult;
             lock(gate) { CaptureFailures++; } Put(row);
         }
         } finally { lock(gate) { inFlight--; System.Threading.Monitor.PulseAll(gate); } }
     }
+    private static object TraceValue(System.Management.ManagementBaseObject e, string name) {
+        int count=0;
+        foreach(System.Management.PropertyData property in e.Properties) {
+            if(++count>32) throw new InvalidDataException("Trace property count exceeded.");
+            if(String.Equals(property.Name,name,StringComparison.Ordinal)) return property.Value;
+        }
+        return null;
+    }
+    private static Dictionary<string,object> Auxiliary(System.Management.ManagementBaseObject e) {
+        var row=new Dictionary<string,object> {{"parent_process_id",null},{"event_sid",null},{"event_sid_base64",null},{"sid_status","absent"},{"exit_status",null},{"field_errors",new List<string>()}};
+        var errors=(List<string>)row["field_errors"];
+        foreach(string field in new[]{"ParentProcessID","ExitStatus"}) {
+            object value=TraceValue(e,field);
+            if(value!=null) {
+                try { row[field=="ParentProcessID" ? "parent_process_id" : "exit_status"]=Convert.ToUInt32(value,CultureInfo.InvariantCulture); }
+                catch(Exception error) { errors.Add(field+":"+error.GetType().FullName); }
+            }
+        }
+        object rawSid=TraceValue(e,"Sid");
+        if(rawSid!=null) {
+            byte[] bytes=rawSid as byte[];
+            if(bytes==null || bytes.Length<8 || bytes.Length>68) row["sid_status"]="invalid-or-overbound";
+            else {
+                row["event_sid_base64"]=Convert.ToBase64String(bytes);
+                try { row["event_sid"]=new SecurityIdentifier(bytes,0).Value; row["sid_status"]="observed"; }
+                catch(Exception error) { row["sid_status"]="decode-failed"; errors.Add("Sid:"+error.GetType().FullName); }
+            }
+        }
+        return row;
+    }
+    private bool EnterCallback() { lock(gate) { if(disposing) return false; inFlight++; return true; } }
+    private void ExitCallback() { lock(gate) { inFlight--; System.Threading.Monitor.PulseAll(gate); } }
     private void Arrived(object sender, System.Management.EventArrivedEventArgs args) {
+        if(!EnterCallback()) return;
+        try {
         try {
             using(var e=args.NewEvent) {
             if(e==null || !String.Equals(Convert.ToString(e["ProcessName"]),"RuntimeBroker.exe",StringComparison.OrdinalIgnoreCase)) {
@@ -283,22 +385,27 @@ public sealed class DrRuntimeBrokerSession : IDisposable {
             if(pid==0) throw new InvalidDataException("Invalid process trace PID.");
             uint eventSession=Convert.ToUInt32(e["SessionID"],CultureInfo.InvariantCulture);
             string eventTime=Convert.ToUInt64(e["TIME_CREATED"],CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture);
-            if(Object.ReferenceEquals(sender,start)) Capture(pid,eventTime,"start-trace",eventSession);
-            else Put(new DrRuntimeBrokerRecord {Kind="stop-trace",Pid=pid,Source="stop-trace",EventTime=eventTime,EventSessionId=eventSession,ReceivedUtc=DateTime.UtcNow.ToString("o")});
+            if(Object.ReferenceEquals(sender,start)) Capture(pid,eventTime,"start-trace",eventSession,Auxiliary(e),null,null);
+            else Put(new DrRuntimeBrokerRecord {Kind="stop-trace",Pid=pid,Source="stop-trace",EventTime=eventTime,EventSessionId=eventSession,ReceivedUtc=DateTime.UtcNow.ToString("o"),TraceAuxiliary=Auxiliary(e)});
             }
         } catch(Exception error) {
             lock(gate) { ProviderFailures++; }
             Put(new DrRuntimeBrokerRecord {Kind="event-error",ErrorType=error.GetType().FullName,ErrorHResult=error.HResult,ReceivedUtc=DateTime.UtcNow.ToString("o")});
         }
+        } finally { ExitCallback(); }
     }
     private void Stopped(object sender, System.Management.StoppedEventArgs args) {
-        lock(gate) { if(disposing) return; ProviderFailures++; }
-        Put(new DrRuntimeBrokerRecord {Kind="provider-stopped",ErrorHResult=(int)args.Status,ReceivedUtc=DateTime.UtcNow.ToString("o")});
+        if(!EnterCallback()) return;
+        try {
+            lock(gate) { ProviderFailures++; }
+            Put(new DrRuntimeBrokerRecord {Kind="provider-stopped",ErrorHResult=(int)args.Status,ReceivedUtc=DateTime.UtcNow.ToString("o")});
+        } finally { ExitCallback(); }
     }
     public void Start() {
         start=new System.Management.ManagementEventWatcher("SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName = 'RuntimeBroker.exe'");
         stop=new System.Management.ManagementEventWatcher("SELECT * FROM Win32_ProcessStopTrace WHERE ProcessName = 'RuntimeBroker.exe'");
         start.EventArrived+=Arrived; stop.EventArrived+=Arrived; start.Stopped+=Stopped; stop.Stopped+=Stopped;
+        SubscriptionStartFileTime=DateTime.UtcNow.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture);
         start.Start(); stop.Start(); Started=true;
     }
     public DrRuntimeBrokerRecord[] Drain() { lock(gate) { var rows=queue.ToArray(); queue.Clear(); return rows; } }
@@ -327,8 +434,20 @@ public sealed class DrRuntimeBrokerSession : IDisposable {
     $parameters.GenerateInMemory = $true
     $parameters.TempFiles = [CodeDom.Compiler.TempFileCollection]::new($CompilerRoot, $false)
     foreach ($assembly in @('System.dll','System.Core.dll','System.Management.dll')) { [void]$parameters.ReferencedAssemblies.Add($assembly) }
-    try { Add-Type -TypeDefinition $code -CompilerParameters $parameters -ErrorAction Stop }
-    finally { $parameters.TempFiles.Delete() }
+    $receipt = @{ completed=$false; compilation_succeeded=$false; owned_temp_artifacts_remaining=0; errors=@();
+        compilation_failure=$null; type_reused=$false; started_guest_utc=[DateTime]::UtcNow.ToString('o') }
+    try { Add-Type -TypeDefinition $code -CompilerParameters $parameters -ErrorAction Stop; $receipt.compilation_succeeded=$true }
+    catch { $receipt.compilation_failure=@{ error_type=$_.Exception.GetType().FullName; hresult=$_.Exception.HResult } }
+    finally {
+        $cleanup=Remove-DrRuntimeBrokerCompilerArtifacts -TempFiles $parameters.TempFiles -CompilerRoot $CompilerRoot
+        foreach ($key in $cleanup.Keys) { $receipt[$key]=$cleanup[$key] }
+        $receipt.completed_guest_utc=[DateTime]::UtcNow.ToString('o')
+        if ($cleanup.completed) {
+            try { $parameters.TempFiles.Dispose() } catch { $receipt.errors += $_.Exception.GetType().FullName; $receipt.completed=$false }
+        }
+        else { [GC]::SuppressFinalize($parameters.TempFiles) }
+    }
+    return $receipt
 }
 
 function Read-DrRuntimeBrokerJsonBytes {
@@ -362,78 +481,107 @@ function Get-DrRuntimeBrokerBytesHash {
     try { return [BitConverter]::ToString($hash.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant() }
     finally { $hash.Dispose() }
 }
+function Invoke-DrRuntimeBrokerMetadataQuery {
+    param([string]$Name, [scriptblock]$Action)
+    $query = [ordered]@{ query=$Name; started_guest_utc=[DateTime]::UtcNow.ToString('o'); completed_guest_utc=$null;
+        succeeded=$false; value=$null; error_type=$null; error_hresult=$null }
+    try { $query.value = & $Action; $query.succeeded=$true }
+    catch { $query.error_type=$_.Exception.GetType().FullName; $query.error_hresult=$_.Exception.HResult }
+    finally { $query.completed_guest_utc=[DateTime]::UtcNow.ToString('o') }
+    return $query
+}
 function Get-DrRuntimeBrokerImageEvidence {
     param([string]$Path, [string]$ExpectedLeaf)
     $canonical = Join-Path (Join-Path $env:windir 'System32') $ExpectedLeaf
     if (-not [string]::Equals($Path, $canonical, [StringComparison]::OrdinalIgnoreCase)) {
-        return [ordered]@{ status = 'noncanonical-not-inspected'; image_path = $Path }
+        return [ordered]@{ status='noncanonical-not-inspected'; image_path=$Path }
     }
-    $item = Get-Item -LiteralPath $canonical -Force -ErrorAction Stop
-    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt 16MB) {
-        throw 'Canonical image is not a bounded ordinary file.'
+    $content = Invoke-DrRuntimeBrokerMetadataQuery 'image-content' {
+        $bytes=Read-DrRuntimeBrokerJsonBytes $canonical 16MB
+        [ordered]@{ sha256=Get-DrRuntimeBrokerBytesHash $bytes; bytes=$bytes.Length }
     }
-    $bytes = Read-DrRuntimeBrokerJsonBytes $canonical 16MB
-    $signature = Get-AuthenticodeSignature -LiteralPath $canonical -ErrorAction Stop
-    return [ordered]@{ status = 'observed'; image_path = $canonical; sha256 = Get-DrRuntimeBrokerBytesHash $bytes;
-        bytes = $bytes.Length; signature_status = [string]$signature.Status;
-        signer_subject = if ($null -ne $signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null };
-        signer_thumbprint = if ($null -ne $signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { $null };
-        signature_and_hash_same_read = $false }
+    $signature = Invoke-DrRuntimeBrokerMetadataQuery 'image-signature' {
+        $value=Get-AuthenticodeSignature -LiteralPath $canonical -ErrorAction Stop
+        [ordered]@{ signature_status=[string]$value.Status;
+            signer_subject=if ($null -ne $value.SignerCertificate) { $value.SignerCertificate.Subject } else { $null };
+            signer_thumbprint=if ($null -ne $value.SignerCertificate) { $value.SignerCertificate.Thumbprint } else { $null } }
+    }
+    return [ordered]@{ status=if ($content.succeeded -and $signature.succeeded) { 'observed' } else { 'partial-query-failure' };
+        image_path=$canonical; content=$content; signature=$signature; signature_and_hash_same_read=$false }
 }
 function Get-DrRuntimeBrokerEnrichment {
     param($Record, $Backend)
-    $native = $Record.Lease.Life.Identity
-    $processes = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.Pid)" -OperationTimeoutSec 3 -ErrorAction Stop)
-    if ($processes.Count -ne 1 -or $null -eq $processes[0].CreationDate) { return [ordered]@{ status = 'CIM-missing-or-ambiguous'; parent = $null } }
-    $process = $processes[0]; $cimTicks = $process.CreationDate.ToUniversalTime().ToFileTimeUtc()
-    $difference = [long]$native.creation_filetime_100ns - [long]$cimTicks
-    $row = [ordered]@{ status = 'observed'; cim_creation_filetime_100ns = $cimTicks.ToString(); native_minus_cim_ticks = $difference.ToString();
-        session_id = [int]$process.SessionId; parent_pid = [int]$process.ParentProcessId; parent = $null }
-    if ($difference -lt 0 -or $difference -gt 9 -or $process.SessionId -ne $native.session_id) { $row.status = 'CIM-native-lifetime-mismatch'; return $row }
-    $command = [string]$process.CommandLine
-    if ($command.Length -gt 4096) { throw 'Target command metadata exceeds bound.' }
-    $row.command_line_sha256 = Get-DrRuntimeBrokerBytesHash ([Text.Encoding]::UTF8.GetBytes($command))
-    $row.command_line_length = $command.Length
-    $canonicalImage = Join-Path (Join-Path $env:windir 'System32') 'RuntimeBroker.exe'
-    $safeCommand = [string]::Equals($command, $canonicalImage + ' -Embedding', [StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($command, '"' + $canonicalImage + '" -Embedding', [StringComparison]::OrdinalIgnoreCase)
-    $row.command_line = if ($safeCommand) { $command } else { $null }
-    # Only the fixed canonical command is emitted; other commands remain hash/length only.
-    $row.command_line_redacted = $null -eq $row.command_line
-    $row.image_evidence = Get-DrRuntimeBrokerImageEvidence ([string]$native.image_path) 'RuntimeBroker.exe'
-    if ($process.ParentProcessId -eq 0) { $row.parent = [ordered]@{ association_status = 'no-parent-pid' }; return $row }
-    $parent = $Backend.Session.OpenParent([uint32]$process.ParentProcessId)
-    if ($null -eq $parent) { $row.parent = [ordered]@{ association_status = 'handle-cap' }; return $row }
-    try {
-        $identity = $parent.Life.Identity
-        $parentRow = [ordered]@{ native_identity = $identity; association_status = 'unknown'; cim = $null; handle_closed = $false; close_win32_error = 0 }
-        $row.parent = $parentRow
-        if ($identity.open_error -ne 0 -or $null -eq $identity.creation_filetime_100ns) { $parentRow.association_status = 'capture-failed'; return $row }
-        if ([long]$identity.creation_filetime_100ns -gt [long]$native.creation_filetime_100ns) { $parentRow.association_status = 'invalid-parent-newer-than-child'; return $row }
-        $parents = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)" -OperationTimeoutSec 3 -ErrorAction Stop)
-        if ($parents.Count -ne 1 -or $null -eq $parents[0].CreationDate) { $parentRow.association_status = 'CIM-parent-missing'; return $row }
-        $parentCim = $parents[0]; $ticks = $parentCim.CreationDate.ToUniversalTime().ToFileTimeUtc()
-        $delta = [long]$identity.creation_filetime_100ns - [long]$ticks
-        $parentRow.cim = [ordered]@{ creation_filetime_100ns = $ticks.ToString(); native_minus_cim_ticks = $delta.ToString(); session_id = [int]$parentCim.SessionId; name = [string]$parentCim.Name }
-        if ($delta -lt 0 -or $delta -gt 9 -or $parentCim.SessionId -ne $identity.session_id) { $parentRow.association_status = 'CIM-native-parent-mismatch'; return $row }
-        $parentRow.association_status = 'creation-order-corroborated-not-causality'
-        if ($parentCim.Name -cmatch '^[A-Za-z0-9._-]{1,128}\.exe$') {
-            $parentRow.image_evidence = Get-DrRuntimeBrokerImageEvidence ([string]$identity.image_path) ([string]$parentCim.Name)
+    $native=$Record.Lease.Life.Identity
+    $row=[ordered]@{ status='partial'; target_cim=$null; command_line=$null; command_line_present=$false; command_line_status='not-observed'; parent_pid=$null; parent=$null; image_evidence=$null }
+    $query=Invoke-DrRuntimeBrokerMetadataQuery 'target-cim' {
+        $processes=@(Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.Pid)" -OperationTimeoutSec 3 -ErrorAction Stop)
+        if ($processes.Count -ne 1 -or $null -eq $processes[0].CreationDate) { throw 'CIM target is missing or ambiguous.' }
+        $process=$processes[0]
+        $ticks=$process.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture)
+        $delta=[long]$native.creation_filetime_100ns - [long]$ticks
+        if ($delta -lt 0 -or $delta -gt 9 -or $process.SessionId -ne $native.session_id) {
+            return [ordered]@{ creation_filetime_100ns=$ticks; session_id=[int]$process.SessionId; parent_pid=$null; command_line_present=$false; command_line_status='not-read-lifetime-mismatch'; command_line=$null }
         }
-        $parentRow.same_handle_wait = $parent.Life.Poll()
+        $present=$null -ne $process.PSObject.Properties['CommandLine']
+        $command=if ($present) { $process.CommandLine } else { $null }
+        $commandStatus=if (-not $present) { 'absent' } elseif ($null -eq $command) { 'null' } elseif ($command -isnot [string]) { 'invalid-type' } elseif ($command.Length -gt 4096) { 'overbound' } else { 'observed' }
+        [ordered]@{ creation_filetime_100ns=$process.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture); session_id=[int]$process.SessionId;
+            parent_pid=[int]$process.ParentProcessId; command_line_present=$present; command_line_status=$commandStatus;
+            command_line=if ($commandStatus -ceq 'observed') { $command } else { $null } }
+    }
+    $row.target_cim=$query
+    if (-not $query.succeeded) { return $row }
+    $value=$query.value
+    $difference=[long]$native.creation_filetime_100ns - [long]$value.creation_filetime_100ns
+    $row.cim_creation_filetime_100ns=$value.creation_filetime_100ns; $row.native_minus_cim_ticks=$difference.ToString([Globalization.CultureInfo]::InvariantCulture); $row.session_id=$value.session_id
+    if ($difference -lt 0 -or $difference -gt 9 -or $value.session_id -ne $native.session_id) { $row.status='CIM-native-lifetime-mismatch'; return $row }
+    $row.command_line=$value.command_line; $row.command_line_present=$value.command_line_present; $row.command_line_status=$value.command_line_status; $row.parent_pid=$value.parent_pid
+    if ($value.command_line_status -ceq 'observed') {
+        $row.command_line_sha256=Get-DrRuntimeBrokerBytesHash ([Text.Encoding]::UTF8.GetBytes($value.command_line)); $row.command_line_length=$value.command_line.Length
+    }
+    $row.image_evidence=Get-DrRuntimeBrokerImageEvidence ([string]$native.image_path) 'RuntimeBroker.exe'
+    $row.status=if ($row.image_evidence.status -ceq 'partial-query-failure' -or $value.command_line_status -in @('invalid-type','overbound')) { 'partial' } else { 'observed' }
+    if ($value.parent_pid -eq 0) { $row.parent=[ordered]@{ association_status='no-parent-pid' }; return $row }
+    $parentQuery=Invoke-DrRuntimeBrokerMetadataQuery 'parent-native-open' { $Backend.Session.OpenParent([uint32]$value.parent_pid) }
+    $parent=$parentQuery.value; $parentQuery.value=$null
+    $parentRow=[ordered]@{ native_open=$parentQuery; native_identity=$null; association_status='unknown'; cim=$null; image_evidence=$null; same_handle_wait=$null; handle_closed=$false; close_win32_error=$null; close_query=$null }
+    $row.parent=$parentRow
+    if (-not $parentQuery.succeeded) { $parentRow.association_status='capture-failed'; $row.status='partial'; return $row }
+    if ($null -eq $parent) { $parentRow.association_status='handle-cap'; $row.status='partial'; return $row }
+    try {
+        $identity=$parent.Life.Identity; $parentRow.native_identity=$identity
+        if ($identity.open_error -ne 0 -or $null -eq $identity.creation_filetime_100ns) { $parentRow.association_status='capture-failed'; $row.status='partial'; return $row }
+        if ([long]$identity.creation_filetime_100ns -gt [long]$native.creation_filetime_100ns) { $parentRow.association_status='invalid-parent-newer-than-child'; $row.status='partial'; return $row }
+        $parentRow.cim=Invoke-DrRuntimeBrokerMetadataQuery 'parent-cim' {
+            $parents=@(Get-CimInstance Win32_Process -Filter "ProcessId=$($value.parent_pid)" -OperationTimeoutSec 3 -ErrorAction Stop)
+            if ($parents.Count -ne 1 -or $null -eq $parents[0].CreationDate) { throw 'CIM parent is missing or ambiguous.' }
+            [ordered]@{ creation_filetime_100ns=$parents[0].CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture); session_id=[int]$parents[0].SessionId; name=[string]$parents[0].Name }
+        }
+        if (-not $parentRow.cim.succeeded) { $parentRow.association_status='CIM-parent-query-failed'; $row.status='partial'; return $row }
+        $parentCim=$parentRow.cim.value
+        $delta=[long]$identity.creation_filetime_100ns - [long]$parentCim.creation_filetime_100ns; $parentCim.native_minus_cim_ticks=$delta.ToString([Globalization.CultureInfo]::InvariantCulture)
+        if ($delta -lt 0 -or $delta -gt 9 -or $parentCim.session_id -ne $identity.session_id) { $parentRow.association_status='CIM-native-parent-mismatch'; $row.status='partial'; return $row }
+        $parentRow.association_status='creation-order-corroborated-not-causality'
+        if ($parentCim.name -cmatch '^[A-Za-z0-9._-]{1,128}\.exe$') {
+            $parentRow.image_evidence=Get-DrRuntimeBrokerImageEvidence ([string]$identity.image_path) $parentCim.name
+            if ($parentRow.image_evidence.status -ceq 'partial-query-failure') { $row.status='partial' }
+        }
+        $parentRow.same_handle_wait=Invoke-DrRuntimeBrokerMetadataQuery 'parent-same-handle-wait' { $parent.Life.Poll() }
+        if (-not $parentRow.same_handle_wait.succeeded) { $row.status='partial' }
     } finally {
-        $parent.Close()
-        if ($null -ne $row.parent) { $row.parent.handle_closed = $parent.Closed; $row.parent.close_win32_error = $parent.Life.CloseError }
+        $parentRow.close_query=Invoke-DrRuntimeBrokerMetadataQuery 'parent-close' { $parent.Close() }
+        $parentRow.handle_closed=$parent.Closed; $parentRow.close_win32_error=$parent.Life.CloseError
+        if (-not $parentRow.close_query.succeeded -or -not $parent.Closed -or $parent.Life.CloseError -ne 0) { $row.status='partial' }
     }
     return $row
 }
 
 function Invoke-DrRuntimeBrokerObserverCore {
     param([string]$Root, [string]$RunId, [string]$RunnerSid, [int]$DurationSeconds, [hashtable]$Backend,
-        [int]$MetadataLimit = 14MB, [int]$TerminalReserve = 256KB, [string]$ExpectedVmId = '')
+        [int]$MetadataLimit = 14MB, [int]$TerminalReserve = 256KB, [string]$ExpectedVmId = '', [System.Collections.IDictionary]$CompilerCleanup = @{ completed=$false; owned_temp_artifacts_remaining=$null; errors=@('not-supplied') })
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $state = @{ bytes = 0; issues = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); active = @{}; seen = @{};
-        phases = @{}; phase_bytes = 0; records = 0; ready = $false; stop_reason = 'deadline'; cleanup = $null; failure_detail = $null }
+        phases = @{}; phase_bytes = 0; records = 0; ready = $false; stop_reason = 'deadline'; cleanup = $null; failure_detail = $null; staging = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); staging_created = 0; staging_published = 0; staging_discarded = 0 }
     $events = $null
     function Write-ObserverRecord {
         param($Record, [bool]$Terminal = $false, [string]$Leaf = '')
@@ -442,23 +590,38 @@ function Invoke-DrRuntimeBrokerObserverCore {
         $limit = if ($Terminal) { $MetadataLimit } else { $MetadataLimit - $TerminalReserve }
         if ($bytes.Length -gt 96KB -or $state.bytes + $bytes.Length -gt $limit) { throw 'Diagnostic metadata budget exceeded.' }
         if ($Leaf) {
-            $path = Join-Path $Root $Leaf
-            $file = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-            try { $file.Write($bytes, 0, $bytes.Length) } finally { $file.Dispose() }
-        } else { $events.Write($bytes, 0, $bytes.Length); $events.Flush(); $state.records++ }
+            $path=Join-Path $Root $Leaf
+            $stage=Join-Path $Root ('.runtimebroker-' + [guid]::NewGuid().ToString('N') + '.tmp')
+            $file=[IO.File]::Open($stage,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            [void]$state.staging.Add($stage); $state.staging_created++
+            try {
+                try { $file.Write($bytes,0,$bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+                [IO.File]::Move($stage,$path)
+                $state.staging_published++; [void]$state.staging.Remove($stage)
+            } finally {
+                if ($state.staging.Contains($stage)) {
+                    if (Test-Path -LiteralPath $stage) { [IO.File]::Delete($stage) }
+                    if (-not (Test-Path -LiteralPath $stage)) { [void]$state.staging.Remove($stage); $state.staging_discarded++ }
+                }
+            }
+        } else { $events.Write($bytes,0,$bytes.Length); $events.Flush(); $state.records++ }
         $state.bytes += $bytes.Length
     }
     function Drain-ObserverRecords {
         foreach ($record in @(& $Backend.Drain)) {
             $row = [ordered]@{ kind = $record.Kind; source = $record.Source; pid = $record.Pid;
                 event_filetime_100ns = $record.EventTime; event_session_id = $record.EventSessionId; received_at_utc = $record.ReceivedUtc; discovered_elapsed_ms = $watch.ElapsedMilliseconds;
+                native_capture_started_guest_utc = $record.NativeCaptureStartedUtc; native_identity_completed_guest_utc = $record.NativeIdentityCompletedUtc;
+                subscription_start_filetime_100ns = $record.SubscriptionStartFileTime; existing_at_start = $record.ExistingAtStart; origin_classification = $record.OriginClassification; trace_auxiliary = $record.TraceAuxiliary;
+                snapshot_identity = if ($record.Source -ceq 'initial-snapshot') { @{ pid=$record.Pid; creation_filetime_100ns=$record.SnapshotCreationFileTime; session_id=$record.SnapshotSessionId } } else { $null };
                 identity_status = 'not-captured'; owner_scope = $record.OwnerScope; native_identity = $null; enrichment = $null;
-                error_type = $record.ErrorType; error_hresult = $record.ErrorHResult; causal_attribution = 'unknown' }
+                error_type = $record.ErrorType; error_hresult = $record.ErrorHResult; failure_close = $record.FailureClose; causal_attribution = 'unknown' }
             if ($null -ne $record.Lease) {
                 $lease = $record.Lease; $identity = $lease.Life.Identity
                 if ($record.OwnerScope -ceq 'foreign') {
-                    $row.identity_status = 'foreign-owner-excluded'; $row.native_identity = [ordered]@{ pid = $identity.pid; creation_filetime_100ns = $identity.creation_filetime_100ns }
+                    $row.trace_auxiliary=$null; $row.snapshot_identity=$null; $row.identity_status = 'foreign-owner-excluded'; $row.native_identity = [ordered]@{ pid = $identity.pid; creation_filetime_100ns = $identity.creation_filetime_100ns }
                 } else { $row.native_identity = $identity; $row.identity_status = if ($record.OwnerScope -ceq 'runner') { 'native-identified' } else { 'partial-or-capture-failed' } }
+                if ($record.Kind -ceq 'capture-mismatch-or-failure' -and $record.OwnerScope -cne 'foreign') { $row.identity_status='target-association-mismatch-or-capture-failed' }
                 if ($record.Kind -ceq 'capture' -and $record.OwnerScope -ceq 'runner') {
                     $row.identity_status = if ($identity.package_first_status -eq 15700) { 'no-package-identity' } elseif ($identity.aumid_first_status -eq 15703) { 'no-application-identity' } elseif ($null -eq $identity.package_full_name -or $null -eq $identity.aumid) { 'identity-query-incomplete' } else { 'native-identified' }
                 }
@@ -472,7 +635,7 @@ function Invoke-DrRuntimeBrokerObserverCore {
                         if ($watch.Elapsed.TotalSeconds -ge $DurationSeconds) {
                             $lease.Close(); $state.active.Remove($key); [void]$state.issues.Add('deadline-before-record-enrichment')
                         } elseif ($record.OwnerScope -ceq 'runner') {
-                            try { $row.enrichment = & $Backend.Enrich $record $Backend }
+                            try { $row.enrichment = & $Backend.Enrich $record $Backend; if ($row.enrichment.status -in @('partial','CIM-native-lifetime-mismatch')) { [void]$state.issues.Add('metadata-enrichment-incomplete') } }
                             catch { [void]$state.issues.Add('metadata-enrichment-failed'); $row.error_type = $_.Exception.GetType().FullName; $row.error_hresult = $_.Exception.HResult }
                         }
                     }
@@ -543,12 +706,13 @@ function Invoke-DrRuntimeBrokerObserverCore {
         $events = [IO.File]::Open((Join-Path $Root 'events.jsonl'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
         & $Backend.Start
         if (-not (& $Backend.Ready)) { throw 'Subscriptions are not ready.' }
-        foreach ($pidValue in @(& $Backend.Snapshot)) {
+        foreach ($snapshot in @(& $Backend.Snapshot)) {
             if ($watch.Elapsed.TotalSeconds -ge $DurationSeconds) { throw 'Initial snapshot capture exceeded deadline.' }
-            & $Backend.Capture ([uint32]$pidValue)
+            & $Backend.Capture $snapshot
         }
         Drain-ObserverRecords
         if ($watch.Elapsed.TotalSeconds -ge $DurationSeconds) { throw 'Readiness exceeded observation deadline.' }
+        if (-not (& $Backend.Ready)) { throw 'Subscriptions failed during initial snapshot or enrichment.' }
         Write-ObserverRecord ([ordered]@{ schema_version = 1; run_id = $RunId; runner_sid = $RunnerSid; expected_vm_id = $ExpectedVmId; status = 'ready'; subscriptions_started_before_snapshot = $true;
             initial_snapshot_complete = $true; ready_guest_utc = [DateTime]::UtcNow.ToString('o'); elapsed_ms = $watch.ElapsedMilliseconds;
             observation_coverage = 'best-effort-WMI-not-lossless'; causal_attribution = 'unknown' }) $false 'ready.json'
@@ -574,11 +738,17 @@ function Invoke-DrRuntimeBrokerObserverCore {
             if ($state.cleanup.ContainsKey($field) -and $state.cleanup[$field] -gt 0) { [void]$state.issues.Add('coverage-or-close-loss:' + $field) }
         }
     }
+    if (-not $CompilerCleanup.completed -or $CompilerCleanup.owned_temp_artifacts_remaining -ne 0 -or @($CompilerCleanup.errors).Count -ne 0) { [void]$state.issues.Add('compiler-cleanup-incomplete') }
+    if ($state.staging.Count -ne 0) {
+        [void]$state.issues.Add('output-staging-cleanup-incomplete')
+        if ($null -ne $state.cleanup) { $state.cleanup['errors']=@($state.cleanup.errors) + 'output-staging-cleanup-incomplete' }
+    }
     $result = [ordered]@{ schema_version = 1; run_id = $RunId; runner_sid = $RunnerSid; expected_vm_id = $ExpectedVmId; status = if ($state.issues.Count) { 'diagnostic-incomplete' } else { 'diagnostic-completed' };
         identity_status = 'per-lifetime-recorded-or-unknown'; exit_observation_status = 'per-held-handle-recorded-or-unknown';
         observation_coverage = if ($state.issues.Count) { 'incomplete-best-effort-not-lossless' } else { 'best-effort-not-lossless' }; causal_attribution = 'unknown'; ready_written = $state.ready;
         stop_reason = $state.stop_reason; observed_guest_utc = [DateTime]::UtcNow.ToString('o'); elapsed_ms = $watch.ElapsedMilliseconds;
-        records = $state.records; diagnostic_metadata_bytes_before_result = $state.bytes; phase_input_bytes = $state.phase_bytes; issues = @($state.issues | Sort-Object); failure_detail = $state.failure_detail; cleanup = $state.cleanup;
+        records = $state.records; diagnostic_metadata_bytes_before_result = $state.bytes; phase_input_bytes = $state.phase_bytes; issues = @($state.issues | Sort-Object); failure_detail = $state.failure_detail; cleanup = $state.cleanup; compiler_cleanup = $CompilerCleanup;
+        output_staging = @{ created_before_result=$state.staging_created; published_before_result=$state.staging_published; discarded_before_result=$state.staging_discarded; remaining_before_result=$state.staging.Count; result_publication='atomic-exclusive-after-close' };
         processes_terminated = 0; settings_or_acl_changes = $false }
     Write-ObserverRecord $result $true 'result.json'
     return [pscustomobject]$result
@@ -621,9 +791,15 @@ function Invoke-DrRuntimeBrokerObserver {
     foreach ($leaf in @('ready.json','events.jsonl','result.json')) {
         if (Test-Path -LiteralPath (Join-Path $Root $leaf)) { throw 'Existing diagnostic output is preserved.' }
     }
-    Initialize-DrRuntimeBrokerNative $Root
+    $compilerReceipt=Initialize-DrRuntimeBrokerNative $Root
     $remainingSeconds = [int][Math]::Floor($DurationSeconds - $entryWatch.Elapsed.TotalSeconds)
     if ($remainingSeconds -le 0) { throw 'Diagnostic setup consumed observation deadline.' }
+    if (-not $compilerReceipt.compilation_succeeded -or -not $compilerReceipt.completed) {
+        $failedBackend=@{ Start={ throw 'Native compilation or compiler cleanup failed.' }; Ready={ $false }; Drain={ @() };
+            Close={ @{ subscriptions_closed=$true; owned_handles_remaining=0; errors=@(); native_close_failures=0 } } }
+        [void](Invoke-DrRuntimeBrokerObserverCore -Root $Root -RunId $RunId -RunnerSid $RunnerSid -DurationSeconds $remainingSeconds -Backend $failedBackend -ExpectedVmId $ExpectedVmId.ToString() -CompilerCleanup $compilerReceipt)
+        throw 'Native compilation or compiler cleanup failed; inspect result.json.'
+    }
     $session = [DrRuntimeBrokerSession]::new($RunnerSid)
     $backend = @{
         Session = $session
@@ -632,13 +808,15 @@ function Invoke-DrRuntimeBrokerObserver {
         Snapshot = {
             $rows = @(Get-CimInstance Win32_Process -Filter "Name='RuntimeBroker.exe'" -OperationTimeoutSec 3 -ErrorAction Stop)
             if ($rows.Count -gt 4096) { throw 'Initial target snapshot bound exceeded.' }
-            @($rows | ForEach-Object { [uint32]$_.ProcessId })
+            @($rows | ForEach-Object { [pscustomobject]@{ pid=[uint32]$_.ProcessId;
+                creation_filetime_100ns=if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture) } else { $null };
+                session_id=if ($null -ne $_.SessionId) { [uint32]$_.SessionId } else { $null } } })
         }
-        Capture = { param([uint32]$ProcessId) $session.Capture($ProcessId,$null,'initial-snapshot') }.GetNewClosure()
+        Capture = { param($Snapshot) $session.CaptureSnapshot([uint32]$Snapshot.pid,$Snapshot.creation_filetime_100ns,$Snapshot.session_id) }.GetNewClosure()
         Drain = { $session.Drain() }.GetNewClosure()
         Enrich = ${function:Get-DrRuntimeBrokerEnrichment}
         Delay = { Start-Sleep -Milliseconds 100 }
         Close = { $session.Close() }.GetNewClosure()
     }
-    Invoke-DrRuntimeBrokerObserverCore -Root $Root -RunId $RunId -RunnerSid $RunnerSid -DurationSeconds $remainingSeconds -Backend $backend -ExpectedVmId $ExpectedVmId.ToString()
+    Invoke-DrRuntimeBrokerObserverCore -Root $Root -RunId $RunId -RunnerSid $RunnerSid -DurationSeconds $remainingSeconds -Backend $backend -ExpectedVmId $ExpectedVmId.ToString() -CompilerCleanup $compilerReceipt
 }
