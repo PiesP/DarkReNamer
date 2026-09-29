@@ -395,7 +395,10 @@ privilege.
 A bounded, explicitly owned Windows PowerShell registration query completes
 before the runner baselines. Its child must exit, close its job and streams, and
 leave no owned lifetime. Missing CBS registration disables only the
-DesktopSpotlight class. Classification rechecks that exact registration through
+DesktopSpotlight class. The result crosses remoting as one bounded JSON string,
+including JSON null for a missing package, so transport annotations cannot enter
+the registration record. Independent verification still rejects unexpected data
+fields. Classification rechecks that exact registration through
 the current user's native package APIs without starting another process. The
 package must match the fixed Microsoft identity, system signature status, and
 nondevelopment registration. Its protected SystemApps manifest must independently

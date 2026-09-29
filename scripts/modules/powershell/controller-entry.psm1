@@ -449,6 +449,31 @@ function Test-DrControllerProcessJobCleanupLedger {
     catch { return $false }
 }
 
+function ConvertFrom-DrControllerSpotlightPreflightJson {
+    param([AllowNull()][AllowEmptyCollection()][object[]] $Values)
+
+    if ($null -eq $Values -or $Values.Count -ne 1 -or
+        $Values[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($Values[0])) {
+        throw 'Registration preflight must return one nonempty JSON string.'
+    }
+    $text = [string]$Values[0]
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    if ($text.Length -gt 65536 -or $utf8.GetByteCount($text) -gt 65536) {
+        throw 'Registration preflight exceeds 65536 UTF-8 bytes.'
+    }
+    try { $record = ConvertFrom-Json -InputObject $text -ErrorAction Stop }
+    catch { throw 'Registration preflight returned invalid JSON.' }
+    if ($null -eq $record) {
+        if ($text.Trim() -cne 'null') { throw 'Registration preflight requires a JSON object or null.' }
+        return $null
+    }
+    if ($record -isnot [pscustomobject] -or -not $text.TrimStart().StartsWith('{')) {
+        throw 'Registration preflight requires a JSON object or null.'
+    }
+    # Preserve every data field; the independent verifier enforces closed keys.
+    $record
+}
+
 function Invoke-DrWindowsVmController {
     [CmdletBinding(DefaultParameterSetName = 'Direct')]
     param(
@@ -2902,7 +2927,7 @@ public static class DrVmCommandLineNative {
         }
     $transport['tooling'] = $transferredTooling
     # A narrow, fully owned PS5 registration query finishes before either baseline.
-    $spotlightPreflight = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
+    $spotlightPreflightJson = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
         param($root,$sid)
         $loaderRecord=@($global:DrVmToolingRecords|Where-Object role -CEQ 'powershell-loader')
         if ($loaderRecord.Count -ne 1) { throw 'Registration preflight loader binding is missing.' }
@@ -2971,13 +2996,15 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         finally {$state.owner.Dispose()}
                     }
                 }
-                $record
+                # Serialize before remoting can annotate the registration object.
+                $record | ConvertTo-Json -Depth 8 -Compress
             } $root $sid
         } finally {
             if($null -ne $guestModule){Remove-Module -ModuleInfo $guestModule -Force -ErrorAction Stop}
             if($null -ne $loaderModule){Remove-Module -ModuleInfo $loaderModule -Force -ErrorAction Stop}
         }
-    }
+    })
+    $spotlightPreflight = ConvertFrom-DrControllerSpotlightPreflightJson -Values $spotlightPreflightJson
     $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
         param($sid)
         @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
