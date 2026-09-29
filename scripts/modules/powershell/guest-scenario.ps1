@@ -20,12 +20,14 @@
             -Phase initial `
             -FixtureRoot $FixtureRoot `
             -LocalAppData $LocalAppData))
-        raw_checkpoints = if ($RawEvidence) {
-            @((Get-VmAutomatedCheckpoint `
-                -Phase initial `
-                -FixtureRoot $FixtureRoot `
-                -LocalAppData $LocalAppData))
-        } else { @() }
+        raw_checkpoints = @(
+            if ($RawEvidence) {
+                Get-VmAutomatedCheckpoint `
+                    -Phase initial `
+                    -FixtureRoot $FixtureRoot `
+                    -LocalAppData $LocalAppData
+            }
+        )
     }
 }
 

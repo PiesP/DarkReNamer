@@ -622,6 +622,88 @@ try {
         $null -ne (New-VmAutomatedJournalCleanupObservation -Observed $false -Entries @())) {
         throw 'Cleanup journal evidence must distinguish an observed inventory from an unobserved one.'
     }
+    # Exercise the actual fixture producer in a fresh process so Linux-only native stubs cannot leak.
+    $producerScript = @'
+param([string] $ScriptsRoot, [string] $TestRoot)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $ScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind guest)) { . $definition }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    Initialize-NativeCapture
+}
+else {
+    # Only Windows identity/drive-path boundaries are substituted; inventories and hashes remain real.
+    Add-Type 'public static class DarkReNamerVmNative { public static string GetFileIdentity(string path) { return "portable-fixture-id"; } }'
+    function Get-VmAutomatedCanonicalRootPath([string] $Path) {
+        (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName
+    }
+    function Get-FullFileIdentity([string] $Path) {
+        [ordered]@{ volume_serial = 'aabbccdd11223344'; file_id = 'ffffffff000000000000000000000001' }
+    }
+}
+[void](New-Item -ItemType Directory -Path $TestRoot)
+$applicationRoot = Join-Path $TestRoot 'application'
+[void](New-Item -ItemType Directory -Path $applicationRoot)
+[IO.File]::WriteAllText((Join-Path $applicationRoot 'DarkReNamer.exe'), 'fixture application bytes')
+foreach ($rawEvidence in @($true, $false)) {
+    $caseRoot = Join-Path $TestRoot ([string]$rawEvidence)
+    $fixtureRoot = Join-Path $caseRoot 'fixture'
+    $localAppData = Join-Path $caseRoot 'local-app-data'
+    [void](New-Item -ItemType Directory -Path $fixtureRoot -Force)
+    [void](New-Item -ItemType Directory -Path $localAppData)
+    $initial = Initialize-ProductionRenameFlowFixture -FixtureRoot $fixtureRoot `
+        -ApplicationRoot $applicationRoot -LocalAppData $localAppData -RawEvidence:$rawEvidence
+    if ($initial.checkpoints -isnot [array] -or $initial.checkpoints.Count -ne 1) {
+        throw 'The actual fixture producer must return a singleton legacy checkpoint array.'
+    }
+    if ($initial.raw_checkpoints -isnot [array] -or
+        $initial.raw_checkpoints.Count -ne $(if ($rawEvidence) { 1 } else { 0 })) {
+        throw "The actual fixture producer must return a raw checkpoint array (RawEvidence=$rawEvidence)."
+    }
+    $journalRoot = Join-Path $localAppData 'DarkReNamer/journal'
+    [void](New-Item -ItemType Directory -Path $journalRoot -Force)
+    [IO.File]::WriteAllBytes((Join-Path $journalRoot 'runtime.lock'), [byte[]]@())
+    $startup = @((Get-FlowCheckpoint -Phase initial -FixtureRoot $fixtureRoot -LocalAppData $localAppData))
+    Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $initial.checkpoints[0] -Startup $startup[0]
+    if ($rawEvidence) {
+        $rawStartup = @((Get-VmAutomatedCheckpoint -Phase initial -FixtureRoot $fixtureRoot -LocalAppData $localAppData))
+        if ($initial.raw_checkpoints[0] -isnot [Collections.IDictionary] -or
+            $initial.raw_checkpoints[0].phase -cne 'initial' -or
+            @($initial.raw_checkpoints[0].journal_entries).Count -ne 0 -or
+            @($rawStartup[0].journal_entries).Count -ne 1) {
+            throw 'The actual singleton raw checkpoint must retain prelaunch and observed startup state.'
+        }
+        # Match the production call shape; an unwrapped OrderedDictionary indexes to "initial" here.
+        Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $initial.raw_checkpoints[0] -Startup $rawStartup[0]
+    }
+}
+'@
+    $producerScriptPath = Join-Path $temporaryRoot 'fixture-producer-regression.ps1'
+    [IO.File]::WriteAllText($producerScriptPath, $producerScript, [Text.UTF8Encoding]::new($false))
+    $producerStartInfo = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $producerStartInfo.UseShellExecute = $false
+    $producerStartInfo.CreateNoWindow = $true
+    $producerStartInfo.RedirectStandardOutput = $true
+    $producerStartInfo.RedirectStandardError = $true
+    foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $producerScriptPath,
+        '-ScriptsRoot', $toolingScriptsRoot, '-TestRoot', (Join-Path $temporaryRoot 'fixture-producer'))) {
+        [void]$producerStartInfo.ArgumentList.Add($argument)
+    }
+    $producerProcess = [Diagnostics.Process]::Start($producerStartInfo)
+    try {
+        $producerOutput = $producerProcess.StandardOutput.ReadToEndAsync()
+        $producerError = $producerProcess.StandardError.ReadToEndAsync()
+        if (-not $producerProcess.WaitForExit(30000)) { throw 'Fixture producer regression timed out.' }
+        if ($producerProcess.ExitCode -ne 0) {
+            throw "Actual fixture producer regression failed: $($producerError.GetAwaiter().GetResult())"
+        }
+        [void]$producerOutput.GetAwaiter().GetResult()
+    }
+    finally {
+        if (-not $producerProcess.HasExited) { $producerProcess.Kill($true); $producerProcess.WaitForExit() }
+        $producerProcess.Dispose()
+    }
     # Startup may create the runtime lock; Cancel starts from the observed running state.
     $startupLocalAppData = Join-Path $temporaryRoot 'startup-local-app-data'
     [void](New-Item -ItemType Directory -Path $startupLocalAppData)
