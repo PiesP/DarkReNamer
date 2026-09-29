@@ -216,7 +216,7 @@ try {
     function Read-DrRuntimeBrokerJsonBytes { param($Path,$Limit) return ,([byte[]]@(1,2,3)) }
     function Get-AuthenticodeSignature { param($LiteralPath,$ErrorAction) throw 'Mocked signature failure.' }
     try {
-        $image=Get-DrRuntimeBrokerImageEvidence '/mockWindows/System32/RuntimeBroker.exe' 'RuntimeBroker.exe'
+        $image=Get-DrRuntimeBrokerImageEvidence (Join-Path (Join-Path $env:windir 'System32') 'RuntimeBroker.exe') 'RuntimeBroker.exe'
         Assert-ObserverTest ($image.content.succeeded -and $image.content.value.bytes -eq 3 -and $image.content.value.sha256.Length -eq 64) 'Signature failure discarded captured file hash.'
         Assert-ObserverTest (-not $image.signature.succeeded -and $image.signature.error_type -and $null -ne $image.signature.error_hresult -and $image.signature.started_guest_utc -and $image.signature.completed_guest_utc) 'Signature error metadata or timing was lost.'
     } finally { Set-Item Function:Read-DrRuntimeBrokerJsonBytes $savedReader; Remove-Item Function:Get-AuthenticodeSignature; $env:windir=$savedWindir }
