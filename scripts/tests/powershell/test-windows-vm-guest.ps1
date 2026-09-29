@@ -3507,6 +3507,46 @@ finally {
         [IO.File]::WriteAllBytes($path,[byte[]]::new(0))
         if((Read-DrVmBoundedOrdinaryBytes $path 0).Length -ne 0){throw 'Exact empty stderr was not preserved.'}
     } finally {Remove-Item -LiteralPath $byteRoot -Recurse -Force}
+    # Run the actual child command in an isolated runspace with a package-query
+    # fixture. Progress must be suppressed before the query; real errors stop it.
+    $queryLiterals=@($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.Value.Contains('$items=@(Get-AppxPackage -Name MicrosoftWindows.Client.CBS)')
+    },$true))
+    if($queryLiterals.Count -ne 1){throw 'Expected one actual CBS child query command.'}
+    $queryFixture=@'
+$ProgressPreference='Continue'
+function Get-AppxPackage {
+    Write-Progress -Activity 'Preparing modules for first use.' -Completed
+    [pscustomobject]@{Name='MicrosoftWindows.Client.CBS';PackageFullName='fixture';
+        PackageFamilyName='fixture';Publisher='fixture';PublisherId='fixture';Version='1.0.0.0';
+        Architecture='X64';ResourceId='';InstallLocation='fixture';SignatureKind='System';
+        Status='Ok';IsDevelopmentMode=$false}
+}
+'@
+    $queryShell=[PowerShell]::Create()
+    try {
+        [void]$queryShell.AddScript($queryFixture+"`n"+$queryLiterals[0].Value)
+        $queryOutput=@($queryShell.Invoke())
+        if($queryShell.HadErrors -or $queryShell.Streams.Progress.Count -ne 0 -or $queryOutput.Count -ne 1){
+            throw 'CBS child query emitted progress or lost its single JSON result.'
+        }
+        $queryRecord=[string]$queryOutput[0]|ConvertFrom-Json
+        if($queryRecord.name -cne 'MicrosoftWindows.Client.CBS' -or $queryRecord.architecture -cne 'x64'){
+            throw 'CBS child query result was changed by progress suppression.'
+        }
+    } finally {$queryShell.Dispose()}
+    $queryShell=[PowerShell]::Create()
+    try {
+        [void]$queryShell.AddScript("function Get-AppxPackage { Write-Error 'fixture registration failure' }`n"+$queryLiterals[0].Value)
+        $queryOutput=@();$queryFailure=$null
+        try {$queryOutput=@($queryShell.Invoke())} catch {$queryFailure=$_}
+        if(-not $queryShell.HadErrors -or $queryShell.InvocationStateInfo.State -ne 'Failed' -or
+            $null -eq $queryFailure -or $queryOutput.Count -ne 0 -or
+            $queryFailure.Exception.Message -cnotlike '*fixture registration failure*'){
+            throw 'CBS child query suppressed a real registration error.'
+        }
+    } finally {$queryShell.Dispose()}
     Initialize-DrVmSpotlightNative
     if([Runtime.InteropServices.Marshal]::SizeOf([type][DrVmSpotlightNative+PackageInfo]) -ne 80 -or
         [Runtime.InteropServices.Marshal]::SizeOf([type][DrVmSpotlightNative+PackageId]) -ne 48 -or

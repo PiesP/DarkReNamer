@@ -2929,6 +2929,7 @@ public static class DrVmCommandLineNative {
                 if (-not (Test-Path -LiteralPath $ps5 -PathType Leaf)) { throw 'Registration preflight requires native Windows PowerShell 5.1.' }
                 $command=@'
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 $items=@(Get-AppxPackage -Name MicrosoftWindows.Client.CBS)
 if($items.Count -gt 1){throw 'CBS registration is ambiguous.'}
 if($items.Count -eq 0){'null';exit 0}
