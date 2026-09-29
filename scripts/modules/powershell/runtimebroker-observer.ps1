@@ -1,4 +1,12 @@
 # Diagnostic observer only. No acceptance classification or process intervention.
+function Initialize-DrRuntimeBrokerModuleEnvironment {
+    if ($PSVersionTable.PSEdition -cne 'Desktop') { throw 'Observer modules require Windows PowerShell.' }
+    # CreateProcess inherits the PS7 parent's module path without the adjustment
+    # made by PowerShell's native-command launcher. Keep this child's built-ins
+    # bound to its own engine; never change the user or machine environment.
+    [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine($PSHOME, 'Modules'), 'Process')
+}
+
 function Remove-DrRuntimeBrokerCompilerArtifacts {
     param($TempFiles, [string]$CompilerRoot)
     $known=@($TempFiles)
@@ -767,6 +775,7 @@ function Invoke-DrRuntimeBrokerObserver {
     if ($env:OS -cne 'Windows_NT' -or $PSVersionTable.PSEdition -cne 'Desktop' -or [IntPtr]::Size -ne 8) {
         throw 'Native diagnostics require Windows PowerShell 5.1 x64.'
     }
+    Initialize-DrRuntimeBrokerModuleEnvironment
     $expectedRoot = Join-Path $env:ProgramData ('DarkReNamerRuntimeBrokerDiag-' + $RunId)
     if ($env:ProgramData -ine 'C:\ProgramData' -or $Root -cne $expectedRoot -or $ExpectedVmId -eq [guid]::Empty) { throw 'Fixed diagnostic root or VM identity differs.' }
     foreach ($path in @('C:\','C:\ProgramData',$Root)) {
