@@ -229,6 +229,7 @@ class CampaignFixture:
         result = self.result_base(self.bundle, "ui" if keyboard else "core")
         result["process_job_cleanup"] = self.process_job_cleanup(lifecycle)
         if not keyboard:
+            raw['raw_prelaunch_checkpoints'] = [deepcopy(raw['raw_checkpoints'][0])]
             result.update(gui={"flow": raw, "process_lifecycle": lifecycle}, raw_cleanup=guest)
             return result, host
         result.update(raw, process_lifecycle=lifecycle, raw_cleanup=guest)

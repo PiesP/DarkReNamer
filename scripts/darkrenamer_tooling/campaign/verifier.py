@@ -16,7 +16,7 @@ from darkrenamer_tooling.contracts.platform import (
     contains, rectangle, verify_cleanup, verify_controller_cleanup,
     verify_environment, verify_keyboard_events,
 )
-from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints
+from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints, core_startup_checkpoint
 from darkrenamer_tooling.evidence.archive import (
     EvidenceError, ExtractedEvidence, MAX_JSON_BYTES, MAX_MEMBER_BYTES,
     parse_bounded_json_bytes, read_referenced_file, require_exact_keys, require_int,
@@ -154,6 +154,8 @@ def verify_core_execution(result: dict, bundle: dict, transport: dict, target: d
     destination = "accepted-acceptance-source.txt" if keyboard else "vm-confirmed-vm-flow-source.txt"
     final = core_rename_checkpoints(raw["raw_checkpoints"], source_name=source,
                                     destination_name=destination, full_identity=True)
+    if not keyboard:
+        core_startup_checkpoint(raw.get("raw_prelaunch_checkpoints"), raw["raw_checkpoints"][0])
     root_identity = Identity.parse(environment["fixture_volume"]["root_identity"])
     require(all(row.identity.volume == root_identity.volume for row in final.values()),
             "Core fixture identities do not belong to the observed volume.")

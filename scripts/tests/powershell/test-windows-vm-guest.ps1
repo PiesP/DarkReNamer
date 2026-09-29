@@ -622,6 +622,82 @@ try {
         $null -ne (New-VmAutomatedJournalCleanupObservation -Observed $false -Entries @())) {
         throw 'Cleanup journal evidence must distinguish an observed inventory from an unobserved one.'
     }
+    # Startup may create the runtime lock; Cancel starts from the observed running state.
+    $startupLocalAppData = Join-Path $temporaryRoot 'startup-local-app-data'
+    [void](New-Item -ItemType Directory -Path $startupLocalAppData)
+    $prelaunchJournal = @(Get-VmAutomatedJournalInventory -LocalAppData $startupLocalAppData)
+    $startupJournalRoot = Join-Path $startupLocalAppData 'DarkReNamer/journal'
+    [void](New-Item -ItemType Directory -Path $startupJournalRoot -Force)
+    [IO.File]::WriteAllBytes((Join-Path $startupJournalRoot 'runtime.lock'), [byte[]]@())
+    $startupJournal = @(Get-VmAutomatedJournalInventory -LocalAppData $startupLocalAppData)
+    foreach ($rawIdentity in @($false, $true)) {
+        $entry = [ordered]@{
+            name = 'vm-flow-source.txt'; kind = 'file'; bytes = [long]65
+            content_sha256 = 'a' * 64
+        }
+        if ($rawIdentity) {
+            $entry['file_identity'] = [ordered]@{
+                volume_serial = 'aabbccdd11223344'
+                file_id = 'ffffffff000000000000000000000001'
+            }
+        }
+        else { $entry['file_identity_sha256'] = 'b' * 64 }
+        $prelaunch = [ordered]@{
+            phase = 'initial'; fixture_entries = @($entry); journal_entries = $prelaunchJournal
+        }
+        $startup = [ordered]@{
+            phase = 'initial'; fixture_entries = @($entry); journal_entries = $startupJournal
+        }
+        $observedBefore = $startup | ConvertTo-Json -Depth 8 -Compress
+        Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $prelaunch -Startup $startup
+        Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $prelaunch -Startup $prelaunch
+        if (@($prelaunch.journal_entries).Count -ne 0 -or
+            @($startup.journal_entries).Count -ne 1 -or
+            ($startup | ConvertTo-Json -Depth 8 -Compress) -cne $observedBefore) {
+            throw 'Startup validation must preserve the actual prelaunch and post-startup observations.'
+        }
+        foreach ($mutation in @('content', 'size', 'name', 'extra', 'identity', 'file-id')) {
+            $changed = $observedBefore | ConvertFrom-Json -Depth 8
+            switch ($mutation) {
+                content { $changed.fixture_entries[0].content_sha256 = 'c' * 64 }
+                size { $changed.fixture_entries[0].bytes++ }
+                name { $changed.fixture_entries[0].name = 'changed.txt' }
+                extra { $changed.fixture_entries += $changed.fixture_entries[0] }
+                identity {
+                    if ($rawIdentity) {
+                        $changed.fixture_entries[0].file_identity.volume_serial = '0000000011223344'
+                    }
+                    else { $changed.fixture_entries[0].file_identity_sha256 = 'd' * 64 }
+                }
+                file-id {
+                    if ($rawIdentity) {
+                        $changed.fixture_entries[0].file_identity.file_id = '00000000000000000000000000000001'
+                    }
+                    else { $changed.fixture_entries[0].file_identity_sha256 = 'e' * 64 }
+                }
+            }
+            Assert-Fails {
+                Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $prelaunch -Startup $changed
+            } 'Startup changed the production flow fixture inventory'
+        }
+        foreach ($mutation in @('bytes', 'boolean-bytes', 'kind', 'name', 'extra')) {
+            $changed = $observedBefore | ConvertFrom-Json -Depth 8
+            switch ($mutation) {
+                bytes { $changed.journal_entries[0].bytes = 1 }
+                boolean-bytes { $changed.journal_entries[0].bytes = $false }
+                kind { $changed.journal_entries[0].kind = 'directory' }
+                name { $changed.journal_entries[0].name = 'active.drj' }
+                extra { $changed.journal_entries += $changed.journal_entries[0] }
+            }
+            Assert-Fails {
+                Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $prelaunch -Startup $changed
+            } 'Startup left an unexpected production flow journal inventory'
+        }
+        $dirtyPrelaunch = $observedBefore | ConvertFrom-Json -Depth 8
+        Assert-Fails {
+            Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch -Startup $startup
+        } 'The prelaunch production flow journal inventory is not empty'
+    }
     $injectedOwnedPath = [IO.Path]::GetFullPath($valid.root).TrimEnd('\\') +
         '\\injected-owned.exe'
     $observedOwned = Get-VmAutomatedOwnedProcessCleanupObservation `
