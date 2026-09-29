@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = 'Direct')]
+﻿[CmdletBinding(DefaultParameterSetName = 'Direct')]
 param(
     [Parameter(Mandatory = $true)][string] $BundleRoot,
     [Parameter(Mandatory = $true, ParameterSetName = 'Direct')][string] $VmName,
@@ -29,13 +29,17 @@ param(
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $RecoveryObserverSha256,
     [switch] $RecoveryExport,
     [switch] $RecoveryIntentOnlyCandidateDiscard,
+    [string] $RuntimeBrokerDiagnosticRoot,
+    [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
+    [ValidateRange(1, 900)][int] $RuntimeBrokerDiagnosticBudgetSeconds,
+    [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ToolingManifestSha256 = '17e62baefbb80250ae404013d1fa005431921271ef4a1f67e5e7d9fed9344dc1'
+$ToolingManifestSha256 = 'f4b4549530b11fde3c196597db74504ba74a8bab29f918dc2a2332d76d5f5e00'
 $ToolingLoaderSha256 = '46e30d634bd4e01645397438b611ad6323f78fd0427508c87b5f190b331f17d3'
 
 function Get-DrBootstrapSha256 {

@@ -506,6 +506,10 @@ function Invoke-DrWindowsVmController {
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $RecoveryObserverSha256,
     [switch] $RecoveryExport,
     [switch] $RecoveryIntentOnlyCandidateDiscard,
+    [string] $RuntimeBrokerDiagnosticRoot,
+    [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
+    [ValidateRange(1, 900)][int] $RuntimeBrokerDiagnosticBudgetSeconds,
+    [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
     [Parameter(Mandatory)][string] $EntryPointPath,
@@ -544,6 +548,25 @@ $taskSelection = Resolve-ControllerTaskSelection `
     -TimeoutSeconds $TestTimeoutSeconds
 
 $transportKind = if ($PSCmdlet.ParameterSetName -eq 'Ssh') { 'ssh' } else { 'powershell_direct' }
+$runtimeBrokerEnabled = Test-DrRuntimeBrokerDiagnosticArguments -Root $RuntimeBrokerDiagnosticRoot `
+    -RunId $RuntimeBrokerDiagnosticRunId -PreparationOnly ([bool]$RuntimeBrokerPreparationOnly) `
+    -TransportKind $transportKind -TaskKind $taskSelection.kind -Mode $AcceptanceMode `
+    -VmId $ExpectedGuestVmId -RunnerSid $ExpectedDesktopSid -BudgetSeconds $RuntimeBrokerDiagnosticBudgetSeconds
+$runtimeBrokerClock = [Diagnostics.Stopwatch]::StartNew()
+$runtimeBrokerPrepared = $false
+$runtimeBrokerErrors = [Collections.Generic.List[string]]::new()
+function Write-DrDiagnosticPhase {
+    param([string] $Phase, [string] $State='observed', [hashtable] $Details=@{})
+    if (-not $runtimeBrokerEnabled -or $null -eq $session) { return }
+    try {
+        Invoke-Command -Session $session -ArgumentList $Phase,$State,$Details -ScriptBlock {
+            param($phase,$state,$details)
+            Write-DrRuntimeBrokerControllerPhase -Phase $phase -State $state -Details $details
+        }
+    } catch {
+        if ($runtimeBrokerErrors.Count -lt 32) { $runtimeBrokerErrors.Add($Phase + ': ' + $_.Exception.GetType().Name) }
+    }
+}
 $acceptance = $taskSelection.kind -ceq 'ui'
 $recovery = $taskSelection.kind -ceq 'recovery'
 $observerTask = [bool]$taskSelection.is_observer
@@ -806,6 +829,11 @@ public static class VmDesktopState {
         if ($unlocked.Count -ne 1 -or $unlocked[0] -le 0) { throw 'Log in to one unlocked desktop with the configured VM test account.' }
         if (-not (Test-Path "$env:SystemRoot\System32\VCRUNTIME140.dll")) { throw 'Install the Microsoft x64 Visual C++ runtime in the VM before testing.' }
         [pscustomobject]@{sid = $sid; session_id = $unlocked[0]}
+    }
+    if ($runtimeBrokerEnabled) {
+        Initialize-DrRuntimeBrokerControllerDiagnostic -Session $session -Root $RuntimeBrokerDiagnosticRoot `
+            -RunId $RuntimeBrokerDiagnosticRunId -RunnerSid $desktop.sid -VmId $ExpectedGuestVmId
+        Write-DrDiagnosticPhase -Phase 'desktop-session-bound' -Details @{ session_id=[int]$desktop.session_id; runner_sid=[string]$desktop.sid }
     }
     $workspaceRoots = Invoke-Command -Session $session -ArgumentList $taskName,$desktop.sid -ScriptBlock {
         param($name,$runnerSid)
@@ -2926,6 +2954,10 @@ public static class DrVmCommandLineNative {
             }
         }
     $transport['tooling'] = $transferredTooling
+    if ($runtimeBrokerEnabled) {
+        [void](Get-DrRuntimeBrokerControllerRemainingSeconds -Clock $runtimeBrokerClock -BudgetSeconds $RuntimeBrokerDiagnosticBudgetSeconds -ReserveSeconds 420)
+    }
+    Write-DrDiagnosticPhase -Phase 'cbs-registration-preflight' -State 'begin'
     # A narrow, fully owned PS5 registration query finishes before either baseline.
     $spotlightPreflightJson = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
         param($root,$sid)
@@ -3005,6 +3037,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     })
     $spotlightPreflight = ConvertFrom-DrControllerSpotlightPreflightJson -Values $spotlightPreflightJson
+    Write-DrDiagnosticPhase -Phase 'cbs-registration-preflight' -State 'end'
+    Write-DrDiagnosticPhase -Phase 'acceptance-baseline' -State 'begin'
     $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
         param($sid)
         @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
@@ -3019,6 +3053,20 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     $runnerProcessBaseline = @($processSnapshot.processes)
     $transport['runner_process_baseline'] = @($runnerProcessBaseline)
+    Write-DrDiagnosticPhase -Phase 'acceptance-baseline' -State 'end' -Details @{ task_count=$runnerTaskBaseline.Count; process_count=$runnerProcessBaseline.Count }
+    if ($RuntimeBrokerPreparationOnly) {
+        # The preflight child has closed; no candidate task/job has been created.
+        $runtimeBrokerPrepared = $true
+        $transport.status = 'diagnostic-prepared'
+        Write-DrDiagnosticPhase -Phase 'preparation-only-complete'
+    } else {
+    if ($runtimeBrokerEnabled) {
+        $candidateSeconds = Get-DrRuntimeBrokerControllerRemainingSeconds -Clock $runtimeBrokerClock `
+            -BudgetSeconds $RuntimeBrokerDiagnosticBudgetSeconds -ReserveSeconds 420
+        if ($candidateSeconds -lt $TestTimeoutSeconds) { throw 'Insufficient diagnostic time for the candidate and unchanged cleanup.' }
+        $SuiteTimeoutSeconds = [Math]::Min($SuiteTimeoutSeconds, $candidateSeconds)
+    }
+    Write-DrDiagnosticPhase -Phase 'candidate-task' -State 'begin'
 
     $trustedBundleRecords = @(
         foreach ($name in @('bundle.json') + @($artifacts | ForEach-Object { $_.file })) {
@@ -3053,8 +3101,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
         Copy-Item -LiteralPath (Join-Path $BundleRoot 'windows-vm-acceptance.ps1') -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'windows-vm-acceptance.ps1') -ToSession $session
         Copy-Item -LiteralPath $AcceptanceManifest -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'input-manifest.json') -ToSession $session
-        $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256 -ScriptBlock {
-            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash)
+        if ($runtimeBrokerEnabled) {
+            $candidateSeconds = Get-DrRuntimeBrokerControllerRemainingSeconds -Clock $runtimeBrokerClock `
+                -BudgetSeconds $RuntimeBrokerDiagnosticBudgetSeconds -ReserveSeconds 420
+            if ($candidateSeconds -lt $TestTimeoutSeconds) { throw 'Insufficient diagnostic time after candidate staging.' }
+            $SuiteTimeoutSeconds = [Math]::Min($SuiteTimeoutSeconds, $candidateSeconds)
+        }
+        $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256,$RuntimeBrokerDiagnosticRunId -ScriptBlock {
+            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash,$runtimeBrokerRunId)
             $observerPath = Join-Path $root 'windows-vm-acceptance.ps1'
             if ((Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash -ine $observerHash) { throw 'Transferred acceptance observer hash mismatch.' }
             $bundle = Join-Path $root 'bundle'
@@ -3080,6 +3134,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 if ($captureNativeMenu) { $observerArguments += ' -CaptureNativeMenu' }
                 if ($captureAdvancedAppearance) { $observerArguments += ' -CaptureAdvancedAppearance' }
             }
+            if ($runtimeBrokerRunId) { $observerArguments += ' -RuntimeBrokerDiagnosticRunId ' + $runtimeBrokerRunId }
             Register-DrVmTask `
                 -TaskName $name `
                 -UserSid $sid `
@@ -3153,6 +3208,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     -RegisteredLastRunTimeTicks $acceptanceEngine.registered_last_run_time_ticks `
                     -LastRunTimeTicks $state.last_run_time_ticks
                 if ($state.terminal) { break }
+                if ($runtimeBrokerEnabled) {
+                    [void](Get-DrRuntimeBrokerControllerRemainingSeconds -Clock $runtimeBrokerClock `
+                        -BudgetSeconds $RuntimeBrokerDiagnosticBudgetSeconds -ReserveSeconds 420)
+                }
             } while ((Get-Date) -lt $deadline)
         }
         catch { $pollFailure = $_ }
@@ -3833,11 +3892,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     $transport.status = 'collected'
     }
+    Write-DrDiagnosticPhase -Phase 'candidate-task' -State 'end'
+    }
 } catch {
     $transport.status = 'failed'
     $transport.error = 'VM transport failed; inspect transport-error.txt.'
     $_ | Out-String | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport-error.txt') -Encoding UTF8
 } finally {
+    Write-DrDiagnosticPhase -Phase 'controller-cleanup' -State 'begin'
     $toolingCleanupError = Remove-ControllerToolingTransferStage -Transfer $toolingTransfer
     if ($null -ne $toolingCleanupError) {
         $transport.status = 'failed'
@@ -3851,11 +3913,43 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
                     if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
                 }
+                if ($runtimeBrokerEnabled -and -not $RuntimeBrokerPreparationOnly -and $trustedTaskRoot) {
+                    try {
+                        Invoke-Command -Session $session -ArgumentList $trustedTaskRoot,$RuntimeBrokerDiagnosticRunId -ScriptBlock {
+                            param($trustedRoot,$runId)
+                            try {
+                                $path = Join-Path (Join-Path $trustedRoot 'out') ('runtimebroker-' + $runId + '-phases.json')
+                                $bytes = Read-DrVmBoundedOrdinaryBytes -Path $path -MaximumBytes 262144
+                                $rows = @([Text.UTF8Encoding]::new($false,$true).GetString($bytes) | ConvertFrom-Json)
+                                if ($rows.Count -gt 64) { throw 'RuntimeBroker UI phase count exceeded.' }
+                                foreach ($row in $rows) {
+                                    if ($row.schema_version -ne 1 -or $row.run_id -cne $runId -or $row.source -cne 'ui-observer') {
+                                        throw 'RuntimeBroker UI phase binding mismatch.'
+                                    }
+                                    $details = @{}
+                                    foreach ($property in $row.details.PSObject.Properties) { $details[$property.Name]=$property.Value }
+                                    $recordedAt = if ($row.recorded_at_utc -is [DateTime]) {
+                                        $row.recorded_at_utc.ToUniversalTime().ToString('o')
+                                    } else { [string]$row.recorded_at_utc }
+                                    Write-DrRuntimeBrokerPhaseFile @global:DrRuntimeBrokerDiagnostic -Phase $row.phase `
+                                        -State $row.state -Source 'ui-observer' -RecordedAtUtc $recordedAt -Details $details
+                                }
+                            } catch {
+                                if ($global:DrRuntimeBrokerPhaseErrors.Count -lt 32) {
+                                    $global:DrRuntimeBrokerPhaseErrors.Add('ui-phase-import: ' + $_.Exception.GetType().Name)
+                                }
+                            }
+                        }
+                    } catch { $runtimeBrokerErrors.Add('UI phase import remoting failed.') }
+                }
                 if ($guestRoot) {
                     $cleanupAuthorized = $transport.status -eq 'collected' -and
                         (-not $observerTask -or $acceptancePassed)
-                    $requiredProcessJobsClosed = $processJobsClosed
+                    # Preparation-only owns only the completed registration preflight.
+                    if ($runtimeBrokerPrepared -and $transport.status -ceq 'diagnostic-prepared') { $cleanupAuthorized = $true }
+                    $requiredProcessJobsClosed = $processJobsClosed -or $runtimeBrokerPrepared
                     $cleanupTaskContext = [pscustomobject]@{
+                        diagnostic_enabled = $runtimeBrokerEnabled
                         runner_sid = [string]$desktop.sid
                         baseline_tasks = @($runnerTaskBaseline)
                         spotlight_preflight = $spotlightPreflight
@@ -3866,6 +3960,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     }
                     $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext,(${function:Test-DrControllerCleanupObservation}.ToString()) -ScriptBlock {
                         param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext,$completionDefinition)
+                        $diagnosticEnabled = $null -ne $taskContext.PSObject.Properties['diagnostic_enabled'] -and
+                            $taskContext.diagnostic_enabled -is [bool] -and $taskContext.diagnostic_enabled
                         $expectedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $name
                         $expectedTrustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
                         if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
@@ -3903,6 +3999,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         }
                         $removedRunnerTasks = [Collections.Generic.HashSet[string]]::new(
                             [StringComparer]::OrdinalIgnoreCase)
+                        if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-initial-inventory' -State 'begin' }
                         $runnerTasksBeforeCleanup = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
                         $unexpectedRunnerTasksBeforeCleanup = @($runnerTasksBeforeCleanup |
                             Where-Object {
@@ -3928,6 +4025,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         $unexpectedRunnerProcessesBeforeCleanup = @($processSnapshotBeforeCleanup.processes |
                             Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
                             Sort-Object identity)
+                        if ($diagnosticEnabled) {
+                            Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-initial-inventory' -State 'end' -Details @{ unexpected_process_count=$unexpectedRunnerProcessesBeforeCleanup.Count }
+                            Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-classification' -State 'begin'
+                        }
                         $terminatedRunnerProcesses = [Collections.Generic.List[object]]::new()
                         $cleanupResourceErrors = [Collections.Generic.List[string]]::new()
                         $ownedRootProcessCandidates = @(Get-CimInstance Win32_Process `
@@ -3994,6 +4095,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             $runnerProcessNaturalExit.final_runner_task_delta_identities = @(
                                 $unexpectedRunnerTasksBeforeCleanup | ForEach-Object { [string]$_.identity })
                         }
+                        if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-classification' -State 'end' -Details @{ status=[string]$runnerProcessNaturalExit.status } }
                         foreach ($candidateProcess in $ownedRootProcessCandidates) {
                             $owned = $null
                             $terminationRecord = $null
@@ -4037,6 +4139,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         # Same-user process and task deltas can include unrelated desktop
                         # work. Detect them and retain the VM root for inspection; only
                         # terminate processes whose executable is inside this exact run root.
+                        if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-reinventory' -State 'begin' }
                         $processSnapshotAfterIntervention = Get-DrVmRunnerProcesses `
                             -UserSid $taskContext.runner_sid `
                             -SessionId $taskContext.runner_session_id
@@ -4065,6 +4168,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
                             })
                         $taskPresentBeforeDelete = $ownedScheduledTasksBeforeDelete.Count -gt 0
+                        if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-reinventory' -State 'end' -Details @{ unexpected_process_count=$unexpectedRunnerProcessesAfterIntervention.Count } }
                         if ($runnerProcessNaturalExit.status -ceq 'pending') {
                             if ($mayDelete -and $jobsClosed -and -not $taskPresentBeforeDelete -and
                                 $processSnapshotAfterIntervention.complete -and
@@ -4078,6 +4182,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 $terminatedRunnerProcesses.Count -eq 0 -and
                                 $cleanupResourceErrors.Count -eq 0) {
                                 $nativeWait = if ($runnerProcessNaturalExit.process_class -ceq 'desktop-spotlight') { $nativeCapture } else { $null }
+                                if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-timed-polling' -State 'begin' }
                                 $waitResult = Wait-DrVmSmartScreenNaturalExit `
                                     -UserSid $taskContext.runner_sid `
                                     -SessionId $taskContext.runner_session_id `
@@ -4086,6 +4191,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                     -CandidateIdentity ([string]$runnerProcessNaturalExit.candidate_identity) `
                                     -OwnedRootPrefixes $prefixes `
                                     -TimeoutMilliseconds 360000 -NativeCapture $nativeWait
+                                if ($diagnosticEnabled) { Write-DrRuntimeBrokerControllerPhase -Phase 'cleanup-timed-polling' -State 'end' -Details @{ status=[string]$waitResult.status } }
                                 $runnerProcessNaturalExit.status = [string]$waitResult.status
                                 $runnerProcessNaturalExit.elapsed_ms = [int]$waitResult.elapsed_ms
                                 $runnerProcessNaturalExit.polls = @($waitResult.polls)
@@ -4288,6 +4394,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     }
     finally {
+        Write-DrDiagnosticPhase -Phase 'controller-cleanup' -State 'end' -Details @{ guest_cleanup=[bool]$transport.guest_cleanup }
+        if ($runtimeBrokerEnabled) {
+            try {
+                $remotePhaseErrors = @(Invoke-Command -Session $session -ScriptBlock { @($global:DrRuntimeBrokerPhaseErrors.ToArray()) })
+                foreach ($phaseError in $remotePhaseErrors) { if ($runtimeBrokerErrors.Count -lt 64) { $runtimeBrokerErrors.Add([string]$phaseError) } }
+            } catch { $runtimeBrokerErrors.Add('Controller phase error collection failed.') }
+        }
         $controllerCleanupErrors = @(Close-DrControllerResources `
             -Session $session -Credential $credential -Mutex $mutex -MutexHeld $mutexHeld)
         if ($controllerCleanupErrors.Count -gt 0) {
@@ -4295,11 +4408,25 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $transport['controller_cleanup_errors'] = $controllerCleanupErrors
         }
         $transport | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport.json') -Encoding UTF8
+        if ($runtimeBrokerEnabled) {
+            [ordered]@{ schema_version=1; run_id=$RuntimeBrokerDiagnosticRunId; preparation_only=[bool]$RuntimeBrokerPreparationOnly
+                preparation_completed=$runtimeBrokerPrepared; acceptance_claim=$false; controller_status=[string]$transport.status
+                guest_cleanup=[bool]$transport.guest_cleanup; phase_errors=@($runtimeBrokerErrors.ToArray())
+                controller_elapsed_ms=$runtimeBrokerClock.ElapsedMilliseconds; controller_budget_seconds=$RuntimeBrokerDiagnosticBudgetSeconds
+                controller_deadline_exceeded=($runtimeBrokerClock.Elapsed.TotalSeconds -gt $RuntimeBrokerDiagnosticBudgetSeconds)
+            } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'runtimebroker-controller.json') -Encoding UTF8
+        }
         if ($result -and $taskSelection.kind -ceq 'core') {
             $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
             $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
         }
     }
+}
+if ($RuntimeBrokerPreparationOnly) {
+    if (-not $runtimeBrokerPrepared -or $transport.status -cne 'diagnostic-prepared' -or -not $transport.guest_cleanup) {
+        throw 'RuntimeBroker preparation-only diagnostic or cleanup failed; inspect transport.json.'
+    }
+    return
 }
 if ($transport.status -ne 'collected' -or -not $transport.guest_cleanup -or
     ($observerTask -and -not $acceptancePassed)) {

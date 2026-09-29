@@ -599,7 +599,7 @@
       "bundle": "ui-current-dpi.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "dd93fb0c8a3348a0438753d6d5a695e20098f91df65589fa39687e4b2adb47f5",
+      "sha256": "db25eeb7db26bdcbf69d35b389632399a17d9d05adfd6bb5dc0b18f415ce46d2",
       "dependencies": []
     },
     {
@@ -608,7 +608,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "24a01ec1b9a12a154f11cda4635d5e5ec9579adce272c02ee5ddccba52d9f675",
+      "sha256": "2624e0b6d75684970f3967f2b34b5091d5fa7859a2c62720197676fb8252735c",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -726,7 +726,7 @@
       "bundle": "controller-contracts.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b3d423aab0686dd365eefeb2bfb0d075136a2a3a08106c3171d0ac3fceed4558",
+      "sha256": "2d8232e76171c993038beb5fd5d6d622cc973d164795d6f881c535b52e3b1c21",
       "dependencies": []
     },
     {
@@ -762,7 +762,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "07213cd6a41e54d7ada76d7750b6891afcfecfabb73e6173e3e6057a3676a177",
+      "sha256": "d51a9a54a97e4fe74e6e3450284df1bebace3f99c7b66888822ffd1d64acf03c",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
