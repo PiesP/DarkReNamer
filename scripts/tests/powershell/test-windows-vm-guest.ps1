@@ -3715,4 +3715,97 @@ function Get-AppxPackage {
     } finally {$env:windir=$savedWindir}
 }
 
+function Test-DrControllerSpotlightPreflightTransport {
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'),[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw $errors}
+    # Extract the actual final guest-module expression, not a duplicate serializer.
+    $boundaries=@($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.ScriptBlockAst] -and
+        $null -ne $node.EndBlock -and $node.EndBlock.Statements.Count -gt 0 -and
+        $node.EndBlock.Statements[-1].Extent.Text -match '^\$record(?:\s*\||$)' -and
+        $node.Extent.Text.Contains('Start-JobBoundProcess -FilePath $ps5')
+    },$true))
+    if($boundaries.Count -ne 1){throw 'Expected one actual registration return boundary.'}
+    $serializer=$boundaries[0].EndBlock.Statements[-1].Extent.Text
+    $job=$null
+    try {
+        # Start-Job/Receive-Job uses the real remoting serializer on both hosts.
+        $job=Start-Job -ArgumentList $serializer -ScriptBlock {
+            param($serializer)
+            $record=[pscustomobject]@{
+                name='MicrosoftWindows.Client.CBS';resource_id='';is_development_mode=$false
+                runner_sid='S-1-5-21-1';unknown_field='retain for strict verification'
+                child_lifecycle=[ordered]@{pid=4242;start_time_utc_ticks='639262682600000000'
+                    exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$true;exit_code=0}
+            }
+            $record
+            & ([scriptblock]::Create($serializer))
+            $record=$null
+            & ([scriptblock]::Create($serializer))
+        }
+        if($null -eq (Wait-Job -Job $job -Timeout 30)){throw 'Registration transport regression timed out.'}
+        $received=@(Receive-Job -Job $job -ErrorAction Stop)
+        if($job.State -ne 'Completed'){throw 'Registration transport regression job failed.'}
+    } finally {
+        if($null -ne $job){
+            if($job.State -notin @('Completed','Failed','Stopped')){Stop-Job -Job $job}
+            Remove-Job -Job $job -Force
+        }
+    }
+    if($received.Count -lt 1 -or $received[0].PSObject.Properties.Name -notcontains 'PSComputerName' -or
+        $received[0].PSObject.Properties.Name -notcontains 'RunspaceId' -or
+        $received[0].PSObject.Properties.Name -notcontains 'PSShowComputerName'){
+        throw 'Direct object regression did not reproduce remoting metadata.'
+    }
+    if($received.Count -ne 3 -or $received[1] -isnot [string] -or $received[2] -isnot [string]){
+        throw 'Actual registration boundary leaked an object or lost JSON null.'
+    }
+    $decoder=@($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'ConvertFrom-DrControllerSpotlightPreflightJson'
+    },$true))
+    if($decoder.Count -ne 1){throw 'Expected one actual registration transport decoder.'}
+    . ([scriptblock]::Create($decoder[0].Extent.Text))
+    $decoded=ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[1])
+    $expected=$received[0].PSObject.Properties.Name|Where-Object {$_ -notin @('PSComputerName','PSShowComputerName','RunspaceId')}
+    if((@($decoded.PSObject.Properties.Name|Sort-Object) -join '|') -cne (@($expected|Sort-Object) -join '|') -or
+        $decoded.name -cne 'MicrosoftWindows.Client.CBS' -or $decoded.resource_id -cne '' -or
+        $decoded.is_development_mode -ne $false -or $decoded.runner_sid -cne 'S-1-5-21-1' -or
+        $decoded.unknown_field -cne 'retain for strict verification' -or
+        -not $decoded.child_lifecycle.process_job_closed -or $decoded.child_lifecycle.pid -ne 4242 -or
+        $decoded.child_lifecycle.start_time_utc_ticks -cne '639262682600000000'){
+        throw 'Registration JSON changed fields, nested lifecycle, or retained unknown fields.'
+    }
+    if(($decoded.child_lifecycle|ConvertTo-Json -Depth 8 -Compress) -cne
+        ($received[0].child_lifecycle|ConvertTo-Json -Depth 8 -Compress)){
+        throw 'Registration transport changed an exact child lifecycle value.'
+    }
+    $unknown=ConvertFrom-DrControllerSpotlightPreflightJson -Values @(
+        '{"PSComputerName":"unknown data","nested":{"null_value":null,"items":[1,false,""]}}')
+    if($unknown.PSComputerName -cne 'unknown data' -or $null -ne $unknown.nested.null_value -or
+        ($unknown.nested.items|ConvertTo-Json -Compress) -cne '[1,false,""]'){
+        throw 'Registration decoder silently removed unknown data or changed nested values.'
+    }
+    if($null -ne (ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[2]))){throw 'Missing CBS registration lost JSON null.'}
+    Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[0])} 'one nonempty JSON string'
+    foreach($invalid in @(@(),@(''),@(' '),@('null','null'),@(42),@($null))){
+        Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values $invalid} 'one nonempty JSON string'
+    }
+    Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @('{bad')} 'invalid JSON'
+    foreach($invalid in @('[]','1','true','"text"')){
+        Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @($invalid)} 'object or null'
+    }
+    Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @(('x'*65537))} '65536 UTF-8 bytes'
+    Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @(('é'*32769))} '65536 UTF-8 bytes'
+    $limit='{"value":"'+('x'*65524)+'"}'
+    if([Text.Encoding]::UTF8.GetByteCount($limit) -ne 65536 -or
+        (ConvertFrom-DrControllerSpotlightPreflightJson -Values @($limit)).value.Length -ne 65524){
+        throw 'Exact registration transport byte limit was not accepted.'
+    }
+}
+
+Test-DrControllerSpotlightPreflightTransport
+
 Write-Host 'Windows VM guest runner tests passed.'
