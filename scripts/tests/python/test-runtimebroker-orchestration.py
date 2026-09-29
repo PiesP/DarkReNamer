@@ -31,10 +31,25 @@ class DiagnosticTests(unittest.TestCase):
         }
         self.args = SimpleNamespace(
             ssh_host='configured-vm', candidate_mode=True, desktop_mode='rdp',
-            task_kind='ui', expected_vm_id=self.plan['vm_id'],
+            task_kind='ui', acceptance_mode='current-dpi', expected_vm_id=self.plan['vm_id'],
             candidate_source_sha=diagnostic.PRODUCT_SHA,
             candidate_executable_sha256=diagnostic.PRODUCT_EXE_SHA256,
-            test_timeout_seconds=300)
+            test_timeout_seconds=300, acceptance_high_contrast=False,
+            acceptance_manifest=self.root / 'original-acceptance-input.json')
+        self.args.acceptance_manifest.write_bytes(b'{"schema_version":1,"immutable":"input"}\n')
+
+    def prepare_bundle_fixture(self, repo, bundle, args, tooling):
+        observer = b'# frozen UI observer source\n'
+        (bundle / 'windows-vm-acceptance.ps1').write_bytes(observer)
+        manifest = {'schema_version': 2,
+                    'product': {'source_sha': diagnostic.PRODUCT_SHA,
+                                'application': {'file': 'DarkReNamer.exe', 'sha256': diagnostic.PRODUCT_EXE_SHA256}},
+                    'harness': {'source_sha': 'a' * 40,
+                                'runner': {'sha256': 'c' * 64},
+                                'observers': {'ui': {'file': 'windows-vm-acceptance.ps1',
+                                                     'sha256': hashlib.sha256(observer).hexdigest()}}}}
+        (bundle / 'bundle.json').write_bytes(diagnostic.document_bytes(manifest))
+        return manifest
 
     def save_plan(self):
         path = self.root / 'plan.json'
@@ -92,6 +107,14 @@ class DiagnosticTests(unittest.TestCase):
             self.plan['attempts'][0]['launcher_arguments'] = [option]
             with self.assertRaisesRegex(ValueError, 'managed RDP'):
                 diagnostic.workload_arguments(self.plan['attempts'][0], self.plan)
+
+    def test_plan_rejects_unsupported_mode_before_attempt_directory_exists(self):
+        self.args.acceptance_mode = 'full-context'
+        path, digest = self.save_plan()
+        with mock.patch.object(diagnostic.launcher, 'parse_arguments', return_value=self.args):
+            with self.assertRaisesRegex(ValueError, 'workload differs'):
+                diagnostic.load_plan(path, digest)
+        self.assertFalse((self.root / 'runs').exists())
 
     def test_symlink_evidence_ancestry_is_rejected(self):
         link = self.root / 'linked'
@@ -209,7 +232,7 @@ class DiagnosticTests(unittest.TestCase):
                  'observer_resources_closed': True, 'desktop_resources_closed': True,
                  'os_processes_terminated': False, 'acceptance_reclassified': False,
                  'raw_evidence': [{'file': str(self.root / 'unused'), 'sha256': 'a' * 64, 'bytes': 0}]}
-        for failure in ('deadline', 'observer', 'unready', 'error'):
+        for failure in ('deadline', 'observer', 'unready', 'error', 'restoration'):
             receipt = {'ready_before_desktop': True, 'deadline_exceeded': False,
                        'desktop_resources_closed': True, 'error': None,
                        'bridge_lifecycle': {'clean': True},
@@ -221,6 +244,8 @@ class DiagnosticTests(unittest.TestCase):
                 receipt['observation']['observer_job']['clean'] = False
             elif failure == 'unready':
                 receipt['ready_before_desktop'] = False
+            elif failure == 'restoration':
+                receipt['restoration_uncertain'] = True
             else:
                 receipt['error'] = 'disconnect'
             data = diagnostic.document_bytes(receipt)
@@ -232,11 +257,14 @@ class DiagnosticTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cannot override'):
                 diagnostic.verify_cleanup_proof(path, hashlib.sha256(raw).hexdigest(), prior, self.plan)
 
-    def run_fake_attempt(self, ready_error=False, controller_error=False):
+    def run_fake_attempt(self, ready_error=False, controller_error=False,
+                         preparation_only=True, high_contrast=False, restoration='verified'):
         order = []
         root = self.root / 'attempt'
         root.mkdir()
         owner = self
+        self.plan['attempts'][0]['preparation_only'] = preparation_only
+        self.args.acceptance_high_contrast = high_contrast
 
         class FakeBridge:
             def __init__(self, *args):
@@ -274,15 +302,35 @@ class DiagnosticTests(unittest.TestCase):
             order.append('controller')
             self.assertNotIn('timeout', kwargs)  # Restoration must not be killed.
             self.assertIn('-RuntimeBrokerDiagnosticBudgetSeconds', command)
-            self.assertIn('-RuntimeBrokerPreparationOnly', command)
-            (root / 'workload/transport.json').write_text('{"guest_cleanup":true}')
+            self.assertEqual('-RuntimeBrokerPreparationOnly' in command, preparation_only)
+            bundle = root / 'workload'
+            output = bundle / 'observer-output'
+            self.assertTrue(output.is_dir())
+            self.assertEqual((bundle / 'acceptance-input.json').read_bytes(), self.args.acceptance_manifest.read_bytes())
+            (output / 'transport.json').write_text('{"guest_cleanup":true}')
+            if preparation_only:
+                (output / 'runtimebroker-controller.json').write_bytes(diagnostic.document_bytes({
+                    'schema_version': 1, 'run_id': 'b' * 32, 'preparation_only': True,
+                    'preparation_completed': True, 'acceptance_claim': False,
+                    'controller_status': 'diagnostic-prepared', 'guest_cleanup': True,
+                    'phase_errors': [], 'controller_elapsed_ms': 10,
+                    'controller_budget_seconds': 600, 'controller_deadline_exceeded': False}))
+            elif high_contrast and restoration != 'missing':
+                manifest = json.loads((bundle / 'bundle.json').read_bytes())
+                result = {'schema_version': 2, 'lane': 'candidate-gui-only', 'observer_role': 'ui',
+                          'product': manifest['product'], 'harness': manifest['harness'],
+                          'application': manifest['product']['application'],
+                          'runner_sha256': manifest['harness']['runner']['sha256'],
+                          'acceptance_script_sha256': manifest['harness']['observers']['ui']['sha256'],
+                          'status': 'failed', 'high_contrast': {'requested': True, 'restoration': restoration}}
+                (output / 'acceptance-result.json').write_bytes(diagnostic.document_bytes(result))
             if controller_error:
                 raise OSError('controller-disconnect')
-            return SimpleNamespace(returncode=1)  # Strict failure remains a strict failure.
+            return SimpleNamespace(returncode=0 if preparation_only else 1)
 
         with mock.patch.object(diagnostic, 'workload_arguments', return_value=self.args), \
                 mock.patch.object(diagnostic.launcher, 'clean_source_identity', return_value=(self.root, 'a' * 40)), \
-                mock.patch.object(diagnostic.launcher, 'build_candidate_bundle'), \
+                mock.patch.object(diagnostic.launcher, 'build_candidate_bundle', side_effect=self.prepare_bundle_fixture), \
                 mock.patch.object(diagnostic.launcher, 'managed_desktop', side_effect=desktop), \
                 mock.patch.object(diagnostic.launcher, 'controller_invocation', return_value=['controller']), \
                 mock.patch.object(diagnostic.subprocess, 'run', side_effect=run):
@@ -291,12 +339,50 @@ class DiagnosticTests(unittest.TestCase):
         return order, receipt
 
     def test_ready_precedes_desktop_and_observer_collect_follows_desktop_stop(self):
-        order, receipt = self.run_fake_attempt()
+        order, receipt = self.run_fake_attempt(preparation_only=False)
         self.assertLess(order.index('observer-ready'), order.index('desktop-start'))
         self.assertLess(order.index('desktop-stop'), order.index('observer-collect'))
         self.assertEqual(receipt['controller_exit_code'], 1)
         self.assertFalse(receipt['acceptance_reclassification'])
         self.assertNotIn('observer_result', receipt['observation'])
+
+    def test_preparation_uses_real_observer_directory_and_separate_result(self):
+        order, receipt = self.run_fake_attempt()
+        self.assertIsNone(receipt['error'])
+        self.assertTrue(receipt['safe_to_continue'])
+        self.assertFalse(receipt['preparation_result']['acceptance_claim'])
+        self.assertTrue((self.root / 'attempt/workload/observer-output/runtimebroker-controller.json').is_file())
+        self.assertFalse((self.root / 'attempt/workload/transport.json').exists())
+        self.assertFalse((self.root / 'attempt/workload/observer-output/acceptance-result.json').exists())
+
+    def test_failed_hc_restoration_stops_next_attempt_without_relabeling_result(self):
+        _, receipt = self.run_fake_attempt(preparation_only=False, high_contrast=True, restoration='failed')
+        self.assertIsNone(receipt['error'])
+        self.assertTrue(receipt['restoration_uncertain'])
+        self.assertFalse(receipt['safe_to_continue'])
+        self.assertEqual(receipt['restoration']['status'], 'failed')
+        result = json.loads((self.root / 'attempt/workload/observer-output/acceptance-result.json').read_bytes())
+        self.assertEqual(result['status'], 'failed')
+
+    def test_missing_hc_result_does_not_prove_restoration(self):
+        _, receipt = self.run_fake_attempt(preparation_only=False, high_contrast=True, restoration='missing')
+        self.assertTrue(receipt['restoration_uncertain'])
+        self.assertFalse(receipt['safe_to_continue'])
+
+    def test_preparation_cannot_accept_a_ui_result_or_wrong_run(self):
+        output = self.root / 'output'
+        output.mkdir()
+        record = {'schema_version': 1, 'run_id': 'b' * 32, 'preparation_only': True,
+                  'preparation_completed': True, 'acceptance_claim': False,
+                  'controller_status': 'diagnostic-prepared', 'guest_cleanup': True,
+                  'phase_errors': [], 'controller_elapsed_ms': 1,
+                  'controller_budget_seconds': 600, 'controller_deadline_exceeded': False}
+        (output / 'runtimebroker-controller.json').write_bytes(diagnostic.document_bytes(record))
+        with self.assertRaisesRegex(ValueError, 'Preparation-only'):
+            diagnostic.preparation_result(output, 'c' * 32)
+        (output / 'acceptance-result.json').write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'Preparation-only'):
+            diagnostic.preparation_result(output, 'b' * 32)
 
     def test_unready_observer_prevents_desktop_and_closes_owned_resources(self):
         order, receipt = self.run_fake_attempt(ready_error=True)

@@ -140,6 +140,7 @@ def workload_arguments(attempt, plan):
     args = launcher.parse_arguments(arguments)
     if (not args.ssh_host or not args.candidate_mode or args.desktop_mode != 'rdp'
             or args.task_kind != 'ui'
+            or args.acceptance_mode != 'current-dpi'
             or args.expected_vm_id != plan['vm_id']
             or args.candidate_source_sha != plan['candidate_source_sha']
             or args.candidate_executable_sha256 != plan['candidate_executable_sha256']):
@@ -460,6 +461,49 @@ def reserve_attempt(output, plan, plan_data, plan_digest, attempt_id,
     return directory, parse_json(read_bounded(directory / 'attempt.json', 4096))['run_id']
 
 
+def preparation_result(output, run_id):
+    record = parse_json(read_bounded(output / 'runtimebroker-controller.json', 64 * 1024))
+    fields = {'schema_version', 'run_id', 'preparation_only', 'preparation_completed',
+              'acceptance_claim', 'controller_status', 'guest_cleanup', 'phase_errors',
+              'controller_elapsed_ms', 'controller_budget_seconds', 'controller_deadline_exceeded'}
+    if (type(record) is not dict or set(record) != fields or record['schema_version'] != 1
+            or record['run_id'] != run_id or record['preparation_only'] is not True
+            or record['preparation_completed'] is not True or record['acceptance_claim'] is not False
+            or record['controller_status'] != 'diagnostic-prepared'
+            or record['guest_cleanup'] is not True
+            or record['controller_deadline_exceeded'] is not False
+            or type(record['phase_errors']) is not list
+            or (output / 'acceptance-result.json').exists()):
+        raise ValueError('Preparation-only controller result is incomplete or claims acceptance.')
+    return record
+
+
+def ui_restoration(output, manifest, args, observer):
+    if not args.acceptance_high_contrast:
+        return {'status': 'not_required', 'uncertain': False}
+    result_path = output / 'acceptance-result.json'
+    if not result_path.is_file():
+        return {'status': 'missing', 'uncertain': True}
+    raw = read_bounded(result_path, 16 * 1024 * 1024)
+    result = parse_json(raw)
+    # Bind the actual collected record without relabeling a failed UI outcome
+    # as the passing status required by the acceptance verifier.
+    if (type(result) is not dict or result.get('schema_version') != 2
+            or result.get('lane') != 'candidate-gui-only' or result.get('observer_role') != 'ui'
+            or result.get('product') != manifest['product']
+            or result.get('harness') != manifest['harness']
+            or result.get('application') != manifest['product']['application']
+            or result.get('runner_sha256') != manifest['harness']['runner']['sha256']
+            or result.get('acceptance_script_sha256') != observer['sha256']
+            or result.get('status') not in {'failed', 'review_required'}
+            or type(result.get('high_contrast')) is not dict
+            or result['high_contrast'].get('requested') is not True):
+        raise ValueError('HC restoration record differs from the frozen UI workload.')
+    status = (result.get('high_contrast') or {}).get('restoration')
+    return {'status': status, 'uncertain': status != 'verified',
+            'file': 'acceptance-result.json', 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
 def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=Bridge):
     deadline = Deadline()
     args = workload_arguments(attempt, plan)
@@ -470,6 +514,7 @@ def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=
                'candidate_source_sha': plan['candidate_source_sha'],
                'candidate_executable_sha256': plan['candidate_executable_sha256'],
                'acceptance_reclassification': False, 'safe_to_continue': False,
+               'restoration_uncertain': bool(args.acceptance_high_contrast and not attempt['preparation_only']),
                'ready_before_desktop': False, 'controller_exit_code': None,
                'error': None, 'observation': None}
     bridge = None
@@ -477,7 +522,9 @@ def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=
         _, harness_sha = launcher.clean_source_identity(repo, 'Diagnostic source')
         if harness_sha != plan['diagnostic_source_sha']:
             raise ValueError('Diagnostic source differs from frozen plan.')
-        launcher.build_candidate_bundle(repo, bundle, args, tooling)
+        manifest = launcher.build_candidate_bundle(repo, bundle, args, tooling)
+        args.expected_bundle_manifest_sha256 = launcher.sha256(bundle / 'bundle.json')
+        observer_inputs = launcher.prepare_observer_inputs(bundle, manifest, args)
         bridge = bridge_factory(directory, args, plan, run_id, tooling, deadline)
         ready = bridge.wait_ready()
         receipt['ready_before_desktop'] = True
@@ -519,13 +566,21 @@ def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=
         observer_clean = receipt['observation']['observer_job'].get('clean') is True
         collector_clean = receipt['observation'].get('collector_owned_cleanup') is True
         root_clean = receipt['observation']['root_cleanup'].get('removed') is True
-        transport = parse_json(read_bounded(bundle / 'transport.json', 4 * 1024 * 1024))
+        observer_output = observer_inputs['output']
+        transport = parse_json(read_bounded(observer_output / 'transport.json', 4 * 1024 * 1024))
+        if attempt['preparation_only']:
+            receipt['preparation_result'] = preparation_result(observer_output, run_id)
+            receipt['restoration_uncertain'] = False
+        else:
+            receipt['restoration'] = ui_restoration(observer_output, manifest, args, observer_inputs['observer'])
+            receipt['restoration_uncertain'] = receipt['restoration']['uncertain']
         # A strict OS delta failure may retain its workload root. Further trials
         # require the coordinator to establish restoration/owned cleanup, not a
         # later broker disappearance or this diagnostic's producer summary.
         receipt['deadline_exceeded'] = deadline.remaining() <= 0
         receipt['safe_to_continue'] = bool(not receipt['deadline_exceeded']
                                            and desktop_clean and observer_clean and collector_clean and root_clean
+                                           and not receipt['restoration_uncertain']
                                            and transport.get('guest_cleanup') is True)
     except Exception as error:
         receipt['error'] = str(error)[:4096]
