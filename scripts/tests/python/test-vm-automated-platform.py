@@ -402,6 +402,35 @@ class PlatformTests(unittest.TestCase):
         with self.assertRaises(EvidenceError):
             verify_cleanup(guest, host)
 
+    def test_spotlight_five_path_inventory_cannot_omit_a_nested_windows_ancestor(self):
+        def relocate(value):
+            if type(value) is str and value.startswith(r"C:\Windows"):
+                return r"C:\Parent\Windows" + value[len(r"C:\Windows"):]
+            if type(value) is list:
+                return [relocate(item) for item in value]
+            if type(value) is dict:
+                return {key: relocate(item) for key, item in value.items()}
+            return value
+
+        guest, host = self.spotlight()
+        nested = relocate(host)
+        paths = nested["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"]
+        self.assertEqual(len(paths), 5)
+        self.assertNotIn(r"C:\Parent", [row["path"] for row in paths])
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, nested)
+
+        # The new path constraint belongs only to the package manifest contract.
+        guest, host = self.clean()
+        proof = self.natural_exit_smart_screen()
+        host["runner_process_natural_exit"] = proof
+        host["unexpected_runner_processes"] = [{
+            "identity": proof["candidate_identity"], "pid": 9008, "session_id": 2,
+            "creation_time_utc": proof["broker"]["process_creation_time_utc"],
+            "executable_path": proof["broker"]["process_executable_path"],
+        }]
+        verify_cleanup(guest, relocate(host))
+
     def test_process_classes_cannot_mix_optional_proofs_or_accept_multiple_initial_processes(self):
         guest, host = self.spotlight()
         host["unexpected_runner_processes"].append(deepcopy(host["unexpected_runner_processes"][0]))

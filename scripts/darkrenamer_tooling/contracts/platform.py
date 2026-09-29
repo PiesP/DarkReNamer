@@ -407,6 +407,8 @@ def verify_runner_process_natural_exit(value: object, initial_processes: object)
     require(all(part and part not in {".", ".."} and not part.endswith((".", " "))
                 for part in directory_parts),
             "Runner process Windows directory contains an aliased component.")
+    require(not spotlight or len(directory_parts) == 1,
+            "DesktopSpotlight requires a direct drive-child Windows directory for complete ancestor evidence.")
     process_path = _windows_system_path(directory, "backgroundTaskHost.exe" if spotlight else "smartscreen.exe")
     parent_path = _windows_system_path(directory, "svchost.exe")
     require(broker["process_identity"] == row["candidate_identity"] and
