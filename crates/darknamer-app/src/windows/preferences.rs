@@ -9,6 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{AppThemeMode, ColumnState, PreviewEmphasis, RailDensityPreference, UiAppearance};
 
+#[path = "preference_lifecycle.rs"]
+pub(crate) mod lifecycle;
+
 const MAGIC: [u8; 8] = *b"DRCOLS\0\0";
 const FORMAT_VERSION: u8 = 1;
 const COLUMN_COUNT: usize = 7;
