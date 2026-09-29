@@ -78,13 +78,31 @@ function Invoke-ProductionRenameFlow {
         $flow.before_content_sha256 = $InitialFixture.before_content_sha256
         $beforeFileIdentity = [string]$InitialFixture.before_file_identity
         $flow.before_file_identity_sha256 = Get-LowerTextSha256 -Value $beforeFileIdentity
-        $flow.checkpoints = @($InitialFixture.checkpoints)
+        # Keep prelaunch evidence, but compare Cancel with the actual running application state.
+        $flow['prelaunch_checkpoints'] = @($InitialFixture.checkpoints)
+        $flow.checkpoints = @((Get-FlowCheckpoint `
+            -Phase initial `
+            -FixtureRoot $FixtureRoot `
+            -LocalAppData $env:LOCALAPPDATA))
         if ($RawEvidence) {
+            $flow['raw_prelaunch_checkpoints'] = @($InitialFixture.raw_checkpoints)
             $flow['raw_environment'] = Get-VmAutomatedEnvironment `
                 -Process $Process `
                 -WindowHandle ([IntPtr]$MainWindow.Current.NativeWindowHandle) `
                 -FixtureRoot $FixtureRoot
-            $flow['raw_checkpoints'] = @($InitialFixture.raw_checkpoints)
+            $flow['raw_checkpoints'] = @((Get-VmAutomatedCheckpoint `
+                -Phase initial `
+                -FixtureRoot $FixtureRoot `
+                -LocalAppData $env:LOCALAPPDATA))
+        }
+        $flow.failure_reason = 'startup_fixture_changed'
+        Assert-ProductionRenameFlowStartupCheckpoint `
+            -Prelaunch $InitialFixture.checkpoints[0] `
+            -Startup $flow.checkpoints[0]
+        if ($RawEvidence) {
+            Assert-ProductionRenameFlowStartupCheckpoint `
+                -Prelaunch $InitialFixture.raw_checkpoints[0] `
+                -Startup $flow.raw_checkpoints[0]
         }
 
         $flow.failure_reason = 'file_add_failed'

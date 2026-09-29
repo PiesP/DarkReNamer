@@ -76,7 +76,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "e44733c9323b9cbc02fee576d90235e905d5c939a792dbdb4a8cb17449feb351",
+      "sha256": "545b5cff9b4f02ec26d950f821f149d6ca0963d4f8ff67821674a56834d6712a",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -264,7 +264,7 @@
       "bundle": "tooling-contracts-state.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.state",
-      "sha256": "ca3ee9188f579140d514d7097a6c1c84afca0e8b8448d732edad5e185cceae48",
+      "sha256": "c1c8cd1a3b9f29464e072b811751a3159e7435e8b468cc363820a5a6d2d5b5dd",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -472,7 +472,7 @@
       "bundle": "guest-state.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "04d26d7914ee342677d653c6af859326cfd61ceb02b4bdfc8e3b840ca4410977",
+      "sha256": "d015a03819f9fe4da3d631bfa8714970332374b4fc394d7660c406c61797dfab",
       "dependencies": []
     },
     {
@@ -481,7 +481,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "14a2c2184d9087936acd14cfd115fb94da0ad63cd1eed17207c726231021cbb7",
+      "sha256": "f70b5be720664a7b210a1fe77dbd50c38ce60e71d67bbb6bdf9d1945e9444b34",
       "dependencies": []
     },
     {
