@@ -249,7 +249,7 @@
       "bundle": "tooling-contracts-platform.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.platform",
-      "sha256": "397e42bcbd102e57a2a222aca2272eb52da0083f736416936143014c9939e7c3",
+      "sha256": "9e9d313cc3b28e5b33b42be890ea819cd582321d8381cf90cc652939eb5702ec",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -762,7 +762,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "3515c52bf1974c073b0e598e4d4819f98eab7222512d34d1159101a31fb82783",
+      "sha256": "2e9d8d4d0bfff48fcb43cf17688ec7feeb7af838a1d832e7aba5b9b01208605b",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
