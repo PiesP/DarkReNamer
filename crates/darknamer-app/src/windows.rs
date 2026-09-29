@@ -25,10 +25,11 @@ use crate::admission::{
     PathBudgetReservation, WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
 };
 use crate::icon_cache::{IconCacheKey, cache_icon_index, icon_cache_key};
+use crate::preferences::lifecycle::PreferencePersistence;
 use crate::preferences::{
-    AppearancePreferencesWriter, PreferenceWriteEvent, PreferencesWriter,
-    appearance_path_for_journal_root, load_appearance_or_default,
-    load_or_default as load_column_preferences, path_for_journal_root, shown_columns,
+    AppearancePreferencesWriter, PreferencesWriter, appearance_path_for_journal_root,
+    load_appearance_or_default, load_or_default as load_column_preferences, path_for_journal_root,
+    shown_columns,
 };
 use crate::rename::{
     CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
@@ -553,12 +554,7 @@ struct AppState {
     apply_worker: Option<ApplyWorker>,
     plan_worker: Option<PlanWorker>,
     admission_worker: Option<AdmissionWorker>,
-    preferences_writer: Option<PreferencesWriter>,
-    preferences_failure_generation: Option<u64>,
-    preferences_terminal_observed: bool,
-    appearance_writer: Option<AppearancePreferencesWriter>,
-    appearance_failure_generation: Option<u64>,
-    appearance_terminal_observed: bool,
+    preference_persistence: PreferencePersistence,
     close_pending: bool,
     confirmation_pending: bool,
     active_prompt: Option<u64>,
@@ -658,12 +654,7 @@ impl AppState {
             apply_worker: None,
             plan_worker: None,
             admission_worker: None,
-            preferences_writer: None,
-            preferences_failure_generation: None,
-            preferences_terminal_observed: false,
-            appearance_writer: None,
-            appearance_failure_generation: None,
-            appearance_terminal_observed: false,
+            preference_persistence: PreferencePersistence::default(),
             close_pending: false,
             confirmation_pending: false,
             active_prompt: None,
@@ -862,10 +853,8 @@ impl AppState {
 
     fn persist_column_preferences(&mut self) {
         let result = self
-            .preferences_writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("column preference writer is unavailable"))
-            .and_then(|writer| writer.submit(self.column_states).map(|_| ()));
+            .preference_persistence
+            .submit_columns(self.column_states);
         if let Err(error) = result {
             self.set_transient_status(format!(
                 "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
@@ -875,10 +864,8 @@ impl AppState {
 
     fn persist_appearance_preferences(&mut self) {
         let result = self
-            .appearance_writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("appearance preference writer is unavailable"))
-            .and_then(|writer| writer.submit(self.appearance).map(|_| ()));
+            .preference_persistence
+            .submit_appearance(self.appearance);
         if let Err(error) = result {
             self.set_transient_status(format!(
                 "모양 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"

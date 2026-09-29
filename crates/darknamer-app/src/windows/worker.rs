@@ -107,14 +107,15 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
         // writer starts. The wake contains no pointer payload or borrowed data.
         unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
     });
-    match writer {
-        Ok(writer) => state.preferences_writer = Some(writer),
+    let columns = match writer {
+        Ok(writer) => Some(writer),
         Err(error) => {
             state.set_transient_status(format!(
                 "열 표시 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
             ));
+            None
         }
-    }
+    };
     let window_value = window as usize;
     let appearance_writer =
         AppearancePreferencesWriter::spawn(state.appearance_preferences_path.clone(), move || {
@@ -122,13 +123,17 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
             // the writer starts. No UI-owned pointer crosses this boundary.
             unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
         });
-    match appearance_writer {
-        Ok(writer) => state.appearance_writer = Some(writer),
-        Err(error) => state.set_transient_status(format!(
-            "모양 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-        )),
-    }
-    if state.preferences_writer.is_none() && state.appearance_writer.is_none() {
+    let appearance = match appearance_writer {
+        Ok(writer) => Some(writer),
+        Err(error) => {
+            state.set_transient_status(format!(
+                "모양 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            ));
+            None
+        }
+    };
+    state.preference_persistence = PreferencePersistence::new(columns, appearance);
+    if state.preference_persistence.is_joined() {
         return;
     }
     // SAFETY: the timer belongs to the live top-level window and supplies a
@@ -141,88 +146,9 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
     }
 }
 
-fn apply_preferences_events(state: &mut AppState, events: Vec<PreferenceWriteEvent>) {
-    for event in events {
-        match event {
-            PreferenceWriteEvent::Saved { generation } => {
-                if state
-                    .preferences_failure_generation
-                    .is_some_and(|failed| generation >= failed)
-                {
-                    state.preferences_failure_generation = None;
-                    if !state.close_pending {
-                        state.set_transient_status("열 표시 설정을 다시 저장했습니다.");
-                    }
-                }
-            }
-            PreferenceWriteEvent::Stopped => state.preferences_terminal_observed = true,
-            PreferenceWriteEvent::Failed { generation, error } => {
-                state.preferences_failure_generation = Some(generation);
-                if !state.close_pending {
-                    state.set_transient_status(format!(
-                        "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-                    ));
-                }
-            }
-            PreferenceWriteEvent::Panicked => {
-                state.preferences_terminal_observed = true;
-                if !state.close_pending {
-                    state.set_transient_status(
-                        "열 표시 설정 writer가 비정상 종료되었습니다. 현재 작업에는 영향이 없습니다.",
-                    );
-                }
-            }
-        }
-    }
-}
-
 fn drain_preferences_events(state: &mut AppState) {
-    let events = state
-        .preferences_writer
-        .as_ref()
-        .map(PreferencesWriter::drain_events)
-        .unwrap_or_default();
-    apply_preferences_events(state, events);
-    let appearance_events = state
-        .appearance_writer
-        .as_ref()
-        .map(AppearancePreferencesWriter::drain_events)
-        .unwrap_or_default();
-    apply_appearance_preferences_events(state, appearance_events);
-}
-
-fn apply_appearance_preferences_events(state: &mut AppState, events: Vec<PreferenceWriteEvent>) {
-    for event in events {
-        match event {
-            PreferenceWriteEvent::Saved { generation } => {
-                if state
-                    .appearance_failure_generation
-                    .is_some_and(|failed| generation >= failed)
-                {
-                    state.appearance_failure_generation = None;
-                    if !state.close_pending {
-                        state.set_transient_status("모양 설정을 다시 저장했습니다.");
-                    }
-                }
-            }
-            PreferenceWriteEvent::Stopped => state.appearance_terminal_observed = true,
-            PreferenceWriteEvent::Failed { generation, error } => {
-                state.appearance_failure_generation = Some(generation);
-                if !state.close_pending {
-                    state.set_transient_status(format!(
-                        "모양 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-                    ));
-                }
-            }
-            PreferenceWriteEvent::Panicked => {
-                state.appearance_terminal_observed = true;
-                if !state.close_pending {
-                    state.set_transient_status(
-                        "모양 설정 writer가 비정상 종료되었습니다. 현재 작업에는 영향이 없습니다.",
-                    );
-                }
-            }
-        }
+    for message in state.preference_persistence.drain(state.close_pending) {
+        state.set_transient_status(message);
     }
 }
 
@@ -1059,14 +985,9 @@ pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
         unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
         finalize_apply_worker(window, state, worker);
     }
-    if let Some(mut writer) = state.preferences_writer.take() {
-        let _shutdown = writer.shutdown_with(state.column_states);
-        let _joined = writer.join();
-    }
-    if let Some(mut writer) = state.appearance_writer.take() {
-        let _shutdown = writer.shutdown_with(state.appearance);
-        let _joined = writer.join();
-    }
+    state
+        .preference_persistence
+        .shutdown_and_join(state.column_states, state.appearance);
     // SAFETY: this exact timer belongs to the still-live top-level window.
     unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
     if state.close_pending {
@@ -1075,23 +996,11 @@ pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
 }
 
 fn request_preferences_shutdown(state: &mut AppState) {
-    let column_result = state
-        .preferences_writer
-        .as_mut()
-        .map(|writer| writer.shutdown_with(state.column_states));
-    if let Some(Err(error)) = column_result {
-        state.set_transient_status(format!(
-            "종료 전 열 표시 설정을 저장하도록 요청하지 못했습니다: {error}"
-        ));
-    }
-    let appearance_result = state
-        .appearance_writer
-        .as_mut()
-        .map(|writer| writer.shutdown_with(state.appearance));
-    if let Some(Err(error)) = appearance_result {
-        state.set_transient_status(format!(
-            "종료 전 모양 설정을 저장하도록 요청하지 못했습니다: {error}"
-        ));
+    for message in state
+        .preference_persistence
+        .shutdown(state.column_states, state.appearance)
+    {
+        state.set_transient_status(message);
     }
 }
 
@@ -1105,25 +1014,8 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
     {
         return;
     }
-    drain_preferences_events(state);
-    if state
-        .preferences_writer
-        .as_ref()
-        .is_some_and(|writer| !state.preferences_terminal_observed && !writer.is_finished())
-        || state
-            .appearance_writer
-            .as_ref()
-            .is_some_and(|writer| !state.appearance_terminal_observed && !writer.is_finished())
-    {
+    if !state.preference_persistence.finish_if_ready() {
         return;
-    }
-    if let Some(mut writer) = state.preferences_writer.take() {
-        let _joined = writer.join();
-        apply_preferences_events(state, writer.drain_events());
-    }
-    if let Some(mut writer) = state.appearance_writer.take() {
-        let _joined = writer.join();
-        apply_appearance_preferences_events(state, writer.drain_events());
     }
     // SAFETY: the message carries no pointer. The later callback rechecks the
     // close decision and releases its AppState lease before DestroyWindow.
@@ -1142,8 +1034,7 @@ pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
         || state.admission_worker.is_some()
         || state.plan_worker.is_some()
         || state.apply_worker.is_some()
-        || state.preferences_writer.is_some()
-        || state.appearance_writer.is_some()
+        || !state.preference_persistence.is_joined()
     {
         return false;
     }
