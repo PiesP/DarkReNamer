@@ -201,6 +201,7 @@ class PredicateTests(unittest.TestCase):
         guest, host = self.cleanups()
         raw = {'raw_environment': deepcopy(self.environment),
                'raw_checkpoints': self.checkpoints()}
+        raw['raw_prelaunch_checkpoints'] = [deepcopy(raw['raw_checkpoints'][0])]
         result = {'schema_version': 2, 'lane': self.bundle['lane'],
                   'product': deepcopy(self.bundle['product']),
                   'harness': deepcopy(self.bundle['harness']), 'target': self.bundle['target'],
@@ -208,6 +209,60 @@ class PredicateTests(unittest.TestCase):
                   'process_job_cleanup': self.process_job_cleanup(),
                   'raw_cleanup': guest}
         return result, {'raw_cleanup': host}
+
+    def test_core_startup_lock_is_observed_without_losing_prelaunch_assurance(self):
+        result, transport = self.core_records()
+        raw = result['gui']['flow']
+        lock = {'name': 'runtime.lock', 'kind': 'file', 'bytes': 0}
+        for checkpoint in raw['raw_checkpoints']:
+            checkpoint['journal_entries'] = [deepcopy(lock)]
+        verify_core_execution(result, self.bundle, transport, self.target, keyboard=False)
+        self.assertEqual(raw['raw_prelaunch_checkpoints'][0]['journal_entries'], [])
+        for mutation in ('missing', 'not-list', 'empty', 'duplicate', 'phase', 'summary',
+                         'content', 'size', 'name', 'extra', 'volume', 'file-id',
+                         'prelaunch-lock', 'dirty-journal', 'nonzero-lock', 'boolean-size',
+                         'cancel-lock-removed'):
+            changed = deepcopy(result)
+            flow = changed['gui']['flow']
+            prelaunch = flow['raw_prelaunch_checkpoints']
+            row = prelaunch[0]
+            fixture = row['fixture_entries'][0]
+            if mutation == 'missing':
+                flow.pop('raw_prelaunch_checkpoints')
+            elif mutation == 'not-list':
+                flow['raw_prelaunch_checkpoints'] = row
+            elif mutation == 'empty':
+                prelaunch.clear()
+            elif mutation == 'duplicate':
+                prelaunch.append(deepcopy(row))
+            elif mutation == 'phase':
+                row['phase'] = 'after_cancel'
+            elif mutation == 'summary':
+                row.pop('fixture_entries')
+            elif mutation == 'content':
+                fixture['content_sha256'] = '5' * 64
+            elif mutation == 'size':
+                fixture['bytes'] += 1
+            elif mutation == 'name':
+                fixture['name'] = 'changed.txt'
+            elif mutation == 'extra':
+                row['fixture_entries'].append(self.fixture('extra.txt'))
+            elif mutation == 'volume':
+                fixture['file_identity']['volume_serial'] = '0000000011111111'
+            elif mutation == 'file-id':
+                fixture['file_identity']['file_id'] = '00000000000000004444444444444444'
+            elif mutation == 'prelaunch-lock':
+                row['journal_entries'] = [deepcopy(lock)]
+            elif mutation == 'dirty-journal':
+                row['journal_entries'] = [{'name': 'active.drj', 'kind': 'file', 'bytes': 1}]
+            elif mutation == 'nonzero-lock':
+                row['journal_entries'] = [{**lock, 'bytes': 1}]
+            elif mutation == 'boolean-size':
+                row['journal_entries'] = [{**lock, 'bytes': False}]
+            else:
+                flow['raw_checkpoints'][1]['journal_entries'] = []
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_core_execution(changed, self.bundle, transport, self.target, keyboard=False)
 
     def test_core_execution_uses_raw_inventory_identity_and_cleanup(self):
         result, transport = self.core_records()

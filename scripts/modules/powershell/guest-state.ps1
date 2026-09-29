@@ -61,6 +61,32 @@ function Get-FlowCheckpoint {
         journal_entries = @($journalEntries)
     }
 }
+function Assert-ProductionRenameFlowStartupCheckpoint {
+    param(
+        [Parameter(Mandatory)][object] $Prelaunch,
+        [Parameter(Mandatory)][object] $Startup
+    )
+
+    if ($Prelaunch.phase -cne 'initial' -or $Startup.phase -cne 'initial') {
+        throw 'The production flow startup comparison requires initial checkpoints.'
+    }
+    # Both observations use the same ordered inventory producer, including the full raw FILE_ID.
+    $before = ConvertTo-Json -InputObject @($Prelaunch.fixture_entries) -Depth 8 -Compress
+    $after = ConvertTo-Json -InputObject @($Startup.fixture_entries) -Depth 8 -Compress
+    if ($before -cne $after) {
+        throw 'Startup changed the production flow fixture inventory.'
+    }
+    if (@($Prelaunch.journal_entries).Count -ne 0) {
+        throw 'The prelaunch production flow journal inventory is not empty.'
+    }
+    $journal = @($Startup.journal_entries)
+    if ($journal.Count -gt 1 -or ($journal.Count -eq 1 -and (
+        $journal[0].name -cne 'runtime.lock' -or $journal[0].kind -cne 'file' -or
+        ($journal[0].bytes -isnot [long] -and $journal[0].bytes -isnot [int]) -or
+        $journal[0].bytes -ne 0))) {
+        throw 'Startup left an unexpected production flow journal inventory.'
+    }
+}
 function Get-VmAutomatedFixtureInventory {
     param([Parameter(Mandatory)][string] $FixtureRoot)
 

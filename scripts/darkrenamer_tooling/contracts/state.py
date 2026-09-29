@@ -137,6 +137,24 @@ def core_rename_checkpoints(value: object, *, source_name: str, destination_name
     return closed
 
 
+def core_startup_checkpoint(prelaunch: object, initial: object) -> None:
+    """Preserve the complete prelaunch fixture while allowing an observed startup lock."""
+    require(type(prelaunch) is list and len(prelaunch) == 1,
+            "Core prelaunch evidence requires exactly one checkpoint.")
+    before = require_exact_keys(prelaunch[0], {"phase", "fixture_entries", "journal_entries"},
+                                "Core prelaunch checkpoint")
+    after = require_exact_keys(initial, {"phase", "fixture_entries", "journal_entries"},
+                               "Core startup checkpoint")
+    require(before["phase"] == after["phase"] == "initial",
+            "Core prelaunch and startup checkpoint phases differ.")
+    require(clean_journal_inventory(before["journal_entries"]) == (),
+            "Core prelaunch journal inventory is not empty.")
+    clean_journal_inventory(after["journal_entries"])
+    require(fixture_inventory(before["fixture_entries"], full_identity=True) ==
+            fixture_inventory(after["fixture_entries"], full_identity=True),
+            "Startup changed the complete prelaunch fixture inventory.")
+
+
 def restored_inventory(initial: object, restored: object, *, expected_count: int) -> dict[str, FileState]:
     require_int(expected_count, 1, MAX_FIXTURES, "Expected fixture count")
     before = fixture_inventory(initial, full_identity=True)
