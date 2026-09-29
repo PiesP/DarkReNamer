@@ -391,3 +391,130 @@ function Remove-ControllerToolingTransferStage {
         return 'Local frozen-tooling transfer cleanup failed.'
     }
 }
+
+function Test-DrRuntimeBrokerDiagnosticArguments {
+    param([string] $Root, [string] $RunId, [bool] $PreparationOnly,
+        [string] $TransportKind, [string] $TaskKind, [string] $Mode,
+        [guid] $VmId, [string] $RunnerSid, [int] $BudgetSeconds)
+    $enabled = -not [string]::IsNullOrEmpty($Root) -or -not [string]::IsNullOrEmpty($RunId)
+    if (-not $enabled -and -not $PreparationOnly -and $BudgetSeconds -eq 0) { return $false }
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$' -or
+        $Root -cne ('C:\ProgramData\DarkReNamerRuntimeBrokerDiag-' + $RunId) -or
+        $TransportKind -cne 'ssh' -or $TaskKind -cne 'ui' -or $Mode -cne 'current-dpi' -or
+        $VmId -eq [guid]::Empty -or $RunnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$' -or
+        $BudgetSeconds -lt 1 -or $BudgetSeconds -gt 900) {
+        throw 'RuntimeBroker diagnostics require a bound SSH current-DPI attempt and observer root.'
+    }
+    return $true
+}
+
+function Get-DrRuntimeBrokerControllerRemainingSeconds {
+    param([Parameter(Mandatory)][Diagnostics.Stopwatch] $Clock,
+        [Parameter(Mandatory)][int] $BudgetSeconds, [int] $ReserveSeconds = 0)
+    $remaining = [int][Math]::Floor($BudgetSeconds - $Clock.Elapsed.TotalSeconds - $ReserveSeconds)
+    if ($remaining -le 0) { throw 'RuntimeBroker diagnostic controller deadline reached.' }
+    return $remaining
+}
+
+function Write-DrRuntimeBrokerPhaseFile {
+    param([Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $RunId,
+        [Parameter(Mandatory)][string] $Phase,
+        [ValidateSet('begin','end','observed')][string] $State = 'observed',
+        [ValidateSet('controller','ui-observer')][string] $Source = 'controller',
+        [string] $RecordedAtUtc = [DateTime]::UtcNow.ToString('o'),
+        [System.Collections.IDictionary] $Details = @{})
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$' -or
+        $Root -cne ('C:\ProgramData\DarkReNamerRuntimeBrokerDiag-' + $RunId) -or
+        $Phase -cnotmatch '^[a-z][a-z0-9-]{0,63}$' -or
+        $RecordedAtUtc -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{1,7}Z$') {
+        throw 'Invalid RuntimeBroker phase identity or guest timestamp.'
+    }
+    [void][DateTime]::Parse($RecordedAtUtc, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind)
+    $directory = Join-Path $Root 'phases'
+    $cursor = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+    while ($null -ne $cursor) {
+        if ($cursor -isnot [IO.DirectoryInfo] -or
+            ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'RuntimeBroker phase directory ancestry is not ordinary.'
+        }
+        $cursor = $cursor.Parent
+    }
+    # A fixed partition avoids racing the collector's independent output budget.
+    $rows = @(Get-ChildItem -LiteralPath $directory -Force)
+    if ($rows.Count -ge 192) { throw 'RuntimeBroker phase count limit reached.' }
+    foreach ($row in $rows) {
+        if ($row.PSIsContainer -or ($row.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $row.Name -cnotmatch '^[0-9a-f]{32}\.json$' -or $row.Length -gt 4096) {
+            throw 'RuntimeBroker phase inventory is invalid.'
+        }
+    }
+    $record = [ordered]@{ schema_version=1; run_id=$RunId; phase=$Phase; state=$State
+        recorded_at_utc=$RecordedAtUtc; source=$Source; details=$Details }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($record | ConvertTo-Json -Depth 5 -Compress))
+    if ($bytes.Length -gt 4096) { throw 'RuntimeBroker phase byte limit reached.' }
+    $leaf = [guid]::NewGuid().ToString('N')
+    $path = Join-Path $directory ($leaf + '.json')
+    $staging = Join-Path $Root ('phase-' + $leaf + '.tmp')
+    $stream = [IO.File]::Open($staging, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        # The observer can only discover a complete, closed immutable JSON file.
+        [IO.File]::Move($staging, $path)
+    } finally { if ([IO.File]::Exists($staging)) { [IO.File]::Delete($staging) } }
+}
+
+function Initialize-DrRuntimeBrokerControllerDiagnostic {
+    param([Parameter(Mandatory)][object] $Session,
+        [Parameter(Mandatory)][string] $Root, [Parameter(Mandatory)][string] $RunId,
+        [Parameter(Mandatory)][string] $RunnerSid, [Parameter(Mandatory)][guid] $VmId)
+    Invoke-Command -Session $Session -ArgumentList $Root,$RunId,$RunnerSid,$VmId,
+        (${function:Write-DrRuntimeBrokerPhaseFile}.ToString()) -ScriptBlock {
+        param($root,$runId,$sid,$vmId,$phaseDefinition)
+        $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'RuntimeBroker diagnostic root is not ordinary.'
+        }
+        $acl = Get-Acl -LiteralPath $root
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if (-not $acl.AreAccessRulesProtected -or $owner -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'RuntimeBroker diagnostic root is not protected.'
+        }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544') -and
+                ([long]$rule.FileSystemRights -band 0x000D0156) -ne 0) {
+                throw 'RuntimeBroker diagnostic root grants untrusted mutation rights.'
+            }
+        }
+        $path = Join-Path $root 'ready.json'
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Length -gt 4096) { throw 'RuntimeBroker READY record is invalid.' }
+        $ready = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($ready.schema_version -ne 1 -or $ready.status -cne 'ready' -or
+            $ready.run_id -cne $runId -or $ready.runner_sid -cne $sid -or
+            [guid]$ready.expected_vm_id -ne $vmId -or
+            $ready.subscriptions_started_before_snapshot -isnot [bool] -or
+            -not $ready.subscriptions_started_before_snapshot -or
+            $ready.initial_snapshot_complete -isnot [bool] -or -not $ready.initial_snapshot_complete) {
+            throw 'RuntimeBroker READY is not bound to this diagnostic attempt.'
+        }
+        Set-Item -Path Function:\global:Write-DrRuntimeBrokerPhaseFile -Value ([scriptblock]::Create($phaseDefinition))
+        $global:DrRuntimeBrokerDiagnostic = @{ Root=$root; RunId=$runId }
+        $global:DrRuntimeBrokerPhaseErrors = [Collections.Generic.List[string]]::new()
+        function global:Write-DrRuntimeBrokerControllerPhase {
+            param([string] $Phase, [string] $State='observed', [hashtable] $Details=@{})
+            try { Write-DrRuntimeBrokerPhaseFile @global:DrRuntimeBrokerDiagnostic -Phase $Phase -State $State -Details $Details }
+            catch {
+                if ($global:DrRuntimeBrokerPhaseErrors.Count -lt 32) {
+                    $global:DrRuntimeBrokerPhaseErrors.Add($Phase + ': ' + $_.Exception.GetType().Name)
+                }
+            }
+        }
+        Write-DrRuntimeBrokerControllerPhase -Phase 'controller-connected'
+    }
+}

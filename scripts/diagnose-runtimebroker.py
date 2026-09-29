@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check GitHub metadata bindings after authenticated downloads and gh verification."""
+"""Run one frozen, bounded RuntimeBroker identity and lifetime diagnostic."""
 
 import sys
 
@@ -17,7 +17,7 @@ import types
 
 TOOLING_MANIFEST_SHA256 = "e7eb9a4e5668dc6edd5b17a55c5ff3f20f96df6e09344e9e27aa688fc2637e74"
 TOOLING_LOADER_SHA256 = "22b9293859ac8ee4a270bac93e949330d1625f0927b1be4d4a73c05bac3220f1"
-IMPLEMENTATION_ROLE = "contracts-authority"
+IMPLEMENTATION_ROLE = "vm-runtimebroker-diagnostic"
 
 
 def _read_loader(path: Path) -> bytes:

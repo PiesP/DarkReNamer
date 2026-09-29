@@ -11,6 +11,7 @@ param(
     [switch] $CaptureAdvancedAppearance,
     [switch] $Clipboard,
     [switch] $HighContrast,
+    [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
     [switch] $RestoreHighContrastOnly,
     [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip')]
     [string] $RegressionMode,
@@ -23,8 +24,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ToolingManifestSha256 = '17e62baefbb80250ae404013d1fa005431921271ef4a1f67e5e7d9fed9344dc1'
-$ToolingLoaderSha256 = '46e30d634bd4e01645397438b611ad6323f78fd0427508c87b5f190b331f17d3'
+$ToolingManifestSha256 = 'e7eb9a4e5668dc6edd5b17a55c5ff3f20f96df6e09344e9e27aa688fc2637e74'
+$ToolingLoaderSha256 = '38f1c11b87e003bfc4ffe11832b8c1c978e4604d9653ffe48623fb382bb09f12'
 
 function Get-DrBootstrapSha256 {
     param([Parameter(Mandatory)][byte[]] $Bytes)

@@ -422,6 +422,15 @@ cannot produce a passing late result. Any identity mismatch, second process,
 task delta, incomplete inventory, or timeout fails cleanup. The controller never
 terminates either OS process.
 
+The separate [RuntimeBroker identity diagnostic](DEVELOPMENT.md#runtimebroker-identity-diagnostics)
+does not participate in this acceptance predicate. It retains target and parent
+handles with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` and token handles
+with `TOKEN_QUERY`, without enabling privileges or assigning observed OS
+processes to a job. Its owned job contains only the collector and its compiler
+children. PID and native creation FILETIME bind a lifetime; start/stop events
+and current parent PID lookups are auxiliary observations. Event loss or query
+failure stays explicit and cannot justify allowing an additional process.
+
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not
 verdict inputs. The five required gate records bind separate properties:

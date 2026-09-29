@@ -478,7 +478,23 @@ function Complete-VmAutomatedLayoutRun {
     $Run.layout_observations.screenshots = @($Screenshots)
 }
 
+function Add-DrRuntimeBrokerUiPhase {
+    param([string] $Phase, [ValidateSet('begin','end','observed')][string] $State='observed',
+        [hashtable] $Details=@{})
+    if ($null -eq (Get-Variable -Name RuntimeBrokerDiagnosticRunId -ErrorAction SilentlyContinue) -or
+        [string]::IsNullOrEmpty($RuntimeBrokerDiagnosticRunId)) { return }
+    if ($runtimeBrokerUiPhases.Count -ge 64) { throw 'RuntimeBroker UI phase count limit reached.' }
+    $row = [ordered]@{ schema_version=1; run_id=$RuntimeBrokerDiagnosticRunId
+        phase=$Phase; state=$State; recorded_at_utc=[DateTime]::UtcNow.ToString('o')
+        source='ui-observer'; details=$Details }
+    if ([Text.Encoding]::UTF8.GetByteCount(($row | ConvertTo-Json -Depth 5 -Compress)) -gt 4096) {
+        throw 'RuntimeBroker UI phase byte limit reached.'
+    }
+    $runtimeBrokerUiPhases.Add($row)
+}
+
 function Invoke-DrCurrentDpiAcceptanceScenario {
+$runtimeBrokerUiPhases = [Collections.Generic.List[object]]::new()
 $null = Resolve-VerifiedBundle -Root $bootstrap.root -InvokedScriptPath $bootstrap.runner
 $verified = Resolve-AcceptanceBundle `
     -Root $BundleRoot `
@@ -689,9 +705,12 @@ try {
     if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
         throw 'Windows refused the per-monitor-v2 acceptance DPI context.'
     }
+    Add-DrRuntimeBrokerUiPhase -Phase 'appearance-snapshot' -State 'begin'
     $highContrastState.original = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
     $highContrastResult.original_enabled = ($highContrastState.original.Flags -band 1) -ne 0
+    Add-DrRuntimeBrokerUiPhase -Phase 'appearance-snapshot' -State 'end' -Details @{ high_contrast_enabled=[bool]$highContrastResult.original_enabled }
     if ($HighContrast) {
+        Add-DrRuntimeBrokerUiPhase -Phase 'high-contrast-activation' -State 'begin'
         $highContrastState.rescue_path = Join-Path $verified.output_root 'high-contrast-restore.json'
         Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
             schema_version = 2
@@ -721,6 +740,7 @@ try {
             } `
             -Label 'High Contrast activation'
         $highContrastResult.acceptance_enabled = ($highContrastState.acceptance.Flags -band 1) -ne 0
+        Add-DrRuntimeBrokerUiPhase -Phase 'high-contrast-activation' -State 'end'
         if (-not $highContrastResult.acceptance_enabled) {
             throw 'Windows did not enable High Contrast for the acceptance session.'
         }
@@ -764,6 +784,7 @@ try {
         if ((Get-LowerSha256 -Path $applicationPath) -cne $verified.application.sha256) {
             throw 'Acceptance application changed after bundle verification.'
         }
+        Add-DrRuntimeBrokerUiPhase -Phase 'candidate-application-start' -State 'begin'
         $application = Start-AcceptanceApplication `
             -FilePath $applicationPath `
             -WorkingDirectory $verified.root `
@@ -772,6 +793,7 @@ try {
             -Label 'current-DPI acceptance application' `
             -ProcessLifecycleObservations $processLifecycles
         $processState.process = $application.owned
+        Add-DrRuntimeBrokerUiPhase -Phase 'candidate-application-start' -State 'end' -Details @{ pid=[int]$application.process.Id }
         $lifecycle.process_terminated = $false
         $process = $application.process
         $mainWindow = $application.main
@@ -784,6 +806,7 @@ try {
             [ordered]@{ command_id = $null; evidence_name = 'forced-colors' }
         }
         else {
+            Add-DrRuntimeBrokerUiPhase -Phase 'application-appearance' -State 'begin' -Details @{ appearance=$Appearance }
             Set-AcceptanceAppearance `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
@@ -791,6 +814,7 @@ try {
                 -Appearance $Appearance
         }
         $result.appearance.observed = $appearanceSpec.evidence_name
+        if (-not $HighContrast) { Add-DrRuntimeBrokerUiPhase -Phase 'application-appearance' -State 'end' }
         $workbench = Get-CurrentDpiWorkbenchObservation -MainWindow $mainWindow -Process $process `
             -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds -RawCandidate $rawCandidate `
             -Verified $verified -FixtureRoot $fixtureRoot -AppearanceSpec $appearanceSpec `
@@ -1326,6 +1350,7 @@ finally {
                 }
             }
             $lifecycle.process_terminated = $process.HasExited
+            Add-DrRuntimeBrokerUiPhase -Phase 'candidate-application-exit-observation' -Details @{ has_exited=[bool]$process.HasExited }
         }
         catch {
             $result.status = 'failed'
@@ -1338,6 +1363,7 @@ finally {
     }
     if ($HighContrast -and $null -ne $highContrastState.original) {
         try {
+            Add-DrRuntimeBrokerUiPhase -Phase 'high-contrast-restoration' -State 'begin'
             if ($highContrastState.changed) {
                 [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(
                     $highContrastState.original.Flags,
@@ -1352,6 +1378,7 @@ finally {
                 -AllowPaletteRestore:$highContrastState.changed
             $highContrastState.restoration_verified = $true
             $highContrastResult.restoration = 'verified'
+            Add-DrRuntimeBrokerUiPhase -Phase 'high-contrast-restoration' -State 'end' -Details @{ restoration_verified=$true }
             Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
                 schema_version = 2
                 source_sha = $verified.source_sha
@@ -1487,6 +1514,15 @@ finally {
             file = 'acceptance-error.txt'
             sha256 = Get-LowerSha256 -Path $diagnosticPath
         }
+    }
+    if ($null -ne (Get-Variable -Name RuntimeBrokerDiagnosticRunId -ErrorAction SilentlyContinue) -and
+        -not [string]::IsNullOrEmpty($RuntimeBrokerDiagnosticRunId)) {
+        Add-DrRuntimeBrokerUiPhase -Phase 'ui-observer-cleanup' -State 'end' -Details @{ runtime_cleanup=[bool]$runtimeCleanup }
+        $phaseBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject @($runtimeBrokerUiPhases.ToArray()) -Depth 5 -Compress))
+        if ($phaseBytes.Length -gt 256KB) { throw 'RuntimeBroker UI journal exceeds its fixed partition.' }
+        $phasePath = Join-Path $verified.output_root ('runtimebroker-' + $RuntimeBrokerDiagnosticRunId + '-phases.json')
+        $phaseStream = [IO.File]::Open($phasePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try { $phaseStream.Write($phaseBytes,0,$phaseBytes.Length); $phaseStream.Flush($true) } finally { $phaseStream.Dispose() }
     }
     Write-JsonUtf8Bom -Path $observationPath -Value $observations
     $result['acceptance_observations'] = $observations
