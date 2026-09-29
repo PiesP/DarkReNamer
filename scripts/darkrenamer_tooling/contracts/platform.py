@@ -177,8 +177,10 @@ def _verify_spotlight_registration(value: object, *, runner_sid: str, directory:
     require_int(current["count"], 1, 1, "Native registration head count")
     require_int(current["request_flags"], 0x110, 0x110, "Native registration request flags")
     properties = require_int(current["property_flags"], 0, 0xFFFFFFFF, "Native package properties")
+    # Win32 represents the absent resource ID as NULL; Appx preflight reports "".
     require(properties & 0x1000F == 0 and current["caller_sid"] == runner_sid and
-            all(current[field] == preflight[field] for field in identity_fields) and
+            current["resource_id"] is None and
+            all(current[field] == preflight[field] for field in identity_fields - {"resource_id"}) and
             type(current["path"]) is str and current["path"].casefold() == package_path.casefold(),
             "Native registration differs from the preflight or has unsupported package properties.")
     return preflight

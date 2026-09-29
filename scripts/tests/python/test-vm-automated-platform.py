@@ -222,7 +222,7 @@ class PlatformTests(unittest.TestCase):
                               self.filetime("2026-09-27T17:00:00.0000000Z") + 504_911_232_000_000_000),
                               "exit_code": 0, "exited": True, "streams_complete": True,
                               "exact_lifetime_absent": True, "process_job_closed": True}},
-            "current": {**package, "caller_sid": proof["runner_sid"], "path": package_path,
+            "current": {**package, "resource_id": None, "caller_sid": proof["runner_sid"], "path": package_path,
                         "open_status": 0, "first_status": 122, "second_status": 0, "close_status": 0,
                         "required_bytes": 512, "returned_bytes": 512, "count": 1,
                         "request_flags": 0x110, "property_flags": 0},
@@ -336,6 +336,7 @@ class PlatformTests(unittest.TestCase):
             ("current", "caller_sid", "S-1-5-18"), ("current", "count", 2),
             ("current", "request_flags", 0x10), ("current", "returned_bytes", 513),
             ("current", "required_bytes", 65537), ("current", "publisher", "CN=Other"),
+            ("current", "resource_id", ""), ("current", "resource_id", "resources"),
         ) + tuple(("current", "property_flags", flag) for flag in (1, 2, 4, 8, 0x10000))
         for section, field, value in cases:
             guest, host = self.spotlight()
