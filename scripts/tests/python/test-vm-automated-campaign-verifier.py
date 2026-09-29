@@ -650,7 +650,7 @@ class CompleteCampaignTests(unittest.TestCase):
                 ("invalid raw cleanup", lambda value: value["raw_cleanup"].update(
                     scheduled_task_present=True)),
                 ("different valid raw cleanup", lambda value: value["raw_cleanup"]
-                    ["smart_screen_natural_exit"].update(runner_session_id=3))):
+                    ["runner_process_natural_exit"].update(runner_session_id=3))):
             with self.subTest(label=label), self.fixture.change_backend_transport(mutation):
                 with self.assertRaises(EvidenceError):
                     self.verify()

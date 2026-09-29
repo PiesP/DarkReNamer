@@ -308,7 +308,7 @@ class CampaignRunnerTests(unittest.TestCase):
     def test_backend_external_cleanup_must_match_embedded_raw_observation(self) -> None:
         transport_path = self.backend / "transport.json"
         transport = json.loads(transport_path.read_text(encoding="utf-8"))
-        transport["raw_cleanup"]["smart_screen_natural_exit"]["runner_session_id"] = 3
+        transport["raw_cleanup"]["runner_process_natural_exit"]["runner_session_id"] = 3
         write_json(transport_path, transport)
         profile = json.loads((self.repo / "config" / "vm-automated-v1.json").read_text())
         with patch.object(runner, "staged_tooling_files", return_value=[]), \
