@@ -17,9 +17,10 @@ def clean_controller_cleanup():
         "removed_runner_tasks": [],
         "terminated_runner_processes": [],
         "resource_cleanup_errors": [],
-        "smart_screen_natural_exit": {
-            "schema_version": 1,
+        "runner_process_natural_exit": {
+            "schema_version": 2,
             "status": "not-required",
+            "process_class": None, "native_exit": None, "initial_native_observations": [],
             "runner_sid": "S-1-5-21-1000-1000-1000-1001",
             "runner_session_id": 2,
             "candidate_identity": None,
