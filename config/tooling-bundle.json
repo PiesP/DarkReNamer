@@ -762,7 +762,7 @@
       "bundle": "runtimebroker-observer.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "a8c0c57e82a385acdc10b66b06299472136f2ab43992f9481b4b7e992e7acb67",
+      "sha256": "afeec17844832657b2a1909cb86ea10cb7201dedb9edad1f23547928c845b2ef",
       "dependencies": []
     },
     {
