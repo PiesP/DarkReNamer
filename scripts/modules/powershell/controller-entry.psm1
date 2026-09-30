@@ -5268,7 +5268,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $proof | Add-Member -NotePropertyName nonce -NotePropertyValue $nonce -Force
                 $temporaryProof = $proofPath + '.tmp'
                 Write-DrControllerExclusiveJson -Path $temporaryProof -Value $proof -MaximumBytes 1MB
-                [IO.File]::Replace($temporaryProof,$proofPath,$null)
+                # PowerShell coerces $null to an empty string for this string overload.
+                [IO.File]::Replace($temporaryProof,$proofPath,[NullString]::Value)
             }
         }
     }

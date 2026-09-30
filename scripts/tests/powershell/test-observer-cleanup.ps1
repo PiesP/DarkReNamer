@@ -18,6 +18,26 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Exercise the production atomic replacement expression with actual files.
+$replaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-proof-replace-' + [guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($replaceRoot)
+try {
+    $proofPath = Join-Path $replaceRoot 'proof.json'
+    $temporaryProof = $proofPath + '.tmp'
+    [IO.File]::WriteAllText($proofPath, '{"status":"incomplete"}')
+    [IO.File]::WriteAllText($temporaryProof, '{"status":"complete"}')
+    $controllerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1') -Raw
+    $replacement = [regex]::Matches($controllerSource, '(?m)^\s*\[IO\.File\]::Replace\(\$temporaryProof,\$proofPath,[^\r\n]+')
+    if ($replacement.Count -ne 1) { throw 'The production proof replacement expression was not unique.' }
+    & ([scriptblock]::Create($replacement[0].Value.Trim()))
+    if ([IO.File]::ReadAllText($proofPath) -cne '{"status":"complete"}' -or
+        (Test-Path -LiteralPath $temporaryProof) -or
+        @(Get-ChildItem -LiteralPath $replaceRoot).Count -ne 1) {
+        throw 'Atomic proof replacement did not publish the complete proof without residue.'
+    }
+}
+finally { Remove-Item -LiteralPath $replaceRoot -Recurse -Force }
+
 # Test the same completion predicate serialized into the guest cleanup command.
 Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     foreach ($result in @($null, [pscustomobject]@{guest_cleanup=$true},
