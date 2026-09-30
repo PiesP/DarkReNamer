@@ -165,6 +165,71 @@ foreach ($entry in @(
     }
 }
 
+# Preserve known empty/single inventories across the actual remoting serializer.
+& {
+    $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $keys=@('unexpected_runner_tasks','unexpected_runner_processes',
+        'unexpected_runner_tasks_after_intervention','unexpected_runner_processes_after_intervention',
+        'unexpected_runner_tasks_after_delete','unexpected_runner_processes_after_delete')
+    $rawTables=@($ast.FindAll({param($node)
+        if($node -isnot [Management.Automation.Language.HashtableAst]){return $false}
+        $names=@($node.KeyValuePairs|ForEach-Object{$_.Item1.Value})
+        'owned_resource_evidence' -cin $names -and 'profile_sha256' -cin $names -and
+            @($keys|Where-Object{$_ -cnotin $names}).Count -eq 0
+    },$true))
+    if($errors.Count -or $rawTables.Count -ne 1){throw 'V2 raw inventory serializer is not unique.'}
+    $entries=@(foreach($key in $keys){
+        $pair=@($rawTables[0].KeyValuePairs|Where-Object{$_.Item1.Value -ceq $key})
+        if($pair.Count -ne 1){throw 'V2 raw inventory field is not unique.'}
+        $key+' = '+$pair[0].Item2.Extent.Text
+    })
+    $rawBlock=[scriptblock]::Create('[ordered]@{'+($entries -join "`n")+'}')
+    $assignments=@(foreach($name in @('deltaBefore','deltaIntervention','deltaAfter')){
+        $matches=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -ceq $name -and
+            $node.Right.Extent.Text.Contains('Get-V2ProcessDelta')
+        },$true))
+        if($matches.Count -ne 1){throw 'V2 process delta assignment is not unique.'}
+        [scriptblock]::Create($matches[0].Extent.Text)
+    })
+    function Get-V2ProcessDelta {param($Snapshot);$Snapshot.processes}
+    foreach($count in @(-1,0,1,2)){
+        $rows=@(for($index=0;$index -lt $count;$index++){
+            [ordered]@{identity=('fixture-'+$index)}
+        })
+        if($count -lt 0){
+            $before=$null;$intervention=$null;$after=$null
+            $taskDeltaBefore=$null;$taskDeltaIntervention=$null;$taskDeltaAfter=$null
+        }else{
+            $before=[pscustomobject]@{processes=$rows};$intervention=$before;$after=$before
+            $taskDeltaBefore=[ordered]@{changed=$rows};$taskDeltaIntervention=$taskDeltaBefore
+            $taskDeltaAfter=$taskDeltaBefore
+        }
+        foreach($assignment in $assignments){. $assignment}
+        $raw=& $rawBlock
+        $returned=[Management.Automation.PSSerializer]::Deserialize(
+            [Management.Automation.PSSerializer]::Serialize($raw,16))
+        $decoded=$returned|ConvertTo-Json -Depth 16 -Compress|ConvertFrom-Json -AsHashtable
+        foreach($key in $keys){
+            if($count -lt 0){
+                if($null -ne $decoded[$key]){throw 'Unavailable inventory was normalized to known data.'}
+            }elseif($decoded[$key] -isnot [Collections.IList] -or $decoded[$key].Count -ne $count){
+                throw "V2 inventory lost its array shape after remoting: $key ($count)."
+            }else{
+                for($index=0;$index -lt $count;$index++){
+                    if($decoded[$key][$index].identity -cne ('fixture-'+$index)){
+                        throw 'V2 inventory changed a returned observation.'
+                    }
+                }
+            }
+        }
+    }
+}
+
 # Exercise the production atomic replacement expression with actual files.
 $replaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-proof-replace-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($replaceRoot)
