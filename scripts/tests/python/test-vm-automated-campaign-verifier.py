@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end semantic verification of the fixed 30-slot VM campaign."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -82,7 +82,7 @@ class CampaignFixture:
         self.plan = new_plan(self.profile, profile_sha256=self.profile_sha256, candidate=self.candidate,
                              harness_sha=self.candidate.source_sha, campaign_id="complete-campaign",
                              created_at="2026-09-20T00:00:00Z")
-        self.campaign = {"schema": "darkrenamer-vm-automated-campaign-v1",
+        self.campaign = {"schema": f"darkrenamer-vm-automated-campaign-v{self.profile['revision']}",
                          "campaign_id": "complete-campaign", "plan": "plan.json",
                          "attempts": [], "backend": {}}
         self._build_runs()
@@ -102,7 +102,8 @@ class CampaignFixture:
         return self.add_bytes(path, encode(value))
 
     def reader(self) -> EvidenceReader:
-        return EvidenceReader(ExtractedEvidence(self.root, self.files))
+        return EvidenceReader(ExtractedEvidence(
+            self.root, self.files, f"darkrenamer-vm-automated-index-v{self.profile['revision']}"))
 
     def _bundle(self) -> dict:
         def component(role: str) -> dict:
@@ -478,6 +479,30 @@ class CampaignFixture:
             target.update(self.profile["stability"]["environment"])
         return target
 
+    def v2_cleanup(self, result: dict, index: int) -> dict:
+        from controller_cleanup_fixture import clean_controller_cleanup_v2
+        cleanup = clean_controller_cleanup_v2(
+            profile_sha256=self.profile_sha256,
+            process_jobs=result["process_job_cleanup"],
+            run_name=f"DarkReNamerTests-{index:032x}")
+        lifecycle = cleanup["owned_resource_evidence"]["task_execution"]["observer_lifecycle"]
+        lifecycle["pid"] = 700_000 + index
+        lifecycle["start_time_utc_ticks"] = str(134041000000100000 + index)
+        # Keep synthetic ambient PIDs disjoint from every fixture-owned lifetime.
+        for phase in cleanup["owned_resource_evidence"]["process_snapshots"].values():
+            for row in phase["processes"]:
+                row["pid"] += 900_000
+                row["identity"] = str(row["pid"]) + "|" + row["creation_time_utc"]
+        for phase, key in (("before", "unexpected_runner_processes"),
+                           ("after_intervention", "unexpected_runner_processes_after_intervention"),
+                           ("after_delete", "unexpected_runner_processes_after_delete")):
+            cleanup[key] = deepcopy(cleanup["owned_resource_evidence"]["process_snapshots"][
+                phase]["processes"])
+        result.update(status="passed", failure_reason=None,
+                      observer_lifecycle=deepcopy(cleanup["owned_resource_evidence"][
+                          "task_execution"]["observer_lifecycle"]))
+        return cleanup
+
     def _build_runs(self) -> None:
         start = datetime(2026, 9, 20, tzinfo=timezone.utc)
         for index, slot in enumerate(execution_slots(self.profile), start=1):
@@ -496,6 +521,8 @@ class CampaignFixture:
                     self.add_bytes(path, data)
                 observer_prefix = prefix + "bundle/observer-output/"
                 result_path = observer_prefix + "recovery-acceptance-test/summary.json"
+            if self.profile["revision"] == 2:
+                host_cleanup = self.v2_cleanup(result, index)
             transport = {"raw_cleanup": host_cleanup, "vm_id": VM_ID,
                          "vm_identity_kind": "hyper-v-guest-parameters-virtual-machine-id-v1",
                          "vm_identity_sha256": hashlib.sha256(VM_ID.encode()).hexdigest()}
@@ -552,6 +579,9 @@ class CampaignFixture:
             self.process_job_cleanup(lifecycle)[0] for lifecycle in
             (result["tests"][0]["process_lifecycle"], result["gui"]["process_lifecycle"])
         ]
+        if self.profile["revision"] == 2:
+            backend_cleanup = self.v2_cleanup(result, 31)
+            result["transport"]["raw_cleanup"] = backend_cleanup
         self.add_json("backend/bundle.json", bundle)
         self.add_json("backend/result.json", result)
         self.add_json("backend/transport.json", {
@@ -602,6 +632,64 @@ class CampaignFixture:
             self.files["campaign.json"] = campaign_pin
 
 
+
+class OwnedResourceCampaignTests(unittest.TestCase):
+    def test_v2_complete_campaign_accepts_observed_ambient_lifetimes(self):
+        profile = json.loads((REPOSITORY_ROOT / "config/vm-automated-v2.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CampaignFixture(Path(directory), profile=profile)
+            verified = verify_complete_campaign(
+                fixture.reader(), profile=fixture.profile,
+                profile_sha256=fixture.profile_sha256, candidate=fixture.candidate,
+                component_hashes=fixture.components)
+            self.assertRegex(verified["profile_evidence_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(len(fixture.campaign["attempts"]), 30)
+            path = "runs/core-uia-flow/transport.json"
+            with fixture.change_json(path, lambda value: value["raw_cleanup"].update(
+                    profile_sha256="0" * 64)):
+                with self.assertRaises(EvidenceError):
+                    verify_complete_campaign(
+                        fixture.reader(), profile=fixture.profile,
+                        profile_sha256=fixture.profile_sha256, candidate=fixture.candidate,
+                        component_hashes=fixture.components)
+
+
+    def test_v2_rejects_observer_and_owned_run_replay_between_fresh_product_slots(self):
+        profile = json.loads((REPOSITORY_ROOT / "config/vm-automated-v2.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CampaignFixture(Path(directory), profile=profile)
+            first, second = fixture.campaign["attempts"][:2]
+            original_first = json.loads((fixture.root / first["transport"]).read_text())
+            original_second = json.loads((fixture.root / second["transport"]).read_text())
+            original_result = json.loads((fixture.root / second["result"]).read_text())
+            for mode in ("observer lifetime", "owned run name"):
+                transport, result = deepcopy(original_second), deepcopy(original_result)
+                owned = transport["raw_cleanup"]["owned_resource_evidence"]
+                prior = original_first["raw_cleanup"]["owned_resource_evidence"]
+                if mode == "observer lifetime":
+                    lifecycle = owned["task_execution"]["observer_lifecycle"]
+                    for key in ("pid", "start_time_utc_ticks"):
+                        lifecycle[key] = prior["task_execution"]["observer_lifecycle"][key]
+                else:
+                    raw = deepcopy(original_first["raw_cleanup"])
+                    replay = raw["owned_resource_evidence"]
+                    replay["declared_processes"] = owned["declared_processes"]
+                    replay["process_job_cleanup"] = owned["process_job_cleanup"]
+                    lifecycle = replay["task_execution"]["observer_lifecycle"]
+                    for key in ("pid", "start_time_utc_ticks"):
+                        lifecycle[key] = owned["task_execution"]["observer_lifecycle"][key]
+                    transport["raw_cleanup"] = raw
+                result["observer_lifecycle"] = deepcopy(lifecycle)
+                with self.subTest(mode=mode), ExitStack() as changes:
+                    changes.enter_context(fixture.change_json(second["transport"], lambda value: value.update(transport)))
+                    changes.enter_context(fixture.change_json(second["result"], lambda value: value.update(result)))
+                    with self.assertRaisesRegex(EvidenceError, "prior v2 " + mode):
+                        verify_complete_campaign(
+                            fixture.reader(), profile=fixture.profile,
+                            profile_sha256=fixture.profile_sha256, candidate=fixture.candidate,
+                            component_hashes=fixture.components)
+
+
 class CompleteCampaignTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -624,6 +712,14 @@ class CompleteCampaignTests(unittest.TestCase):
         self.assertRegex(result["profile_evidence_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(len(self.fixture.campaign["attempts"]), 30)
         self.assertEqual(len(self.fixture.profile["required_targets"]), 22)
+
+    def test_v1_archive_cannot_be_selected_as_v2(self):
+        profile = json.loads((REPOSITORY_ROOT / 'config/vm-automated-v2.json').read_text())
+        with self.assertRaisesRegex(EvidenceError, 'archive index'):
+            verify_complete_campaign(self.fixture.reader(), profile=profile,
+                                     profile_sha256=self.fixture.profile_sha256,
+                                     candidate=self.fixture.candidate,
+                                     component_hashes=self.fixture.components)
 
     def test_missing_failed_or_replacement_attempt_fails(self):
         for mode in ("missing", "failed", "replacement"):

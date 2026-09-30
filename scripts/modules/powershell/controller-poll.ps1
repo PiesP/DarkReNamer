@@ -107,6 +107,8 @@ function Invoke-AcceptancePollFailureRescue {
         [Parameter(Mandatory = $true)][string] $Appearance,
         [Parameter(Mandatory = $true)][bool] $HighContrast,
         [Parameter(Mandatory = $true)][string] $HostOutputRoot,
+        [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+        [AllowNull()][object] $EngineEvidence,
         [Parameter(Mandatory = $true)][object] $OriginalFailure
     )
 
@@ -129,7 +131,8 @@ function Invoke-AcceptancePollFailureRescue {
                 -BundleRecords $BundleRecords `
                 -InputManifestSha256 $InputManifestSha256 `
                 -Appearance $Appearance `
-                -HostOutputRoot $HostOutputRoot
+                -HostOutputRoot $HostOutputRoot `
+                -AcceptanceProfileId $AcceptanceProfileId -EngineEvidence $EngineEvidence
         }
         if ($HighContrast -and
             (Test-AcceptanceRestoreSnapshot `
@@ -144,7 +147,8 @@ function Invoke-AcceptancePollFailureRescue {
                 -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
                 -ObserverSha256 $ObserverSha256 `
                 -BundleRecords $BundleRecords `
-                -HostOutputRoot $HostOutputRoot
+                -HostOutputRoot $HostOutputRoot `
+                -AcceptanceProfileId $AcceptanceProfileId -EngineEvidence $EngineEvidence
         }
     }
     catch {

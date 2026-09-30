@@ -23,11 +23,14 @@ from darkrenamer_tooling.evidence.archive import (
     _open_absolute_regular,
     load_bounded_json, open_indexed_evidence_archive, parse_bounded_json_bytes,
     read_referenced_file, require_exact_keys, require_int, serialize_canonical_statement,
+    PROFILE_DEFINITIONS, profile_definition, validate_profile,
 )
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument('--profile-id', choices=tuple(PROFILE_DEFINITIONS),
+                        default='vm-automated-v1-win11-ntfs')
     for name in ('archive', 'candidate-handoff-root', 'trusted-source-root', 'gate-metadata', 'output'):
         result.add_argument('--' + name, type=Path, required=True)
     for name in ('archive-sha256', 'archive-size', 'candidate-run-id', 'candidate-run-attempt',
@@ -45,12 +48,15 @@ def validate(args: argparse.Namespace) -> bytes:
     source = args.trusted_source_root.resolve(strict=True)
     components = trusted_component_hashes(source, source_sha)
     tooling = trusted_tooling_inventory(source, source_sha, ("vm-launcher",))
-    profile_path = 'config/vm-automated-v1.json'
+    revision, profile_path = profile_definition(getattr(args, 'profile_id', 'vm-automated-v1-win11-ntfs'))
     entry = subprocess.check_output(['git', 'ls-tree', source_sha, '--', profile_path], cwd=source, text=True).strip()
     require(entry.startswith('100644 blob ') and entry.endswith('\t' + profile_path),
             'Required profile is not an ordinary trusted source blob.')
     profile_bytes = subprocess.check_output(['git', 'show', source_sha + ':' + profile_path], cwd=source)
     profile = parse_bounded_json_bytes(profile_bytes, label='trusted profile')
+    require(validate_profile(profile) == revision and
+            profile['profile_id'] == getattr(args, 'profile_id', 'vm-automated-v1-win11-ntfs'),
+            'Trusted source profile differs from explicit selection.')
     profile_digest = hashlib.sha256(profile_bytes).hexdigest()
 
     handoff_root = args.candidate_handoff_root.resolve(strict=True)
@@ -93,7 +99,7 @@ def validate(args: argparse.Namespace) -> bytes:
         'immutable-promotion-binding': binding_digest,
     }
     statement = {
-        'schema': 'darkrenamer-vm-automated-statement-v1', 'result': 'passed',
+        'schema': f'darkrenamer-vm-automated-statement-v{revision}', 'result': 'passed',
         'candidate': {'repository': 'PiesP/DarkReNamer', 'source_sha': source_sha,
                       'run_id': int(candidate.workflow_run), 'run_attempt': int(candidate.run_attempt),
                       'artifact_id': int(candidate.artifact_id), 'artifact_sha256': gates['artifact_sha256'],

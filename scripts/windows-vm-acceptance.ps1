@@ -17,6 +17,8 @@ param(
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
     [switch] $RestoreTextScaleOnly,
     [switch] $ElevatedObserver,
     [string] $TrustedResultPath,
@@ -24,7 +26,10 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ToolingManifestSha256 = '96dc6ca92d33e17da6f317cf1a605812cd96275e1cfb75963885437d33b7a78c'
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
+$ToolingManifestSha256 = '2b34e390c161eace1acc8dfeddca4e70a77681e9dcc0a24bb71ca5700aae3b4b'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {

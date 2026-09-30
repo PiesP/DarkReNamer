@@ -13,7 +13,7 @@ import re
 
 from darkrenamer_tooling.contracts.binding import Candidate
 from darkrenamer_tooling.evidence.archive import (
-    EvidenceError, REQUIRED_TARGET_IDS, require_exact_keys, require_int,
+    EvidenceError, REQUIRED_TARGET_IDS, require_exact_keys, require_int, validate_profile,
 )
 
 
@@ -64,13 +64,14 @@ def execution_slots(profile: dict) -> list[dict]:
 
 def new_plan(profile: dict, *, profile_sha256: str, candidate: Candidate,
              harness_sha: str, campaign_id: str, created_at: str) -> dict:
+    revision = validate_profile(profile)
     token(campaign_id)
     timestamp(created_at)
     require(type(profile_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", profile_sha256) is not None,
             "Profile digest is invalid.")
     require(type(harness_sha) is str and re.fullmatch(r"[0-9a-f]{40}", harness_sha) is not None,
             "Harness source is invalid.")
-    return {"schema": "darkrenamer-vm-automated-plan-v1", "campaign_id": campaign_id,
+    return {"schema": f"darkrenamer-vm-automated-plan-v{revision}", "campaign_id": campaign_id,
             "created_at": created_at, "profile_sha256": profile_sha256,
             "candidate": asdict(candidate), "harness_sha": harness_sha,
             "slots": execution_slots(profile)}
@@ -93,7 +94,8 @@ def validate_ledger(plan: object, campaign: object, *, profile: dict,
     require(plan == expected, "Campaign plan differs from the independent source/candidate/profile.")
     campaign = require_exact_keys(campaign, {"schema", "campaign_id", "plan", "attempts", "backend"},
                                   "Campaign ledger")
-    require(campaign["schema"] == "darkrenamer-vm-automated-campaign-v1" and
+    revision = validate_profile(profile)
+    require(campaign["schema"] == f"darkrenamer-vm-automated-campaign-v{revision}" and
             campaign["campaign_id"] == plan["campaign_id"] and campaign["plan"] == "plan.json",
             "Campaign ledger does not match its frozen plan.")
     attempts = campaign["attempts"]

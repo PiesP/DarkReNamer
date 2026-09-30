@@ -18,6 +18,7 @@ from zipfile import ZIP_STORED, ZipFile
 from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign import runner
 from darkrenamer_tooling.vm import launcher
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 REPOSITORY = REPOSITORY_ROOT
 
@@ -223,10 +224,38 @@ class CampaignRunnerTests(unittest.TestCase):
                     patch.object(runner, "vm_connection", FakeGuiRunner), \
                     patch.object(runner, "staged_tooling_files", return_value=[]), \
                     patch.object(runner, "clean_source_sha", side_effect=source_sha), \
+                    patch.object(runner.subprocess, "check_output", return_value=Path(args.profile).read_bytes()), \
                     patch.object(runner.subprocess, "run", side_effect=command):
                 return runner.execute(args, repo=self.repo)
         finally:
             FakeGuiRunner.plan_path = None
+
+    def test_profile_identity_or_bytes_mismatch_fails_before_vm_and_plan(self) -> None:
+        calls, command = self.fake_command()
+        args = self.args()
+        profile = json.loads(Path(args.profile).read_bytes())
+        profile['profile_id'] = 'vm-automated-v2-owned-resources'
+        changed = self.root / 'mixed-profile.json'
+        write_json(changed, profile)
+        args.profile = changed
+        with self.assertRaisesRegex(EvidenceError, 'schema, identity and revision'):
+            self.execute(args, command)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(calls, [])
+
+        args = self.args()
+        profile = json.loads(Path(args.profile).read_bytes())
+        profile['required_targets'].pop()
+        write_json(changed, profile)
+        args.profile = changed
+        def source_sha(path):
+            return CANDIDATE_SHA if Path(path) == self.source else HARNESS_SHA
+        with patch.object(runner, 'clean_source_sha', side_effect=source_sha), \
+                patch.object(runner.subprocess, 'check_output',
+                             return_value=Path(self.args().profile).read_bytes()):
+            with self.assertRaisesRegex(ValueError, 'same-SHA trusted source profile'):
+                runner.execute(args, repo=self.repo)
+        self.assertFalse(self.output.exists())
 
     def test_full_fixed_campaign_writes_plan_first_and_stored_indexed_archive(self) -> None:
         calls, command = self.fake_command()

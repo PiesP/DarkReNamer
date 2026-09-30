@@ -34,12 +34,18 @@ param(
     [ValidateRange(1, 900)][int] $RuntimeBrokerDiagnosticBudgetSeconds,
     [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
-    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $AcceptanceProfileSha256
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
 
-$ToolingManifestSha256 = '96dc6ca92d33e17da6f317cf1a605812cd96275e1cfb75963885437d33b7a78c'
+$ToolingManifestSha256 = '2b34e390c161eace1acc8dfeddca4e70a77681e9dcc0a24bb71ca5700aae3b4b'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {

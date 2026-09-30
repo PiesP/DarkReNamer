@@ -334,14 +334,17 @@ manual acceptance evidence bound to the tested source SHA and storage setup.
 ## VM-Automated release validation
 
 Release validation uses automated source checks, Windows backend tests, and
-candidate-bound Windows VM observations under the fixed
-[`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile. Human input
+candidate-bound Windows VM observations under an explicitly selected
+[`config/vm-automated-v1.json`](config/vm-automated-v1.json) or
+[`config/vm-automated-v2.json`](config/vm-automated-v2.json) profile. The v1
+strict contract and its historical failures retain their original meaning. V2
+is the separate owned-resources contract described below. Human input
 and visual review are not required pass conditions and cannot substitute for
 missing automated evidence. This changes the release evidence contract; the
 filesystem, identity, no-replacement, journal and recovery invariants above
 remain mandatory.
 
-The profile is frozen before a campaign. It declares 22 target verdicts: two
+Both profiles are frozen before a campaign. Each declares 22 target verdicts: two
 core flows, 15 layout cells, and five recovery targets. The recovery-export and
 Intent-only-discard targets share the process-crash execution group, so the
 predeclared fixed matrix contains 20 primary execution cells. Ten additional
@@ -365,6 +368,8 @@ subsequent VM workloads after the first failure. A diagnostic archive may retain
 that partial history, but a later retry cannot replace the failed attempt or
 fill its missing slots. Passing requires a new campaign with a new complete
 execution history.
+
+### Strict v1 runner environment
 
 Preserving a failed execution and cleaning its owned resources are separate
 operations. A collected failed UI or recovery result may authorize owned-root
@@ -467,6 +472,39 @@ processes to a job. Its owned job contains only the collector and its compiler
 children. PID and native creation FILETIME bind a lifetime; start/stop events
 and current parent PID lookups are auxiliary observations. Event loss or query
 failure stays explicit and cannot justify allowing an additional process.
+
+### Owned-resources v2 runner environment
+
+The v2 profile has schema `darkrenamer-vm-automated-profile-v2`, ID
+`vm-automated-v2-owned-resources` and revision 2. Its canonical statement uses
+`darkrenamer-vm-automated-statement-v2` and keeps the exact profile ID, revision
+and SHA-256 source blob binding. V1 keeps its v1 schema and strict predicate.
+Neither a v1 failed record nor its separately verified cleanup proof can be
+promoted into v2 acceptance. The 30 first-attempt slots, 22 product targets,
+five gates, candidate bytes, source binding and authenticated hosted attestation
+are unchanged.
+
+V2 retains complete raw OS process and task observations. A new, surviving, or
+multiple ambient OS processes do not by themselves fail the v2 environment
+predicate when owned lifetimes, jobs, roots and protected resources are fully
+accounted for and essential input, focus and settings remain intact. This is
+not a claim that a process is harmless because of its name, signature, parent
+or absence from an owned Job. Directly launched helpers and protected-resource
+connections must be accounted for; uncertain ownership, missing lifetimes or
+incomplete inventories fail closed. Unexpected scheduled-task creation,
+deletion or definition changes still fail.
+
+Owned process or Job survivors, unresolved owned tasks/files/roots, failed
+journal or product checks, input/focus interference, setting restoration
+failure, missing or inconsistent evidence and incomplete owned-root cleanup
+remain blockers. Failure cleanup preserves the original result and cannot
+authorize a later slot. V2 verifies observed file safety, product behavior,
+required environment and explicit owned-resource cleanup. It does not
+guarantee whole-session OS process stasis, complete causality of ambient OS
+activity, all broker-mediated escape paths or remote VM hardware attestation.
+The trusted VM producer and private raw-evidence boundary remain in force.
+
+### Common evidence and promotion bindings
 
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not

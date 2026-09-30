@@ -191,11 +191,12 @@ function Remove-DrControllerProofRemotingMetadata {
 }
 
 function Invoke-DrControllerOwnedCleanupAfterFailure {
-    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots)
-    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots -ScriptBlock {
-        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots)
+    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256 -ScriptBlock {
+        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256)
+        $v2 = $null -ne $v2Evidence
         $proof = [ordered]@{
-            schema_version = 1
+            schema_version = if ($v2) { 2 } else { 1 }
             kind = 'owned_cleanup_after_strict_failure'
             run_name = $name
             vm_id = $null
@@ -206,6 +207,10 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
             observed_roots_before = $null
             observed_roots_after = $null
             errors = @()
+        }
+        if ($v2) {
+            $proof['profile_id'] = 'vm-automated-v2-owned-resources'
+            $proof['profile_sha256'] = [string]$profileSha256
         }
         $guestGuard = $null
         $trustedGuard = $null
@@ -233,7 +238,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
             }
         }
         function Get-CurrentOwnedInventory {
-            $processes = Get-DrVmRunnerProcesses -UserSid $sid -SessionId $desktopSession
+            $processes = Get-DrVmRunnerProcesses -UserSid $sid -SessionId $desktopSession -IncludeExecutionScope:$v2
             $tasks = @(Get-DrVmRunnerTasks -UserSid $sid)
             $ownedTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
                 [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
@@ -253,6 +258,53 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 tasks = @($tasks)
                 owned_processes = @($ownedProcesses)
                 owned_tasks = @($ownedTasks | ForEach-Object { [string]$_.TaskPath+[string]$_.TaskName })
+            }
+        }
+        function Assert-V2Inventory {
+            param($Inventory,$Earlier)
+            $expectedTasks = @{}
+            foreach ($task in @($v2Evidence.baseline_tasks)) {
+                if ($expectedTasks.ContainsKey([string]$task.identity)) { throw 'V2 baseline task repeats.' }
+                $expectedTasks[[string]$task.identity] = [string]$task.definition_sha256
+            }
+            if (@($Inventory.tasks).Count -ne $expectedTasks.Count) {
+                throw 'V2 task inventory changed from the baseline.'
+            }
+            foreach ($task in @($Inventory.tasks)) {
+                if (-not $expectedTasks.ContainsKey([string]$task.identity) -or
+                    $expectedTasks[[string]$task.identity] -cne [string]$task.definition_sha256) {
+                    throw 'V2 task definition changed from the baseline.'
+                }
+            }
+            $ownedPids = [Collections.Generic.HashSet[int]]::new()
+            foreach ($row in @($v2Evidence.declared_processes)) { [void]$ownedPids.Add([int]$row.pid) }
+            [void]$ownedPids.Add([int]$v2Evidence.preflight_child.pid)
+            [void]$ownedPids.Add([int]$v2Evidence.engine_child.pid)
+            [void]$ownedPids.Add([int]$v2Evidence.task_execution.observer_lifecycle.pid)
+            foreach ($rescue in @($v2Evidence.rescue_executions)) {
+                [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
+            }
+            $known = @{}
+            foreach ($row in @($Earlier.processes)) { $known[[int]$row.pid] = $row }
+            foreach ($row in @($Inventory.processes)) {
+                $scope = ([string]$row.executable_path + ' ' + [string]$row.command_line)
+                if ($row.owner_sid -cne $sid -or [int]$row.session_id -ne $desktopSession -or
+                    [string]::IsNullOrWhiteSpace([string]$row.identity) -or
+                    [string]::IsNullOrWhiteSpace([string]$row.executable_path) -or
+                    [string]::IsNullOrWhiteSpace([string]$row.command_line) -or
+                    $scope.IndexOf($name,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $scope.IndexOf([string]$roots.guest.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $scope.IndexOf([string]$roots.trusted.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $ownedPids.Contains([int]$row.pid) -or $ownedPids.Contains([int]$row.parent_pid)) {
+                    throw 'V2 process has unknown identity or protected execution scope.'
+                }
+                if ($known.ContainsKey([int]$row.pid) -and
+                    ($known[[int]$row.pid].identity -cne $row.identity -or
+                     $known[[int]$row.pid].executable_path -cne $row.executable_path -or
+                     $known[[int]$row.pid].command_line -cne $row.command_line -or
+                     $known[[int]$row.pid].parent_pid -ne $row.parent_pid)) {
+                    throw 'V2 process PID was reused or its lifetime changed.'
+                }
             }
         }
         try {
@@ -279,8 +331,22 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 $pre.owned_tasks.Count -ne 0) {
                 throw 'Owned process, job, task, or complete process inventory is unavailable.'
             }
-            Assert-SubsetInventory -Previous $frozen.processes -Current $pre.processes -Type process
-            Assert-SubsetInventory -Previous $frozen.tasks -Current $pre.tasks -Type task
+            if ($v2) {
+                if ($profileSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                    $v2Evidence.schema_version -ne 2 -or
+                    $v2Evidence.run_name -cne $name -or
+                    $v2Evidence.runner_sid -cne $sid -or
+                    $v2Evidence.runner_session_id -ne $desktopSession -or
+                    $v2Evidence.root_records.guest.file_id -cne $roots.guest.file_id -or
+                    $v2Evidence.root_records.trusted.file_id -cne $roots.trusted.file_id) {
+                    throw 'V2 frozen resource evidence differs from the cleanup target.'
+                }
+                Assert-V2Inventory -Inventory $frozen -Earlier $frozen
+                Assert-V2Inventory -Inventory $pre -Earlier $frozen
+            } else {
+                Assert-SubsetInventory -Previous $frozen.processes -Current $pre.processes -Type process
+                Assert-SubsetInventory -Previous $frozen.tasks -Current $pre.tasks -Type task
+            }
             $guestGuard = [DarkReNamerVmOwnedRootGuard]::new($roots.guest.path)
             $trustedGuard = [DarkReNamerVmOwnedRootGuard]::new($roots.trusted.path)
             $beforeRoots = [ordered]@{}
@@ -324,8 +390,13 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 $proof.post.owned_tasks.Count -eq 0 -and
                 -not $proof.observed_roots_after.guest_present -and
                 -not $proof.observed_roots_after.trusted_present) {
-                Assert-SubsetInventory -Previous $frozen.processes -Current $proof.post.processes -Type process
-                Assert-SubsetInventory -Previous $frozen.tasks -Current $proof.post.tasks -Type task
+                if ($v2) {
+                    Assert-V2Inventory -Inventory $proof.post -Earlier $frozen
+                    Assert-V2Inventory -Inventory $proof.post -Earlier $pre
+                } else {
+                    Assert-SubsetInventory -Previous $frozen.processes -Current $proof.post.processes -Type process
+                    Assert-SubsetInventory -Previous $frozen.tasks -Current $proof.post.tasks -Type task
+                }
                 $proof.status = 'owned-clean'
             }
         } catch { $proof.errors += $_.Exception.Message }
@@ -822,6 +893,47 @@ function ConvertFrom-DrControllerSpotlightPreflightJson {
     $record
 }
 
+function Complete-DrControllerV2TaskExecution {
+    param($Session,$TaskName,$RunnerSid,$SessionId,$Engine,$CompletedTicks,$TaskResult,$Result)
+    $lifecycle = $Result.observer_lifecycle
+    if ($null -eq $Engine -or $null -eq $lifecycle -or
+        $lifecycle.pid -isnot [long] -or $lifecycle.pid -le 0 -or
+        $lifecycle.pid -gt [uint32]::MaxValue -or
+        $lifecycle.start_time_utc_ticks -isnot [string] -or
+        $lifecycle.start_time_utc_ticks -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        $lifecycle.session_id -ne $SessionId -or
+        $lifecycle.owner_sid -cne $RunnerSid -or
+        $lifecycle.image_path -isnot [string] -or
+        $lifecycle.image_path -ine $Engine.action_executable -or
+        $lifecycle.command_line -isnot [string] -or
+        $lifecycle.command_line.Length -gt 4096 -or
+        -not $lifecycle.command_line.Contains($TaskName) -or
+        -not $lifecycle.command_line.Contains('-AcceptanceProfileId vm-automated-v2-owned-resources') -or
+        -not $lifecycle.command_line.EndsWith([string]$Engine.action_arguments,[StringComparison]::Ordinal) -or
+        $CompletedTicks -le $Engine.registered_last_run_time_ticks) {
+        throw 'The v2 observer did not bind its original process lifetime to the task action.'
+    }
+    $absent = Invoke-Command -Session $Session -ArgumentList ([int]$lifecycle.pid) -ScriptBlock {
+        param($processId)
+        @(Get-CimInstance Win32_Process -Filter "ProcessId=$processId" `
+            -OperationTimeoutSec 5 -ErrorAction Stop).Count -eq 0
+    }
+    if ($absent -isnot [bool] -or -not $absent) {
+        throw 'The exact v2 observer PID remains or was reused after task termination.'
+    }
+    [ordered]@{
+        task_name = $TaskName
+        terminal = $true
+        exit_code = [long]$TaskResult
+        registered_last_run_time_ticks = [long]$Engine.registered_last_run_time_ticks
+        completed_last_run_time_ticks = [long]$CompletedTicks
+        action_executable = [string]$Engine.action_executable
+        action_arguments = [string]$Engine.action_arguments
+        observer_lifecycle = $lifecycle
+        observer_lifetime_absent = $true
+    }
+}
+
 function Invoke-DrWindowsVmController {
     [CmdletBinding(DefaultParameterSetName = 'Direct')]
     param(
@@ -860,6 +972,9 @@ function Invoke-DrWindowsVmController {
     [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $AcceptanceProfileSha256,
     [Parameter(Mandatory)][string] $EntryPointPath,
     [Parameter(Mandatory)][object] $VerifiedTooling
 )
@@ -872,6 +987,9 @@ $coreOutputFileMaximumBytes = 128MB
 $coreOutputAggregateMaximumBytes = 256MB
 
 
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
 $taskSelection = Resolve-ControllerTaskSelection `
     -RequestedKind $TaskKind `
     -HasUiOutput $PSBoundParameters.ContainsKey('AcceptanceOutputRoot') `
@@ -895,6 +1013,15 @@ $taskSelection = Resolve-ControllerTaskSelection `
     -HasRecoveryFixtureCount $PSBoundParameters.ContainsKey('RecoveryFixtureCount') `
     -TimeoutSeconds $TestTimeoutSeconds
 
+$ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
+$v2Engine = $null
+$engineChild = $null
+if ($ownedV2 -and -not $PSBoundParameters.ContainsKey('AcceptanceProfileSha256')) {
+    throw 'V2 cleanup requires the launcher-frozen profile digest.'
+}
+if (-not $ownedV2 -and $PSBoundParameters.ContainsKey('AcceptanceProfileSha256')) {
+    throw 'V1 cleanup does not accept a v2 profile digest.'
+}
 $transportKind = if ($PSCmdlet.ParameterSetName -eq 'Ssh') { 'ssh' } else { 'powershell_direct' }
 $runtimeBrokerEnabled = Test-DrRuntimeBrokerDiagnosticArguments -Root $RuntimeBrokerDiagnosticRoot `
     -RunId $RuntimeBrokerDiagnosticRunId -PreparationOnly ([bool]$RuntimeBrokerPreparationOnly) `
@@ -953,6 +1080,10 @@ $taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
 $runnerTaskBaseline = @()
 $runnerProcessBaseline = @()
 $spotlightPreflight = $null
+$preflightChild = $null
+$taskExecution = $null
+$script:DrVmV2RescueExecutions = [Collections.Generic.List[object]]::new()
+$script:DrVmV2RescueAttempts = 0
 $result = $null
 $processJobsClosed = $false
 $acceptancePassed = $false
@@ -3064,7 +3195,8 @@ public static class DrVmSpotlightNative {
             param(
                 [Parameter(Mandatory)][string] $UserSid,
                 [Parameter(Mandatory)][int] $SessionId,
-                [AllowNull()][object] $CaptureContext = $null
+                [AllowNull()][object] $CaptureContext = $null,
+                [switch] $IncludeExecutionScope
             )
             for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $rows = [Collections.Generic.List[object]]::new()
@@ -3113,13 +3245,27 @@ public static class DrVmSpotlightNative {
                     }
                     if ($owner.Sid -ceq $UserSid) {
                         $created = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
-                        $rows.Add([pscustomobject]@{
+                        $record = [ordered]@{
                             identity = ([string]$process.ProcessId + '|' + $created)
                             pid = [int]$process.ProcessId
                             session_id = [int]$process.SessionId
                             creation_time_utc = $created
                             executable_path = [string]$process.ExecutablePath
-                        })
+                        }
+                        if ($IncludeExecutionScope) {
+                            $commandLine = [string]$process.CommandLine
+                            if ([string]::IsNullOrWhiteSpace($record.executable_path) -or
+                                [string]::IsNullOrWhiteSpace($commandLine) -or
+                                $commandLine.Length -gt 4096 -or
+                                $null -eq $process.ParentProcessId) {
+                                $complete = $false
+                                continue
+                            }
+                            $record['command_line'] = $commandLine
+                            $record['parent_pid'] = [int]$process.ParentProcessId
+                            $record['owner_sid'] = [string]$owner.Sid
+                        }
+                        $rows.Add([pscustomobject]$record)
                     }
                 }
                 if ($null -ne $CaptureContext) {
@@ -3639,8 +3785,8 @@ public static class DrVmCommandLineNative {
     }
     Write-DrDiagnosticPhase -Phase 'cbs-registration-preflight' -State 'begin'
     # A narrow, fully owned PS5 registration query finishes before either baseline.
-    $spotlightPreflightJson = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
-        param($root,$sid)
+    $spotlightPreflightJson = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$ownedV2 -ScriptBlock {
+        param($root,$sid,$v2)
         $loaderRecord=@($global:DrVmToolingRecords|Where-Object role -CEQ 'powershell-loader')
         if ($loaderRecord.Count -ne 1) { throw 'Registration preflight loader binding is missing.' }
         $loaderPath=Join-Path $root $loaderRecord[0].file
@@ -3661,7 +3807,7 @@ public static class DrVmCommandLineNative {
             $entry=& $loaderModule {param($v) New-DrToolingVerifiedScriptBlock -VerifiedBundle $v -Role 'powershell-guest-entry'} $verified
             $guestModule=New-Module -Name ('DarkReNamer.preflight.guest.'+[guid]::NewGuid().ToString('N')) -ScriptBlock $entry -ArgumentList (,$libraries)
             & $guestModule {
-                param($r,$expectedSid)
+                param($r,$expectedSid,$v2)
                 $ps5=Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
                 if (-not (Test-Path -LiteralPath $ps5 -PathType Leaf)) { throw 'Registration preflight requires native Windows PowerShell 5.1.' }
                 $command=@'
@@ -3678,7 +3824,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
 '@
                 $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
                 $stdout=Join-Path $r 'cbs-preflight.stdout.json';$stderr=Join-Path $r 'cbs-preflight.stderr.txt'
-                $state=$null;$closed=$false;$record=$null
+                $state=$null;$closed=$false;$record=$null;$childLifecycle=$null
                 try {
                     $state=Start-JobBoundProcess -FilePath $ps5 -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand '+$encoded) `
                         -WorkingDirectory $r -StdoutPath $stdout -StderrPath $stderr -SingleProcessOnly -AggregateOutputLimitBytes 65536
@@ -3695,12 +3841,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $stdoutBytes=Read-DrVmBoundedOrdinaryBytes -Path $stdout -MaximumBytes 65536
                     $stderrBytes=Read-DrVmBoundedOrdinaryBytes -Path $stderr -MaximumBytes 0
                     $record=[Text.UTF8Encoding]::new($false,$true).GetString($stdoutBytes)|ConvertFrom-Json
+                    $childLifecycle = [ordered]@{
+                        pid=$nativePid;start_time_utc_ticks=$ticks;exit_code=$state.process.ExitCode
+                        exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$closed
+                    }
                     if($null -ne $record){
                         $record|Add-Member -NotePropertyName runner_sid -NotePropertyValue $expectedSid
-                        $record|Add-Member -NotePropertyName child_lifecycle -NotePropertyValue ([ordered]@{
-                            pid=$nativePid;start_time_utc_ticks=$ticks;exit_code=$state.process.ExitCode
-                            exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$closed
-                        })
+                        $record|Add-Member -NotePropertyName child_lifecycle -NotePropertyValue $childLifecycle
                     }
                 } finally {
                     if ($null -ne $state) {
@@ -3708,15 +3855,78 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         finally {$state.owner.Dispose()}
                     }
                 }
+                $engineRecord=$null;$engineChild=$null
+                if ($v2) {
+                    $powerShell=Get-DrVmTrustedPowerShellPath
+                    $engineCommand='[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+                    $engineEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($engineCommand))
+                    $engineStdout=Join-Path $r 'engine-preflight.stdout.json'
+                    $engineStderr=Join-Path $r 'engine-preflight.stderr.txt'
+                    $engineState=$null;$engineClosed=$false
+                    try {
+                        $engineState=Start-JobBoundProcess -FilePath $powerShell `
+                            -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand '+$engineEncoded) `
+                            -WorkingDirectory $r -StdoutPath $engineStdout -StderrPath $engineStderr `
+                            -SingleProcessOnly -AggregateOutputLimitBytes 65536
+                        $engineWait=Wait-JobBoundProcessWithOutputLimit -State $engineState `
+                            -StdoutPath $engineStdout -StderrPath $engineStderr -TimeoutSeconds 30
+                        if ($engineWait.failure_reason -or -not $engineState.process.HasExited -or
+                            $engineState.process.ExitCode -ne 0) { throw 'V2 PowerShell engine preflight failed.' }
+                        $engineState.owner.WaitForCapture(10000)
+                        $engineClosed=Close-JobBoundProcess -State $engineState
+                        if (-not $engineClosed -or $engineState.owner.OutputLimitExceeded) {
+                            throw 'V2 PowerShell engine Job or streams did not close.'
+                        }
+                        $enginePid=$engineState.process.Id
+                        $engineTicks=$engineState.process_start_time_utc_ticks
+                        $remaining=Get-Process -Id $enginePid -ErrorAction SilentlyContinue
+                        try {
+                            if ($null -ne $remaining -and
+                                $remaining.StartTime.ToUniversalTime().Ticks.ToString() -ceq $engineTicks) {
+                                throw 'V2 PowerShell engine child lifetime remains.'
+                            }
+                        } finally { if ($null -ne $remaining) { $remaining.Dispose() } }
+                        $engineBytes=Read-DrVmBoundedOrdinaryBytes -Path $engineStdout -MaximumBytes 65536
+                        $null=Read-DrVmBoundedOrdinaryBytes -Path $engineStderr -MaximumBytes 0
+                        $engineRecord=[Text.UTF8Encoding]::new($false,$true).GetString($engineBytes)|ConvertFrom-Json
+                        $engineChild=[ordered]@{
+                            pid=$enginePid;start_time_utc_ticks=$engineTicks;exit_code=$engineState.process.ExitCode
+                            exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$engineClosed
+                        }
+                    } finally {
+                        if ($null -ne $engineState) {
+                            try { if (-not $engineClosed) { [void](Close-JobBoundProcess -State $engineState) } }
+                            finally { $engineState.owner.Dispose() }
+                        }
+                    }
+                }
                 # Serialize before remoting can annotate the registration object.
-                $record | ConvertTo-Json -Depth 8 -Compress
-            } $root $sid
+                if ($v2) {
+                    [ordered]@{ schema_version=2; registration=$record; child_lifecycle=$childLifecycle
+                        engine=$engineRecord; engine_child=$engineChild } |
+                        ConvertTo-Json -Depth 8 -Compress
+                }
+                else { $record | ConvertTo-Json -Depth 8 -Compress }
+            } $root $sid $v2
         } finally {
             if($null -ne $guestModule){Remove-Module -ModuleInfo $guestModule -Force -ErrorAction Stop}
             if($null -ne $loaderModule){Remove-Module -ModuleInfo $loaderModule -Force -ErrorAction Stop}
         }
     })
-    $spotlightPreflight = ConvertFrom-DrControllerSpotlightPreflightJson -Values $spotlightPreflightJson
+    $preflightDocument = ConvertFrom-DrControllerSpotlightPreflightJson -Values $spotlightPreflightJson
+    if ($ownedV2) {
+        if ($preflightDocument.schema_version -ne 2 -or
+            $null -eq $preflightDocument.child_lifecycle -or
+            $null -eq $preflightDocument.engine_child -or
+            $null -eq $preflightDocument.engine) {
+            throw 'V2 preflight helper lifetimes are unavailable.'
+        }
+        $spotlightPreflight = $preflightDocument.registration
+        $preflightChild = $preflightDocument.child_lifecycle
+        $v2Engine = $preflightDocument.engine
+        $engineChild = $preflightDocument.engine_child
+    }
+    else { $spotlightPreflight = $preflightDocument }
     Write-DrDiagnosticPhase -Phase 'cbs-registration-preflight' -State 'end'
     Write-DrDiagnosticPhase -Phase 'acceptance-baseline' -State 'begin'
     $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
@@ -3724,9 +3934,9 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
     })
     $transport['runner_task_baseline'] = @($runnerTaskBaseline)
-    $processSnapshot = Invoke-Command -Session $session -ArgumentList $desktop.sid,$desktop.session_id -ScriptBlock {
-        param($sid,$sessionId)
-        Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId
+    $processSnapshot = Invoke-Command -Session $session -ArgumentList $desktop.sid,$desktop.session_id,$ownedV2 -ScriptBlock {
+        param($sid,$sessionId,$v2)
+        Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId -IncludeExecutionScope:$v2
     }
     if ($null -eq $processSnapshot -or -not $processSnapshot.complete) {
         throw 'The VM runner process baseline was incomplete; refusing to start an untrackable candidate.'
@@ -3787,8 +3997,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             if ($candidateSeconds -lt $TestTimeoutSeconds) { throw 'Insufficient diagnostic time after candidate staging.' }
             $SuiteTimeoutSeconds = [Math]::Min($SuiteTimeoutSeconds, $candidateSeconds)
         }
-        $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256,$RuntimeBrokerDiagnosticRunId -ScriptBlock {
-            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash,$runtimeBrokerRunId)
+        $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256,$RuntimeBrokerDiagnosticRunId,$ownedV2,$v2Engine -ScriptBlock {
+            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash,$runtimeBrokerRunId,$v2,$preflightEngine)
             $observerPath = Join-Path $root 'windows-vm-acceptance.ps1'
             if ((Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash -ine $observerHash) { throw 'Transferred acceptance observer hash mismatch.' }
             $bundle = Join-Path $root 'bundle'
@@ -3796,10 +4006,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $runtime = Join-Path $root 'runtime'
             $inputManifest = Join-Path $root 'input-manifest.json'
             $powerShell = Get-DrVmTrustedPowerShellPath
-            $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
-            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell acceptance engine.' }
-            $engine = $engineJson | ConvertFrom-Json
+            if ($v2) { $engine = $preflightEngine }
+            else {
+                $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+                    '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+                if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell acceptance engine.' }
+                $engine = $engineJson | ConvertFrom-Json
+            }
             if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
                 $engine.effective_policy -cne 'RemoteSigned') {
                 throw 'GUI acceptance requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
@@ -3815,7 +4028,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 if ($captureAdvancedAppearance) { $observerArguments += ' -CaptureAdvancedAppearance' }
             }
             if ($runtimeBrokerRunId) { $observerArguments += ' -RuntimeBrokerDiagnosticRunId ' + $runtimeBrokerRunId }
-            Register-DrVmTask `
+            if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+            $registeredTask = Register-DrVmTask `
                 -TaskName $name `
                 -UserSid $sid `
                 -SessionId $desktopSession `
@@ -3831,7 +4045,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -Arguments $observerArguments `
                 -WorkingDirectory $root `
                 -TrustedResultLeaf 'acceptance-result.json' `
-                -ExecutionTimeLimitSeconds ($suiteTimeout + 60) | Out-Null
+                -ExecutionTimeLimitSeconds ($suiteTimeout + 60)
+            $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
             $registered = Get-ScheduledTaskInfo -TaskName $name
             $registeredTicks = [long]$registered.LastRunTime.Ticks
             Start-ScheduledTask -TaskName $name
@@ -3841,6 +4056,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 edition = [string]$engine.edition
                 effective_policy = [string]$engine.effective_policy
                 registered_last_run_time_ticks = $registeredTicks
+                action_executable = if ($v2) { [string]$actualAction.Path } else { $powerShell }
+                action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $observerArguments }
             }
         }
         $transport.acceptance_engine = [ordered]@{
@@ -3929,6 +4146,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -Appearance $AcceptanceAppearance `
                 -HighContrast ([bool]$AcceptanceHighContrast) `
                 -HostOutputRoot $AcceptanceOutputRoot `
+                -AcceptanceProfileId $AcceptanceProfileId `
+                -EngineEvidence $v2Engine `
                 -OriginalFailure $pollFailure
         }
         Invoke-AcceptanceTerminalFailureRescue -State $state `
@@ -3940,6 +4159,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 ObserverSha256 = $observer.sha256; BundleRecords = $trustedBundleRecords
                 InputManifestSha256 = $inputManifestSha256; Appearance = $AcceptanceAppearance
                 HostOutputRoot = $AcceptanceOutputRoot
+                AcceptanceProfileId = $AcceptanceProfileId; EngineEvidence = $v2Engine
             }
         $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot -ScriptBlock ${function:Get-DrControllerUiOutputInventory})
         foreach ($output in $inventory) {
@@ -3973,6 +4193,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -Role ui `
                 -ExpectedObserverSha256 $observer.sha256
             $processJobsClosed = Test-DrControllerProcessJobCleanupLedger -Result $result
+            if ($ownedV2 -and $state.terminal) {
+                $taskExecution = Complete-DrControllerV2TaskExecution `
+                    -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
+                    -SessionId $desktop.session_id -Engine $acceptanceEngine `
+                    -CompletedTicks $state.last_run_time_ticks -TaskResult $state.task_result `
+                    -Result $result
+            }
         }
         if ($null -ne $result -and $result.status -ceq 'review_required' -and
             $null -eq $pollFailure -and $state.task_result -eq 0) {
@@ -4077,8 +4304,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             -LiteralPath (Join-Path $BundleRoot 'windows-vm-recovery-acceptance.ps1') `
             -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'windows-vm-recovery-acceptance.ps1') `
             -ToSession $session
-        $recoveryEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$RecoveryMode,$RecoveryFixtureCount,([bool]$RecoveryExport),([bool]$RecoveryIntentOnlyCandidateDiscard),$recoveryEvidenceRoot,$trustedBundleRecords,$recoveryRuntimeRoot -ScriptBlock {
-            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$fixtureCount,$recoveryExport,$intentOnlyCandidateDiscard,$evidenceRoot,$bundleRecords,$runtimeRoot)
+        $recoveryEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$RecoveryMode,$RecoveryFixtureCount,([bool]$RecoveryExport),([bool]$RecoveryIntentOnlyCandidateDiscard),$recoveryEvidenceRoot,$trustedBundleRecords,$recoveryRuntimeRoot,$ownedV2,$v2Engine -ScriptBlock {
+            param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$fixtureCount,$recoveryExport,$intentOnlyCandidateDiscard,$evidenceRoot,$bundleRecords,$runtimeRoot,$v2,$preflightEngine)
             $observerPath = Join-Path $root 'windows-vm-recovery-acceptance.ps1'
             if ((Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash -ine $observerHash) {
                 throw 'Transferred recovery observer hash mismatch.'
@@ -4087,10 +4314,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $out = Join-Path $root 'out'
             $private = Join-Path $root 'private'
             $powerShell = Get-DrVmTrustedPowerShellPath
-            $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
-            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell recovery engine.' }
-            $engine = $engineJson | ConvertFrom-Json
+            if ($v2) { $engine = $preflightEngine }
+            else {
+                $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+                    '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+                if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell recovery engine.' }
+                $engine = $engineJson | ConvertFrom-Json
+            }
             if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
                 $engine.effective_policy -cne 'RemoteSigned') {
                 throw 'Recovery acceptance requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
@@ -4100,7 +4330,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             if ($intentOnlyCandidateDiscard) {
                 $observerArguments += ' -IntentOnlyCandidateDiscard'
             }
-            Register-DrVmTask `
+            if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+            $registeredTask = Register-DrVmTask `
                 -TaskName $name `
                 -UserSid $sid `
                 -SessionId $desktopSession `
@@ -4115,7 +4346,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -WorkingDirectory $root `
                 -TrustedResultLeaf 'recovery-summary.json' `
                 -OutputDirectoryLeaves @([string](Split-Path -Leaf $evidenceRoot)) `
-                -ExecutionTimeLimitSeconds ($suiteTimeout + 60) | Out-Null
+                -ExecutionTimeLimitSeconds ($suiteTimeout + 60)
+            $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
             $registered = Get-ScheduledTaskInfo -TaskName $name
             $registeredTicks = [long]$registered.LastRunTime.Ticks
             Start-ScheduledTask -TaskName $name
@@ -4125,6 +4357,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 edition = [string]$engine.edition
                 effective_policy = [string]$engine.effective_policy
                 registered_last_run_time_ticks = $registeredTicks
+                action_executable = if ($v2) { [string]$actualAction.Path } else { $powerShell }
+                action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $observerArguments }
             }
         }
         $transport.recovery_engine = [ordered]@{
@@ -4243,6 +4477,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             -ExpectedObserverSha256 $observer.sha256
         $processJobsClosed = Test-DrControllerProcessJobCleanupLedger `
             -Result $result -RecoveryEvidenceRoot $RecoveryOutputRoot
+        if ($ownedV2 -and $state.terminal) {
+            $taskExecution = Complete-DrControllerV2TaskExecution `
+                -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
+                -SessionId $desktop.session_id -Engine $recoveryEngine `
+                -CompletedTicks $state.last_run_time_ticks -TaskResult $state.task_result `
+                -Result $result
+        }
         $recoveryInventory = [ordered]@{
             schema_version = 1
             task_kind = 'recovery'
@@ -4303,15 +4544,18 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
-    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot)
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
         $powerShell = Get-DrVmTrustedPowerShellPath
-        $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell guest engine.' }
-        $engine = $engineJson | ConvertFrom-Json
+        if ($v2) { $engine = $preflightEngine }
+        else {
+            $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell guest engine.' }
+            $engine = $engineJson | ConvertFrom-Json
+        }
         if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'Native VM validation requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
@@ -4327,7 +4571,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
         $out = Join-Path $trustedRoot 'out'
         $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtimeRoot + '"'
-        Register-DrVmTask `
+        if ($v2) { $arguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+        $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
             -SessionId $desktopSession `
@@ -4341,7 +4586,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             -Arguments $arguments `
             -WorkingDirectory $root `
             -TrustedResultLeaf 'core-result.json' `
-            -ExecutionTimeLimitSeconds ($suiteTimeout + 60) | Out-Null
+            -ExecutionTimeLimitSeconds ($suiteTimeout + 60)
+        $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
         $registered = Get-ScheduledTaskInfo -TaskName $name
         $registeredLastRunTimeTicks = [long]$registered.LastRunTime.Ticks
         Start-ScheduledTask -TaskName $name
@@ -4351,6 +4597,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             edition = [string]$engine.edition
             effective_policy = [string]$engine.effective_policy
             registered_last_run_time_ticks = $registeredLastRunTimeTicks
+            action_executable = if ($v2) { [string]$actualAction.Path } else { $powerShell }
+            action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $arguments }
         }
     }
     $transport.runner_engine = [ordered]@{
@@ -4458,6 +4706,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         throw 'Collected guest result size mismatch.'
     }
     $result = Get-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Raw | ConvertFrom-Json
+    if ($ownedV2 -and $pollState.terminal) {
+        $taskExecution = Complete-DrControllerV2TaskExecution `
+            -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
+            -SessionId $desktop.session_id -Engine $runnerEngine `
+            -CompletedTicks $polledState.last_run_time_ticks -TaskResult $polledState.task_result `
+            -Result $result
+    }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
         $result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup) {
@@ -4650,6 +4905,32 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             $runnerProcessBaseline | ForEach-Object identity
                         )
                     }
+                    if ($ownedV2) {
+                        $declared = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                        if ($null -ne $result) {
+                            if ($recovery) {
+                                $declared = Get-DrControllerRecoveryProcessIdentities `
+                                    -Result $result -EvidenceRoot $RecoveryOutputRoot
+                            }
+                            else {
+                                Add-DrControllerLifecycleIdentity -Value $result -Identities $declared
+                            }
+                        }
+                        $cleanupTaskContext | Add-Member -NotePropertyName v2 -NotePropertyValue $true
+                        $cleanupTaskContext | Add-Member -NotePropertyName profile_sha256 -NotePropertyValue $AcceptanceProfileSha256
+                        $cleanupTaskContext | Add-Member -NotePropertyName baseline_processes -NotePropertyValue @($runnerProcessBaseline)
+                        $cleanupTaskContext | Add-Member -NotePropertyName task_execution -NotePropertyValue $taskExecution
+                        $cleanupTaskContext | Add-Member -NotePropertyName preflight_child -NotePropertyValue $preflightChild
+                        $cleanupTaskContext | Add-Member -NotePropertyName engine_child -NotePropertyValue $engineChild
+                        $cleanupTaskContext | Add-Member -NotePropertyName rescue_attempts -NotePropertyValue $script:DrVmV2RescueAttempts
+                        $cleanupTaskContext | Add-Member -NotePropertyName rescue_executions -NotePropertyValue @($script:DrVmV2RescueExecutions.ToArray())
+                        $cleanupTaskContext | Add-Member -NotePropertyName process_job_cleanup -NotePropertyValue @($result.process_job_cleanup)
+                        $cleanupTaskContext | Add-Member -NotePropertyName declared_processes -NotePropertyValue @(
+                            $declared | Sort-Object | ForEach-Object {
+                                $parts = $_.Split('|')
+                                [ordered]@{ pid = [int]$parts[0]; start_time_utc_ticks = [string]$parts[1] }
+                            })
+                    }
                     $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext,(${function:Test-DrControllerCleanupObservation}.ToString()) -ScriptBlock {
                         param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext,$completionDefinition)
                         $diagnosticEnabled = $null -ne $taskContext.PSObject.Properties['diagnostic_enabled'] -and
@@ -4661,6 +4942,264 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             throw 'Unexpected VM cleanup root.'
                         }
                         $prefixes = @(($root.TrimEnd('\') + '\'), ($trustedRoot.TrimEnd('\') + '\'))
+                        if ($null -ne $taskContext.PSObject.Properties['v2'] -and $taskContext.v2) {
+                            $baselineProcesses = @($taskContext.baseline_processes)
+                            $baselineTasks = @($taskContext.baseline_tasks)
+                            $baselineIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                            foreach ($row in $baselineProcesses) { [void]$baselineIds.Add([string]$row.identity) }
+                            $taskMap = @{}
+                            foreach ($row in $baselineTasks) {
+                                $identity = [string]$row.identity
+                                if ([string]::IsNullOrWhiteSpace($identity) -or
+                                    $taskMap.ContainsKey($identity)) { throw 'V2 task baseline is ambiguous.' }
+                                $taskMap[$identity] = [string]$row.definition_sha256
+                            }
+                            function Get-V2ProcessSnapshot {
+                                $snapshot = Get-DrVmRunnerProcesses -UserSid $taskContext.runner_sid `
+                                    -SessionId $taskContext.runner_session_id -IncludeExecutionScope
+                                [ordered]@{complete=[bool]$snapshot.complete;processes=@($snapshot.processes)}
+                            }
+                            function Get-V2TaskDelta {
+                                param($Current)
+                                $changed = @($Current | Where-Object {
+                                    -not $taskMap.ContainsKey([string]$_.identity) -or
+                                    [string]$_.definition_sha256 -cne $taskMap[[string]$_.identity]
+                                } | Sort-Object identity)
+                                $currentIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                                foreach ($row in $Current) { [void]$currentIds.Add([string]$row.identity) }
+                                $removed = @($taskMap.Keys | Where-Object { -not $currentIds.Contains([string]$_) } | Sort-Object)
+                                [ordered]@{changed=$changed;removed=$removed}
+                            }
+                            function Get-V2ProcessDelta {
+                                param($Snapshot)
+                                @($Snapshot.processes | Where-Object {
+                                    -not $baselineIds.Contains([string]$_.identity)
+                                } | Sort-Object identity)
+                            }
+                            function Get-V2OwnedScopeProcesses {
+                                param($Snapshot)
+                                $ownedPids = [Collections.Generic.HashSet[int]]::new()
+                                foreach ($row in @($taskContext.declared_processes)) {
+                                    [void]$ownedPids.Add([int]$row.pid)
+                                }
+                                [void]$ownedPids.Add([int]$taskContext.preflight_child.pid)
+                                [void]$ownedPids.Add([int]$taskContext.engine_child.pid)
+                                [void]$ownedPids.Add([int]$taskContext.task_execution.observer_lifecycle.pid)
+                                foreach ($rescue in @($taskContext.rescue_executions)) {
+                                    [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
+                                }
+                                @($Snapshot.processes | Where-Object {
+                                    $scope = ([string]$_.executable_path + ' ' + [string]$_.command_line)
+                                    $scope.IndexOf($name,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                                    $scope.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                                    $scope.IndexOf($trustedRoot,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                                    $ownedPids.Contains([int]$_.pid) -or
+                                    $ownedPids.Contains([int]$_.parent_pid)
+                                })
+                            }
+                            $before = $null; $intervention = $null; $after = $null
+                            $tasksBefore = $null; $tasksIntervention = $null; $tasksAfter = $null
+                            $observedRootsBefore = $null; $observedRootsAfter = $null
+                            $rootRecords = [ordered]@{
+                                guest = $global:DrVmOwnedRootRecords.guest
+                                trusted = $global:DrVmOwnedRootRecords.trusted
+                            }
+                            $errors = [Collections.Generic.List[string]]::new()
+                            $ownedAfter = @()
+                            $deleted = $false
+                            try {
+                                if (-not $mayDelete -or -not $jobsClosed -or
+                                    $null -eq $taskContext.task_execution -or
+                                    -not $taskContext.task_execution.terminal -or
+                                    -not $taskContext.task_execution.observer_lifetime_absent -or
+                                    $null -eq $taskContext.preflight_child -or
+                                    -not $taskContext.preflight_child.process_job_closed -or
+                                    $null -eq $taskContext.engine_child -or
+                                    -not $taskContext.engine_child.process_job_closed -or
+                                    $taskContext.rescue_attempts -ne @($taskContext.rescue_executions).Count -or
+                                    $null -eq $rootRecords.guest -or $null -eq $rootRecords.trusted) {
+                                    throw 'V2 declared task, helper, Job or root closure is unavailable.'
+                                }
+                                if (@($taskContext.declared_processes).Count -ne
+                                    @($taskContext.process_job_cleanup).Count) {
+                                    throw 'V2 declared process lifetimes differ from Job cleanup.'
+                                }
+                                $before = Get-V2ProcessSnapshot
+                                $tasksBefore = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                                $taskDeltaBefore = Get-V2TaskDelta -Current $tasksBefore
+                                $intervention = Get-V2ProcessSnapshot
+                                $tasksIntervention = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                                $taskDeltaIntervention = Get-V2TaskDelta -Current $tasksIntervention
+                                $ownedTask = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+                                    [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
+                                })
+                                $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
+                                $globalOwned = @($allProcesses | Where-Object {
+                                    $path = [string]$_.ExecutablePath
+                                    $path.StartsWith($prefixes[0],[StringComparison]::OrdinalIgnoreCase) -or
+                                    $path.StartsWith($prefixes[1],[StringComparison]::OrdinalIgnoreCase)
+                                })
+                                if ($taskContext.task_execution.exit_code -ne 0 -or
+                                    -not $before.complete -or -not $intervention.complete -or
+                                    $taskDeltaBefore.changed.Count -ne 0 -or $taskDeltaBefore.removed.Count -ne 0 -or
+                                    $taskDeltaIntervention.changed.Count -ne 0 -or $taskDeltaIntervention.removed.Count -ne 0 -or
+                                    $ownedTask.Count -ne 0 -or $globalOwned.Count -ne 0 -or
+                                    @(Get-V2OwnedScopeProcesses -Snapshot $before).Count -ne 0 -or
+                                    @(Get-V2OwnedScopeProcesses -Snapshot $intervention).Count -ne 0) {
+                                    throw 'V2 observer exit, owned scope, task definition, or process enumeration is incomplete.'
+                                }
+                                $guestGuard = $null; $trustedGuard = $null
+                                try {
+                                    $guestGuard = [DarkReNamerVmOwnedRootGuard]::new($root)
+                                    $trustedGuard = [DarkReNamerVmOwnedRootGuard]::new($trustedRoot)
+                                    $observedRootsBefore = [ordered]@{}
+                                    foreach ($pair in @(@($guestGuard,$rootRecords.guest),@($trustedGuard,$rootRecords.trusted))) {
+                                        $guard = $pair[0]; $record = $pair[1]
+                                        $guard.Assert([string]$record.base_file_id,[string]$record.file_id)
+                                        $security = $guard.Security()
+                                        if ($security[0] -cne $record.owner_sid -or
+                                            $security[0] -cne 'S-1-5-32-544' -or
+                                            $security[1] -cne $record.acl_sddl) {
+                                            throw 'V2 owned root owner or ACL changed since creation.'
+                                        }
+                                        $role = if ($guard.RootId -ceq $rootRecords.guest.file_id) { 'guest' } else { 'trusted' }
+                                        $observedRootsBefore[$role] = [ordered]@{
+                                            path=$record.path; base_file_id=$guard.BaseId; file_id=$guard.RootId
+                                            owner_sid=$security[0]; acl_sddl=$security[1]; ordinary_directory=$true
+                                        }
+                                    }
+                                    $guestGuard.Delete()
+                                    $trustedGuard.Delete()
+                                    $deleted = $true
+                                }
+                                finally {
+                                    if ($null -ne $trustedGuard) { $trustedGuard.Dispose() }
+                                    if ($null -ne $guestGuard) { $guestGuard.Dispose() }
+                                }
+                            }
+                            catch { $errors.Add($_.Exception.Message) }
+                            try {
+                                if ($null -ne $rootRecords.guest -and $null -ne $rootRecords.trusted) {
+                                    $present = [DarkReNamerVmOwnedRootGuard]::ObserveRoots(
+                                        (Join-Path $env:ProgramData 'DarkReNamerVmRuns'),
+                                        [string]$rootRecords.guest.base_file_id,$name,$name+'-trusted')
+                                    $observedRootsAfter = [ordered]@{
+                                        guest_present=[bool]$present[0]; trusted_present=[bool]$present[1]
+                                    }
+                                }
+                                if ($deleted) {
+                                    $after = Get-V2ProcessSnapshot
+                                    $tasksAfter = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                                    $taskDeltaAfter = Get-V2TaskDelta -Current $tasksAfter
+                                    $ownedAfter = @(Get-CimInstance Win32_Process `
+                                        -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
+                                        $path = [string]$_.ExecutablePath
+                                        $path.StartsWith($prefixes[0],[StringComparison]::OrdinalIgnoreCase) -or
+                                        $path.StartsWith($prefixes[1],[StringComparison]::OrdinalIgnoreCase)
+                                    } | ForEach-Object {
+                                        [ordered]@{ pid=[int]$_.ProcessId; session_id=[int]$_.SessionId
+                                            executable_path=[string]$_.ExecutablePath }
+                                    })
+                                    if (-not $after.complete -or $taskDeltaAfter.changed.Count -ne 0 -or
+                                        $taskDeltaAfter.removed.Count -ne 0 -or
+                                        $ownedAfter.Count -ne 0 -or
+                                        @(Get-V2OwnedScopeProcesses -Snapshot $after).Count -ne 0 -or
+                                        $observedRootsAfter.guest_present -or
+                                        $observedRootsAfter.trusted_present) {
+                                        throw 'V2 post-cleanup owned scope, tasks, or roots remain.'
+                                    }
+                                }
+                            }
+                            catch { $errors.Add($_.Exception.Message) }
+                            $deltaBefore = if ($null -ne $before) { @(Get-V2ProcessDelta -Snapshot $before) } else { $null }
+                            $deltaIntervention = if ($null -ne $intervention) { @(Get-V2ProcessDelta -Snapshot $intervention) } else { $null }
+                            $deltaAfter = if ($null -ne $after) { @(Get-V2ProcessDelta -Snapshot $after) } else { $null }
+                            $taskDeltaBefore = if ($null -ne $tasksBefore) { Get-V2TaskDelta -Current $tasksBefore } else { $null }
+                            $taskDeltaIntervention = if ($null -ne $tasksIntervention) { Get-V2TaskDelta -Current $tasksIntervention } else { $null }
+                            $taskDeltaAfter = if ($null -ne $tasksAfter) { Get-V2TaskDelta -Current $tasksAfter } else { $null }
+                            $removedTasks = [Collections.Generic.List[string]]::new()
+                            foreach ($delta in @($taskDeltaBefore,$taskDeltaIntervention,$taskDeltaAfter)) {
+                                if ($null -ne $delta) {
+                                    foreach ($identity in @($delta.removed)) {
+                                        $removedTasks.Add([string]$identity)
+                                    }
+                                }
+                            }
+                            $complete = $deleted -and $errors.Count -eq 0 -and
+                                $null -ne $after -and $after.complete -and
+                                $null -ne $observedRootsAfter -and
+                                -not $observedRootsAfter.guest_present -and
+                                -not $observedRootsAfter.trusted_present
+                            $raw = [ordered]@{
+                                scheduled_task_present = [bool]($null -ne $ownedTask -and $ownedTask.Count -gt 0)
+                                guest_root_present = [bool]($null -eq $observedRootsAfter -or $observedRootsAfter.guest_present)
+                                trusted_task_root_present = [bool]($null -eq $observedRootsAfter -or $observedRootsAfter.trusted_present)
+                                process_jobs_closed = [bool]$jobsClosed
+                                runner_process_inventory_complete = [bool]($null -ne $before -and $before.complete -and
+                                    $null -ne $intervention -and $intervention.complete -and
+                                    $null -ne $after -and $after.complete)
+                                unexpected_runner_tasks = if ($null -ne $taskDeltaBefore) { @($taskDeltaBefore.changed) } else { $null }
+                                unexpected_runner_processes = $deltaBefore
+                                unexpected_runner_tasks_after_intervention = if ($null -ne $taskDeltaIntervention) { @($taskDeltaIntervention.changed) } else { $null }
+                                unexpected_runner_processes_after_intervention = $deltaIntervention
+                                unexpected_runner_tasks_after_delete = if ($null -ne $taskDeltaAfter) { @($taskDeltaAfter.changed) } else { $null }
+                                unexpected_runner_processes_after_delete = $deltaAfter
+                                removed_runner_tasks = @($removedTasks.ToArray() | Sort-Object -Unique)
+                                terminated_runner_processes = @()
+                                resource_cleanup_errors = @($errors.ToArray())
+                                runner_process_natural_exit = [ordered]@{schema_version=2;status='v2-owned-resources'}
+                                owned_processes_after = @($ownedAfter)
+                                schema_version = 2
+                                profile_id = 'vm-automated-v2-owned-resources'
+                                profile_sha256 = [string]$taskContext.profile_sha256
+                                owned_resource_evidence = [ordered]@{
+                                    schema_version = 2
+                                    run_name = $name
+                                    runner_sid = [string]$taskContext.runner_sid
+                                    runner_session_id = [int]$taskContext.runner_session_id
+                                    root_records = $rootRecords
+                                    baseline_processes = $baselineProcesses
+                                    baseline_tasks = $baselineTasks
+                                    process_snapshots = [ordered]@{before=$before;after_intervention=$intervention;after_delete=$after}
+                                    task_snapshots = [ordered]@{before=$tasksBefore;after_intervention=$tasksIntervention;after_delete=$tasksAfter}
+                                    declared_processes = @($taskContext.declared_processes)
+                                    process_job_cleanup = @($taskContext.process_job_cleanup)
+                                    preflight_child = $taskContext.preflight_child
+                                    engine_child = $taskContext.engine_child
+                                    rescue_attempts = [int]$taskContext.rescue_attempts
+                                    rescue_executions = @($taskContext.rescue_executions)
+                                    task_execution = $taskContext.task_execution
+                                    observed_roots_before = $observedRootsBefore
+                                    observed_roots_after = $observedRootsAfter
+                                }
+                            }
+                            return [pscustomobject]@{
+                                guest_cleanup = [bool]$complete
+                                owned_cleanup_after_strict_failure_eligible = [bool](
+                                    -not $deleted -and $mayDelete -and $jobsClosed -and
+                                    $null -ne $before -and $before.complete -and
+                                    $null -ne $intervention -and $intervention.complete -and
+                                    $null -ne $tasksIntervention -and
+                                    $null -ne $observedRootsAfter -and
+                                    $observedRootsAfter.guest_present -and
+                                    $observedRootsAfter.trusted_present -and
+                                    $null -ne $taskContext.task_execution -and
+                                    $taskContext.task_execution.terminal -and
+                                    $taskContext.task_execution.observer_lifetime_absent -and
+                                    $null -ne $taskContext.preflight_child -and
+                                    $taskContext.preflight_child.process_job_closed -and
+                                    $null -ne $taskContext.engine_child -and
+                                    $taskContext.engine_child.process_job_closed -and
+                                    $ownedAfter.Count -eq 0 -and $ownedTask.Count -eq 0)
+                                failed_snapshot = if ($null -ne $intervention -and $null -ne $tasksIntervention) {
+                                    [ordered]@{complete=[bool]$intervention.complete
+                                        processes=@($intervention.processes);tasks=@($tasksIntervention)
+                                        owned_processes=@($ownedAfter)}
+                                } else { $null }
+                                root_records = $rootRecords
+                                raw_cleanup = $raw
+                            }
+                        }
                         function Test-ProcessExecutableInOwnedRoots {
                             param([AllowNull()][string] $Path,[Parameter(Mandatory)][string[]] $Prefixes)
                             if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -5204,7 +5743,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $transportHash = (Get-FileHash -LiteralPath $transportPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 $nonce = [string]$ownedHandshake.nonce
                 $receipt = [ordered]@{
-                    schema_version = 1
+                    schema_version = if ($ownedV2) { 2 } else { 1 }
                     kind = 'owned_cleanup_strict_failure_preservation'
                     run_name = $taskName
                     vm_id = ([guid]$transport.vm_id).ToString('D').ToLowerInvariant()
@@ -5216,6 +5755,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     files = @(Get-DrControllerPreservedFiles -Root $transportOutputRoot)
                     failed_snapshot = $cleanupResult.failed_snapshot
                     root_records = $cleanupResult.root_records
+                }
+                if ($ownedV2) {
+                    $receipt['profile_id'] = $AcceptanceProfileId
+                    $receipt['profile_sha256'] = $AcceptanceProfileSha256
                 }
                 $receiptPath = Join-Path $transportOutputRoot 'owned-cleanup-strict-failure-preservation.json'
                 # Preflight two complete inventory snapshots and two copies of the root
@@ -5231,7 +5774,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 $proofPath = Join-Path $transportOutputRoot 'owned-cleanup-after-strict-failure.json'
                 Write-DrControllerExclusiveJson -Path $proofPath -Value ([ordered]@{
-                    schema_version=1; kind='owned_cleanup_after_strict_failure'; status='incomplete'
+                    schema_version=if ($ownedV2) { 2 } else { 1 }
+                    kind='owned_cleanup_after_strict_failure'; status='incomplete'
                     run_name=$taskName; vm_id=$receipt.vm_id; errors=@('Finalizer did not complete.')
                 }) -MaximumBytes 1MB
                 $proof = $null
@@ -5250,7 +5794,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     }
                     $lease = Get-Content -LiteralPath $leasePath -Raw -ErrorAction Stop | ConvertFrom-Json
                     $leaseHash = (Get-FileHash -LiteralPath $leasePath -Algorithm SHA256).Hash.ToLowerInvariant()
-                    if ($signal.schema_version -ne 1 -or $signal.nonce -cne $nonce -or
+                    if ($signal.schema_version -ne $receipt.schema_version -or
+                        ($ownedV2 -and ($signal.profile_id -cne $AcceptanceProfileId -or
+                            $signal.profile_sha256 -cne $AcceptanceProfileSha256)) -or
+                        $signal.nonce -cne $nonce -or
                         $signal.preservation_sha256 -cne $receiptHash -or
                         $signal.desktop_lease_sha256 -cne $leaseHash -or
                         $lease.mode -cne 'managed-rdp' -or $lease.stop_status -cne 'stopped' -or
@@ -5262,11 +5809,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $proof = Invoke-DrControllerOwnedCleanupAfterFailure `
                         -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
                         -SessionId $desktop.session_id -ExpectedVmId $receipt.vm_id `
-                        -Frozen $receipt.failed_snapshot -Roots $receipt.root_records
+                        -Frozen $receipt.failed_snapshot -Roots $receipt.root_records `
+                        -V2Evidence $(if ($ownedV2) { $transport.raw_cleanup.owned_resource_evidence } else { $null }) `
+                        -ProfileSha256 $(if ($ownedV2) { $AcceptanceProfileSha256 } else { $null })
                 }
                 catch {
                     $proof = [pscustomobject]@{
-                        schema_version=1; kind='owned_cleanup_after_strict_failure'
+                        schema_version=if ($ownedV2) { 2 } else { 1 }
+                        kind='owned_cleanup_after_strict_failure'
                         run_name=$taskName; vm_id=$receipt.vm_id; status='incomplete'
                         pre=$null; post=$null; roots=$receipt.root_records
                         observed_roots_before=$null; observed_roots_after=$null
@@ -5274,6 +5824,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     }
                 }
                 Remove-DrControllerProofRemotingMetadata -Proof $proof
+                if ($ownedV2) {
+                    $proof | Add-Member -NotePropertyName profile_id -NotePropertyValue $AcceptanceProfileId -Force
+                    $proof | Add-Member -NotePropertyName profile_sha256 -NotePropertyValue $AcceptanceProfileSha256 -Force
+                }
                 $proof | Add-Member -NotePropertyName preservation_sha256 -NotePropertyValue $receiptHash -Force
                 $proof | Add-Member -NotePropertyName original_transport_sha256 -NotePropertyValue $transportHash -Force
                 $proof | Add-Member -NotePropertyName desktop_lease_sha256 -NotePropertyValue $leaseHash -Force

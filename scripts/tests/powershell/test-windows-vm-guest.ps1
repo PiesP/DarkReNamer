@@ -2204,7 +2204,7 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     $hostRunnerText = Get-DrTestCombinedPowerShellSource -Kind controller
     $taskRegistrationMatches = [regex]::Matches(
         $hostRunnerText,
-        '(?m)^\s+Register-DrVmTask\s+`\s*$'
+        '(?m)^\s+(?:\$registeredTask\s+=\s+)?Register-DrVmTask\s+`\s*$'
     )
     if ($taskRegistrationMatches.Count -ne 5) {
         throw 'Every Windows VM task registration must be enumerated by the controller contract test.'
@@ -3760,7 +3760,7 @@ function Test-DrControllerSpotlightPreflightTransport {
     $boundaries=@($ast.FindAll({param($node)
         $node -is [Management.Automation.Language.ScriptBlockAst] -and
         $null -ne $node.EndBlock -and $node.EndBlock.Statements.Count -gt 0 -and
-        $node.EndBlock.Statements[-1].Extent.Text -match '^\$record(?:\s*\||$)' -and
+        $node.EndBlock.Statements[-1].Extent.Text -match '^if \(\$v2\)' -and
         $node.Extent.Text.Contains('Start-JobBoundProcess -FilePath $ps5')
     },$true))
     if($boundaries.Count -ne 1){throw 'Expected one actual registration return boundary.'}
@@ -3776,9 +3776,19 @@ function Test-DrControllerSpotlightPreflightTransport {
                 child_lifecycle=[ordered]@{pid=4242;start_time_utc_ticks='639262682600000000'
                     exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$true;exit_code=0}
             }
+            $presentRecord=$record
+            $childLifecycle=$record.child_lifecycle
+            $engineRecord=[ordered]@{version='7.4.19';edition='Core';effective_policy='RemoteSigned'}
+            $engineChild=[ordered]@{pid=4343;start_time_utc_ticks='639262682600000001'
+                exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$true;exit_code=0}
             $record
+            $v2=$false
             & ([scriptblock]::Create($serializer))
             $record=$null
+            & ([scriptblock]::Create($serializer))
+            $v2=$true
+            & ([scriptblock]::Create($serializer))
+            $record=$presentRecord
             & ([scriptblock]::Create($serializer))
         }
         if($null -eq (Wait-Job -Job $job -Timeout 30)){throw 'Registration transport regression timed out.'}
@@ -3795,7 +3805,7 @@ function Test-DrControllerSpotlightPreflightTransport {
         $received[0].PSObject.Properties.Name -notcontains 'PSShowComputerName'){
         throw 'Direct object regression did not reproduce remoting metadata.'
     }
-    if($received.Count -ne 3 -or $received[1] -isnot [string] -or $received[2] -isnot [string]){
+    if($received.Count -ne 5 -or @($received[1..4] | Where-Object {$_ -isnot [string]}).Count -ne 0){
         throw 'Actual registration boundary leaked an object or lost JSON null.'
     }
     $decoder=@($ast.FindAll({param($node)
@@ -3825,6 +3835,25 @@ function Test-DrControllerSpotlightPreflightTransport {
         throw 'Registration decoder silently removed unknown data or changed nested values.'
     }
     if($null -ne (ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[2]))){throw 'Missing CBS registration lost JSON null.'}
+    foreach($index in @(3,4)) {
+        $envelope=ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[$index])
+        if (($envelope.PSObject.Properties.Name | Sort-Object) -join '|' -cne
+            'child_lifecycle|engine|engine_child|registration|schema_version' -or
+            $envelope.schema_version -ne 2 -or
+            $envelope.child_lifecycle.pid -ne 4242 -or
+            $envelope.engine_child.pid -ne 4343 -or
+            -not $envelope.engine_child.process_job_closed -or
+            $envelope.engine.edition -cne 'Core' -or
+            $envelope.engine.effective_policy -cne 'RemoteSigned' -or
+            ($index -eq 3 -and $null -ne $envelope.registration) -or
+            ($index -eq 4 -and $envelope.registration.name -cne 'MicrosoftWindows.Client.CBS')) {
+            throw 'V2 preflight envelope lost registration availability or exact helper lifetimes.'
+        }
+        if (($envelope.child_lifecycle | ConvertTo-Json -Depth 8 -Compress) -cne
+            ($decoded.child_lifecycle | ConvertTo-Json -Depth 8 -Compress)) {
+            throw 'V2 preflight envelope changed the registration-query child lifetime.'
+        }
+    }
     Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values @($received[0])} 'one nonempty JSON string'
     foreach($invalid in @(@(),@(''),@(' '),@('null','null'),@(42),@($null))){
         Assert-Fails {ConvertFrom-DrControllerSpotlightPreflightJson -Values $invalid} 'one nonempty JSON string'

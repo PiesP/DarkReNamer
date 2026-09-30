@@ -39,8 +39,9 @@ def compact(value: object) -> bytes:
 
 
 class CliFixture:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, revision: int = 1):
         self.root = root
+        self.revision = revision
         self.scratch = root / "private-scratch"
         self.handoff_root = root / "candidate-handoff"
         self.trusted_root = root / "trusted-source"
@@ -50,7 +51,7 @@ class CliFixture:
                      self.raw_root, self.output_root):
             path.mkdir()
 
-        source_profile = REPOSITORY_ROOT / "config/vm-automated-v1.json"
+        source_profile = REPOSITORY_ROOT / f"config/vm-automated-v{revision}.json"
         self.profile_bytes = source_profile.read_bytes()
         self.profile = json.loads(self.profile_bytes)
         component_bytes = self._create_trusted_checkout()
@@ -88,7 +89,7 @@ class CliFixture:
         repository = REPOSITORY_ROOT
         (self.trusted_root / "config").mkdir()
         (self.trusted_root / "scripts").mkdir()
-        (self.trusted_root / "config/vm-automated-v1.json").write_bytes(self.profile_bytes)
+        (self.trusted_root / f"config/vm-automated-v{self.revision}.json").write_bytes(self.profile_bytes)
         tooling_manifest = (repository / "config/tooling-bundle.json").read_bytes()
         (self.trusted_root / "config/tooling-bundle.json").write_bytes(tooling_manifest)
         for entry in json.loads(tooling_manifest)["modules"]:
@@ -194,7 +195,7 @@ class CliFixture:
                 "sha256": (hashlib.sha256(data).hexdigest() if data is not None else reference.sha256),
                 "size": len(data) if data is not None else reference.size,
             }
-        index = compact({"schema": "darkrenamer-vm-automated-index-v1", "files": pins})
+        index = compact({"schema": f"darkrenamer-vm-automated-index-v{self.revision}", "files": pins})
         with ZipFile(destination, "w", compression=ZIP_STORED, allowZip64=False) as archive:
             archive.writestr("evidence-index.json", index)
             for path in self.campaign.files:
@@ -206,7 +207,7 @@ class CliFixture:
         selected = archive or self.archive
         data = selected.read_bytes()
         return Namespace(
-            archive=selected,
+            profile_id=self.profile["profile_id"], archive=selected,
             archive_sha256=hashlib.sha256(data).hexdigest(), archive_size=str(len(data)),
             candidate_handoff_root=self.handoff_root, trusted_source_root=self.trusted_root,
             gate_metadata=self.gate_metadata, output=output or self.output_root / "statement.json",
@@ -233,6 +234,19 @@ class VmAutomatedCliTests(unittest.TestCase):
             argv.extend(["--" + name.replace("_", "-"), str(value)])
         with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return cli.main(REPOSITORY_ROOT)
+
+    def test_v2_archive_emits_selected_canonical_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CliFixture(Path(directory), revision=2)
+            statement = parse_canonical_statement_bytes(cli.validate(fixture.args()))
+            self.assertEqual(statement["schema"], "darkrenamer-vm-automated-statement-v2")
+            self.assertEqual(statement["profile"], {
+                "id": fixture.profile["profile_id"], "revision": 2,
+                "sha256": hashlib.sha256(fixture.profile_bytes).hexdigest()})
+            args = fixture.args()
+            args.profile_id = "vm-automated-v1-win11-ntfs"
+            with self.assertRaises(EvidenceError):
+                cli.validate(args)
 
     def test_validate_and_main_emit_one_canonical_path_free_statement(self):
         direct = cli.validate(self.fixture.args())

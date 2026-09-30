@@ -18,6 +18,50 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Reject case variants at real public boundaries before source or VM acquisition.
+foreach ($entry in @(
+    @{file='run-windows-vm-tests.ps1';args=@{BundleRoot='unused';SshHost='fixture'}},
+    @{file='windows-vm-guest.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;ValidateOnly=$true}},
+    @{file='windows-vm-acceptance.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;OutputRoot='unused';ExpectedScriptSha256=('a'*64);ValidateOnly=$true}},
+    @{file='windows-vm-recovery-acceptance.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;OutputRoot='unused';PrivateEvidenceRoot='unused';ExpectedScriptSha256=('a'*64);ValidateOnly=$true}}
+)) {
+    $entryPath=Join-Path $PSScriptRoot ('../../'+$entry.file)
+    foreach ($profile in @('VM-AUTOMATED-V1-WIN11-NTFS','VM-AUTOMATED-V2-OWNED-RESOURCES')) {
+        $arguments=$entry.args.Clone()
+        $arguments.AcceptanceProfileId=$profile
+        Assert-Fails { & $entryPath @arguments } 'Unsupported VM acceptance profile identity.'
+    }
+}
+
+# A rescue descendant is owned even when its image and command omit run paths.
+& {
+    $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    foreach ($functionName in @('Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
+        $definitions=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
+        },$true))
+        if($errors.Count -or $definitions.Count -ne 1){throw 'V2 owned inventory function is not unique.'}
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $name='unique-run';$root='C:\owned\run';$trustedRoot='C:\owned\run-trusted'
+    $roots=@{guest=@{path=$root};trusted=@{path=$trustedRoot}}
+    $sid='fixture';$desktopSession=2
+    $taskContext=@{declared_processes=@();baseline_tasks=@();preflight_child=@{pid=1};engine_child=@{pid=2}
+        task_execution=@{observer_lifecycle=@{pid=3}}
+        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777}}})}
+    $v2Evidence=$taskContext
+    $owned=[pscustomobject]@{pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
+        executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding'}
+    $ambient=[pscustomobject]@{pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
+        executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding'}
+    $found=@(Get-V2OwnedScopeProcesses @{processes=@($owned,$ambient)})
+    if($found.Count -ne 1 -or $found[0].pid -ne 900){throw 'Rescue descendant escaped normal owned scope.'}
+    Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()}
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($owned)} @{processes=@()} } 'protected execution scope'
+}
+
 # Exercise the production atomic replacement expression with actual files.
 $replaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-proof-replace-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($replaceRoot)
@@ -41,8 +85,8 @@ finally { Remove-Item -LiteralPath $replaceRoot -Recurse -Force }
 # Execute the finalizer's actual inventory predicate against owned and adjacent paths.
 & {
     $roots = @{guest=@{path='C:\owned\run'};trusted=@{path='C:\owned\run-trusted'}}
-    $sid = 'fixture'; $desktopSession = 2; $name = 'fixture'
-    function Get-DrVmRunnerProcesses { param($UserSid,$SessionId); @{complete=$true;processes=@()} }
+    $sid = 'fixture'; $desktopSession = 2; $name = 'fixture'; $v2 = $false
+    function Get-DrVmRunnerProcesses { param($UserSid,$SessionId,[switch]$IncludeExecutionScope); @{complete=$true;processes=@()} }
     function Get-DrVmRunnerTasks { param($UserSid) }
     function Get-ScheduledTask { param($ErrorAction) }
     function Get-CimInstance {
@@ -598,12 +642,34 @@ try {
                 $probe.observer_path = $ObserverPath
                 $probe.bundle_path = $BundleSourcePath
                 $probe.input_sha256 = $InputManifestSha256
+                $actions = [pscustomobject]@{
+                    Path = $Execute
+                    Arguments = ($Arguments + ' -ElevatedObserver -TrustedResultPath "' +
+                        (Join-Path $out $TrustedResultLeaf) + '"')
+                }
+                $actions | Add-Member -MemberType ScriptMethod -Name Item -Value {
+                    param($index)
+                    [pscustomobject]@{Path=$this.Path;Arguments=$this.Arguments}
+                }
+                [pscustomobject]@{Definition=[pscustomobject]@{Actions=$actions}}
             }
             function Start-ScheduledTask {
                 param($TaskName)
                 $probe.started = $true
-                [IO.File]::WriteAllText((Join-Path $out $probe.result_leaf),
-                    $(if ($probe.mode -ceq 'failed-result') { '{"status":"failed"}' } else { '{"status":"passed"}' }))
+                $resultText = if ($probe.mode -ceq 'failed-result') { '{"status":"failed"}' }
+                    elseif ($probe.mode -ceq 'v2-passed') {
+                        '{"status":"passed","observer_lifecycle":{"pid":901}}'
+                    } else { '{"status":"passed"}' }
+                [IO.File]::WriteAllText((Join-Path $out $probe.result_leaf),$resultText)
+            }
+            function Complete-DrControllerV2TaskExecution {
+                param($Session,$TaskName,$RunnerSid,$SessionId,$Engine,$CompletedTicks,$TaskResult,$Result)
+                if ($Result.observer_lifecycle.pid -ne 901 -or
+                    $Engine.action_arguments -notlike '*-ElevatedObserver -TrustedResultPath*' -or
+                    $Engine.action_arguments -notlike '*-AcceptanceProfileId vm-automated-v2-owned-resources*') {
+                    throw 'The v2 rescue did not pass registered action and exact observer evidence.'
+                }
+                [ordered]@{observer_lifecycle=$Result.observer_lifecycle;terminal=$true;exit_code=[long]$TaskResult}
             }
             function Start-Sleep { param($Seconds); $probe.sleeps++ }
             function Get-Date {
@@ -667,6 +733,34 @@ try {
                         throw 'Text-scale rescue lost the input manifest source binding.'
                     }
                 }
+            }
+            $script:DrVmV2RescueAttempts = 0
+            $script:DrVmV2RescueExecutions = [Collections.Generic.List[object]]::new()
+            $probe = [pscustomobject]@{
+                registered=$false;started=$false;polls=0;copies=0;sleeps=0;clock_reads=0
+                mode='v2-passed';arguments='';result_leaf='';observer_path='';bundle_path='';input_sha256=''
+            }
+            $name = 'rescue-v2-text-scale'
+            $trusted = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+            $out = Join-Path $trusted 'out'
+            [void](New-Item -ItemType Directory -Path $out -Force)
+            $observer = Join-Path $trusted 'windows-vm-acceptance.ps1'
+            [IO.File]::WriteAllText($observer,'source-bound observer fixture')
+            [IO.File]::WriteAllText((Join-Path $out 'text-scale-snapshot.json'),'{}')
+            $hostOut = Join-Path $root 'rescue-host-v2'
+            [void](New-Item -ItemType Directory -Path $hostOut)
+            Invoke-AcceptanceTextScaleRescue -Session $session -GuestRoot (Join-Path $root 'rescue-guest') `
+                -DesktopSid 'fixture-sid' -DesktopSessionId 7 -TaskName $name -TestTimeoutSeconds 60 `
+                -SuiteTimeoutSeconds 120 -ObserverSha256 (Get-LowerSha256 -Path $observer) `
+                -BundleRecords @([pscustomobject]@{file='fixture';sha256=('a' * 64)}) `
+                -InputManifestSha256 ('c' * 64) -Appearance system -HostOutputRoot $hostOut `
+                -AcceptanceProfileId vm-automated-v2-owned-resources `
+                -EngineEvidence ([pscustomobject]@{version='7.4.0';edition='Core';effective_policy='RemoteSigned'})
+            if ($script:DrVmV2RescueAttempts -ne 1 -or
+                $script:DrVmV2RescueExecutions.Count -ne 1 -or
+                $script:DrVmV2RescueExecutions[0].kind -cne 'text-scale' -or
+                $script:DrVmV2RescueExecutions[0].task_execution.observer_lifecycle.pid -ne 901) {
+                throw 'V2 rescue lost its separate task execution receipt.'
             }
             if ($runspace.RunspaceStateInfo.State -ne [Management.Automation.Runspaces.RunspaceState]::BeforeOpen) {
                 throw 'The rescue fixture unexpectedly opened a remote session.'

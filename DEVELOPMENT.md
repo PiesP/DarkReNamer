@@ -308,8 +308,17 @@ physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
 ### VM-Automated campaign development
 
-[`config/vm-automated-v1.json`](config/vm-automated-v1.json) is the canonical
-fixed profile. It declares 22 derived targets and five required gates. The
+Select either the strict
+[`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile or the
+owned-resources [`config/vm-automated-v2.json`](config/vm-automated-v2.json)
+profile before planning a new campaign. Their schema, ID, revision and source
+blob digest are distinct. Pass `--profile config/vm-automated-v2.json` to the
+campaign runner, `--acceptance-profile-id vm-automated-v2-owned-resources` to
+the native VM backend runner, and `--profile-id vm-automated-v2-owned-resources`
+to independent evidence validation. These local entrypoints and the hosted
+wrapper retain a v1 default for existing callers. The hosted
+workflow dispatch offers an explicit profile choice and defaults to v2. Each
+profile declares the same 22 derived targets and five required gates. The
 campaign runner converts those targets into 20 primary execution cells, because
 process crash, recovery export and Intent-only candidate discard share one
 execution group, then adds 10 independent core-UIA stability executions. The
@@ -335,16 +344,21 @@ summaries into passes. The repository owner uploads it as the sole asset of the
 dedicated private draft ingress release. The hosted validation workflow pins
 that release, asset, digest and size; revalidates candidate, source, profile and
 all raw evidence; removes its private scratch; and then attests only the
-canonical path-free statement. Promotion separately recomputes the statement,
-verifies that exact hosted run and attestation, and publishes the unchanged
-candidate bytes.
+canonical path-free v1 or v2 statement for the selected profile. Promotion
+requires its own explicit profile choice, recomputes that statement, checks the
+selected source profile and exact hosted run and attestation, and can publish
+only the unchanged candidate bytes. A v1 failure or partial campaign cannot be
+reinterpreted as v2 success.
 
 Local tooling checks, a packaged archive, or this documented profile do not
 show that the matrix has passed. The VM producer remains trusted to report its
 observations honestly; archive validation is not remote VM attestation. Human
 visual or comprehensive assistive-technology acceptance, actual IME and
 Explorer drag-and-drop, physical-media performance, physical power loss, and VM
-reset or storage-fault durability remain outside VM-Automated v1.
+reset or storage-fault durability remain outside both profiles. V2 verifies
+observed product behavior, essential input/focus/settings and owned-resource
+cleanup. It does not claim whole-session OS process stasis or explain every
+ambient OS lifetime; raw ambient observations remain in the private evidence.
 
 ### RuntimeBroker identity diagnostics
 

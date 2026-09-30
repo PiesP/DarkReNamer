@@ -39,6 +39,14 @@ on:
         description: Raw evidence archive byte length
         required: true
         type: string
+      profile_id:
+        description: Explicit VM-Automated profile
+        required: true
+        type: choice
+        default: vm-automated-v2-owned-resources
+        options:
+          - vm-automated-v2-owned-resources
+          - vm-automated-v1-win11-ntfs
 
 permissions:
   contents: read
@@ -79,6 +87,7 @@ jobs:
           INGRESS_ASSET_ID: ${{ inputs.ingress_asset_id }}
           INGRESS_ARCHIVE_SHA256: ${{ inputs.ingress_archive_sha256 }}
           INGRESS_ARCHIVE_SIZE: ${{ inputs.ingress_archive_size }}
+          PROFILE_ID: ${{ inputs.profile_id }}
         run: |
           foreach ($value in @(
               $env:CANDIDATE_RUN_ID,
@@ -96,6 +105,10 @@ jobs:
               $env:EXPECTED_EXE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
               $env:INGRESS_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'Hosted validation digest input is invalid.'
+          }
+          if ($env:PROFILE_ID -cnotin @('vm-automated-v1-win11-ntfs',
+              'vm-automated-v2-owned-resources')) {
+            throw 'Hosted validation profile choice is invalid.'
           }
           $source = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $source -cne $env:CANDIDATE_SOURCE_SHA -or
@@ -130,6 +143,7 @@ jobs:
           -IngressArchiveSize '${{ inputs.ingress_archive_size }}'
           -ValidationRunId '${{ github.run_id }}'
           -ValidationRunAttempt '${{ github.run_attempt }}'
+          -ProfileId '${{ inputs.profile_id }}'
           -CandidateHandoffRoot (Join-Path $PWD 'candidate')
           -TrustedSourceRoot $PWD
           -OutputPath (Join-Path $PWD 'validation-statement.json')

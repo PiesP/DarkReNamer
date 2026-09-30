@@ -21,6 +21,7 @@ from darkrenamer_tooling.campaign.verifier import (
     verify_desktop_lease,
     verify_layout_controls,
     verify_setting_restoration,
+    verify_owned_job_binding,
 )
 from darkrenamer_tooling.contracts.binding import Candidate
 from darkrenamer_tooling.evidence.archive import EvidenceError, ExtractedEvidence, FileReference
@@ -209,6 +210,35 @@ class PredicateTests(unittest.TestCase):
                   'process_job_cleanup': self.process_job_cleanup(),
                   'raw_cleanup': guest}
         return result, {'raw_cleanup': host}
+
+    def test_v2_cleanup_cannot_omit_or_substitute_actual_owned_jobs(self):
+        result, transport = self.core_records()
+        result.update(status='passed', failure_reason=None)
+        result['observer_lifecycle'] = {'pid': 7000, 'start_time_utc_ticks': '639000000000000000'}
+        transport['raw_cleanup']['owned_resource_evidence'] = {
+            'process_job_cleanup': deepcopy(result['process_job_cleanup']),
+            'task_execution': {'terminal': True, 'exit_code': 0,
+                               'observer_lifecycle': deepcopy(result['observer_lifecycle'])}}
+        verify_owned_job_binding(result, transport, profile_id='vm-automated-v2-owned-resources')
+        for replacement in ([], None, [{'pid': 9999}],
+                            [{**result['process_job_cleanup'][0], 'job_closed': False}]):
+            transport['raw_cleanup']['owned_resource_evidence']['process_job_cleanup'] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(EvidenceError):
+                verify_owned_job_binding(result, transport,
+                                         profile_id='vm-automated-v2-owned-resources')
+        transport['raw_cleanup']['owned_resource_evidence']['process_job_cleanup'] = deepcopy(
+            result['process_job_cleanup'])
+        transport['raw_cleanup']['owned_resource_evidence']['task_execution']['exit_code'] = 1
+        with self.assertRaises(EvidenceError):
+            verify_owned_job_binding(result, transport, profile_id='vm-automated-v2-owned-resources')
+        transport['raw_cleanup']['owned_resource_evidence']['task_execution']['exit_code'] = 0
+        result['status'] = 'failed'
+        with self.assertRaises(EvidenceError):
+            verify_owned_job_binding(result, transport, profile_id='vm-automated-v2-owned-resources')
+        result['status'] = 'passed'
+        transport['raw_cleanup']['owned_resource_evidence']['task_execution']['observer_lifecycle']['pid'] = 7001
+        with self.assertRaises(EvidenceError):
+            verify_owned_job_binding(result, transport, profile_id='vm-automated-v2-owned-resources')
 
     def test_core_startup_lock_is_observed_without_losing_prelaunch_assurance(self):
         result, transport = self.core_records()

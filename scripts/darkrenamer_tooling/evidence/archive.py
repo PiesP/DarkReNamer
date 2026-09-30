@@ -90,6 +90,28 @@ REQUIRED_GATE_IDS = frozenset({
     "immutable-promotion-binding",
 })
 
+# Historical v1 evidence retains its strict environment contract. Selection is
+# explicit and closed; an unknown profile must never fall back to either one.
+PROFILE_DEFINITIONS = {
+    "vm-automated-v1-win11-ntfs": (1, "config/vm-automated-v1.json"),
+    "vm-automated-v2-owned-resources": (2, "config/vm-automated-v2.json"),
+}
+
+
+def profile_definition(profile_id: object) -> tuple[int, str]:
+    _require(type(profile_id) is str and profile_id in PROFILE_DEFINITIONS,
+             "VM acceptance profile is unsupported by the fixed profile contract.")
+    return PROFILE_DEFINITIONS[profile_id]
+
+
+def validate_profile(profile: object) -> int:
+    _require(type(profile) is dict, "VM acceptance profile must be an object.")
+    revision, _ = profile_definition(profile.get("profile_id"))
+    _require(type(profile.get("revision")) is int and profile["revision"] == revision and
+             profile.get("schema") == f"darkrenamer-vm-automated-profile-v{revision}",
+             "VM acceptance profile schema, identity and revision differ.")
+    return revision
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -267,6 +289,7 @@ class ExtractedEvidence:
 
     root: Path
     files: Mapping[str, FileReference]
+    index_schema: str = "darkrenamer-vm-automated-index-v1"
 
 
 def _validate_relative_path(value: object, label: str) -> str:
@@ -892,7 +915,8 @@ def open_indexed_evidence_archive(
                                    member_limit=index_limit, aggregate_remaining=index_limit)
                 index = require_exact_keys(parse_bounded_json_bytes(index_bytes),
                                            {"schema", "files"}, "Evidence index")
-                _require(index["schema"] == "darkrenamer-vm-automated-index-v1",
+                _require(index["schema"] in ("darkrenamer-vm-automated-index-v1",
+                                              "darkrenamer-vm-automated-index-v2"),
                          "Unsupported evidence index schema.")
                 inventory = _coerce_inventory(index["files"], ArchiveLimits())
                 _require(index_name not in inventory and "campaign.json" in inventory,
@@ -903,7 +927,7 @@ def open_indexed_evidence_archive(
         # between bootstrap and extraction. Nothing from the archive executes.
         with open_verified_evidence_archive(archive_path, archive_reference,
                                             private_parent, inventory) as extracted:
-            yield extracted
+            yield ExtractedEvidence(extracted.root, extracted.files, index["schema"])
     except EvidenceError:
         raise
     except (BadZipFile, NotImplementedError, OSError, RuntimeError, zlib.error) as error:
@@ -933,7 +957,8 @@ def _validate_statement(statement: object) -> dict[str, object]:
         "schema", "result", "candidate", "harness", "profile", "environment",
         "targets", "required_gates", "ingress", "validation",
     }, "statement")
-    _require(top["schema"] == "darkrenamer-vm-automated-statement-v1",
+    _require(top["schema"] in ("darkrenamer-vm-automated-statement-v1",
+                               "darkrenamer-vm-automated-statement-v2"),
              "statement.schema is unsupported.")
     _require(type(top["result"]) is str and top["result"] in {"passed", "failed"},
              "statement.result is invalid.")
@@ -973,10 +998,10 @@ def _validate_statement(statement: object) -> dict[str, object]:
 
     profile = require_exact_keys(top["profile"], {"id", "revision", "sha256"},
                                  "statement.profile")
-    _require(profile["id"] == "vm-automated-v1-win11-ntfs",
-             "statement.profile.id differs from the fixed profile.")
-    _require(require_int(profile["revision"], 1, 1, "statement.profile.revision") == 1,
-             "statement.profile.revision differs from the fixed profile.")
+    revision, _ = profile_definition(profile["id"])
+    require_int(profile["revision"], revision, revision, "statement.profile.revision")
+    _require(top["schema"] == f"darkrenamer-vm-automated-statement-v{revision}",
+             "statement schema differs from its selected profile.")
     _require_sha256(profile["sha256"], "statement.profile.sha256")
 
     environment = require_exact_keys(top["environment"], {

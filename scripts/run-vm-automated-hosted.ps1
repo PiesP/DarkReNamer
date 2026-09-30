@@ -13,6 +13,8 @@ param(
     [string] $IngressArchiveSize,
     [string] $ValidationRunId,
     [string] $ValidationRunAttempt,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $ProfileId = 'vm-automated-v1-win11-ntfs',
     [string] $CandidateHandoffRoot,
     [string] $TrustedSourceRoot,
     [string] $OutputPath,
@@ -67,6 +69,23 @@ function Read-HostedJson {
         throw 'Authenticated GitHub metadata is not one bounded ordinary file.'
     }
     Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+}
+
+function Assert-HostedProfile {
+    param([Parameter(Mandatory)][string] $TrustedRoot,
+          [Parameter(Mandatory)][string] $ProfileId)
+    $selected = switch -CaseSensitive ($ProfileId) {
+        'vm-automated-v1-win11-ntfs' { @{ Path = 'config/vm-automated-v1.json'; Revision = 1 } }
+        'vm-automated-v2-owned-resources' { @{ Path = 'config/vm-automated-v2.json'; Revision = 2 } }
+        default { throw 'Unknown hosted profile ID.' }
+    }
+    $profile = Read-HostedJson (Join-Path $TrustedRoot $selected.Path)
+    if ($profile.schema -cne "darkrenamer-vm-automated-profile-v$($selected.Revision)" -or
+        $profile.profile_id -cne $ProfileId -or
+        ($profile.revision -isnot [int] -and $profile.revision -isnot [long]) -or
+        $profile.revision -ne $selected.Revision) {
+        throw 'Hosted source profile schema, ID or revision differs from the requested profile.'
+    }
 }
 
 function Assert-HostedRepository {
@@ -295,6 +314,7 @@ try {
         $env:GITHUB_REF -cne 'refs/heads/master') {
         throw 'Trusted checkout does not match the exact candidate source on master.'
     }
+    Assert-HostedProfile -TrustedRoot $trusted -ProfileId $ProfileId
 
     $scratch = Join-Path ([IO.Path]::GetFullPath($RunnerTemp)) (
         'darkrenamer-vm-hosted-' + [guid]::NewGuid().ToString('N')
@@ -442,6 +462,7 @@ try {
         }
 
         & $PythonExecutable -I (Join-Path $trusted 'scripts/validate-vm-automated-evidence.py') `
+            --profile-id $ProfileId `
             --archive $archivePath `
             --archive-sha256 $IngressArchiveSha256 `
             --archive-size $IngressArchiveSize `

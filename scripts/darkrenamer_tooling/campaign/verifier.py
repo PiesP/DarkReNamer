@@ -29,6 +29,33 @@ def require(condition: bool, message: str) -> None:
         raise EvidenceError(message)
 
 
+def verify_owned_job_binding(result: dict, transport: dict, *, profile_id: str) -> None:
+    """Join the cleanup ownership declaration to independently checked results."""
+    if profile_id == "vm-automated-v1-win11-ntfs":
+        return
+    require(profile_id == "vm-automated-v2-owned-resources", "Unknown ownership profile.")
+    require(result.get("status") in ("passed", "review_required") and
+            "failure_reason" in result and result["failure_reason"] is None,
+            "V2 observer reported a failure or omitted its outcome evidence.")
+    raw = transport.get("raw_cleanup")
+    require(type(raw) is dict and type(raw.get("owned_resource_evidence")) is dict,
+            "V2 cleanup ownership evidence is unavailable.")
+    evidence = raw["owned_resource_evidence"]
+    task = evidence.get("task_execution")
+    require(type(task) is dict and type(task.get("exit_code")) is int and
+            task["exit_code"] == 0 and task.get("terminal") is True,
+            "V2 acceptance observer task did not finish successfully.")
+    require(type(result.get("observer_lifecycle")) is dict and
+            task.get("observer_lifecycle") == result["observer_lifecycle"],
+            "V2 task closure differs from the protected observer lifetime record.")
+    jobs = result.get("process_job_cleanup")
+    require(type(jobs) is list and bool(jobs) and evidence.get("process_job_cleanup") == jobs,
+            "V2 cleanup Job ledger differs from the actual observer result.")
+    # The enclosing execution verifier joins these same jobs to candidate,
+    # native-test or recovery process-start lifetimes and raw filesystem state.
+    verify_process_job_cleanup(jobs)
+
+
 def canonical_digest(value: object) -> str:
     return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=True, allow_nan=False) + "\n").encode()).hexdigest()
@@ -137,7 +164,8 @@ def verify_authenticated_gate_metadata(value: object, candidate: Candidate) -> d
 
 
 def verify_core_execution(result: dict, bundle: dict, transport: dict, target: dict,
-                           *, keyboard: bool) -> None:
+                           *, keyboard: bool, profile_id: str = 'vm-automated-v1-win11-ntfs',
+                           profile_sha256: str | None = None) -> None:
     """Derive one UIA/keyboard rename trial without consuming its pass booleans."""
     observer = "ui" if keyboard else "core"
     verify_result_binding(result, bundle, observer=observer)
@@ -162,7 +190,9 @@ def verify_core_execution(result: dict, bundle: dict, transport: dict, target: d
     if keyboard:
         verify_keyboard_events(result["keyboard_events"], candidate_pid=pid, session_id=session,
                                main_workbench_hwnd=environment["target_display"]["hwnd"])
-    verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])
+    verify_owned_job_binding(result, transport, profile_id=profile_id)
+    verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"], profile_id=profile_id,
+                   profile_sha256=profile_sha256)
 
 
 RAIL_IDS = {"32771", "32772", "32773", "32774", "32775", "32776", "32777", "32778", "32779",
@@ -236,7 +266,9 @@ def verify_layout_raster(reader: EvidenceReader, document: str, layout: dict, en
 
 
 def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_path: str,
-                              *, source_sha: str, required_tests: list[str]) -> str:
+                              *, source_sha: str, required_tests: list[str],
+                              profile_id: str = 'vm-automated-v1-win11-ntfs',
+                              profile_sha256: str | None = None) -> str:
     """Join native transcripts and every process lifetime to its closed job."""
     bundle, result = reader.json(bundle_path), reader.json(result_path)
     require(type(bundle) is dict and type(result) is dict, "Backend records must be objects.")
@@ -307,7 +339,9 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
     require(type(embedded_transport) is dict and result.get("failure_reason") is None and
             embedded_transport.get("guest_cleanup") is True,
             "Backend runtime cleanup failed or was not observed.")
-    verify_controller_cleanup(embedded_transport.get("raw_cleanup"))
+    verify_owned_job_binding(result, embedded_transport, profile_id=profile_id)
+    verify_controller_cleanup(embedded_transport.get("raw_cleanup"), profile_id=profile_id,
+                              profile_sha256=profile_sha256)
     return canonical_digest({"bundle_sha256": reader.evidence.files[bundle_path].sha256,
                              "result_sha256": reader.evidence.files[result_path].sha256,
                              "binary_sha256": dict(sorted(expected.items())),
@@ -571,6 +605,19 @@ def verify_execution_freshness(reader: EvidenceReader, result: dict, transport: 
         require(identity not in seen, "A prior process lifetime was replayed as a fresh required execution.")
         seen.add(identity)
 
+def verify_owned_execution_freshness(transport: dict, *, seen: set[tuple],
+                                     run_names: set[str]) -> None:
+    """Reject replay of a v2 observer lifetime or its owned execution roots."""
+    evidence = transport["raw_cleanup"]["owned_resource_evidence"]
+    lifecycle = evidence["task_execution"]["observer_lifecycle"]
+    identity = (transport["vm_id"], lifecycle["pid"], int(lifecycle["start_time_utc_ticks"]))
+    name = evidence["run_name"]
+    require(identity not in seen, "A prior v2 observer lifetime was replayed as a fresh execution.")
+    require(name not in run_names, "A prior v2 owned run name was replayed as a fresh execution.")
+    seen.add(identity)
+    run_names.add(name)
+
+
 def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_sha256: str,
                               candidate: Candidate, component_hashes: dict[str, str],
                               tooling_inventory: dict[str, object] | None = None) -> dict:
@@ -579,6 +626,11 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     from darkrenamer_tooling.contracts.binding import verify_candidate_bundle
     from darkrenamer_tooling.contracts.tooling import verify_retained_tooling
 
+    from darkrenamer_tooling.evidence.archive import validate_profile
+    revision = validate_profile(profile)
+    profile_id = profile["profile_id"]
+    require(reader.evidence.index_schema == f"darkrenamer-vm-automated-index-v{revision}",
+            "Evidence archive index differs from the selected profile.")
     campaign, plan = reader.json("campaign.json"), reader.json("plan.json")
     attempts = validate_ledger(plan, campaign, profile=profile, profile_sha256=profile_sha256,
                                candidate=candidate, harness_sha=candidate.source_sha)
@@ -587,6 +639,8 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     completed: set[str] = set()
     process_identities: set[tuple] = set()
     vm_ids: set[str] = set()
+    owned_observer_identities: set[tuple] = set()
+    owned_run_names: set[str] = set()
     execution_digests = []
     tooling_digests = []
     for attempt, slot in zip(attempts, execution_slots(profile), strict=True):
@@ -603,16 +657,20 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             prefix = str(PurePosixPath(attempt["bundle"]).parent) + "/"
             tooling_digests.append(verify_retained_tooling(reader, prefix, tooling_inventory))
         require(result.get("failure_reason") is None, "Observer reported an incomplete execution.")
+        verify_owned_job_binding(result, transport, profile_id=profile_id)
         verify_desktop_lease(reader.json(attempt["desktop_lease"]), target, leases)
         if identifier == "core-uia-flow":
-            verify_core_execution(result, bundle, transport, target, keyboard=False)
+            verify_core_execution(result, bundle, transport, target, keyboard=False, profile_id=profile_id,
+                                  profile_sha256=profile_sha256)
         elif identifier == "core-keyboard-flow":
-            verify_core_execution(result, bundle, transport, target, keyboard=True)
+            verify_core_execution(result, bundle, transport, target, keyboard=True, profile_id=profile_id,
+                                  profile_sha256=profile_sha256)
         elif identifier.startswith("layout-"):
             verify_result_binding(result, bundle, observer="ui")
             keyboard = type(result.get("raw_environment")) is dict
             if keyboard:
-                verify_core_execution(result, bundle, transport, target, keyboard=True)
+                verify_core_execution(result, bundle, transport, target, keyboard=True, profile_id=profile_id,
+                                      profile_sha256=profile_sha256)
                 runs = [{"raw_environment": result["raw_environment"],
                          "raw_appearance": result["raw_appearance"],
                          "process_lifecycle": result["process_lifecycle"],
@@ -643,14 +701,19 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
                 expected_processes=layout_processes,
             )
             verify_setting_restoration(reader, attempt["result"], result, bundle, target)
-            verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])
+            verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"], profile_id=profile_id,
+                           profile_sha256=profile_sha256)
         else:
             verified = verify_recovery_execution(reader, result, bundle, transport, target,
                                                   run_prefix=str(PurePosixPath(attempt["transport"]).parent) + "/",
-                                                  result_path=attempt["result"])
+                                                  result_path=attempt["result"], profile_id=profile_id,
+                                                  profile_sha256=profile_sha256)
             require(verified == set(slot["targets"]), "Recovery raw observations do not satisfy the complete execution group.")
         verify_execution_freshness(reader, result, transport, run_prefix="runs/" + slot["id"] + "/",
                                    seen=process_identities, vm_ids=vm_ids)
+        if revision == 2:
+            verify_owned_execution_freshness(transport, seen=owned_observer_identities,
+                                            run_names=owned_run_names)
         completed.update(slot["targets"])
         execution_digests.append({"slot": slot["id"], **{
             field: reader.evidence.files[attempt[field]].sha256
@@ -683,13 +746,16 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     backend_result = reader.json(backend["result"])
     require(type(backend_result) is dict and type(backend_result.get("transport")) is dict,
             "Backend embedded controller transport is unavailable.")
-    external_cleanup = verify_controller_cleanup(backend_transport.get("raw_cleanup"))
-    embedded_cleanup = verify_controller_cleanup(backend_result["transport"].get("raw_cleanup"))
+    external_cleanup = verify_controller_cleanup(backend_transport.get("raw_cleanup"), profile_id=profile_id,
+                                                 profile_sha256=profile_sha256)
+    embedded_cleanup = verify_controller_cleanup(backend_result["transport"].get("raw_cleanup"), profile_id=profile_id,
+                                                 profile_sha256=profile_sha256)
     require(external_cleanup == embedded_cleanup,
             "Backend embedded and external controller cleanup observations differ.")
     backend_digest = verify_backend_execution(reader, backend["bundle"], backend["result"],
                                               source_sha=candidate.source_sha,
-                                              required_tests=profile["required_backend_test_names"])
+                                              required_tests=profile["required_backend_test_names"], profile_id=profile_id,
+                                              profile_sha256=profile_sha256)
     return {"backend_sha256": backend_digest,
             "profile_evidence_sha256": canonical_digest({"profile_sha256": profile_sha256,
                 "plan_sha256": reader.evidence.files["plan.json"].sha256,
