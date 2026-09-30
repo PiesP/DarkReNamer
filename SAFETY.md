@@ -376,6 +376,22 @@ restoration and unresolved owned lifetimes retain the roots. Cleanup permission
 does not change the original result, permit another workload, or establish a
 passing campaign. The strict runner-environment predicate below still applies.
 
+Product behavior, owned-resource cleanup and the external runner environment
+must remain distinguishable in retained evidence. Unknown ownership, incomplete
+observations or uncertain restoration cannot establish successful cleanup.
+An observed external process difference is not by itself proof of a product
+resource leak, but it still fails the strict environment contract. A separate
+owned-cleanup proof cannot replace the original execution or environment
+receipt. Cleanup after a strict environment rejection requires externally
+preserved, integrity-checked failure evidence before any owned-root removal;
+it cannot authorize the next campaign slot or reclassify a prior failure.
+
+The completed bounded RuntimeBroker diagnostic does not justify a new process
+allowance. Missing preparation-control coverage, failed diagnostic attempts,
+best-effort event delivery and unidentified historical lifetimes remain limits
+on its conclusions. No change in those conclusions is inferred from a later
+successful owned cleanup.
+
 Controller cleanup requires complete process and scheduled-task inventories to
 show no runner delta after intervention and after resource removal. One initial
 same-user, same-session process delta may be waited for only when it is one of:
