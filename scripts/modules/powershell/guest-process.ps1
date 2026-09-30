@@ -2235,7 +2235,8 @@ function Invoke-RustTestBinary {
         finally {
             if ($null -ne $processState.process) {
                 try {
-                    $row.job_cleanup = Close-JobBoundProcess -State $processState.process
+                    $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $processState.process
+                    $row.job_cleanup = $jobCleanup.status -ceq 'clean'
                     $processState.process.process.Dispose()
                     if (-not $row.job_cleanup) {
                         $row.status = 'failed'

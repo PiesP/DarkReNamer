@@ -2080,6 +2080,42 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         if ($suiteBytesCaptured -ne $suiteBudgetBytes -or $suiteRunCount -ne 2) {
             throw 'The shrinking per-test output allowance did not cap the complete guest suite.'
         }
+        $jobLedgerOutputRoot = Join-Path $valid.root 'rust-job-ledger-output'
+        [void](New-Item -ItemType Directory -Path $jobLedgerOutputRoot)
+        $savedJobLedger = $script:AcceptanceProcessJobCleanup
+        $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
+        try {
+            $jobLedgerCountBefore = $script:AcceptanceProcessJobCleanup.Count
+            $jobLedgerTest = [pscustomobject]@{
+                file = Split-Path -Leaf $jobPowerShell
+                name = 'rust-job-ledger-fixture'
+                sha256 = Get-LowerSha256 -Path $jobPowerShell
+            }
+            # The real child rejects libtest arguments. Even a failed test must
+            # retain its exact lifecycle and closed Job in the independent ledger.
+            $jobLedgerRow = Invoke-RustTestBinary `
+                -Test $jobLedgerTest `
+                -Root (Split-Path -Parent $jobPowerShell) `
+                -OutputRoot $jobLedgerOutputRoot `
+                -RuntimeRoot $runtimeObservationRoot `
+                -Index 98 `
+                -TimeoutSeconds 20
+            if ($jobLedgerRow.status -cne 'failed' -or -not $jobLedgerRow.job_cleanup -or
+                $script:AcceptanceProcessJobCleanup.Count -ne ($jobLedgerCountBefore + 1)) {
+                throw 'A launched Rust test must retain exactly one closed process-job record.'
+            }
+            $jobLedgerRecord = $script:AcceptanceProcessJobCleanup[$jobLedgerCountBefore]
+            if ($jobLedgerRecord.pid -ne $jobLedgerRow.process_lifecycle.pid -or
+                $jobLedgerRecord.process_start_time_utc_ticks -cne
+                    $jobLedgerRow.process_lifecycle.start_time_utc_ticks -or
+                $jobLedgerRecord.status -cne 'clean' -or
+                -not $jobLedgerRecord.job_empty -or -not $jobLedgerRecord.job_closed -or
+                -not $jobLedgerRecord.capture_complete) {
+                throw 'The Rust test job record must match its exact lifecycle and closed capture.'
+            }
+        }
+        finally { $script:AcceptanceProcessJobCleanup = $savedJobLedger }
+
         $exhaustedOutputRoot = Join-Path $valid.root 'exhausted-output'
         [void](New-Item -ItemType Directory -Path $exhaustedOutputRoot)
         $exhaustedSuiteRow = Invoke-RustTestBinary `

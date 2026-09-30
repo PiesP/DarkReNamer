@@ -96,14 +96,30 @@ class CampaignRunnerTests(unittest.TestCase):
         )["required_backend_test_names"]
         tests = []
         binaries = []
+        process_jobs = []
+
+        def clean_job(lifecycle: dict) -> dict:
+            return {"pid": lifecycle["pid"],
+                    "process_start_time_utc_ticks": lifecycle["start_time_utc_ticks"],
+                    "job_empty": True, "job_closed": True, "capture_complete": True,
+                    "active_processes_at_primary_exit": None, "had_survivors": False,
+                    "forced_termination": False, "active_processes_at_close": 0,
+                    "active_processes_at_stop": None, "active_process_ids_at_stop": [],
+                    "total_processes_at_stop": None, "primary_process_active_at_stop": None,
+                    "termination_exit_code": None, "status": "clean", "error": None}
+
         for index, name in enumerate(required):
             stdout = f"test-{index}.stdout.txt"
             stderr = f"test-{index}.stderr.txt"
             (self.backend / stdout).write_text(f"test native::{name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n", encoding="utf-8")
             (self.backend / stderr).write_text("", encoding="utf-8")
+            lifecycle = {"pid": 20_000 + index,
+                         "start_time_utc_ticks": str(639100000000000000 + index)}
+            process_jobs.append(clean_job(lifecycle))
             tests.append({
                 "name": f"native-binary-{index}", "file": f"test-{index}.exe",
                 "sha256": hashlib.sha256(b"large executable").hexdigest(), "exit_code": 0, "passed": 1, "failed": 0, "ignored": 0,
+                "process_lifecycle": lifecycle,
                 "stdout": {"file": stdout, "sha256": hashlib.sha256((self.backend / stdout).read_bytes()).hexdigest(),
                            "bytes": (self.backend / stdout).stat().st_size},
                 "stderr": {"file": stderr, "sha256": hashlib.sha256(b"").hexdigest(), "bytes": 0},
@@ -121,8 +137,13 @@ class CampaignRunnerTests(unittest.TestCase):
             "runner": {"file": "windows-vm-guest.ps1", "sha256": "f" * 64},
         })
         backend_cleanup = clean_controller_cleanup()
+        gui_lifecycle = {"pid": 20_000 + len(tests),
+                         "start_time_utc_ticks": str(639100000000000000 + len(tests))}
+        process_jobs.append(clean_job(gui_lifecycle))
         write_json(self.backend / "result.json", {"schema_version": 1, "source_sha": HARNESS_SHA,
             "source_state": "clean", "target": "x86_64-pc-windows-msvc", "tests": tests,
+            "gui": {"process_lifecycle": gui_lifecycle},
+            "process_job_cleanup": process_jobs,
             "failure_reason": None, "transport": {
                 "guest_cleanup": True, "raw_cleanup": backend_cleanup}})
         result_path = self.backend / "result.json"
