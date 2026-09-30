@@ -2609,14 +2609,14 @@ public static class DarkReNamerVmControllerWorkspace {
                     [string]::IsNullOrWhiteSpace($groupId)) {
                     throw 'A scheduled task principal is unavailable for the runner inventory.'
                 }
-                $userSid = $null
+                $resolvedTaskUserSid = $null
                 if (-not [string]::IsNullOrWhiteSpace($userId)) {
                     try {
                         if ($userId -cmatch '^S-1-\d+(?:-\d+)+$') {
-                            $userSid = [Security.Principal.SecurityIdentifier]::new($userId)
+                            $resolvedTaskUserSid = [Security.Principal.SecurityIdentifier]::new($userId)
                         }
                         else {
-                            $userSid = [Security.Principal.NTAccount]::new($userId).Translate(
+                            $resolvedTaskUserSid = [Security.Principal.NTAccount]::new($userId).Translate(
                                 [Security.Principal.SecurityIdentifier])
                         }
                     }
@@ -2626,7 +2626,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 }
                 # Group-principal tasks are retained in the baseline as potential
                 # runner resources; their membership may differ in the desktop token.
-                if ($userSid -and ($userSid.Value -ceq $UserSid -or
+                if ($resolvedTaskUserSid -and ($resolvedTaskUserSid.Value -ceq $UserSid -or
                     -not [string]::IsNullOrWhiteSpace($groupId))) {
                     $includeTask = $true
                 }

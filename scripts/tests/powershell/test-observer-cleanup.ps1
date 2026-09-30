@@ -1637,4 +1637,50 @@ try {
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }
+if ($IsWindows) {
+    & {
+        $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+        $definitions=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmRunnerTasks'
+        },$true))
+        if($errors.Count -or $definitions.Count -ne 1){throw 'Runner task inventory function is not unique.'}
+        . ([scriptblock]::Create($definitions[0].Extent.Text.Replace(
+            'function global:Get-DrVmRunnerTasks','function Get-DrVmRunnerTasks')))
+        $targetSid='S-1-5-21-111-222-333-444'
+        $taskInventoryFixtures=@(
+            [pscustomobject]@{TaskPath='\';TaskName='system';Principal=[pscustomobject]@{UserId='S-1-5-18';GroupId=''}},
+            [pscustomobject]@{TaskPath='\';TaskName='runner';Principal=[pscustomobject]@{UserId=$targetSid;GroupId=''}},
+            [pscustomobject]@{TaskPath='\';TaskName='other';Principal=[pscustomobject]@{UserId='S-1-5-21-111-222-333-555';GroupId=''}},
+            [pscustomobject]@{TaskPath='\';TaskName='group';Principal=[pscustomobject]@{UserId='';GroupId='S-1-5-32-545'}}
+        )
+        function Get-ScheduledTask {
+            [CmdletBinding()]param()
+            $taskInventoryFixtures
+        }
+        function Export-ScheduledTask {
+            [CmdletBinding()]param([string]$TaskName,[string]$TaskPath)
+            '<Task>'+ $TaskName +'</Task>'
+        }
+        $rows=@(Get-DrVmRunnerTasks -UserSid $targetSid | Sort-Object task_name)
+        if($rows.Count -ne 2 -or $rows[0].task_name -cne 'group' -or $rows[1].task_name -cne 'runner') {
+            throw 'Task inventory lost the requested runner SID or included an unrelated principal.'
+        }
+        foreach($row in $rows) {
+            $xml='<Task>'+ $row.task_name +'</Task>'
+            $expected=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                [Text.Encoding]::UTF8.GetBytes($xml))).ToLowerInvariant()
+            if($row.identity -cne ('\'+$row.task_name) -or $row.task_path -cne '\' -or
+                $row.definition_sha256 -cne $expected) {
+                throw 'Runner task inventory changed its definition binding.'
+            }
+        }
+        $taskInventoryFixtures=@([pscustomobject]@{
+            TaskPath='\';TaskName='unknown';Principal=[pscustomobject]@{UserId='';GroupId=''}})
+        Assert-Fails { Get-DrVmRunnerTasks -UserSid $targetSid } 'principal is unavailable'
+        Assert-Fails { Get-DrVmRunnerTasks -UserSid 'invalid' } 'principal SID is invalid'
+    }
+}
 Write-Host 'Observer cleanup contracts passed.'
