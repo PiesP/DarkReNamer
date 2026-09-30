@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -217,6 +218,52 @@ def _source_sha(document: dict) -> object:
     return product.get("source_sha") if type(product) is dict else document.get("source_sha")
 
 
+def _setting_snapshot(value: dict, kind: str) -> None:
+    if kind == "high-contrast":
+        row = require_exact_keys(value, {"flags", "scheme", "colors", "visual_style"},
+                                 "High Contrast settings")
+        require(type(row["flags"]) is int and 0 <= row["flags"] <= 0xFFFFFFFF and
+                (row["scheme"] is None or type(row["scheme"]) is str),
+                "High Contrast flags or scheme are unavailable.")
+        colors = require_exact_keys(row["colors"], {
+            "window", "window_text", "button_face", "button_text", "highlight",
+            "highlight_text", "gray_text", "hot_light",
+        }, "High Contrast colors")
+        require(all(type(color) is int and 0 <= color <= 0xFFFFFFFF for color in colors.values()),
+                "High Contrast color observations are incomplete.")
+        style = require_exact_keys(row["visual_style"], {"path", "color", "size"},
+                                   "High Contrast visual style")
+        require(all(type(item) is str and bool(item.strip()) and
+                    not any(ord(unit) < 32 for unit in item) for item in style.values()) and
+                len(style["path"]) <= 510 and
+                re.match(r"^(?:[A-Za-z]:\\|\\\\)", style["path"]) is not None and
+                len(style["color"]) <= 126 and len(style["size"]) <= 126,
+                "High Contrast visual style is unavailable.")
+    else:
+        row = require_exact_keys(value, {
+            "registry_key_existed", "registry_value_existed", "registry_value_kind",
+            "registry_value", "ui_settings_raw_factor", "ui_settings_percent",
+        }, "Text scale settings")
+        require(type(row["registry_key_existed"]) is bool and
+                type(row["registry_value_existed"]) is bool and
+                row["registry_key_existed"],
+                "Text scale registry presence is unavailable.")
+        require(type(row["ui_settings_raw_factor"]) in (int, float) and
+                math.isfinite(row["ui_settings_raw_factor"]) and
+                1.0 <= row["ui_settings_raw_factor"] <= 2.25 and
+                type(row["ui_settings_percent"]) is int and
+                row["ui_settings_percent"] == round(row["ui_settings_raw_factor"] * 100),
+                "Text scale UISettings observations are unavailable.")
+        if not row["registry_value_existed"]:
+            require(row["registry_value_kind"] is None and row["registry_value"] is None,
+                    "Absent text scale value retains an unexplained registry observation.")
+        else:
+            kind_name, observed = row["registry_value_kind"], row["registry_value"]
+            valid = (kind_name == "DWord" and type(observed) is int and
+                     0 <= observed <= 0xFFFFFFFF)
+            require(valid, "Text scale registry value kind or raw value is unknown.")
+
+
 def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> None:
     if context["task_kind"] != "ui":
         return
@@ -232,7 +279,8 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
             "restoration_required", "restoration_verified", "original", "restored",
         }, f"{kind} restoration")
         expected_schema = 2 if kind == "high-contrast" else 1
-        require(snapshot["schema_version"] == expected_schema and
+        require(type(snapshot["schema_version"]) is int and
+                snapshot["schema_version"] == expected_schema and
                 snapshot["source_sha"] == context["source_sha"] and
                 snapshot["acceptance_script_sha256"] == context["observer_sha256"] and
                 snapshot["restoration_required"] is (kind == "text-scale") and
@@ -240,6 +288,8 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
                 type(snapshot["original"]) is dict and type(snapshot["restored"]) is dict,
                 f"{kind} restoration observation is incomplete or unbound.")
         original, restored = dict(snapshot["original"]), dict(snapshot["restored"])
+        _setting_snapshot(original, kind)
+        _setting_snapshot(restored, kind)
         if kind == "high-contrast":
             require((original.get("scheme") or "") == (restored.get("scheme") or ""),
                     "High Contrast scheme was not restored.")
@@ -346,7 +396,8 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
         "schema_version", "nonce", "preservation_sha256", "desktop_lease_sha256",
     }, "Desktop closure signal")
     lease = _json(lease_bytes, "Desktop lease")
-    require(receipt["schema_version"] == proof["schema_version"] == signal["schema_version"] == 1 and
+    require(all(type(document["schema_version"]) is int and document["schema_version"] == 1
+                for document in (receipt, proof, signal)) and
             receipt["kind"] == "owned_cleanup_strict_failure_preservation" and
             proof["kind"] == "owned_cleanup_after_strict_failure" and
             type(receipt["run_name"]) is str and RUN.fullmatch(receipt["run_name"]) is not None and

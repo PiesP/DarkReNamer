@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 from darkrenamer_tooling.contracts.owned_cleanup import (
-    _process_jobs, _reject_owned_entries, _restoration, verify_preserved_owned_cleanup,
+    _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
+    verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
 
@@ -39,6 +40,20 @@ def process_result(source_sha):
                 'total_processes_at_stop': None, 'primary_process_active_at_stop': None,
                 'termination_exit_code': None, 'status': 'clean', 'error': None,
             }]}
+
+
+def high_contrast_snapshot(scheme):
+    return {'flags': 1, 'scheme': scheme,
+            'colors': {key: 0 for key in ('window', 'window_text', 'button_face',
+                       'button_text', 'highlight', 'highlight_text', 'gray_text', 'hot_light')},
+            'visual_style': {'path': r'C:\Windows\Resources\Themes\aero.msstyles',
+                             'color': 'NormalColor', 'size': 'NormalSize'}}
+
+
+def text_scale_snapshot(factor):
+    return {'registry_key_existed': True, 'registry_value_existed': True,
+            'registry_value_kind': 'DWord', 'registry_value': 100,
+            'ui_settings_raw_factor': factor, 'ui_settings_percent': round(factor * 100)}
 
 
 class OwnedCleanupTests(unittest.TestCase):
@@ -200,6 +215,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_rejects_mutated_evidence_and_missing_raw_observations(self):
         for path, value in (
             ('original-transport.json', {**self.original, 'guest_cleanup': True}),
+            ('owned-cleanup-after-strict-failure.json', {**self.proof, 'schema_version': True}),
             ('owned-cleanup-after-strict-failure.json', {**self.proof, 'status': 'incomplete'}),
             ('owned-cleanup-after-strict-failure.json', {**self.proof, 'post': None}),
             ('owned-cleanup-after-strict-failure.json', {
@@ -257,10 +273,9 @@ class OwnedCleanupTests(unittest.TestCase):
         listed = set()
         for kind, filename, schema, required, original, restored in (
             ('high_contrast', 'high-contrast-restore.json', 2, False,
-             {'flags': 1, 'scheme': None}, {'flags': 1, 'scheme': ''}),
+             high_contrast_snapshot(None), high_contrast_snapshot('')),
             ('text_scale', 'text-scale-snapshot.json', 1, True,
-             {'registry_value': 100, 'ui_settings_raw_factor': 1.0},
-             {'registry_value': 100, 'ui_settings_raw_factor': 1.0000005}),
+             text_scale_snapshot(1.0), text_scale_snapshot(1.0000005)),
         ):
             data = write(self.root / filename, {
                 'schema_version': schema, 'source_sha': source_sha,
@@ -289,12 +304,25 @@ class OwnedCleanupTests(unittest.TestCase):
             'schema_version': 1, 'source_sha': source_sha,
             'acceptance_script_sha256': observer_sha,
             'restoration_required': True, 'restoration_verified': True,
-            'original': {'registry_value': 100, 'ui_settings_raw_factor': 1.0},
-            'restored': {'registry_value': 100, 'ui_settings_raw_factor': 1.01},
+            'original': text_scale_snapshot(1.0),
+            'restored': text_scale_snapshot(1.01),
         })
         result['text_scale']['snapshot']['sha256'] = digest(data)
         with self.assertRaises(EvidenceError):
             _restoration(self.root, result, context, listed)
+
+    def test_rejects_incomplete_and_unknown_settings_even_if_equal(self):
+        for kind, snapshot in (('high-contrast', high_contrast_snapshot(None)),
+                               ('text-scale', text_scale_snapshot(1.0))):
+            _setting_snapshot(snapshot, kind)
+            for key in snapshot:
+                partial = {name: item for name, item in snapshot.items() if name != key}
+                with self.subTest(kind=kind, missing=key), self.assertRaises(EvidenceError):
+                    _setting_snapshot(partial, kind)
+        unknown = text_scale_snapshot(1.0)
+        unknown['registry_value_kind'] = 'QWord'
+        with self.assertRaises(EvidenceError):
+            _setting_snapshot(unknown, 'text-scale')
 
 
 if __name__ == '__main__':
