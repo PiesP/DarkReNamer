@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from darkrenamer_tooling.contracts.owned_cleanup import (
-    _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
+    _observer_finished, _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
     verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
@@ -323,6 +323,20 @@ class OwnedCleanupTests(unittest.TestCase):
         unknown['registry_value_kind'] = 'QWord'
         with self.assertRaises(EvidenceError):
             _setting_snapshot(unknown, 'text-scale')
+
+    def test_observer_exit_and_restore_errors_are_independently_checked(self):
+        original = {'observer_process': {'state': 'exited', 'exit_code': 1}}
+        result = {'status': 'failed', 'failure_reason': 'workload_failure'}
+        _observer_finished(original, result, 'ui')
+        for changed in ({}, {'state': 'running', 'exit_code': 1},
+                        {'state': 'exited', 'exit_code': None}):
+            with self.subTest(process=changed), self.assertRaises(EvidenceError):
+                _observer_finished({'observer_process': changed}, result, 'ui')
+        for kind, reason in (('ui', 'raw_cleanup_failed'),
+                             ('recovery', 'candidate_export_cleanup_observation_failed'),
+                             ('ui', 'execution_state_restore_failed')):
+            with self.subTest(kind=kind, reason=reason), self.assertRaises(EvidenceError):
+                _observer_finished(original, {**result, 'failure_reason': reason}, kind)
 
 
 if __name__ == '__main__':

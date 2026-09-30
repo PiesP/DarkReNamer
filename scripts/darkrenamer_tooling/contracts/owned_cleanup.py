@@ -218,6 +218,28 @@ def _source_sha(document: dict) -> object:
     return product.get("source_sha") if type(product) is dict else document.get("source_sha")
 
 
+def _observer_finished(original: dict, result: dict, kind: str) -> None:
+    if kind == "core":
+        return
+    process = require_exact_keys(original.get("observer_process"), {"state", "exit_code"},
+                                 "Original observer termination")
+    require(process["state"] == "exited" and type(process["exit_code"]) is int,
+            "Original observer lifetime is not terminal.")
+    ambiguous = {"execution_state_restore_failed", "desktop_lock_release_failed"}
+    ambiguous.update({
+        "runtime_cleanup_failed", "raw_cleanup_failed", "raw_cleanup_observation_failed",
+    } if kind == "ui" else {
+        "owned_process_cleanup_observation_failed", "journal_cleanup_observation_failed",
+        "process_job_cleanup_failed", "runtime_cleanup_refused",
+        "runtime_cleanup_observation_failed", "candidate_export_cleanup_observation_failed",
+    })
+    allowed = {"review_required", "failed", "environment_blocked", "unsupported", "not_run"}
+    if kind == "recovery":
+        allowed = {"passed", "failed"}
+    require(result.get("status") in allowed and result.get("failure_reason") not in ambiguous,
+            "Original observer result cannot establish desktop restoration or owned closure.")
+
+
 def _setting_snapshot(value: dict, kind: str) -> None:
     if kind == "high-contrast":
         row = require_exact_keys(value, {"flags", "scheme", "colors", "visual_style"},
@@ -350,6 +372,7 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
     bundle = _json(bundle_data, "Source bundle")
     require(_source_sha(result) == _source_sha(bundle) == context["source_sha"],
             "Copied result, bundle, and source commit differ.")
+    _observer_finished(original, result, context["task_kind"])
     _process_jobs(result, context["task_kind"], root, receipt["files"])
     if context["task_kind"] != "core":
         require(type(context["observer_sha256"]) is str and
