@@ -322,7 +322,7 @@ def build_crash():
                 "file": "startup-recovery-confirmation.png",
                 "sha256": hashlib.sha256(screenshot).hexdigest(), "width": 2, "height": 2}}
     result["process_crash"] = mode
-    exported = builder.add("recovery-export/active.drj.retained", interrupted, "recovery-export")
+    exported = builder.add("recovery-export.drj", interrupted, "recovery-export")
     result["recovery_export"] = {"source_active_journal": interrupted_ref, "raw": exported}
 
     intent_processes, ip = add_processes(builder, ["intent-cancel", "intent-relaunch", "intent-discard"],
@@ -462,9 +462,40 @@ class RecoveryProfileTests(unittest.TestCase):
 
     def test_complete_crash_group_derives_three_targets(self):
         reader, result, bundle, transport = self.crash_copy()
+        for relative in ("interrupted-active.drj", "active-after-default-cancel.drj",
+                         "active-after-export.drj"):
+            self.assertEqual(reader.files[PRIVATE_ROOT + "/recovery-export.drj"],
+                             reader.files[PRIVATE_ROOT + "/" + relative])
         self.assertEqual(verify_recovery_execution(reader, result, bundle, transport, target(),
                                                    run_prefix=RUN_PREFIX, result_path=RESULT_PATH),
                          {"process-crash", "recovery-export", "intent-only-discard"})
+
+    def test_export_requires_fixed_indexed_member_and_reference_pins(self):
+        reader, result, bundle, transport = self.crash_copy()
+        fixed_path = PRIVATE_ROOT + "/recovery-export.drj"
+        old_relative = "recovery-export/active.drj.retained"
+        reader.files[PRIVATE_ROOT + "/" + old_relative] = reader.files.pop(fixed_path)
+        index_path = PRIVATE_ROOT + "/private-index.json"
+        index = reader.json(index_path)
+        next(row for row in index["files"] if row["file"] == "recovery-export.drj")["file"] = old_relative
+        index_data = encode(index)
+        reader.files[index_path] = index_data
+        result["private_evidence"]["bytes"] = len(index_data)
+        result["private_evidence"]["sha256"] = hashlib.sha256(index_data).hexdigest()
+        with self.assertRaisesRegex(EvidenceError, "fixed indexed member"):
+            verify_recovery_execution(reader, result, bundle, transport, target(),
+                                      run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
+        for field, value, message in (
+            ("boundary", "other", "wrong semantic boundary"),
+            ("sha256", "0" * 64, "mock digest reference is absent"),
+            ("bytes", 1, "mock digest reference is absent"),
+        ):
+            reader, result, bundle, transport = self.crash_copy()
+            result["recovery_export"]["raw"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(EvidenceError, message):
+                verify_recovery_execution(reader, result, bundle, transport, target(),
+                                          run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_crash_job_receipt_is_complete_private_and_lifecycle_bound(self):
         for mutation in ("missing-row", "wrong-pid", "wrong-nonce", "uncaptured"):
