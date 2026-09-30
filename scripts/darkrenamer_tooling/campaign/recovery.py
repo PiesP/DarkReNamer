@@ -164,15 +164,6 @@ class PrivateEvidence:
         self.used.add(relative)
         return self.root + "/" + relative
 
-    def any_path(self, reference: object, *, boundary: str, prefix: str) -> str:
-        row, digest = self._reference(reference)
-        require(row["boundary"] == boundary, "Private reference has the wrong semantic boundary.")
-        matches = [relative for relative, pin in self.rows.items()
-                   if relative.startswith(prefix) and pin == (row["bytes"], digest)]
-        require(len(matches) == 1, "Private reference is ambiguous within its fixed boundary directory.")
-        self.used.add(matches[0])
-        return self.root + "/" + matches[0]
-
     def raw(self, reference: object, relative: str, *, boundary: str) -> bytes:
         return self.reader.bytes(self.path(reference, relative, boundary=boundary), MAX_MEMBER_BYTES)
 
@@ -650,8 +641,7 @@ def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target:
                             "Recovery export result")
     require(export["source_active_journal"] == interrupted_ref,
             "Recovery export does not reuse the exact interrupted-journal reference.")
-    export_path = private.any_path(export["raw"], boundary="recovery-export", prefix="recovery-export/")
-    exported = private.reader.bytes(export_path, MAX_MEMBER_BYTES)
+    exported = private.raw(export["raw"], "recovery-export.drj", boundary="recovery-export")
     verify_recovery_export(interrupted, exported, after_export)
 
     intent = _required_keys(result.get("intent_only_candidate_discard"),
