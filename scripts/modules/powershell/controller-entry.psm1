@@ -228,7 +228,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
             })
             $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
-            $prefixes = @($roots.guest.path.TrimEnd('\')+'\', $roots.trusted.path.TrimEnd('\')+'\')
+            $prefixes = @(($roots.guest.path.TrimEnd('\')+'\'), ($roots.trusted.path.TrimEnd('\')+'\'))
             $ownedProcesses = @($allProcesses | Where-Object {
                 $path = [string]$_.ExecutablePath
                 $path.StartsWith($prefixes[0],[StringComparison]::OrdinalIgnoreCase) -or
@@ -5268,7 +5268,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $proof | Add-Member -NotePropertyName nonce -NotePropertyValue $nonce -Force
                 $temporaryProof = $proofPath + '.tmp'
                 Write-DrControllerExclusiveJson -Path $temporaryProof -Value $proof -MaximumBytes 1MB
-                [IO.File]::Replace($temporaryProof,$proofPath,$null)
+                # PowerShell coerces $null to an empty string for this string overload.
+                [IO.File]::Replace($temporaryProof,$proofPath,[NullString]::Value)
             }
         }
     }
