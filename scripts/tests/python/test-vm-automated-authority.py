@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from darkrenamer_tooling.contracts import authority
 REPO = 'PiesP/DarkReNamer'
@@ -58,7 +59,8 @@ class AuthorityTests(unittest.TestCase):
 
     def check_run(self, run, rows, **overrides):
         arguments = dict(expected_repository=REPO, source_sha=SOURCE, run_id='43',
-                         run_attempt='2', statement_sha256=DIGEST)
+                         run_attempt='2', statement_sha256=DIGEST,
+                         profile_id='vm-automated-v1-win11-ntfs')
         arguments.update(overrides)
         return authority.validate_run_authority(REPOSITORY, run, rows, **arguments)
 
@@ -125,6 +127,70 @@ class AuthorityTests(unittest.TestCase):
 
     def test_exact_successful_run_and_certificate(self):
         self.assertTrue(self.check_run(*self.run_fixture()).endswith('/43/attempts/2'))
+
+    def test_selected_source_profile_is_exactly_typed_and_pinned(self):
+        for profile_id, (revision, path) in authority.PROFILE_DEFINITIONS.items():
+            blob = ('{"schema":"darkrenamer-vm-automated-profile-v%d",'
+                    '"profile_id":"%s","revision":%d}' %
+                    (revision, profile_id, revision)).encode()
+            def git_output(command, **_kwargs):
+                if command[1] == 'ls-tree':
+                    self.assertEqual(command[-1], path)
+                    return '100644 blob ' + 'a' * 40 + '\t' + path
+                self.assertEqual(command[-1], SOURCE + ':' + path)
+                return blob
+            with self.subTest(profile_id=profile_id), patch.object(
+                    authority.subprocess, 'check_output', side_effect=git_output):
+                self.assertEqual(authority.source_profile(Path('.'), SOURCE, profile_id),
+                                 (revision, hashlib.sha256(blob).hexdigest()))
+            for bad in (blob.replace(b'"revision":%d' % revision, b'"revision":true'),
+                        blob.replace(b'"profile_id":"', b'"profile_id":"wrong-')):
+                with self.subTest(profile_id=profile_id, bad=bad), patch.object(
+                        authority.subprocess, 'check_output',
+                        side_effect=lambda command, **kwargs: (
+                            '100644 blob ' + 'a' * 40 + '\t' + path
+                            if command[1] == 'ls-tree' else bad)):
+                    with self.assertRaises(ValueError):
+                        authority.source_profile(Path('.'), SOURCE, profile_id)
+        with self.assertRaisesRegex(ValueError, 'Unknown requested profile'):
+            authority.source_profile(Path('.'), SOURCE, 'unknown')
+
+    def test_statement_profile_rejects_downgrade_and_candidate_mix(self):
+        for profile_id, (revision, _path) in authority.PROFILE_DEFINITIONS.items():
+            statement = {
+                'schema': f'darkrenamer-vm-automated-statement-v{revision}',
+                'result': 'passed',
+                'profile': {'id': profile_id, 'revision': revision, 'sha256': DIGEST},
+                'candidate': {'repository': REPO, 'source_sha': SOURCE, 'run_id': 31,
+                              'run_attempt': 2, 'artifact_id': 41, 'executable_sha256': DIGEST},
+                'harness': {'repository': REPO, 'source_sha': SOURCE},
+                'validation': {'run_id': 43, 'run_attempt': 2},
+            }
+            kwargs = dict(profile_id=profile_id, revision=revision, profile_sha256=DIGEST,
+                          source_sha=SOURCE, run_id='43', run_attempt='2',
+                          expected_repository=REPO, candidate_run_id='31',
+                          candidate_run_attempt='2', candidate_artifact_id='41',
+                          expected_exe_sha256=DIGEST)
+            authority.validate_statement_profile(statement, **kwargs)
+            mutations = [
+                ('schema', 'darkrenamer-vm-automated-statement-v1' if revision == 2
+                 else 'darkrenamer-vm-automated-statement-v2'),
+                ('profile.id', 'vm-automated-v1-win11-ntfs' if revision == 2
+                 else 'vm-automated-v2-owned-resources'),
+                ('profile.revision', True), ('profile.sha256', 'c' * 64),
+                ('candidate.run_id', 99), ('candidate.source_sha', 'c' * 40),
+                ('candidate.executable_sha256', 'c' * 64),
+                ('harness.source_sha', 'c' * 40), ('validation.run_attempt', 1),
+            ]
+            for key, value in mutations:
+                changed = copy.deepcopy(statement)
+                target = changed
+                parts = key.split('.')
+                for part in parts[:-1]:
+                    target = target[part]
+                target[parts[-1]] = value
+                with self.subTest(profile_id=profile_id, key=key), self.assertRaises(ValueError):
+                    authority.validate_statement_profile(changed, **kwargs)
 
     def test_predicate_cannot_supply_certificate_authority(self):
         run, rows = self.run_fixture()

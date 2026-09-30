@@ -123,6 +123,17 @@ function New-HostedInvocationFixture {
     foreach ($directory in @($trusted, $candidate, $runner, (Join-Path $trusted 'scripts'))) {
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
+    [void](New-Item -ItemType Directory -Path (Join-Path $trusted 'config') -Force)
+    foreach ($profile in @(
+        @{ Id = 'vm-automated-v1-win11-ntfs'; Revision = 1 },
+        @{ Id = 'vm-automated-v2-owned-resources'; Revision = 2 }
+    )) {
+        $path = Join-Path $trusted "config/vm-automated-v$($profile.Revision).json"
+        [IO.File]::WriteAllText($path, (
+            @{ schema = "darkrenamer-vm-automated-profile-v$($profile.Revision)";
+               profile_id = $profile.Id; revision = $profile.Revision } |
+                ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    }
     $mockPython = Join-Path $Root 'mock-python.ps1'
     [IO.File]::WriteAllText($mockPython, @'
 $MockArguments = @($args)
@@ -130,6 +141,11 @@ if ($MockArguments[0] -cne '-I') { throw 'Hosted Python must start in isolated m
 $validator = [string]$MockArguments[1]
 [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "python:$validator`n")
 if ($validator.EndsWith('validate-vm-automated-evidence.py', [StringComparison]::Ordinal)) {
+    $profileIndex = [Array]::IndexOf($MockArguments, '--profile-id')
+    if ($profileIndex -lt 0 -or $profileIndex + 1 -ge $MockArguments.Count) {
+        throw 'Mock raw validator received no explicit profile ID.'
+    }
+    [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "profile:$($MockArguments[$profileIndex + 1])`n")
     if ($env:MOCK_HOSTED_SCENARIO -ceq 'raw-validator-failure') {
         $global:LASTEXITCODE = 19
         return
@@ -187,7 +203,8 @@ function Invoke-HostedInvocationScenario {
     param(
         [Parameter(Mandatory)][ValidateSet(
             'success', 'candidate-attestation-failure', 'raw-validator-failure', 'cleanup-failure'
-        )][string] $Scenario
+        )][string] $Scenario,
+        [string] $ProfileId = 'vm-automated-v1-win11-ntfs'
     )
 
     $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -332,6 +349,7 @@ function Invoke-HostedInvocationScenario {
                 -IngressArchiveSize '3' `
                 -ValidationRunId '53' `
                 -ValidationRunAttempt '1' `
+                -ProfileId $ProfileId `
                 -CandidateHandoffRoot $fixture.candidate `
                 -TrustedSourceRoot $fixture.trusted `
                 -OutputPath $fixture.output `
@@ -390,8 +408,42 @@ if (-not $success.wrapper_succeeded -or -not $success.output_exists -or
     -not $success.candidate_attestation_attempted -or
     -not $success.statement_attestation_reached -or $success.scratch_count -ne 0 -or
     $success.events -notcontains 'scratch-cleanup-attempt' -or
-    $success.events -notcontains 'candidate-attestation:scratch=0') {
+    $success.events -notcontains 'candidate-attestation:scratch=0' -or
+    $success.events -notcontains 'profile:vm-automated-v1-win11-ntfs') {
     throw 'Successful hosted invocation did not clean private scratch before attestation.'
+}
+
+$v2 = Invoke-HostedInvocationScenario -Scenario success `
+    -ProfileId 'vm-automated-v2-owned-resources'
+if (-not $v2.wrapper_succeeded -or
+    $v2.events -notcontains 'profile:vm-automated-v2-owned-resources') {
+    throw 'Hosted v2 selection was not passed to the independent raw validator.'
+}
+
+$profileRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'darkrenamer-hosted-profile-' + [guid]::NewGuid().ToString('N')
+)
+try {
+    $profileFixture = New-HostedInvocationFixture -Root $profileRoot
+    Assert-HostedProfile -TrustedRoot $profileFixture.trusted `
+        -ProfileId 'vm-automated-v2-owned-resources'
+    $profilePath = Join-Path $profileFixture.trusted 'config/vm-automated-v2.json'
+    [IO.File]::WriteAllText($profilePath, (
+        @{ schema = 'darkrenamer-vm-automated-profile-v2';
+           profile_id = 'vm-automated-v2-owned-resources'; revision = '2' } |
+            ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    Assert-Fails {
+        Assert-HostedProfile -TrustedRoot $profileFixture.trusted `
+            -ProfileId 'vm-automated-v2-owned-resources'
+    } 'schema, ID or revision'
+    Assert-Fails {
+        Assert-HostedProfile -TrustedRoot $profileFixture.trusted -ProfileId 'unknown'
+    } 'Unknown hosted profile'
+}
+finally {
+    if (Test-Path -LiteralPath $profileRoot) {
+        Remove-Item -LiteralPath $profileRoot -Recurse -Force
+    }
 }
 
 $candidateFailure = Invoke-HostedInvocationScenario -Scenario candidate-attestation-failure
