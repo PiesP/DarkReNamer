@@ -237,7 +237,7 @@ def verify_layout_raster(reader: EvidenceReader, document: str, layout: dict, en
 
 def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_path: str,
                               *, source_sha: str, required_tests: list[str]) -> str:
-    """Join source-bound native binaries to their complete Rust test transcripts."""
+    """Join native transcripts and every process lifetime to its closed job."""
     bundle, result = reader.json(bundle_path), reader.json(result_path)
     require(type(bundle) is dict and type(result) is dict, "Backend records must be objects.")
     for row in (bundle, result):
@@ -259,11 +259,27 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
     observed = set()
     executed_tests = set()
     total_passed = 0
+    process_identities = []
+
+    def lifecycle_identity(value: object) -> tuple[int, int]:
+        # Source-built native rows retain only the exact process identity. The
+        # candidate GUI lifecycle has a different, richer contract checked by
+        # verify_process_lifecycle in the candidate execution verifier.
+        lifecycle = require_exact_keys(value, {"pid", "start_time_utc_ticks"},
+                                       "Native backend process lifecycle")
+        pid = require_int(lifecycle["pid"], 1, 0xFFFFFFFF, "Native backend PID")
+        ticks = lifecycle["start_time_utc_ticks"]
+        require(type(ticks) is str and re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None and
+                int(ticks) <= 3_155_378_975_999_999_999,
+                "Native backend process creation ticks are invalid.")
+        return pid, int(ticks)
+
     for test in tests:
         require(type(test) is dict and type(test.get("file")) is str and test["file"] not in observed and
                 test["file"] in expected and test.get("sha256") == expected[test["file"]],
                 "Native test result differs from its source-bound binary inventory.")
         observed.add(test["file"])
+        process_identities.append(lifecycle_identity(test.get("process_lifecycle")))
         require_int(test.get("exit_code"), 0, 0, "Native test exit code")
         output = reader.bytes(reader.sibling(result_path, test["stdout"]), MAX_JSON_BYTES).decode("utf-8", errors="strict")
         reader.bytes(reader.sibling(result_path, test["stderr"]), MAX_JSON_BYTES)
@@ -282,6 +298,11 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
         total_passed += passed
     require(total_passed > 0 and set(required_tests) <= executed_tests,
             "Required no-overwrite/recovery backend regressions were not executed successfully.")
+    gui = result.get("gui")
+    require(type(gui) is dict, "Native backend GUI process lifecycle is unavailable.")
+    process_identities.append(lifecycle_identity(gui.get("process_lifecycle")))
+    verify_process_job_cleanup(result.get("process_job_cleanup"),
+                               expected_processes=process_identities)
     embedded_transport = result.get("transport")
     require(type(embedded_transport) is dict and result.get("failure_reason") is None and
             embedded_transport.get("guest_cleanup") is True,
