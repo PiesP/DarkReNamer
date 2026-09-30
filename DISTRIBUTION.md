@@ -117,6 +117,15 @@ and cannot be replaced by a successful retry; publication requires a new
 complete campaign. The policy and profile define this requirement, but do not
 claim that a campaign has already passed.
 
+Successful cleanup of resources owned by a failed execution is not release
+acceptance. The original product and strict environment failures remain
+immutable inputs, even when a separately verified cleanup proof establishes
+that the run's resources were removed. Unknown environment observations,
+missing evidence and unsuccessful restoration still prevent a passing
+statement. This distinction does not relax the fixed first-attempt matrix,
+the same-source candidate/harness/hosted-verifier requirement, or any of the
+five required gates.
+
 The repository owner and the prepared VM evidence producer remain trusted to
 run the recorded commands and capture their observations honestly. Archive
 validation detects missing, substituted and inconsistent evidence; it does not

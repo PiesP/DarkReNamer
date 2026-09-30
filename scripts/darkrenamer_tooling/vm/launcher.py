@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
@@ -44,6 +45,8 @@ CANDIDATE_HARNESS_FILES = (
 CORE_RESULT_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES = 64 * 1024 * 1024
+CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
+CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
 
 def sha256(path):
@@ -623,16 +626,111 @@ def managed_desktop(args, evidence_root=None):
 
 
 def run_controller(root, args, defaults=None, pwsh=None):
-    with managed_desktop(args, root) as desktop:
-        command = controller_invocation(root, args, defaults, pwsh,
-                                        desktop['expectedGuestSid'] if desktop else None)
-        cwd = root if args.ssh_host else Path('/mnt/c')
-        subprocess.run(command, cwd=cwd, text=True, check=True)
+    output = root if args.task_kind == 'core' else root / 'observer-output'
+    receipt_path = output / 'owned-cleanup-strict-failure-preservation.json'
+    command = None
+    process = None
+    preserved = None
+    desktop = None
+    handshake = None
+
+    def reap(timeout):
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+            raise RuntimeError('The exact VM controller exceeded its bounded cleanup wait.') from error
+
+    try:
+        with managed_desktop(args, root) as desktop:
+            command = controller_invocation(root, args, defaults, pwsh,
+                                            desktop['expectedGuestSid'] if desktop else None)
+            cwd = root if args.ssh_host else Path('/mnt/c')
+            environment = os.environ.copy()
+            environment.pop('DR_VM_OWNED_CLEANUP_HANDSHAKE', None)
+            if desktop:
+                handshake = {
+                    'nonce': uuid.uuid4().hex,
+                    'lease_id': desktop['leaseId'],
+                    'sid': desktop['expectedGuestSid'],
+                }
+                environment['DR_VM_OWNED_CLEANUP_HANDSHAKE'] = json.dumps(handshake, separators=(',', ':'))
+            process = subprocess.Popen(command, cwd=cwd, text=True, env=environment)
+            # The controller's default whole-suite budget is 2400 seconds; the
+            # allowance covers natural OS-process exit and evidence collection.
+            deadline = (time.monotonic() + CONTROLLER_SUITE_TIMEOUT_SECONDS +
+                        CONTROLLER_CLEANUP_ALLOWANCE_SECONDS)
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('The exact VM controller exceeded its bounded execution wait.')
+                if receipt_path.is_file():
+                    try:
+                        preserved = read_json_strict(receipt_path, maximum_bytes=1024 * 1024)
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        time.sleep(0.25)
+                        continue
+                    if (handshake is None or type(preserved) is not dict or
+                            preserved.get('nonce') != handshake['nonce'] or
+                            preserved.get('desktop_lease_id') != handshake['lease_id']):
+                        raise ValueError('Owned cleanup receipt differs from the issued handshake.')
+                    break
+                time.sleep(0.25)
+        if preserved is not None:
+            if desktop is None or args.desktop_mode != 'rdp':
+                raise ValueError('Owned cleanup requires a closed managed desktop lease.')
+            original_path = output / 'original-transport.json'
+            original = read_json_strict(original_path, maximum_bytes=4 * 1024 * 1024)
+            lease_path = root / 'desktop-lease.json'
+            lease = read_json_strict(lease_path, maximum_bytes=64 * 1024)
+            if (type(preserved) is not dict or preserved.get('schema_version') != 1 or
+                    preserved.get('kind') != 'owned_cleanup_strict_failure_preservation' or
+                    not isinstance(preserved.get('nonce'), str) or
+                    re.fullmatch(r'[0-9a-f]{32}', preserved['nonce']) is None or
+                    preserved.get('desktop_lease_id') != desktop['leaseId'] or
+                    preserved.get('original_transport', {}).get('file') != 'original-transport.json' or
+                    preserved['original_transport'].get('sha256') != sha256(original_path) or
+                    original.get('guest_cleanup') is not False or
+                    not isinstance(original.get('raw_cleanup'), dict) or
+                    original['raw_cleanup'].get('unexpected_runner_tasks_after_delete') is not None or
+                    original['raw_cleanup'].get('unexpected_runner_processes_after_delete') is not None or
+                    lease.get('mode') != 'managed-rdp' or lease.get('lease_id') != desktop['leaseId'] or
+                    lease.get('stop_status') != 'stopped' or
+                    lease.get('cleanup_observed') is not True):
+                raise ValueError('Frozen strict failure or desktop closure is incomplete.')
+            signal = {
+                'schema_version': 1,
+                'nonce': preserved['nonce'],
+                'preservation_sha256': sha256(receipt_path),
+                'desktop_lease_sha256': sha256(lease_path),
+            }
+            signal_path = output / 'owned-cleanup-desktop-closed.json'
+            temporary = signal_path.with_name(signal_path.name + '.new-' + uuid.uuid4().hex)
+            with temporary.open('xb') as stream:
+                stream.write((json.dumps(signal, sort_keys=True) + '\n').encode('utf-8'))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temporary, signal_path)
+            temporary.unlink()
+        code = reap(300)
+        if code:
+            raise subprocess.CalledProcessError(code, command)
         if desktop and args.task_kind == 'core':
             result = read_json_strict(
                 root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
                 raise ValueError('Production window DPI differs from the requested RDP scale.')
+    except BaseException:
+        if process is not None and process.poll() is None:
+            try:
+                reap(190)
+            except Exception:
+                pass
+        raise
 
 
 def test_artifacts(messages):

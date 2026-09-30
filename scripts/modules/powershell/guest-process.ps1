@@ -2141,6 +2141,10 @@ function Invoke-RustTestBinary {
                     -StderrPath $stderrPath `
                     -AggregateOutputLimitBytes $OutputBudgetBytes
                 $processState.process = $ownedProcess
+                $row.process_lifecycle = [ordered]@{
+                    pid = [int]$ownedProcess.process.Id
+                    start_time_utc_ticks = [string]$ownedProcess.process_start_time_utc_ticks
+                }
                 $wait = Wait-JobBoundProcessWithOutputLimit `
                     -State $processState.process `
                     -StdoutPath $stdoutPath `

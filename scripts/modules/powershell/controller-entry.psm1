@@ -126,6 +126,202 @@ function Get-DrControllerRecoveryOutputInventory {
     }
 }
 
+function Write-DrControllerExclusiveJson {
+    param([Parameter(Mandatory)][string] $Path,[Parameter(Mandatory)][object] $Value,
+        [Parameter(Mandatory)][int] $MaximumBytes)
+    $bytes = [Text.UTF8Encoding]::new($false,$true).GetBytes(
+        ($Value | ConvertTo-Json -Depth 24 -Compress) + "`n")
+    if ($bytes.Length -gt $MaximumBytes) {
+        throw 'Exclusive evidence JSON exceeds its byte bound; owned roots are retained.'
+    }
+    if (Test-Path -LiteralPath $Path) { throw 'Exclusive evidence path already exists.' }
+    $temporary = $Path + '.new-' + [guid]::NewGuid().ToString('N')
+    $stream = [IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {
+        $stream.Write($bytes,0,$bytes.Length)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+    [IO.File]::Move($temporary,$Path)
+}
+
+function Get-DrControllerPreservedFiles {
+    param([Parameter(Mandatory)][string] $Root)
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'External evidence root is not an ordinary directory.'
+    }
+    $pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+    $pending.Push($rootItem)
+    $files = [Collections.Generic.List[object]]::new()
+    $total = [long]0
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'External evidence contains a reparse entry.'
+            }
+            if ($item.PSIsContainer) { $pending.Push($item); continue }
+            $relative = $item.FullName.Substring($rootItem.FullName.Length + 1).Replace('\','/')
+            if ($relative -ceq 'desktop-lease.json') { continue }
+            $total += $item.Length
+            if ($files.Count -ge 1024 -or $total -gt 512MB) {
+                throw 'External evidence inventory exceeds its bound.'
+            }
+            $files.Add([ordered]@{
+                file = $relative
+                bytes = [long]$item.Length
+                sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            })
+        }
+    }
+    @($files.ToArray() | Sort-Object file)
+}
+
+function Invoke-DrControllerOwnedCleanupAfterFailure {
+    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots -ScriptBlock {
+        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots)
+        $proof = [ordered]@{
+            schema_version = 1
+            kind = 'owned_cleanup_after_strict_failure'
+            run_name = $name
+            vm_id = $null
+            status = 'incomplete'
+            pre = $null
+            post = $null
+            roots = [ordered]@{ guest = $roots.guest; trusted = $roots.trusted }
+            observed_roots_before = $null
+            observed_roots_after = $null
+            errors = @()
+        }
+        $guestGuard = $null
+        $trustedGuard = $null
+        function Assert-SubsetInventory {
+            param($Previous,$Current,$Type)
+            $known = @{}
+            foreach ($row in @($Previous)) {
+                $identity = [string]$row.identity
+                $binding = if ($Type -ceq 'process') { [string]$row.executable_path } else { [string]$row.definition_sha256 }
+                if ([string]::IsNullOrWhiteSpace($identity) -or
+                    [string]::IsNullOrWhiteSpace($binding) -or $known.ContainsKey($identity)) {
+                    throw "Frozen $Type identity or binding is unavailable."
+                }
+                $known[$identity] = $binding
+            }
+            foreach ($row in @($Current)) {
+                $identity = [string]$row.identity
+                $binding = if ($Type -ceq 'process') { [string]$row.executable_path } else { [string]$row.definition_sha256 }
+                if ([string]::IsNullOrWhiteSpace($identity) -or
+                    [string]::IsNullOrWhiteSpace($binding) -or
+                    -not $known.ContainsKey($identity) -or
+                    $known[$identity] -cne $binding) {
+                    throw "New or unknown $Type identity appeared after the frozen failure."
+                }
+            }
+        }
+        function Get-CurrentOwnedInventory {
+            $processes = Get-DrVmRunnerProcesses -UserSid $sid -SessionId $desktopSession
+            $tasks = @(Get-DrVmRunnerTasks -UserSid $sid)
+            $ownedTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+                [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
+            })
+            $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
+            $prefixes = @($roots.guest.path.TrimEnd('\')+'\', $roots.trusted.path.TrimEnd('\')+'\')
+            $ownedProcesses = @($allProcesses | Where-Object {
+                $path = [string]$_.ExecutablePath
+                $path.StartsWith($prefixes[0],[StringComparison]::OrdinalIgnoreCase) -or
+                $path.StartsWith($prefixes[1],[StringComparison]::OrdinalIgnoreCase)
+            } | ForEach-Object {
+                [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+            })
+            [ordered]@{
+                complete = [bool]$processes.complete
+                processes = @($processes.processes)
+                tasks = @($tasks)
+                owned_processes = @($ownedProcesses)
+                owned_tasks = @($ownedTasks | ForEach-Object { [string]$_.TaskPath+[string]$_.TaskName })
+            }
+        }
+        try {
+            if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
+                $sid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$' -or
+                $frozen.complete -isnot [bool] -or -not $frozen.complete -or
+                @($frozen.owned_processes).Count -ne 0) {
+                throw 'Frozen owned cleanup context is incomplete.'
+            }
+            $actualVmId = ([guid](Get-ItemProperty `
+                -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' `
+                -Name VirtualMachineId).VirtualMachineId).ToString('D').ToLowerInvariant()
+            if ($actualVmId -cne $expectedVmId) { throw 'Owned cleanup VM identity changed.' }
+            $proof.vm_id = $actualVmId
+            $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
+            if ($roots.guest.path -cne (Join-Path $base $name) -or
+                $roots.trusted.path -cne (Join-Path $base ($name+'-trusted')) -or
+                $roots.guest.base_file_id -cne $roots.trusted.base_file_id) {
+                throw 'Owned cleanup run or root path differs from creation.'
+            }
+            $pre = Get-CurrentOwnedInventory
+            $proof.pre = $pre
+            if (-not $pre.complete -or $pre.owned_processes.Count -ne 0 -or
+                $pre.owned_tasks.Count -ne 0) {
+                throw 'Owned process, job, task, or complete process inventory is unavailable.'
+            }
+            Assert-SubsetInventory -Previous $frozen.processes -Current $pre.processes -Type process
+            Assert-SubsetInventory -Previous $frozen.tasks -Current $pre.tasks -Type task
+            $guestGuard = [DarkReNamerVmOwnedRootGuard]::new($roots.guest.path)
+            $trustedGuard = [DarkReNamerVmOwnedRootGuard]::new($roots.trusted.path)
+            $beforeRoots = [ordered]@{}
+            foreach ($pair in @(@($guestGuard,$roots.guest),@($trustedGuard,$roots.trusted))) {
+                $guard = $pair[0]; $record = $pair[1]
+                $guard.Assert([string]$record.base_file_id,[string]$record.file_id)
+                $security = $guard.Security()
+                $owner = $security[0]
+                $sddl = $security[1]
+                $role = if ($record.path -ceq $roots.guest.path) { 'guest' } else { 'trusted' }
+                $beforeRoots[$role] = [ordered]@{
+                    path = $record.path; base_file_id = $guard.BaseId
+                    file_id = $guard.RootId; owner_sid = $owner; acl_sddl = $sddl
+                    ordinary_directory = $true
+                }
+                if ($owner -cne $record.owner_sid -or $owner -cne 'S-1-5-32-544' -or
+                    $sddl -cne $record.acl_sddl) {
+                    throw 'Owned root owner or ACL changed since creation.'
+                }
+            }
+            $proof.observed_roots_before = $beforeRoots
+            $guestGuard.Delete()
+            $trustedGuard.Delete()
+        }
+        catch { $proof.errors = @($_.Exception.Message) }
+        finally {
+            if ($null -ne $trustedGuard) { $trustedGuard.Dispose() }
+            if ($null -ne $guestGuard) { $guestGuard.Dispose() }
+        }
+        try {
+            $rootPresence = [DarkReNamerVmOwnedRootGuard]::ObserveRoots(
+                (Join-Path $env:ProgramData 'DarkReNamerVmRuns'),
+                [string]$roots.guest.base_file_id,$name,$name+'-trusted')
+            $proof.observed_roots_after = [ordered]@{
+                guest_present = [bool]$rootPresence[0]
+                trusted_present = [bool]$rootPresence[1]
+            }
+            $proof.post = Get-CurrentOwnedInventory
+            if ($proof.errors.Count -eq 0 -and $proof.post.complete -and
+                $proof.post.owned_processes.Count -eq 0 -and
+                $proof.post.owned_tasks.Count -eq 0 -and
+                -not $proof.observed_roots_after.guest_present -and
+                -not $proof.observed_roots_after.trusted_present) {
+                Assert-SubsetInventory -Previous $frozen.processes -Current $proof.post.processes -Type process
+                Assert-SubsetInventory -Previous $frozen.tasks -Current $proof.post.tasks -Type task
+                $proof.status = 'owned-clean'
+            }
+        } catch { $proof.errors += $_.Exception.Message }
+        [pscustomobject]$proof
+    }
+}
+
 function Test-DrControllerCleanupObservation {
     param([AllowNull()][object] $Observation)
 
@@ -449,6 +645,138 @@ function Test-DrControllerProcessJobCleanupLedger {
     catch { return $false }
 }
 
+function Test-DrControllerPreservedOutputCleanupAuthorization {
+    param(
+        [Parameter(Mandatory)][ValidateSet('ui', 'recovery')][string] $Role,
+        [Parameter(Mandatory)][object] $Result,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Inventory,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $ObserverSha256,
+        [string] $AcceptanceMode,
+        [bool] $HighContrastRequested,
+        [bool] $ProcessJobsClosed,
+        [AllowNull()][object] $ObserverProcess,
+        [AllowNull()][object] $PollFailure
+    )
+
+    try {
+        if (-not $ProcessJobsClosed -or $null -ne $PollFailure -or
+            $null -eq $ObserverProcess -or $ObserverProcess.state -cne 'exited' -or
+            ($ObserverProcess.exit_code -isnot [int] -and
+                $ObserverProcess.exit_code -isnot [long]) -or
+            $Result.status -cnotin $(if ($Role -ceq 'ui') {
+                @('review_required', 'failed', 'environment_blocked', 'unsupported', 'not_run')
+            } else { @('passed', 'failed') }) -or
+            $Result.failure_reason -cin @('execution_state_restore_failed', 'desktop_lock_release_failed')) {
+            return $false
+        }
+        # Some observer finally blocks assign a later cleanup failure after an
+        # execution-state restore failure. Those final reasons cannot prove restore.
+        $ambiguousRestorationFailures = if ($Role -ceq 'recovery') {
+            @('owned_process_cleanup_observation_failed', 'journal_cleanup_observation_failed',
+                'process_job_cleanup_failed', 'runtime_cleanup_refused',
+                'runtime_cleanup_observation_failed', 'candidate_export_cleanup_observation_failed')
+        } else {
+            @('runtime_cleanup_failed', 'raw_cleanup_failed', 'raw_cleanup_observation_failed')
+        }
+        if ($Result.failure_reason -cin $ambiguousRestorationFailures) { return $false }
+
+        $summaryLeaf = if ($Role -ceq 'ui') { 'acceptance-result.json' } else { 'summary.json' }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $summaryCount = 0
+        $summaryPath = $null
+        if ($Inventory.Count -eq 0 -or $Inventory.Count -gt 256) { return $false }
+        foreach ($row in $Inventory) {
+            if ($null -eq $row -or $row.file -isnot [string] -or
+                $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                ($row.bytes -isnot [int] -and $row.bytes -isnot [long]) -or
+                [long]$row.bytes -lt 0 -or -not $seen.Add($row.file)) { return $false }
+            $segments = @(Get-SafeEvidencePathSegments $row.file)
+            if ($segments.Count -eq 0) { return $false }
+            if ($Role -ceq 'ui' -and $segments.Count -ne 1) { return $false }
+            $path = $OutputRoot
+            foreach ($segment in $segments) { $path = Join-Path $path $segment }
+            if ($segments[-1] -ceq $summaryLeaf) {
+                $summaryCount++
+                $summaryPath = $path
+            }
+            Assert-PathWithoutReparse $path
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or $item.Length -ne [long]$row.bytes -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $row.sha256) {
+                return $false
+            }
+        }
+        if ($summaryCount -ne 1) { return $false }
+        $copiedResult = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+        if (($copiedResult | ConvertTo-Json -Depth 32 -Compress) -cne
+            ($Result | ConvertTo-Json -Depth 32 -Compress)) { return $false }
+        if ($Role -ceq 'recovery') { return $true }
+
+        # A failed observer can still have changed desktop settings. The result status
+        # alone cannot certify restoration; use the copied raw restore document.
+        $sourceSha = if ($Result.schema_version -eq 2) {
+            $Result.product.source_sha
+        } else { $Result.source_sha }
+        foreach ($kind in @(
+            $(if ($HighContrastRequested) { 'high-contrast' }),
+            $(if ($AcceptanceMode -ceq 'text-scale') { 'text-scale' })
+        )) {
+            if (-not $kind) { continue }
+            $snapshotLeaf = $kind + '-snapshot.json'
+            if ($kind -ceq 'high-contrast') { $snapshotLeaf = 'high-contrast-restore.json' }
+            $rescueLeaf = $kind + '-rescue-result.json'
+            if (-not $seen.Contains($snapshotLeaf)) { return $false }
+            $snapshotPath = Join-Path $OutputRoot $snapshotLeaf
+            $snapshotHash = (Get-FileHash -LiteralPath $snapshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $reference = if ($kind -ceq 'high-contrast') {
+                $Result.high_contrast.snapshot
+            } else { $Result.text_scale.snapshot }
+            if ($seen.Contains($rescueLeaf)) {
+                $rescue = Get-Content -LiteralPath (Join-Path $OutputRoot $rescueLeaf) -Raw | ConvertFrom-Json
+                if ($rescue.status -cne 'passed' -or $rescue.restoration_verified -isnot [bool] -or
+                    -not $rescue.restoration_verified -or $rescue.source_sha -cne $sourceSha -or
+                    $rescue.acceptance_script_sha256 -cne $ObserverSha256 -or
+                    $rescue.snapshot_sha256 -cne $snapshotHash) { return $false }
+            }
+            elseif ($null -eq $reference -or $reference.file -cne $snapshotLeaf -or
+                $reference.sha256 -cne $snapshotHash) { return $false }
+            $snapshot = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+            $expectedSchema = if ($kind -ceq 'high-contrast') { 2 } else { 1 }
+            $required = if ($kind -ceq 'high-contrast') { $false } else { $true }
+            if ($snapshot.schema_version -ne $expectedSchema -or
+                $snapshot.source_sha -cne $sourceSha -or
+                $snapshot.acceptance_script_sha256 -cne $ObserverSha256 -or
+                $snapshot.restoration_required -isnot [bool] -or
+                $snapshot.restoration_required -ne $required -or
+                $snapshot.restoration_verified -isnot [bool] -or
+                -not $snapshot.restoration_verified -or $null -eq $snapshot.original -or
+                $null -eq $snapshot.restored) { return $false }
+            # Match the observer's established equality rules without modifying
+            # the retained raw document. Null and empty Scheme are equivalent;
+            # UISettings float samples have the observer's existing tolerance.
+            $original = $snapshot.original | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $restored = $snapshot.restored | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            if ($kind -ceq 'high-contrast') {
+                if (-not [string]::Equals([string]$original.scheme, [string]$restored.scheme,
+                    [StringComparison]::Ordinal)) { return $false }
+                $restored.scheme = $original.scheme
+            } else {
+                if (($original.ui_settings_raw_factor -isnot [double] -and
+                        $original.ui_settings_raw_factor -isnot [long]) -or
+                    ($restored.ui_settings_raw_factor -isnot [double] -and
+                        $restored.ui_settings_raw_factor -isnot [long]) -or
+                    -not ([Math]::Abs([double]$original.ui_settings_raw_factor -
+                        [double]$restored.ui_settings_raw_factor) -lt 0.000001)) { return $false }
+                $restored.ui_settings_raw_factor = $original.ui_settings_raw_factor
+            }
+            if (($original | ConvertTo-Json -Depth 20 -Compress) -cne
+                ($restored | ConvertTo-Json -Depth 20 -Compress)) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
 function ConvertFrom-DrControllerSpotlightPreflightJson {
     param([AllowNull()][AllowEmptyCollection()][object[]] $Values)
 
@@ -608,6 +936,7 @@ $spotlightPreflight = $null
 $result = $null
 $processJobsClosed = $false
 $acceptancePassed = $false
+$outputPreservedForCleanup = $false
 $observerProcess = $null
 $transportOutputRoot = if ($acceptance) {
     $AcceptanceOutputRoot
@@ -619,6 +948,8 @@ $transportOutputRoot = if ($acceptance) {
 $mutex = $null
 $mutexHeld = $false
 $toolingTransfer = $null
+$originalTransportFrozen = $false
+$cleanupResult = $null
 
 
 try {
@@ -841,6 +1172,329 @@ public static class VmDesktopState {
             $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$') {
             throw 'The VM workspace identity is invalid.'
         }
+        if (-not ('DarkReNamerVmOwnedRootGuard' -as [type])) {
+            Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
+    const uint READ_ATTRIBUTES = 0x80, LIST_DIRECTORY = 1, READ_CONTROL = 0x20000;
+    const uint DELETE = 0x10000, SYNCHRONIZE = 0x100000;
+    const uint SHARE_READ = 1, OPEN_EXISTING = 3, FILE_OPEN = 1;
+    const uint BACKUP_SEMANTICS = 0x02000000, OPEN_REPARSE_POINT = 0x00200000;
+    const uint FILE_OPEN_REPARSE_POINT = 0x00200000, FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
+    const int FILE_ATTRIBUTE_DIRECTORY = 0x10, FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+    const int FILE_ID_INFO = 18, FILE_ATTRIBUTE_TAG_INFO = 9, FILE_DISPOSITION_INFO = 4;
+    const int FILE_ID_EXTD_DIRECTORY_INFO = 19, FILE_ID_EXTD_DIRECTORY_RESTART_INFO = 20;
+    readonly List<SafeFileHandle> chain = new List<SafeFileHandle>();
+    int nodes, enumerated;
+    public string BaseId { get; private set; }
+    public string RootId { get; private set; }
+
+    [StructLayout(LayoutKind.Sequential)] struct UnicodeString {
+        public ushort Length, MaximumLength;
+        public IntPtr Buffer;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct ObjectAttributes {
+        public uint Length;
+        public IntPtr RootDirectory, ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor, SecurityQualityOfService;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IoStatusBlock {
+        public IntPtr Status, Information;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+        IntPtr security, uint creation, uint flags, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int info,
+        byte[] buffer, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle file, int info,
+        byte[] buffer, uint size);
+    [DllImport("ntdll.dll")]
+    static extern int NtCreateFile(out SafeFileHandle file, uint access,
+        ref ObjectAttributes attributes, out IoStatusBlock status, IntPtr allocation,
+        uint fileAttributes, uint share, uint disposition, uint options,
+        IntPtr ea, uint eaLength);
+    [DllImport("advapi32.dll")]
+    static extern uint GetSecurityInfo(SafeFileHandle file, int objectType, uint requested,
+        out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl,
+        out IntPtr descriptor);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        IntPtr descriptor, uint revision, uint requested, out IntPtr text, out uint length);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr memory);
+
+    static SafeFileHandle OpenDrive(string name) {
+        SafeFileHandle result = CreateFileW(name,
+            READ_ATTRIBUTES | LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE,
+            SHARE_READ, IntPtr.Zero, OPEN_EXISTING,
+            BACKUP_SEMANTICS | OPEN_REPARSE_POINT, IntPtr.Zero);
+        if (result.IsInvalid) {
+            int error = Marshal.GetLastWin32Error(); result.Dispose();
+            throw new Win32Exception(error, "Owned cleanup handle could not be opened.");
+        }
+        return result;
+    }
+    static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, bool delete) {
+        if (name.Length == 0 || name.Length > 255 || name == "." || name == ".." ||
+            name.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0)
+            throw new InvalidOperationException("Owned cleanup encountered an unsafe relative name.");
+        IntPtr characters = IntPtr.Zero, unicode = IntPtr.Zero;
+        try {
+            characters = Marshal.StringToHGlobalUni(name);
+            UnicodeString value = new UnicodeString();
+            value.Length = checked((ushort)(name.Length * 2));
+            value.MaximumLength = checked((ushort)((name.Length + 1) * 2));
+            value.Buffer = characters;
+            unicode = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+            Marshal.StructureToPtr(value, unicode, false);
+            ObjectAttributes attributes = new ObjectAttributes();
+            attributes.Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes));
+            attributes.RootDirectory = parent.DangerousGetHandle();
+            attributes.ObjectName = unicode;
+            attributes.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+            IoStatusBlock status;
+            SafeFileHandle result;
+            int code = NtCreateFile(out result,
+                READ_ATTRIBUTES | LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE | (delete ? DELETE : 0),
+                ref attributes, out status, IntPtr.Zero, 0, SHARE_READ, FILE_OPEN,
+                FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                IntPtr.Zero, 0);
+            if (code != 0 || result == null || result.IsInvalid) {
+                if (result != null) result.Dispose();
+                throw new InvalidOperationException("Relative owned cleanup open failed: NTSTATUS " +
+                    ((uint)code).ToString("x8"));
+            }
+            return result;
+        }
+        finally {
+            if (unicode != IntPtr.Zero) Marshal.FreeHGlobal(unicode);
+            if (characters != IntPtr.Zero) Marshal.FreeHGlobal(characters);
+        }
+    }
+    static byte[] Info(SafeFileHandle file, int kind, int size) {
+        byte[] data = new byte[size];
+        if (!GetFileInformationByHandleEx(file, kind, data, (uint)size))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return data;
+    }
+    static int Attributes(SafeFileHandle file) {
+        return BitConverter.ToInt32(Info(file, FILE_ATTRIBUTE_TAG_INFO, 8), 0);
+    }
+    static string Identity(SafeFileHandle file) {
+        return BitConverter.ToString(Info(file, FILE_ID_INFO, 24)).Replace("-", "").ToLowerInvariant();
+    }
+    static void Ordinary(SafeFileHandle file, bool directory) {
+        int attributes = Attributes(file);
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory)
+            throw new InvalidOperationException("Owned cleanup encountered a reparse or changed entry kind.");
+    }
+    public string[] Security() {
+        IntPtr owner, group, dacl, sacl, descriptor;
+        uint error = GetSecurityInfo(chain[chain.Count - 1], 1, 7,
+            out owner, out group, out dacl, out sacl, out descriptor);
+        if (error != 0) throw new Win32Exception((int)error, "Held root security query failed.");
+        IntPtr ownerText = IntPtr.Zero, sddlText = IntPtr.Zero;
+        try {
+            uint length;
+            if (!ConvertSidToStringSidW(owner, out ownerText) ||
+                !ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor, 1, 7, out sddlText, out length))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Held root descriptor conversion failed.");
+            return new string[] { Marshal.PtrToStringUni(ownerText), Marshal.PtrToStringUni(sddlText) };
+        }
+        finally {
+            if (ownerText != IntPtr.Zero) LocalFree(ownerText);
+            if (sddlText != IntPtr.Zero) LocalFree(sddlText);
+            if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+        }
+    }
+    sealed class ChildEntry {
+        public string Name;
+        public string Id;
+        public int Attributes;
+    }
+    static List<ChildEntry> Names(SafeFileHandle directory, int maximumEntries) {
+        Ordinary(directory, true);
+        List<ChildEntry> names = new List<ChildEntry>();
+        byte[] buffer = new byte[65536];
+        bool first = true;
+        while (true) {
+            Array.Clear(buffer, 0, buffer.Length);
+            if (!GetFileInformationByHandleEx(directory,
+                    first ? FILE_ID_EXTD_DIRECTORY_RESTART_INFO : FILE_ID_EXTD_DIRECTORY_INFO,
+                    buffer, (uint)buffer.Length)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 18) break; // ERROR_NO_MORE_FILES
+                throw new Win32Exception(error, "Held directory enumeration failed.");
+            }
+            first = false;
+            int offset = 0;
+            while (true) {
+                if (offset > buffer.Length - 88)
+                    throw new InvalidOperationException("Held directory enumeration returned an invalid frame.");
+                uint next = BitConverter.ToUInt32(buffer, offset);
+                uint byteLength = BitConverter.ToUInt32(buffer, offset + 60);
+                if (byteLength == 0 || (byteLength & 1) != 0 ||
+                    byteLength > buffer.Length - offset - 88 ||
+                    (next != 0 && (next < 88 + byteLength || next > buffer.Length - offset)))
+                    throw new InvalidOperationException("Held directory name length is invalid.");
+                char[] units = new char[byteLength / 2];
+                Buffer.BlockCopy(buffer, offset + 88, units, 0, (int)byteLength);
+                string name = new string(units);
+                if (name != "." && name != "..") {
+                    if (names.Count >= maximumEntries || name.Length > 255 ||
+                        name.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0)
+                        throw new InvalidOperationException("Held directory contains an unsafe or oversized entry.");
+                    byte[] identifier = new byte[16];
+                    Buffer.BlockCopy(buffer, offset + 72, identifier, 0, 16);
+                    if (Array.TrueForAll(identifier, value => value == 0))
+                        throw new InvalidOperationException("Held directory did not report a child file identity.");
+                    names.Add(new ChildEntry {
+                        Name = name,
+                        Id = BitConverter.ToString(identifier).Replace("-", "").ToLowerInvariant(),
+                        Attributes = BitConverter.ToInt32(buffer, offset + 56)
+                    });
+                }
+                if (next == 0) break;
+                offset += (int)next;
+            }
+        }
+        return names;
+    }
+    public static bool[] ObserveRoots(string basePath, string expectedBaseId,
+        string guestName, string trustedName) {
+        string path = Path.GetFullPath(basePath);
+        string drive = Path.GetPathRoot(path);
+        if (drive == null || drive.Length != 3 ||
+            !path.EndsWith("\\DarkReNamerVmRuns", StringComparison.Ordinal) ||
+            guestName.Length == 0 || trustedName.Length == 0)
+            throw new InvalidOperationException("Owned cleanup post-observation base is invalid.");
+        string[] parts = path.Substring(drive.Length).Split(Path.DirectorySeparatorChar);
+        List<SafeFileHandle> handles = new List<SafeFileHandle>();
+        try {
+            handles.Add(OpenDrive(drive));
+            Ordinary(handles[0], true);
+            foreach (string part in parts) {
+                SafeFileHandle child = OpenRelative(handles[handles.Count - 1], part, false);
+                try { Ordinary(child, true); handles.Add(child); }
+                catch { child.Dispose(); throw; }
+            }
+            SafeFileHandle parent = handles[handles.Count - 1];
+            if (Identity(parent) != expectedBaseId)
+                throw new InvalidOperationException("Owned cleanup base changed after disposition.");
+            bool guest = false, trusted = false;
+            foreach (ChildEntry child in Names(parent, 20000)) {
+                if (String.Equals(child.Name, guestName, StringComparison.OrdinalIgnoreCase)) guest = true;
+                if (String.Equals(child.Name, trustedName, StringComparison.OrdinalIgnoreCase)) trusted = true;
+            }
+            return new bool[] { guest, trusted };
+        }
+        finally {
+            for (int index = handles.Count - 1; index >= 0; --index) handles[index].Dispose();
+        }
+    }
+    public DarkReNamerVmOwnedRootGuard(string root) {
+        string path = Path.GetFullPath(root);
+        string drive = Path.GetPathRoot(path);
+        if (drive == null || drive.Length != 3 || path.Length <= drive.Length)
+            throw new InvalidOperationException("Owned cleanup root must be drive absolute.");
+        string[] parts = path.Substring(drive.Length).Split(Path.DirectorySeparatorChar);
+        if (parts.Length < 3 || parts[parts.Length - 2] != "DarkReNamerVmRuns")
+            throw new InvalidOperationException("Owned cleanup path is outside its exact base.");
+        try {
+            chain.Add(OpenDrive(drive));
+            Ordinary(chain[0], true);
+            foreach (string part in parts) {
+                if (part.Length == 0 || part == "." || part == "..")
+                    throw new InvalidOperationException("Owned cleanup path contains an alias.");
+                SafeFileHandle handle = OpenRelative(chain[chain.Count - 1], part,
+                    part == parts[parts.Length - 1]);
+                try { Ordinary(handle, true); chain.Add(handle); }
+                catch { handle.Dispose(); throw; }
+                if (part == "DarkReNamerVmRuns") BaseId = Identity(handle);
+            }
+            if (BaseId == null) throw new InvalidOperationException("Owned cleanup base is unavailable.");
+            RootId = Identity(chain[chain.Count - 1]);
+        } catch { Dispose(); throw; }
+    }
+    public void Assert(string expectedBaseId, string expectedRootId) {
+        if (BaseId != expectedBaseId || RootId != expectedRootId ||
+            Identity(chain[chain.Count - 2]) != expectedBaseId ||
+            Identity(chain[chain.Count - 1]) != expectedRootId)
+            throw new InvalidOperationException("Owned cleanup root or base identity changed.");
+    }
+    List<ChildEntry> Children(SafeFileHandle directory) {
+        List<ChildEntry> entries = Names(directory, 20000 - enumerated);
+        enumerated += entries.Count;
+        return entries;
+    }
+    void DeleteEntry(SafeFileHandle parent, ChildEntry child, int depth) {
+        if (depth > 64 || ++nodes > 20000)
+            throw new InvalidOperationException("Owned cleanup tree exceeds its bound.");
+        using (SafeFileHandle entry = OpenRelative(parent, child.Name, true)) {
+            int attributes = Attributes(entry);
+            if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                (child.Attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                ((attributes ^ child.Attributes) & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                Identity(entry).Substring(16) != child.Id)
+                throw new InvalidOperationException("Owned cleanup child changed or became a reparse entry.");
+            if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                foreach (ChildEntry nested in Children(entry)) DeleteEntry(entry, nested, depth + 1);
+            }
+            if (!SetFileInformationByHandle(entry, FILE_DISPOSITION_INFO,
+                    new byte[] { 1 }, 1))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned cleanup disposition failed.");
+        }
+    }
+    public void Delete() {
+        nodes = 0;
+        enumerated = 0;
+        SafeFileHandle root = chain[chain.Count - 1];
+        Ordinary(root, true);
+        if (Identity(root) != RootId)
+            throw new InvalidOperationException("Owned cleanup root changed before disposition.");
+        foreach (ChildEntry child in Children(root)) DeleteEntry(root, child, 1);
+        if (!SetFileInformationByHandle(root, FILE_DISPOSITION_INFO,
+                new byte[] { 1 }, 1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned root disposition failed.");
+    }
+    public void Dispose() {
+        for (int index = chain.Count - 1; index >= 0; --index) chain[index].Dispose();
+        chain.Clear();
+    }
+}
+'@
+        }
+        function global:Get-DrVmOwnedRootRecord {
+            param([Parameter(Mandatory)][string] $Path)
+            $guard = [DarkReNamerVmOwnedRootGuard]::new($Path)
+            try {
+                $security = $guard.Security()
+                [pscustomobject]@{
+                    path = $Path
+                    base_file_id = $guard.BaseId
+                    file_id = $guard.RootId
+                    owner_sid = $security[0]
+                    acl_sddl = $security[1]
+                }
+            } finally { $guard.Dispose() }
+        }
         if (-not ('DarkReNamerVmControllerWorkspace' -as [type])) {
             Add-Type @'
 using System;
@@ -974,6 +1628,9 @@ public static class DarkReNamerVmControllerWorkspace {
         }
         $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
         [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
+        $global:DrVmOwnedRootRecords = @{
+            guest = Get-DrVmOwnedRootRecord -Path $path
+        }
         function global:Get-DrVmTrustedPowerShellPath {
             $programFiles = [Environment]::GetFolderPath(
                 [Environment+SpecialFolder]::ProgramFiles
@@ -1170,6 +1827,9 @@ public static class DarkReNamerVmControllerWorkspace {
                 [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $trustedTaskRoot)
             }
             Assert-ProtectedTaskDirectory -Path $trustedTaskRoot
+            if ($null -eq $global:DrVmOwnedRootRecords.trusted) {
+                $global:DrVmOwnedRootRecords.trusted = Get-DrVmOwnedRootRecord -Path $trustedTaskRoot
+            }
             $taskRootItem = Get-Item -LiteralPath $trustedTaskRoot -Force -ErrorAction Stop
             $trustedObserverRoot = $trustedTaskRoot
             $trustedBundleRoot = Join-Path $trustedTaskRoot 'bundle'
@@ -3358,6 +4018,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $null -ne $observerProcess -and
             $observerProcess.state -ceq 'exited' -and
             $observerProcess.exit_code -eq 0
+        if ($null -ne $result) {
+            $outputPreservedForCleanup = Test-DrControllerPreservedOutputCleanupAuthorization `
+                -Role ui -Result $result -Inventory $inventory -OutputRoot $AcceptanceOutputRoot `
+                -ObserverSha256 $observer.sha256 -AcceptanceMode $AcceptanceMode `
+                -HighContrastRequested ([bool]$AcceptanceHighContrast) `
+                -ProcessJobsClosed $processJobsClosed -ObserverProcess $observerProcess `
+                -PollFailure $pollFailure
+        }
         $transport.status = 'collected'
     }
     elseif ($recovery) {
@@ -3586,6 +4254,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $null -ne $observerProcess -and
             $observerProcess.state -ceq 'exited' -and
             $observerProcess.exit_code -eq 0
+        $outputPreservedForCleanup = Test-DrControllerPreservedOutputCleanupAuthorization `
+            -Role recovery -Result $result -Inventory $inventory -OutputRoot $RecoveryOutputRoot `
+            -ObserverSha256 $observer.sha256 -ProcessJobsClosed $processJobsClosed `
+            -ObserverProcess $observerProcess -PollFailure $pollFailure
         $transport.status = 'collected'
     }
     else {
@@ -3944,7 +4616,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 }
                 if ($guestRoot) {
                     $cleanupAuthorized = $transport.status -eq 'collected' -and
-                        (-not $observerTask -or $acceptancePassed)
+                        (-not $observerTask -or $outputPreservedForCleanup)
                     # Preparation-only owns only the completed registration preflight.
                     if ($runtimeBrokerPrepared -and $transport.status -ceq 'diagnostic-prepared') { $cleanupAuthorized = $true }
                     $requiredProcessJobsClosed = $processJobsClosed -or $runtimeBrokerPrepared
@@ -4274,8 +4946,53 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             $removedRunnerTasks.Count -ne 0 -or
                             $terminatedRunnerProcesses.Count -ne 0 -or
                             $cleanupResourceErrors.Count -ne 0) {
+                            $frozenProcesses = Get-DrVmRunnerProcesses `
+                                -UserSid $taskContext.runner_sid `
+                                -SessionId $taskContext.runner_session_id
+                            $frozenTasks = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                            $ownedAfterFailure = @(Get-CimInstance Win32_Process `
+                                -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
+                                    Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
+                                } | Sort-Object ProcessId | ForEach-Object {
+                                    [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+                                })
+                            $knownFailure = $mayDelete -and $jobsClosed -and
+                                -not $taskPresentBeforeDelete -and
+                                $processSnapshotBeforeCleanup.complete -and
+                                $processSnapshotAfterIntervention.complete -and
+                                $frozenProcesses.complete -and
+                                $removedRunnerTasks.Count -eq 0 -and
+                                $terminatedRunnerProcesses.Count -eq 0 -and
+                                $cleanupResourceErrors.Count -eq 0 -and
+                                $ownedAfterFailure.Count -eq 0 -and
+                                $guestRootPresentBeforeDelete -and $trustedRootPresentBeforeDelete -and
+                                $null -ne $global:DrVmOwnedRootRecords.guest -and
+                                $null -ne $global:DrVmOwnedRootRecords.trusted -and
+                                @($frozenProcesses.processes | Where-Object {
+                                    [string]::IsNullOrWhiteSpace([string]$_.identity) -or
+                                    [string]::IsNullOrWhiteSpace([string]$_.executable_path)
+                                }).Count -eq 0 -and
+                                @($frozenTasks | Where-Object {
+                                    [string]::IsNullOrWhiteSpace([string]$_.identity) -or
+                                    [string]::IsNullOrWhiteSpace([string]$_.definition_sha256)
+                                }).Count -eq 0 -and
+                                ($unexpectedRunnerTasksBeforeCleanup.Count -gt 0 -or
+                                    $unexpectedRunnerProcessesBeforeCleanup.Count -gt 0 -or
+                                    $unexpectedRunnerTasksAfterIntervention.Count -gt 0 -or
+                                    $unexpectedRunnerProcessesAfterIntervention.Count -gt 0)
                             return [pscustomobject]@{
                                 guest_cleanup = $false
+                                owned_cleanup_after_strict_failure_eligible = [bool]$knownFailure
+                                failed_snapshot = [ordered]@{
+                                    complete = [bool]$frozenProcesses.complete
+                                    processes = @($frozenProcesses.processes)
+                                    tasks = @($frozenTasks)
+                                    owned_processes = @($ownedAfterFailure)
+                                }
+                                root_records = [ordered]@{
+                                    guest = $global:DrVmOwnedRootRecords.guest
+                                    trusted = $global:DrVmOwnedRootRecords.trusted
+                                }
                                 raw_cleanup = [ordered]@{
                                     scheduled_task_present = $taskPresentBeforeDelete
                                     guest_root_present = $guestRootPresentBeforeDelete
@@ -4293,11 +5010,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                     terminated_runner_processes = @($terminatedRunnerProcesses)
                                     resource_cleanup_errors = @($cleanupResourceErrors)
                                     runner_process_natural_exit = $runnerProcessNaturalExit
-                                    owned_processes_after = @(Get-CimInstance Win32_Process | Where-Object {
-                                        Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
-                                    } | Sort-Object ProcessId | ForEach-Object {
-                                        [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
-                                    })
+                                    owned_processes_after = @($ownedAfterFailure)
                                 }
                             }
                         }
@@ -4390,7 +5103,165 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $transport.status='failed'; $transport.cleanup_error='Guest cleanup failed; inspect cleanup-error.txt.'; $transport.guest_cleanup=$false
                 $_ | Out-String | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'cleanup-error.txt') -Encoding UTF8
             }
-            if ($guestRoot -and -not $transport.guest_cleanup) { [IO.File]::WriteAllText((Join-Path $transportOutputRoot 'retained-guest-directory.txt'), $guestRoot) }
+            if ($guestRoot -and -not $transport.guest_cleanup) {
+                $retainedPath = Join-Path $transportOutputRoot 'retained-guest-directory.txt'
+                $retainedBytes = [Text.UTF8Encoding]::new($false).GetBytes($guestRoot)
+                $retainedStream = [IO.FileStream]::new($retainedPath,[IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write,[IO.FileShare]::None)
+                try {
+                    $retainedStream.Write($retainedBytes,0,$retainedBytes.Length)
+                    $retainedStream.Flush($true)
+                } finally { $retainedStream.Dispose() }
+            }
+            $ownedHandshake = $null
+            try {
+                $binding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE | ConvertFrom-Json -ErrorAction Stop
+                $pendingLease = Get-Content -LiteralPath (Join-Path $BundleRoot 'desktop-lease.json') `
+                    -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($binding.nonce -cmatch '^[0-9a-f]{32}$' -and
+                    $binding.lease_id -cmatch '^[0-9a-f]{32}$' -and
+                    $binding.sid -ceq $ExpectedDesktopSid -and
+                    $pendingLease.lease_id -ceq $binding.lease_id -and
+                    $pendingLease.mode -ceq 'managed-rdp' -and
+                    $pendingLease.start_status -ceq 'ready' -and
+                    $pendingLease.stop_status -ceq 'failed') {
+                    $ownedHandshake = $binding
+                }
+            } catch { }
+            if ($null -ne $cleanupResult -and
+                $cleanupResult.owned_cleanup_after_strict_failure_eligible -eq $true -and
+                $transport.status -ceq 'collected' -and
+                $transport.guest_cleanup -eq $false -and
+                $processJobsClosed -and
+                (-not $observerTask -or $outputPreservedForCleanup) -and
+                -not [string]::IsNullOrWhiteSpace($ExpectedDesktopSid) -and
+                $ExpectedGuestVmId -ne [guid]::Empty -and
+                $null -ne $ownedHandshake) {
+                # Freeze the original strict failure and every collected output byte before
+                # granting any later owned-root deletion authority.
+                $sourceResultLeaf = if ($taskSelection.kind -ceq 'core') {
+                    'original-result.json'
+                } elseif ($taskSelection.kind -ceq 'ui') {
+                    'acceptance-result.json'
+                } else {
+                    [string]$recoveryInventory.summary_file
+                }
+                $sourceResultPath = Join-Path $transportOutputRoot $sourceResultLeaf
+                if ($taskSelection.kind -ceq 'core') {
+                    [IO.File]::Copy((Join-Path $BundleRoot 'result.json'),$sourceResultPath)
+                }
+                $sourceResultItem = Get-Item -LiteralPath $sourceResultPath -Force -ErrorAction Stop
+                $bundleItem = Get-Item -LiteralPath (Join-Path $BundleRoot 'bundle.json') -Force -ErrorAction Stop
+                $transport['owned_cleanup_failure_context'] = [ordered]@{
+                    task_kind = [string]$taskSelection.kind
+                    failed_snapshot = $cleanupResult.failed_snapshot
+                    root_records = $cleanupResult.root_records
+                    source_result = [ordered]@{
+                        file = $sourceResultLeaf; bytes = [long]$sourceResultItem.Length
+                        sha256 = (Get-FileHash -LiteralPath $sourceResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                    }
+                    bundle = [ordered]@{
+                        file = 'bundle.json'; bytes = [long]$bundleItem.Length
+                        sha256 = (Get-FileHash -LiteralPath $bundleItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    }
+                    source_sha = if ($manifest.schema_version -eq 2) {
+                        [string]$manifest.product.source_sha
+                    } else { [string]$manifest.source_sha }
+                    observer_sha256 = if ($observerTask) { [string]$observer.sha256 } else { $null }
+                    acceptance_mode = if ($taskSelection.kind -ceq 'ui') { [string]$AcceptanceMode } else { $null }
+                    high_contrast_requested = [bool]($taskSelection.kind -ceq 'ui' -and $AcceptanceHighContrast)
+                    output_preservation_verified = [bool](-not $observerTask -or $outputPreservedForCleanup)
+                }
+                $transport.status = 'failed'
+                $transport['cleanup_error'] = 'Strict OS cleanup delta failed; original raw cleanup is retained.'
+                $transportPath = Join-Path $transportOutputRoot 'original-transport.json'
+                Write-DrControllerExclusiveJson -Path $transportPath -Value $transport -MaximumBytes 4MB
+                if ($result -and $taskSelection.kind -ceq 'core') {
+                    $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
+                    $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
+                }
+                $originalTransportFrozen = $true
+                $transportItem = Get-Item -LiteralPath $transportPath -Force
+                $transportHash = (Get-FileHash -LiteralPath $transportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $nonce = [string]$ownedHandshake.nonce
+                $receipt = [ordered]@{
+                    schema_version = 1
+                    kind = 'owned_cleanup_strict_failure_preservation'
+                    run_name = $taskName
+                    vm_id = ([guid]$transport.vm_id).ToString('D').ToLowerInvariant()
+                    nonce = $nonce
+                    desktop_lease_id = [string]$ownedHandshake.lease_id
+                    original_transport = [ordered]@{
+                        file = 'original-transport.json'; bytes = [long]$transportItem.Length; sha256 = $transportHash
+                    }
+                    files = @(Get-DrControllerPreservedFiles -Root $transportOutputRoot)
+                    failed_snapshot = $cleanupResult.failed_snapshot
+                    root_records = $cleanupResult.root_records
+                }
+                $receiptPath = Join-Path $transportOutputRoot 'owned-cleanup-strict-failure-preservation.json'
+                # Preflight two complete inventory snapshots and two copies of the root
+                # descriptors before any finalizer can delete an owned root. The post
+                # snapshot is required to be a subset of this frozen inventory.
+                $utf8 = [Text.UTF8Encoding]::new($false,$true)
+                $snapshotBytes = $utf8.GetByteCount(($receipt.failed_snapshot | ConvertTo-Json -Depth 24 -Compress))
+                $rootBytes = $utf8.GetByteCount(($receipt.root_records | ConvertTo-Json -Depth 24 -Compress))
+                if ((2L * $snapshotBytes + 2L * $rootBytes + 32768L) -gt 1MB) {
+                    throw 'Owned cleanup proof could exceed its byte bound; owned roots are retained.'
+                }
+                Write-DrControllerExclusiveJson -Path $receiptPath -Value $receipt -MaximumBytes 1MB
+                $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $proofPath = Join-Path $transportOutputRoot 'owned-cleanup-after-strict-failure.json'
+                Write-DrControllerExclusiveJson -Path $proofPath -Value ([ordered]@{
+                    schema_version=1; kind='owned_cleanup_after_strict_failure'; status='incomplete'
+                    run_name=$taskName; vm_id=$receipt.vm_id; errors=@('Finalizer did not complete.')
+                }) -MaximumBytes 1MB
+                $proof = $null
+                $leaseHash = $null
+                try {
+                    $signalPath = Join-Path $transportOutputRoot 'owned-cleanup-desktop-closed.json'
+                    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+                    while (-not (Test-Path -LiteralPath $signalPath) -and [DateTime]::UtcNow -lt $deadline) {
+                        Start-Sleep -Milliseconds 250
+                    }
+                    if (-not (Test-Path -LiteralPath $signalPath)) { throw 'Managed desktop closure was not signaled.' }
+                    $signal = Get-Content -LiteralPath $signalPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $leasePath = Join-Path $BundleRoot 'desktop-lease.json'
+                    if ($transportOutputRoot -cne $BundleRoot) {
+                        $leasePath = Join-Path (Split-Path -Parent $transportOutputRoot) 'desktop-lease.json'
+                    }
+                    $lease = Get-Content -LiteralPath $leasePath -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $leaseHash = (Get-FileHash -LiteralPath $leasePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($signal.schema_version -ne 1 -or $signal.nonce -cne $nonce -or
+                        $signal.preservation_sha256 -cne $receiptHash -or
+                        $signal.desktop_lease_sha256 -cne $leaseHash -or
+                        $lease.mode -cne 'managed-rdp' -or $lease.stop_status -cne 'stopped' -or
+                        $lease.cleanup_observed -isnot [bool] -or -not $lease.cleanup_observed -or
+                        (Get-FileHash -LiteralPath $transportPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $transportHash -or
+                        (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receiptHash) {
+                        throw 'Frozen failure evidence or managed desktop closure differs from its receipt.'
+                    }
+                    $proof = Invoke-DrControllerOwnedCleanupAfterFailure `
+                        -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
+                        -SessionId $desktop.session_id -ExpectedVmId $receipt.vm_id `
+                        -Frozen $receipt.failed_snapshot -Roots $receipt.root_records
+                }
+                catch {
+                    $proof = [pscustomobject]@{
+                        schema_version=1; kind='owned_cleanup_after_strict_failure'
+                        run_name=$taskName; vm_id=$receipt.vm_id; status='incomplete'
+                        pre=$null; post=$null; roots=$receipt.root_records
+                        observed_roots_before=$null; observed_roots_after=$null
+                        errors=@($_.Exception.Message)
+                    }
+                }
+                $proof | Add-Member -NotePropertyName preservation_sha256 -NotePropertyValue $receiptHash -Force
+                $proof | Add-Member -NotePropertyName original_transport_sha256 -NotePropertyValue $transportHash -Force
+                $proof | Add-Member -NotePropertyName desktop_lease_sha256 -NotePropertyValue $leaseHash -Force
+                $proof | Add-Member -NotePropertyName nonce -NotePropertyValue $nonce -Force
+                $temporaryProof = $proofPath + '.tmp'
+                Write-DrControllerExclusiveJson -Path $temporaryProof -Value $proof -MaximumBytes 1MB
+                [IO.File]::Replace($temporaryProof,$proofPath,$null)
+            }
         }
     }
     finally {
@@ -4416,7 +5287,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 controller_deadline_exceeded=($runtimeBrokerClock.Elapsed.TotalSeconds -gt $RuntimeBrokerDiagnosticBudgetSeconds)
             } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'runtimebroker-controller.json') -Encoding UTF8
         }
-        if ($result -and $taskSelection.kind -ceq 'core') {
+        if (-not $originalTransportFrozen -and $result -and $taskSelection.kind -ceq 'core') {
             $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
             $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
         }

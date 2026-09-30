@@ -51,6 +51,7 @@ SUPPORTED_ROLES = MappingProxyType({
     "contracts-binding": ("python", "darkrenamer_tooling.contracts.binding"),
     "contracts-menu-layout": ("python", "darkrenamer_tooling.contracts.menu_layout"),
     "contracts-platform": ("python", "darkrenamer_tooling.contracts.platform"),
+    "contracts-owned-cleanup": ("python", "darkrenamer_tooling.contracts.owned_cleanup"),
     "contracts-state": ("python", "darkrenamer_tooling.contracts.state"),
     "contracts-authority": ("python", "darkrenamer_tooling.contracts.authority"),
     "contracts-tooling": ("python", "darkrenamer_tooling.contracts.tooling"),

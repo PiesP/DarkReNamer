@@ -286,6 +286,21 @@ The controller verifies that the desktop is active and unlocked; a disconnected
 Explorer session does not qualify. Managed RDP also binds that desktop account
 to the helper's expected guest SID.
 
+Failed-run preservation and owned-root finalization have a separate, versioned
+evidence contract. The controller exclusively writes `original-transport.json`
+and `owned-cleanup-strict-failure-preservation.json` outside the disposable guest
+roots before requesting deletion. The preservation receipt binds the original
+transport, collected files, frozen inventories and original root identities.
+The managed launcher closes its desktop lease before writing the nonce- and
+hash-bound `owned-cleanup-desktop-closed.json` signal. The controller then records
+fresh inventories, held root descriptors and post-deletion observations in
+`owned-cleanup-after-strict-failure.json`. Missing evidence, unknown restoration,
+changed identities, new inventory entries or cleanup errors refuse finalization.
+An independent verifier may establish `owned-clean` from these raw records while
+retaining `strict-failed` and `rejected`; the original failure remains immutable.
+This handshake does not run for a controller without a matching managed lease,
+and it does not authorize a subsequent campaign workload.
+
 This lane proves actual Windows execution of cross-built test artifacts, not
 native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,

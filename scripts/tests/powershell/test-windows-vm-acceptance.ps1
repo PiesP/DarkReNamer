@@ -495,7 +495,9 @@ try {
         'recovery-inventory.json',
         '-Role recovery',
         'Assert-ObserverResultBinding',
-        '(-not $observerTask -or $acceptancePassed)'
+        '(-not $observerTask -or $outputPreservedForCleanup)',
+        'Test-DrControllerPreservedOutputCleanupAuthorization',
+        '($observerTask -and -not $acceptancePassed)'
     )) {
         if ($controllerText.IndexOf($requiredObserverSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The shared controller is missing observer contract '$requiredObserverSource'."
