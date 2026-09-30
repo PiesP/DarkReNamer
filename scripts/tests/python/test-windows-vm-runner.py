@@ -1,5 +1,5 @@
 """Contract tests for the host VM bundle and returned native evidence."""
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 import hashlib
 import io
 import json
@@ -1622,6 +1622,117 @@ class VmRunnerTests(unittest.TestCase):
             })
             observed.append(document['lease_id'])
         self.assertEqual(len(set(observed)), 2)
+
+    def test_owned_cleanup_signal_follows_managed_desktop_closure(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        original = {'guest_cleanup': False, 'raw_cleanup': {
+            'unexpected_runner_tasks_after_delete': None,
+            'unexpected_runner_processes_after_delete': None,
+        }}
+        original_path = self.root / 'original-transport.json'
+        original_path.write_text(json.dumps(original))
+        receipt_path = self.root / 'owned-cleanup-strict-failure-preservation.json'
+        receipt_path.write_text(json.dumps({
+            'schema_version': 1,
+            'kind': 'owned_cleanup_strict_failure_preservation',
+            'nonce': 'b' * 32,
+            'desktop_lease_id': 'a' * 32,
+            'original_transport': {'file': 'original-transport.json',
+                                   'sha256': vm.sha256(original_path)},
+        }))
+        (self.root / 'result.json').write_text(json.dumps({'gui': {'window_dpi': 192}}))
+        events = []
+
+        @contextmanager
+        def desktop_context(_args, _root):
+            events.append('start')
+            yield self.desktop_lease()
+            (self.root / 'desktop-lease.json').write_text(json.dumps({
+                'mode': 'managed-rdp', 'lease_id': 'a' * 32, 'stop_status': 'stopped',
+                'cleanup_observed': True,
+            }))
+            events.append('closed')
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = lambda timeout: events.append('reaped') or 0
+        with mock.patch.object(vm, 'managed_desktop', side_effect=desktop_context), \
+             mock.patch.object(vm, 'controller_invocation', return_value=['pwsh']), \
+             mock.patch.object(vm.subprocess, 'Popen', return_value=process) as spawn:
+            vm.run_controller(self.root, args)
+        self.assertEqual(events, ['start', 'closed', 'reaped'])
+        binding = json.loads(spawn.call_args.kwargs['env']['DR_VM_OWNED_CLEANUP_HANDSHAKE'])
+        self.assertEqual(binding['lease_id'], 'a' * 32)
+        self.assertEqual(binding['sid'], self.desktop_lease()['expectedGuestSid'])
+        signal = json.loads((self.root / 'owned-cleanup-desktop-closed.json').read_text())
+        self.assertEqual(signal['nonce'], 'b' * 32)
+        self.assertEqual(signal['preservation_sha256'], vm.sha256(receipt_path))
+
+    def test_direct_controller_has_no_owned_cleanup_handshake(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with mock.patch.dict(os.environ, {'DR_VM_OWNED_CLEANUP_HANDSHAKE': 'stale'}), \
+             mock.patch.object(vm, 'controller_invocation', return_value=['pwsh']), \
+             mock.patch.object(vm.subprocess, 'Popen', return_value=process) as spawn:
+            vm.run_controller(self.root, args)
+        self.assertNotIn('DR_VM_OWNED_CLEANUP_HANDSHAKE', spawn.call_args.kwargs['env'])
+
+    def test_controller_wait_deadline_reaps_exact_spawned_child(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired(['pwsh'], 190), 0]
+        with mock.patch.object(vm, 'controller_invocation', return_value=['pwsh']), \
+             mock.patch.object(vm.subprocess, 'Popen', return_value=process), \
+             mock.patch.object(vm.time, 'monotonic', side_effect=[0, 3001]):
+            with self.assertRaisesRegex(RuntimeError, 'bounded execution wait'):
+                vm.run_controller(self.root, args)
+        process.terminate.assert_called_once_with()
+        self.assertEqual([call.kwargs['timeout'] for call in process.wait.call_args_list],
+                         [190, 10])
+
+    def test_exclusive_cleanup_evidence_rejects_oversize_before_creating_file(self):
+        pwsh = shutil.which('pwsh')
+        if pwsh is None:
+            self.skipTest('PowerShell 7 is unavailable')
+        source = REPOSITORY_ROOT / 'scripts/modules/powershell/controller-entry.psm1'
+        script = r'''
+            $tokens=$null; $errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile(
+                $env:VM_RUNNER_SOURCE,[ref]$tokens,[ref]$errors)
+            if ($errors.Count -ne 0) { throw 'Controller parse failed.' }
+            $functions=@($ast.FindAll({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Write-DrControllerExclusiveJson'
+            },$true))
+            if ($functions.Count -ne 1) { throw 'Exclusive writer was not found.' }
+            . ([scriptblock]::Create($functions[0].Extent.Text))
+            try {
+                Write-DrControllerExclusiveJson -Path $env:VM_RUNNER_OUTPUT `
+                    -Value @{ payload=('x'*128) } -MaximumBytes 64
+                throw 'Oversized JSON was accepted.'
+            } catch {
+                if ($_.Exception.Message -notlike '*byte bound*') { throw }
+            }
+            if (Test-Path -LiteralPath $env:VM_RUNNER_OUTPUT) {
+                throw 'Oversized JSON created evidence.'
+            }
+            if (@(Get-ChildItem -LiteralPath (Split-Path $env:VM_RUNNER_OUTPUT) `
+                    -Filter '*.new-*').Count -ne 0) {
+                throw 'Oversized JSON created temporary evidence.'
+            }
+            Write-DrControllerExclusiveJson -Path $env:VM_RUNNER_OUTPUT `
+                -Value @{ payload='ok' } -MaximumBytes 64
+            if (-not (Test-Path -LiteralPath $env:VM_RUNNER_OUTPUT)) {
+                throw 'Bounded JSON was not published.'
+            }
+        '''
+        subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-Command', script],
+                       check=True, capture_output=True, text=True, timeout=20,
+                       env={**os.environ, 'VM_RUNNER_SOURCE': str(source),
+                            'VM_RUNNER_OUTPUT': str(self.root / 'bounded.json')})
 
     def test_existing_desktop_never_calls_windows_host(self):
         args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])

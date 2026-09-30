@@ -597,7 +597,8 @@ try {
             throw 'The final acceptance rejection was weakened.'
         }
         $assignment = @($ast.FindAll({ param($node)
-            $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$cleanupResult'
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Extent.Text -match '^\$cleanupResult\s*=\s*Invoke-Command\b'
         }, $true))
         if ($assignment.Count -ne 1) { throw 'The controller cleanup command is ambiguous.' }
         $remoteBody = $assignment[0].Find({ param($node)
@@ -661,12 +662,29 @@ try {
                 $guestRoot = Join-Path $base $taskName
                 $trustedRoot = Join-Path $base ($taskName + '-trusted')
                 [void](New-Item -ItemType Directory -Path $guestRoot,$trustedRoot -Force)
+                $global:DrVmOwnedRootRecords = [ordered]@{
+                    guest = [pscustomobject]@{ path = $guestRoot }
+                    trusted = [pscustomobject]@{ path = $trustedRoot }
+                }
                 $context = [pscustomobject]@{
                     runner_sid = 'runner-sid'; runner_session_id = 7
                     baseline_tasks = @([pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = 'a' * 64 })
                     baseline_process_identities = @()
                 }
                 $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                if ($null -ne $observed.PSObject.Properties['owned_cleanup_after_strict_failure_eligible']) {
+                    if ($observed.guest_cleanup -or $probe.deletes -ne 0 -or
+                        $null -ne $observed.raw_cleanup.unexpected_runner_tasks_after_delete -or
+                        $null -ne $observed.raw_cleanup.unexpected_runner_processes_after_delete -or
+                        -not $observed.raw_cleanup.guest_root_present -or
+                        -not $observed.raw_cleanup.trusted_task_root_present) {
+                        throw 'Strict failure changed its raw observation or deleted owned roots.'
+                    }
+                    foreach ($ownedRoot in @($guestRoot,$trustedRoot)) {
+                        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $ownedRoot -Recurse -Force
+                    }
+                    continue
+                }
                 if($mode -ceq 'failed-capture'){
                     if($observed.guest_cleanup -or $probe.deletes -ne 0 -or
                         -not $observed.raw_cleanup.guest_root_present -or -not $observed.raw_cleanup.trusted_task_root_present -or
