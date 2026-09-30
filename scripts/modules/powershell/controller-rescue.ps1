@@ -11,12 +11,16 @@
         [Parameter(Mandatory = $true)][object[]] $BundleRecords,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
         [Parameter(Mandatory = $true)][string] $Appearance,
-        [Parameter(Mandatory = $true)][string] $HostOutputRoot
+        [Parameter(Mandatory = $true)][string] $HostOutputRoot,
+        [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+        [AllowNull()][object] $EngineEvidence
     )
 
+    $v2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
+    if ($v2) { $script:DrVmV2RescueAttempts++ }
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance,$BundleRecords,$InputManifestSha256 -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance,$bundleRecords,$inputManifestHash)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance,$BundleRecords,$InputManifestSha256,$v2,$EngineEvidence -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance,$bundleRecords,$inputManifestHash,$v2,$preflightEngine)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -36,16 +40,20 @@
         }
         $inputManifest = Join-Path $trustedRoot 'input-manifest.json'
         $powerShell = Get-DrVmTrustedPowerShellPath
-        $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
-        $engine = $engineJson | ConvertFrom-Json
+        if ($v2) { $engine = $preflightEngine }
+        else {
+            $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
+            $engine = $engineJson | ConvertFrom-Json
+        }
         if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'Text-scale rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
         $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode text-scale -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
-        Register-DrVmTask `
+        if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+        $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
             -SessionId $desktopSession `
@@ -61,12 +69,15 @@
             -Arguments $observerArguments `
             -WorkingDirectory $root `
             -TrustedResultLeaf 'text-scale-rescue-result.json' `
-            -ExecutionTimeLimitSeconds ($rescueSeconds + 30) | Out-Null
+            -ExecutionTimeLimitSeconds ($rescueSeconds + 30)
+        $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
         $registered = Get-ScheduledTaskInfo -TaskName $name
         $registeredTicks = [long]$registered.LastRunTime.Ticks
         Start-ScheduledTask -TaskName $name | Out-Null
         [pscustomobject][ordered]@{
             registered_last_run_time_ticks = $registeredTicks
+            action_executable = if ($v2) { [string]$actualAction.Path } else { $null }
+            action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $null }
         }
     }
 
@@ -144,6 +155,19 @@
     if ($rescue.result_status -cne 'passed' -or $rescue.task_result -ne 0) {
         throw 'Text-scale rescue did not verify exact restoration; inspect rescue evidence.'
     }
+    if ($v2) {
+        $document = Get-Content -LiteralPath (Join-Path $HostOutputRoot 'text-scale-rescue-result.json') `
+            -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $execution = Complete-DrControllerV2TaskExecution -Session $Session -TaskName $TaskName `
+            -RunnerSid $DesktopSid -SessionId $DesktopSessionId -Engine $rescueGeneration `
+            -CompletedTicks $rescue.last_run_time_ticks -TaskResult $rescue.task_result -Result $document
+        $script:DrVmV2RescueExecutions.Add([pscustomobject]@{
+            kind='text-scale'; task_execution=$execution
+            result_file='text-scale-rescue-result.json'
+            result_sha256=(Get-FileHash -LiteralPath (Join-Path $HostOutputRoot 'text-scale-rescue-result.json') `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+    }
 }
 function Invoke-AcceptanceHighContrastRescue {
     param(
@@ -156,12 +180,16 @@ function Invoke-AcceptanceHighContrastRescue {
         [Parameter(Mandatory = $true)][int] $SuiteTimeoutSeconds,
         [Parameter(Mandatory = $true)][string] $ObserverSha256,
         [Parameter(Mandatory = $true)][object[]] $BundleRecords,
-        [Parameter(Mandatory = $true)][string] $HostOutputRoot
+        [Parameter(Mandatory = $true)][string] $HostOutputRoot,
+        [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+        [AllowNull()][object] $EngineEvidence
     )
 
+    $v2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
+    if ($v2) { $script:DrVmV2RescueAttempts++ }
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$BundleRecords -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$bundleRecords)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$BundleRecords,$v2,$EngineEvidence -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$bundleRecords,$v2,$preflightEngine)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -180,16 +208,20 @@ function Invoke-AcceptanceHighContrastRescue {
             throw 'High Contrast rescue snapshot is not an ordinary file.'
         }
         $powerShell = Get-DrVmTrustedPowerShellPath
-        $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
-        $engine = $engineJson | ConvertFrom-Json
+        if ($v2) { $engine = $preflightEngine }
+        else {
+            $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
+            $engine = $engineJson | ConvertFrom-Json
+        }
         if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'High Contrast rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
         $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance system -HighContrast -RestoreHighContrastOnly'
-        Register-DrVmTask `
+        if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+        $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
             -SessionId $desktopSession `
@@ -203,12 +235,15 @@ function Invoke-AcceptanceHighContrastRescue {
             -Arguments $observerArguments `
             -WorkingDirectory $root `
             -TrustedResultLeaf 'high-contrast-rescue-result.json' `
-            -ExecutionTimeLimitSeconds ($rescueSeconds + 30) | Out-Null
+            -ExecutionTimeLimitSeconds ($rescueSeconds + 30)
+        $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
         $registered = Get-ScheduledTaskInfo -TaskName $name
         $registeredTicks = [long]$registered.LastRunTime.Ticks
         Start-ScheduledTask -TaskName $name | Out-Null
         [pscustomobject][ordered]@{
             registered_last_run_time_ticks = $registeredTicks
+            action_executable = if ($v2) { [string]$actualAction.Path } else { $null }
+            action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $null }
         }
     }
 
@@ -290,5 +325,18 @@ function Invoke-AcceptanceHighContrastRescue {
     }
     if ($rescue.result_status -cne 'passed' -or $rescue.task_result -ne 0) {
         throw 'High Contrast rescue did not verify exact restoration; inspect rescue evidence.'
+    }
+    if ($v2) {
+        $document = Get-Content -LiteralPath (Join-Path $HostOutputRoot 'high-contrast-rescue-result.json') `
+            -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $execution = Complete-DrControllerV2TaskExecution -Session $Session -TaskName $TaskName `
+            -RunnerSid $DesktopSid -SessionId $DesktopSessionId -Engine $rescueGeneration `
+            -CompletedTicks $rescue.last_run_time_ticks -TaskResult $rescue.task_result -Result $document
+        $script:DrVmV2RescueExecutions.Add([pscustomobject]@{
+            kind='high-contrast'; task_execution=$execution
+            result_file='high-contrast-rescue-result.json'
+            result_sha256=(Get-FileHash -LiteralPath (Join-Path $HostOutputRoot 'high-contrast-rescue-result.json') `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
     }
 }

@@ -52,11 +52,17 @@ function Invoke-DrWindowsVmAcceptance {
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
     [switch] $RestoreTextScaleOnly,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
     [switch] $ValidateOnly,
     [Parameter(Mandatory)][string] $EntryPointPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:VmAcceptanceProfileId = $AcceptanceProfileId
+if ($AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources' -and -not $ValidateOnly) {
+    Initialize-DrVmObserverLifecycle -ProfileId $AcceptanceProfileId
+}
 $script:acceptanceForegroundObservations = [Collections.Generic.List[object]]::new()
 $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
 $script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()

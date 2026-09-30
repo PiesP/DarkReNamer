@@ -34,6 +34,9 @@ param(
 
     [switch] $IntentOnlyCandidateDiscard,
 
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+
     [switch] $ElevatedObserver,
 
     [string] $TrustedResultPath,

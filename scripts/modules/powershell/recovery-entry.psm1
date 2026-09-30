@@ -65,11 +65,18 @@ function Invoke-DrWindowsVmRecoveryAcceptance {
 
     [switch] $IntentOnlyCandidateDiscard,
 
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+
     [switch] $ValidateOnly,
     [Parameter(Mandatory)][string] $EntryPointPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:VmAcceptanceProfileId = $AcceptanceProfileId
+if ($AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources' -and -not $ValidateOnly) {
+    Initialize-DrVmObserverLifecycle -ProfileId $AcceptanceProfileId
+}
 $script:AcceptanceProcessSequence = 0
 $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
 $script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()

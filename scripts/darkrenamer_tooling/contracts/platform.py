@@ -593,13 +593,308 @@ def verify_environment(value: object, target: dict, *, candidate_pid: int, sessi
             "Candidate window does not intersect its observed work area.")
 
 
-def verify_cleanup(guest: object, transport: object, *, require_candidate_export: bool = False) -> None:
+V1_PROFILE_ID = "vm-automated-v1-win11-ntfs"
+V2_PROFILE_ID = "vm-automated-v2-owned-resources"
+
+
+def _v2_process_rows(value: object, sid: str, session: int, label: str) -> dict[str, dict]:
+    require(type(value) is list and len(value) <= 20_000, f"{label} process inventory is unavailable or oversized.")
+    rows: dict[str, dict] = {}
+    pids: set[int] = set()
+    fields = {"identity", "pid", "session_id", "creation_time_utc", "executable_path",
+              "command_line", "parent_pid", "owner_sid"}
+    for raw in value:
+        row = require_exact_keys(raw, fields, f"{label} process")
+        pid = require_int(row["pid"], 1, 0xFFFFFFFF, f"{label} PID")
+        require(type(row["creation_time_utc"]) is str and
+                _WINDOWS_UTC_TIMESTAMP.fullmatch(row["creation_time_utc"]) is not None and
+                row["identity"] == f"{pid}|{row['creation_time_utc']}" and
+                row["owner_sid"] == sid and type(row["session_id"]) is int and
+                row["session_id"] == session and
+                type(row["executable_path"]) is str and
+                re.match(r"^[A-Za-z]:\\", row["executable_path"]) is not None and
+                len(row["executable_path"]) <= 32_767 and
+                type(row["command_line"]) is str and
+                0 < len(row["command_line"]) <= 4096 and
+                type(row["parent_pid"]) is int and 0 <= row["parent_pid"] <= 0xFFFFFFFF and
+                row["identity"] not in rows and pid not in pids,
+                f"{label} process lifetime, image, owner, or execution scope is unknown.")
+        rows[row["identity"]] = row
+        pids.add(pid)
+    return rows
+
+
+def _v2_task_rows(value: object, label: str) -> dict[str, str]:
+    require(type(value) is list and len(value) <= 20_000, f"{label} task inventory is unavailable or oversized.")
+    rows: dict[str, str] = {}
+    for raw in value:
+        row = require_exact_keys(raw, {"identity", "task_path", "task_name", "definition_sha256"},
+                                 f"{label} task")
+        require(type(row["identity"]) is str and type(row["task_path"]) is str and
+                type(row["task_name"]) is str and
+                row["identity"] == row["task_path"] + row["task_name"] and
+                row["task_path"].startswith("\\") and
+                bool(row["task_name"]) and type(row["definition_sha256"]) is str and
+                re.fullmatch(r"[0-9a-f]{64}", row["definition_sha256"]) is not None and
+                row["identity"] not in rows, f"{label} task identity or definition is unknown.")
+        rows[row["identity"]] = row["definition_sha256"]
+    return rows
+
+
+def _v2_closed_helper(value: object, label: str) -> int:
+    row = require_exact_keys(value, {
+        "pid", "start_time_utc_ticks", "exit_code", "exited", "streams_complete",
+        "exact_lifetime_absent", "process_job_closed",
+    }, label)
+    pid = require_int(row["pid"], 1, 0xFFFFFFFF, f"{label} PID")
+    require(type(row["start_time_utc_ticks"]) is str and
+            re.fullmatch(r"[1-9][0-9]{0,18}", row["start_time_utc_ticks"]) is not None and
+            type(row["exit_code"]) is int and row["exit_code"] == 0 and
+            all(row[key] is True for key in
+                ("exited", "streams_complete", "exact_lifetime_absent", "process_job_closed")),
+            f"{label} has an unclosed lifetime or Job.")
+    return pid
+
+
+def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
+                               deleted: bool = True) -> dict:
+    from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
+
+    require(type(profile_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", profile_sha256) is not None and
+            type(host["schema_version"]) is int and host["schema_version"] == 2 and
+            host["profile_id"] == V2_PROFILE_ID and
+            host["profile_sha256"] == profile_sha256,
+            "V2 cleanup is not bound to the selected profile bytes.")
+    evidence = require_exact_keys(host["owned_resource_evidence"], {
+        "schema_version", "run_name", "runner_sid", "runner_session_id", "root_records",
+        "baseline_processes", "baseline_tasks", "process_snapshots", "task_snapshots",
+        "declared_processes", "process_job_cleanup", "preflight_child", "engine_child",
+        "task_execution", "rescue_attempts", "rescue_executions",
+        "observed_roots_before", "observed_roots_after",
+    }, "V2 owned-resource evidence")
+    name, sid = evidence["run_name"], evidence["runner_sid"]
+    require(type(evidence["schema_version"]) is int and evidence["schema_version"] == 2 and
+            type(name) is str and
+            re.fullmatch(r"DarkReNamerTests-[0-9a-f]{32}", name) is not None and
+            type(sid) is str and _WINDOWS_RUNNER_SID.fullmatch(sid) is not None,
+            "V2 owned run or runner SID is unavailable.")
+    session = require_int(evidence["runner_session_id"], 1, 0xFFFFFFFF, "V2 runner session")
+    roots = require_exact_keys(evidence["root_records"], {"guest", "trusted"}, "V2 owned roots")
+    paths = []
+    for role, suffix in (("guest", ""), ("trusted", "-trusted")):
+        root = require_exact_keys(roots[role],
+                                  {"path", "base_file_id", "file_id", "owner_sid", "acl_sddl"},
+                                  f"V2 {role} root")
+        path = require_fixture_root(root["path"])
+        require(path.casefold().endswith(("\\darkrenamervmruns\\" + name + suffix).casefold()) and
+                root["owner_sid"] == "S-1-5-32-544" and
+                all(type(root[key]) is str and re.fullmatch(r"[0-9a-f]{48}", root[key])
+                    for key in ("base_file_id", "file_id")) and
+                type(root["acl_sddl"]) is str and 0 < len(root["acl_sddl"]) <= 16_384,
+                f"V2 {role} root identity or descriptor is unavailable.")
+        paths.append(path.casefold())
+    require(roots["guest"]["base_file_id"] == roots["trusted"]["base_file_id"] and
+            roots["guest"]["file_id"] != roots["trusted"]["file_id"],
+            "V2 owned root identities are inconsistent.")
+    if deleted or evidence["observed_roots_before"] is not None:
+        observed_before = require_exact_keys(evidence["observed_roots_before"],
+                                             {"guest", "trusted"}, "V2 observed roots before deletion")
+        for role in ("guest", "trusted"):
+            require(observed_before[role] == {**roots[role], "ordinary_directory": True},
+                    f"V2 {role} root changed identity, descriptor, or type before deletion.")
+    observed_after = require_exact_keys(evidence["observed_roots_after"],
+                                        {"guest_present", "trusted_present"},
+                                        "V2 observed roots after deletion")
+    if deleted:
+        require(observed_after == {"guest_present": False, "trusted_present": False},
+                "V2 owned roots remain after deletion.")
+    else:
+        require(observed_after == {"guest_present": True, "trusted_present": True},
+                "V2 failed run cannot be finalized with changed root presence.")
+
+    baseline = _v2_process_rows(evidence["baseline_processes"], sid, session, "V2 baseline")
+    tasks = _v2_task_rows(evidence["baseline_tasks"], "V2 baseline")
+    process_snapshots = require_exact_keys(evidence["process_snapshots"],
+        {"before", "after_intervention", "after_delete"}, "V2 process snapshots")
+    task_snapshots = require_exact_keys(evidence["task_snapshots"],
+        {"before", "after_intervention", "after_delete"}, "V2 task snapshots")
+    all_rows = list(baseline.values())
+    for phase, process_key, task_key in (
+        ("before", "unexpected_runner_processes", "unexpected_runner_tasks"),
+        ("after_intervention", "unexpected_runner_processes_after_intervention",
+         "unexpected_runner_tasks_after_intervention"),
+        ("after_delete", "unexpected_runner_processes_after_delete",
+         "unexpected_runner_tasks_after_delete"),
+    ):
+        if phase == "after_delete" and not deleted:
+            require(process_snapshots[phase] is None and task_snapshots[phase] is None and
+                    host[process_key] is None and host[task_key] is None,
+                    "V2 failed run was silently rewritten as completed cleanup.")
+            continue
+        snapshot = require_exact_keys(process_snapshots[phase], {"complete", "processes"},
+                                      f"V2 {phase} processes")
+        require(snapshot["complete"] is True, f"V2 {phase} process enumeration is incomplete.")
+        current = _v2_process_rows(snapshot["processes"], sid, session, f"V2 {phase}")
+        all_rows.extend(current.values())
+        observed_delta = {key: row for key, row in current.items() if key not in baseline}
+        require(type(host[process_key]) is list and
+                {row.get("identity"): row for row in host[process_key]
+                 if type(row) is dict} == observed_delta and
+                len(host[process_key]) == len(observed_delta),
+                f"V2 {phase} process delta differs from its complete inventory.")
+        current_tasks = _v2_task_rows(task_snapshots[phase], f"V2 {phase}")
+        require(current_tasks == tasks and host[task_key] == [],
+                f"V2 {phase} task creation, deletion, or definition change is unexplained.")
+    require(host["removed_runner_tasks"] == [], "V2 cleanup removed an unexpected task.")
+
+    by_pid: dict[int, str] = {}
+    by_identity: dict[str, dict] = {}
+    for row in all_rows:
+        pid, identity = row["pid"], row["identity"]
+        require(pid not in by_pid or by_pid[pid] == identity,
+                "V2 process PID was reused across observed lifetimes.")
+        require(identity not in by_identity or by_identity[identity] == row,
+                "V2 process lifetime changed image, owner, or execution scope.")
+        by_pid[pid] = identity
+        by_identity[identity] = row
+
+    declared = evidence["declared_processes"]
+    require(type(declared) is list and len(declared) <= 64,
+            "V2 declared process lifetimes are unavailable or oversized.")
+    identities: list[tuple[int, int]] = []
+    for raw in declared:
+        row = require_exact_keys(raw, {"pid", "start_time_utc_ticks"}, "V2 declared process")
+        pid = require_int(row["pid"], 1, 0xFFFFFFFF, "V2 declared PID")
+        ticks = row["start_time_utc_ticks"]
+        require(type(ticks) is str and re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None,
+                "V2 declared process creation time is unavailable.")
+        identities.append((pid, int(ticks)))
+    require(len(identities) == len(set(identities)), "V2 declared process lifetime repeats.")
+    jobs = evidence["process_job_cleanup"]
+    if identities:
+        verify_process_job_cleanup(jobs, expected_processes=identities)
+    else:
+        require(jobs == [], "V2 Job cleanup has an undeclared lifetime.")
+    preflight_pid = _v2_closed_helper(evidence["preflight_child"], "V2 registration-query child")
+    engine_pid = _v2_closed_helper(evidence["engine_child"], "V2 PowerShell engine child")
+    require(engine_pid != preflight_pid, "V2 preflight helper PID was reused.")
+    task = require_exact_keys(evidence["task_execution"], {
+        "task_name", "terminal", "exit_code", "registered_last_run_time_ticks",
+        "completed_last_run_time_ticks", "action_executable", "action_arguments",
+        "observer_lifecycle", "observer_lifetime_absent",
+    }, "V2 task execution")
+    lifecycle = require_exact_keys(task["observer_lifecycle"], {
+        "pid", "start_time_utc_ticks", "session_id", "image_path", "command_line", "owner_sid",
+    }, "V2 observer lifetime")
+    observer_pid = require_int(lifecycle["pid"], 1, 0xFFFFFFFF, "V2 observer PID")
+    require(len({preflight_pid, engine_pid, observer_pid} |
+                {candidate for candidate, _ in identities}) == len(identities) + 3,
+            "V2 declared process PIDs overlap or were reused.")
+    require(task["task_name"] == name and task["terminal"] is True and
+            task["observer_lifetime_absent"] is True and
+            type(task["exit_code"]) is int and 0 <= task["exit_code"] <= 0xFFFFFFFF and
+            (not deleted or task["exit_code"] == 0) and
+            type(task["registered_last_run_time_ticks"]) is int and
+            type(task["completed_last_run_time_ticks"]) is int and
+            0 <= task["registered_last_run_time_ticks"] < task["completed_last_run_time_ticks"] and
+            type(task["action_executable"]) is str and
+            task["action_executable"].casefold().endswith("\\pwsh.exe") and
+            type(task["action_arguments"]) is str and 0 < len(task["action_arguments"]) <= 4096 and
+            name.casefold() in task["action_arguments"].casefold() and
+            ('-file "' + roots["trusted"]["path"] + '\\').casefold() in
+            task["action_arguments"].casefold() and
+            ('-elevatedobserver -trustedresultpath "' + roots["trusted"]["path"] +
+             '\\out\\').casefold() in task["action_arguments"].casefold() and
+            "-acceptanceprofileid vm-automated-v2-owned-resources" in task["action_arguments"].casefold() and
+            type(lifecycle["start_time_utc_ticks"]) is str and
+            re.fullmatch(r"[1-9][0-9]{0,18}", lifecycle["start_time_utc_ticks"]) is not None and
+            type(lifecycle["session_id"]) is int and lifecycle["session_id"] == session and
+            lifecycle["owner_sid"] == sid and
+            type(lifecycle["image_path"]) is str and
+            lifecycle["image_path"].casefold() == task["action_executable"].casefold() and
+            type(lifecycle["command_line"]) is str and 0 < len(lifecycle["command_line"]) <= 4096 and
+            lifecycle["command_line"].endswith(task["action_arguments"]) and
+            name.casefold() in lifecycle["command_line"].casefold() and
+            "-acceptanceprofileid vm-automated-v2-owned-resources" in lifecycle["command_line"].casefold(),
+            "V2 declared scheduled task execution is unbound or nonterminal.")
+    rescue_attempts = require_int(evidence["rescue_attempts"], 0, 2, "V2 rescue attempts")
+    rescues = evidence["rescue_executions"]
+    require(type(rescues) is list and len(rescues) == rescue_attempts,
+            "V2 rescue task attempt lacks a complete execution receipt.")
+    rescue_pids: set[int] = set()
+    rescue_kinds: set[str] = set()
+    task_fields = set(task)
+    lifecycle_fields = set(lifecycle)
+    for raw in rescues:
+        rescue = require_exact_keys(raw, {"kind", "task_execution", "result_file", "result_sha256"},
+                                    "V2 rescue task")
+        kind = rescue["kind"]
+        require(kind in ("text-scale", "high-contrast") and kind not in rescue_kinds and
+                rescue["result_file"] == kind + "-rescue-result.json" and
+                type(rescue["result_sha256"]) is str and
+                re.fullmatch(r"[0-9a-f]{64}", rescue["result_sha256"]) is not None,
+                "V2 rescue output identity or digest is unknown.")
+        rescue_kinds.add(kind)
+        execution = require_exact_keys(rescue["task_execution"], task_fields,
+                                       "V2 rescue execution")
+        child = require_exact_keys(execution["observer_lifecycle"], lifecycle_fields,
+                                   "V2 rescue observer")
+        pid = require_int(child["pid"], 1, 0xFFFFFFFF, "V2 rescue observer PID")
+        required_switch = "-RestoreTextScaleOnly" if kind == "text-scale" else "-RestoreHighContrastOnly"
+        require(pid not in rescue_pids and pid not in (preflight_pid, engine_pid, observer_pid) and
+                pid not in {candidate for candidate, _ in identities} and
+                execution["task_name"] == name and execution["terminal"] is True and
+                execution["observer_lifetime_absent"] is True and
+                type(execution["exit_code"]) is int and execution["exit_code"] == 0 and
+                type(execution["registered_last_run_time_ticks"]) is int and
+                type(execution["completed_last_run_time_ticks"]) is int and
+                0 <= execution["registered_last_run_time_ticks"] < execution["completed_last_run_time_ticks"] and
+                execution["completed_last_run_time_ticks"] > task["completed_last_run_time_ticks"] and
+                type(execution["action_executable"]) is str and
+                execution["action_executable"].casefold().endswith("\\pwsh.exe") and
+                type(execution["action_arguments"]) is str and
+                0 < len(execution["action_arguments"]) <= 4096 and
+                name.casefold() in execution["action_arguments"].casefold() and
+                ('-file "' + roots["trusted"]["path"] + '\\').casefold() in
+                execution["action_arguments"].casefold() and
+                ('-elevatedobserver -trustedresultpath "' + roots["trusted"]["path"] +
+                 '\\out\\').casefold() in execution["action_arguments"].casefold() and
+                required_switch.casefold() in execution["action_arguments"].casefold() and
+                "-acceptanceprofileid vm-automated-v2-owned-resources" in
+                execution["action_arguments"].casefold() and
+                type(child["start_time_utc_ticks"]) is str and
+                re.fullmatch(r"[1-9][0-9]{0,18}", child["start_time_utc_ticks"]) is not None and
+                type(child["session_id"]) is int and child["session_id"] == session and
+                child["owner_sid"] == sid and
+                type(child["image_path"]) is str and
+                child["image_path"].casefold() == execution["action_executable"].casefold() and
+                type(child["command_line"]) is str and
+                child["command_line"].endswith(execution["action_arguments"]),
+                "V2 rescue task has an unbound or incomplete process lifetime.")
+        rescue_pids.add(pid)
+    owned_pids = {pid for pid, _ in identities} | {preflight_pid, engine_pid, observer_pid} | rescue_pids
+    receipt = require_exact_keys(host["runner_process_natural_exit"],
+                                 {"schema_version", "status"}, "V2 ambient-process policy")
+    require(type(receipt["schema_version"]) is int and receipt["schema_version"] == 2 and
+            receipt["status"] == "v2-owned-resources",
+            "V2 cleanup reused a strict-v1 ambient process receipt.")
+    for row in all_rows:
+        scope = (row["executable_path"] + " " + row["command_line"]).casefold()
+        require(row["pid"] not in owned_pids and row["parent_pid"] not in owned_pids and
+                name.casefold() not in scope and not any(path in scope for path in paths),
+                "V2 process is owned or has an unresolved protected execution scope.")
+    return evidence
+
+
+def verify_cleanup(guest: object, transport: object, *, require_candidate_export: bool = False,
+                   profile_id: str = V1_PROFILE_ID, profile_sha256: str | None = None) -> None:
     """Require actual post-cleanup inventories, not only producer pass flags."""
     guest_fields = {"owned_processes_after", "runtime_root_after", "journal_after"}
     if require_candidate_export:
         guest_fields.add("candidate_export_root_after")
     guest = require_exact_keys(guest, guest_fields, "Guest cleanup")
-    host = verify_controller_cleanup(transport)
+    host = verify_controller_cleanup(transport, profile_id=profile_id,
+                                     profile_sha256=profile_sha256)
     for rows in (guest["owned_processes_after"], host["owned_processes_after"]):
         require(type(rows) is list and not rows, "Owned test processes remain after cleanup.")
     root = require_exact_keys(guest["runtime_root_after"], {"exists", "entries"}, "Runtime root cleanup")
@@ -620,9 +915,10 @@ def verify_cleanup(guest: object, transport: object, *, require_candidate_export
         require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
 
 
-def verify_controller_owned_cleanup(transport: object) -> dict:
+def verify_controller_owned_cleanup(transport: object, *, profile_id: str = V1_PROFILE_ID,
+                                    profile_sha256: str | None = None) -> dict:
     """Derive owned-resource cleanup only; this is never an acceptance verdict."""
-    host = require_exact_keys(transport, {
+    fields = {
         "scheduled_task_present", "guest_root_present", "trusted_task_root_present",
         "process_jobs_closed", "runner_process_inventory_complete",
         "unexpected_runner_tasks", "unexpected_runner_processes",
@@ -632,7 +928,12 @@ def verify_controller_owned_cleanup(transport: object) -> dict:
         "unexpected_runner_processes_after_delete",
         "removed_runner_tasks", "terminated_runner_processes",
         "resource_cleanup_errors", "runner_process_natural_exit", "owned_processes_after",
-    }, "Controller cleanup")
+    }
+    if profile_id == V2_PROFILE_ID:
+        fields |= {"schema_version", "profile_id", "profile_sha256", "owned_resource_evidence"}
+    else:
+        require(profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
+    host = require_exact_keys(transport, fields, "Controller cleanup")
     for key in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
         require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
     require(host["process_jobs_closed"] is True and
@@ -650,12 +951,18 @@ def verify_controller_owned_cleanup(transport: object) -> dict:
         require(type(host[key]) is list, f"Controller inventory is unavailable: {key}.")
     require(type(host["runner_process_natural_exit"]) is dict,
             "Controller environment classification evidence is unavailable.")
+    if profile_id == V2_PROFILE_ID:
+        _verify_v2_owned_resources(host, profile_sha256=profile_sha256)
     return host
 
 
-def verify_controller_cleanup(transport: object) -> dict:
+def verify_controller_cleanup(transport: object, *, profile_id: str = V1_PROFILE_ID,
+                              profile_sha256: str | None = None) -> dict:
     """Require both owned cleanup and the unchanged strict environment predicate."""
-    host = verify_controller_owned_cleanup(transport)
+    host = verify_controller_owned_cleanup(transport, profile_id=profile_id,
+                                           profile_sha256=profile_sha256)
+    if profile_id == V2_PROFILE_ID:
+        return host
     for key in ("unexpected_runner_tasks", "unexpected_runner_tasks_after_intervention",
                 "unexpected_runner_processes_after_intervention",
                 "unexpected_runner_tasks_after_delete",

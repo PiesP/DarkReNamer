@@ -1,4 +1,34 @@
-﻿function Write-ResultDocument {
+﻿function Initialize-DrVmObserverLifecycle {
+    param([Parameter(Mandatory)][string] $ProfileId)
+    if ($ProfileId -ceq 'vm-automated-v1-win11-ntfs') { return }
+    if ($ProfileId -cne 'vm-automated-v2-owned-resources' -or
+        [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'The observer profile or native process lifetime is unavailable.'
+    }
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $commandLine = [Environment]::CommandLine
+        $image = $process.MainModule.FileName
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ([string]::IsNullOrWhiteSpace($image) -or
+            [string]::IsNullOrWhiteSpace($commandLine) -or
+            $commandLine.Length -gt 4096) {
+            throw 'The observer image or execution scope is unavailable.'
+        }
+        $script:VmObserverLifecycle = [ordered]@{
+            pid = [int]$process.Id
+            start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString(
+                [Globalization.CultureInfo]::InvariantCulture)
+            session_id = [int]$process.SessionId
+            image_path = [string]$image
+            command_line = [string]$commandLine
+            owner_sid = [string]$sid
+        }
+    }
+    finally { $process.Dispose() }
+}
+
+function Write-ResultDocument {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][object] $Result,
@@ -25,6 +55,12 @@
             $Result['failure_reason'] = 'process_job_cleanup_failed'
         }
     }
+    if ($script:VmAcceptanceProfileId -ceq 'vm-automated-v2-owned-resources') {
+        if ($null -eq $script:VmObserverLifecycle) {
+            throw 'The v2 observer did not retain its original process lifetime.'
+        }
+        $Result['observer_lifecycle'] = $script:VmObserverLifecycle
+    }
     try {
         $json = $Result | ConvertTo-Json -Depth 16
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
@@ -45,6 +81,8 @@ $script:VmTrustedResultWriter = $null
 $script:VmTrustedResultRoot = $null
 $script:VmTrustedResultPath = $null
 $script:AcceptanceProcessJobCleanup = $null
+$script:VmAcceptanceProfileId = 'vm-automated-v1-win11-ntfs'
+$script:VmObserverLifecycle = $null
 
 function Initialize-TrustedResultWriter {
     param(
