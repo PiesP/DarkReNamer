@@ -228,7 +228,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
             })
             $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
-            $prefixes = @($roots.guest.path.TrimEnd('\')+'\', $roots.trusted.path.TrimEnd('\')+'\')
+            $prefixes = @(($roots.guest.path.TrimEnd('\')+'\'), ($roots.trusted.path.TrimEnd('\')+'\'))
             $ownedProcesses = @($allProcesses | Where-Object {
                 $path = [string]$_.ExecutablePath
                 $path.StartsWith($prefixes[0],[StringComparison]::OrdinalIgnoreCase) -or

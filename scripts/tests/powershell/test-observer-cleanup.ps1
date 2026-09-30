@@ -38,6 +38,38 @@ try {
 }
 finally { Remove-Item -LiteralPath $replaceRoot -Recurse -Force }
 
+# Execute the finalizer's actual inventory predicate against owned and adjacent paths.
+& {
+    $roots = @{guest=@{path='C:\owned\run'};trusted=@{path='C:\owned\run-trusted'}}
+    $sid = 'fixture'; $desktopSession = 2; $name = 'fixture'
+    function Get-DrVmRunnerProcesses { param($UserSid,$SessionId); @{complete=$true;processes=@()} }
+    function Get-DrVmRunnerTasks { param($UserSid) }
+    function Get-ScheduledTask { param($ErrorAction) }
+    function Get-CimInstance {
+        param($ClassName,$OperationTimeoutSec,$ErrorAction)
+        $paths = @('C:\owned\run\app.exe','c:\OWNED\run-trusted\app.exe',
+            'C:\Windows\system32\DllHost.exe','C:\owned\run-other\app.exe',
+            'C:\owned\run-trusted-other\app.exe',$null)
+        for ($i=0; $i -lt $paths.Count; $i++) {
+            [pscustomobject]@{ProcessId=$i+1;SessionId=2;ExecutablePath=$paths[$i]}
+        }
+    }
+    $source = Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $inventory=@($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-CurrentOwnedInventory'
+    },$true))
+    if ($errors.Count -ne 0 -or $inventory.Count -ne 1) { throw 'Finalizer inventory definition is unavailable.' }
+    . ([scriptblock]::Create($inventory[0].Extent.Text))
+    $observed=Get-CurrentOwnedInventory
+    if (-not $observed.complete -or $observed.owned_processes.Count -ne 2 -or
+        $observed.owned_processes[0].pid -ne 1 -or $observed.owned_processes[1].pid -ne 2) {
+        throw 'Finalizer inventory classified unrelated, adjacent, or unknown paths as owned.'
+    }
+}
+
 # Test the same completion predicate serialized into the guest cleanup command.
 Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     foreach ($result in @($null, [pscustomobject]@{guest_cleanup=$true},
