@@ -392,6 +392,17 @@ best-effort event delivery and unidentified historical lifetimes remain limits
 on its conclusions. No change in those conclusions is inferred from a later
 successful owned cleanup.
 
+Post-failure owned-root deletion must stay bound to the original root and base
+file identities and their retained security descriptors. Native cleanup reads
+ownership and ACLs from the held root handle, enumerates through held directory
+handles, and opens only single child components relative to those handles.
+The enumerated child identity must match the opened object before disposition.
+Raw UTF-16 name units must survive enumeration unchanged. Reparse traversal,
+root or child replacement, unknown ownership and incomplete observations refuse
+cleanup; pathname checks and sharing flags alone are insufficient. These
+cleanup capabilities grant deletion only for the verified disposable run tree;
+they neither enable privileges nor authorize terminating external OS processes.
+
 Controller cleanup requires complete process and scheduled-task inventories to
 show no runner delta after intervention and after resource removal. One initial
 same-user, same-session process delta may be waited for only when it is one of:
