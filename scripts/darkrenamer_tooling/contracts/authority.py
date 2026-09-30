@@ -10,12 +10,17 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 WORKFLOW = '.github/workflows/vm-acceptance.yaml'
 REF = 'refs/heads/master'
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+PROFILE_DEFINITIONS = {
+    'vm-automated-v1-win11-ntfs': (1, 'config/vm-automated-v1.json'),
+    'vm-automated-v2-owned-resources': (2, 'config/vm-automated-v2.json'),
+}
 
 
 def require(condition, message):
@@ -47,21 +52,16 @@ def object_value(value, label):
 
 
 def read_json(path):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            require(key not in result, 'Duplicate JSON field.')
-            result[key] = value
-        return result
-
-    def constant(_value):
-        raise ValueError('Non-finite JSON constant.')
-
     with Path(path).open('rb') as stream:
         data = stream.read(MAX_JSON_BYTES + 1)
+    return parse_json_bytes(data)
+
+
+def parse_json_bytes(data):
     require(len(data) <= MAX_JSON_BYTES, 'JSON exceeds its size bound.')
     try:
-        return json.loads(data.decode('utf-8-sig'), object_pairs_hook=unique, parse_constant=constant)
+        return json.loads(data.decode('utf-8-sig'), object_pairs_hook=unique_fields,
+                          parse_constant=lambda _value: require(False, 'Non-finite JSON constant.'))
     except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValueError('Malformed bounded JSON.') from error
 
@@ -145,8 +145,74 @@ def verify_archive_bytes(path, expected_sha256, expected_size):
             'Downloaded archive digest or size mismatch.')
 
 
+def source_profile(source_root, source_sha, profile_id):
+    """Read only the explicitly selected profile blob from the pinned source."""
+    require(profile_id in PROFILE_DEFINITIONS, 'Unknown requested profile ID.')
+    digest(source_sha, 40, 'Source SHA')
+    revision, path = PROFILE_DEFINITIONS[profile_id]
+    entry = subprocess.check_output(
+        ['git', 'ls-tree', source_sha, '--', path], cwd=source_root, text=True).strip()
+    require(entry.startswith('100644 blob ') and entry.endswith('\t' + path),
+            'Selected profile is not an ordinary pinned source blob.')
+    data = subprocess.check_output(['git', 'show', source_sha + ':' + path], cwd=source_root)
+    require(len(data) <= MAX_JSON_BYTES, 'Selected profile exceeds its size bound.')
+    profile = parse_json_bytes(data)
+    require(type(profile) is dict and profile.get('schema') ==
+            f'darkrenamer-vm-automated-profile-v{revision}' and
+            profile.get('profile_id') == profile_id and
+            type(profile.get('revision')) is int and profile['revision'] == revision,
+            'Selected source profile schema, ID or revision mismatch.')
+    return revision, hashlib.sha256(data).hexdigest()
+
+
+def unique_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        require(key not in value, 'Duplicate JSON field.')
+        value[key] = item
+    return value
+
+
+def validate_statement_profile(statement, *, profile_id, revision, profile_sha256,
+                               source_sha, run_id, run_attempt, expected_repository,
+                               candidate_run_id, candidate_run_attempt, candidate_artifact_id,
+                               expected_exe_sha256):
+    require(profile_id in PROFILE_DEFINITIONS and
+            PROFILE_DEFINITIONS[profile_id][0] == revision,
+            'Requested profile ID or revision is unsupported.')
+    statement = object_value(statement, 'Canonical statement')
+    require(statement.get('schema') == f'darkrenamer-vm-automated-statement-v{revision}' and
+            statement.get('result') == 'passed',
+            'Statement schema or result differs from the requested profile.')
+    profile = object_value(statement.get('profile'), 'Statement profile')
+    require(set(profile) == {'id', 'revision', 'sha256'} and
+            profile.get('id') == profile_id and type(profile.get('revision')) is int and
+            profile['revision'] == revision and profile.get('sha256') == profile_sha256,
+            'Statement profile differs from the selected source profile.')
+    candidate = object_value(statement.get('candidate'), 'Statement candidate')
+    harness = object_value(statement.get('harness'), 'Statement harness')
+    validation = object_value(statement.get('validation'), 'Statement validation')
+    for value, label in ((candidate_run_id, 'Candidate run ID'),
+                         (candidate_run_attempt, 'Candidate run attempt'),
+                         (candidate_artifact_id, 'Candidate artifact ID')):
+        pin(value, label)
+    digest(expected_exe_sha256, 64, 'Expected executable SHA256')
+    require(candidate.get('repository') == expected_repository and
+            harness.get('repository') == expected_repository and
+            candidate.get('source_sha') == source_sha and harness.get('source_sha') == source_sha and
+            type(candidate.get('run_id')) is int and str(candidate['run_id']) == candidate_run_id and
+            type(candidate.get('run_attempt')) is int and
+            str(candidate['run_attempt']) == candidate_run_attempt and
+            type(candidate.get('artifact_id')) is int and
+            str(candidate['artifact_id']) == candidate_artifact_id and
+            candidate.get('executable_sha256') == expected_exe_sha256 and
+            type(validation.get('run_id')) is int and str(validation['run_id']) == run_id and
+            type(validation.get('run_attempt')) is int and str(validation['run_attempt']) == run_attempt,
+            'Statement source, candidate or validation attempt differs from its pins.')
+
+
 def validate_run_authority(repository, run, verified_attestations, *, expected_repository,
-                           source_sha, run_id, run_attempt, statement_sha256):
+                           source_sha, run_id, run_attempt, statement_sha256, profile_id):
     """Bind a verified subject to its exact successful hosted workflow attempt.
 
     The input must be stdout from a successful restricted gh attestation verify;
@@ -156,6 +222,7 @@ def validate_run_authority(repository, run, verified_attestations, *, expected_r
     digest(statement_sha256, 64, 'Statement SHA256')
     pin(run_id, 'Validation run ID')
     pin(run_attempt, 'Validation run attempt')
+    require(profile_id in PROFILE_DEFINITIONS, 'Unknown requested profile ID.')
     repository_id, owner_id = repository_identity(repository, expected_repository)
     run = object_value(run, 'Exact run attempt metadata')
     require(positive(run.get('id'), 'Run ID') == run_id and
@@ -228,6 +295,12 @@ def main(repo: Path, argv=None):
     authority.add_argument('--run-id', required=True)
     authority.add_argument('--run-attempt', required=True)
     authority.add_argument('--statement', type=Path, required=True)
+    authority.add_argument('--profile-id', choices=tuple(PROFILE_DEFINITIONS), required=True)
+    authority.add_argument('--source-root', type=Path, required=True)
+    authority.add_argument('--candidate-run-id', required=True)
+    authority.add_argument('--candidate-run-attempt', required=True)
+    authority.add_argument('--candidate-artifact-id', required=True)
+    authority.add_argument('--expected-exe-sha256', required=True)
     args = parser.parse_args(argv)
     repository = read_json(args.repository_metadata)
     if args.command == 'ingress':
@@ -241,10 +314,21 @@ def main(repo: Path, argv=None):
         with args.statement.open('rb') as stream:
             data = stream.read(MAX_JSON_BYTES + 1)
         require(len(data) <= MAX_JSON_BYTES, 'Statement exceeds its size bound.')
+        statement = parse_json_bytes(data)
+        revision, profile_sha256 = source_profile(args.source_root, args.source_sha, args.profile_id)
+        validate_statement_profile(statement, profile_id=args.profile_id, revision=revision,
+                                   profile_sha256=profile_sha256, source_sha=args.source_sha,
+                                   run_id=args.run_id, run_attempt=args.run_attempt,
+                                   expected_repository=args.repository,
+                                   candidate_run_id=args.candidate_run_id,
+                                   candidate_run_attempt=args.candidate_run_attempt,
+                                   candidate_artifact_id=args.candidate_artifact_id,
+                                   expected_exe_sha256=args.expected_exe_sha256)
         validate_run_authority(repository, read_json(args.run_metadata), read_json(args.verified_attestations),
                                expected_repository=args.repository, source_sha=args.source_sha,
                                run_id=args.run_id, run_attempt=args.run_attempt,
-                               statement_sha256=hashlib.sha256(data).hexdigest())
+                               statement_sha256=hashlib.sha256(data).hexdigest(),
+                               profile_id=args.profile_id)
     print('GitHub authority bindings verified; raw evidence derivation remains a separate required gate.')
     return 0
 
@@ -253,6 +337,7 @@ def cli(repo: Path, argv=None, tooling=None):
     del tooling
     try:
         return main(repo, argv)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
+            UnicodeError, json.JSONDecodeError) as error:
         print(str(error), file=sys.stderr)
         return 1

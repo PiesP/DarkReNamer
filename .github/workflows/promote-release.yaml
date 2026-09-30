@@ -51,6 +51,14 @@ on:
         description: Exact hosted VM validation workflow run attempt
         required: true
         type: string
+      profile_id:
+        description: Explicit profile verified by the hosted validation attempt
+        required: true
+        type: choice
+        default: vm-automated-v2-owned-resources
+        options:
+          - vm-automated-v2-owned-resources
+          - vm-automated-v1-win11-ntfs
 
 permissions:
   actions: read
@@ -96,6 +104,7 @@ jobs:
           INGRESS_ARCHIVE_SIZE: ${{ inputs.ingress_archive_size }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
+          PROFILE_ID: ${{ inputs.profile_id }}
         run: |
           foreach ($entry in ([ordered]@{
               CANDIDATE_RUN_ID = $env:CANDIDATE_RUN_ID
@@ -119,6 +128,10 @@ jobs:
           }
           if ($env:INGRESS_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'INGRESS_ARCHIVE_SHA256 must be a lowercase SHA-256 digest.'
+          }
+          if ($env:PROFILE_ID -cnotin @('vm-automated-v1-win11-ntfs',
+              'vm-automated-v2-owned-resources')) {
+            throw 'Promotion profile choice is invalid.'
           }
           if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
             throw 'RELEASE_TAG must be a v-prefixed semantic version.'
@@ -255,6 +268,7 @@ jobs:
           -IngressArchiveSize '${{ inputs.ingress_archive_size }}'
           -ValidationRunId '${{ inputs.validation_run_id }}'
           -ValidationRunAttempt '${{ inputs.validation_run_attempt }}'
+          -ProfileId '${{ inputs.profile_id }}'
           -CandidateHandoffRoot (Join-Path $PWD 'dist')
           -TrustedSourceRoot $PWD
           -OutputPath (Join-Path $PWD 'validation-statement.json')
@@ -267,6 +281,11 @@ jobs:
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
+          PROFILE_ID: ${{ inputs.profile_id }}
         run: |
           $root = Join-Path $env:RUNNER_TEMP (
             'darkrenamer-validation-authority-' + [guid]::NewGuid().ToString('N')
@@ -296,10 +315,16 @@ jobs:
               --repository-metadata $repository `
               --repository $env:GITHUB_REPOSITORY `
               --source-sha $env:CANDIDATE_SOURCE_SHA `
+              --candidate-run-id $env:CANDIDATE_RUN_ID `
+              --candidate-run-attempt $env:CANDIDATE_RUN_ATTEMPT `
+              --candidate-artifact-id $env:CANDIDATE_ARTIFACT_ID `
+              --expected-exe-sha256 $env:EXPECTED_EXE_SHA256 `
               --run-metadata $run `
               --verified-attestations $verified `
               --run-id $env:VALIDATION_RUN_ID `
               --run-attempt $env:VALIDATION_RUN_ATTEMPT `
+              --profile-id $env:PROFILE_ID `
+              --source-root $PWD `
               --statement validation-statement.json
             if ($LASTEXITCODE -ne 0) {
               throw 'Hosted validation run authority check failed.'
@@ -342,7 +367,17 @@ jobs:
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
+          PROFILE_ID: ${{ inputs.profile_id }}
         run: |
+          $profileDisclosure = switch -CaseSensitive ($env:PROFILE_ID) {
+            'vm-automated-v1-win11-ntfs' {
+              'Validation covers the fixed Windows 11 NTFS VM-Automated v1 profile, including its strict runner environment predicate.'
+            }
+            'vm-automated-v2-owned-resources' {
+              'Validation covers the fixed Windows 11 NTFS VM-Automated v2 owned-resources profile. It checks observed product safety, required environment and explicit owned-resource cleanup; it does not guarantee whole-session OS process stasis or explain all ambient OS activity.'
+            }
+            default { throw 'Unknown promotion profile ID.' }
+          }
           @(
             'VM-Automated Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
             ''
@@ -352,7 +387,9 @@ jobs:
             ''
             'Portable means installer-free. Preferences are stored in %LOCALAPPDATA%\DarkReNamer, separately from the executable.'
             ''
-            'Validation covers the fixed Windows 11 NTFS VM-Automated v1 profile. Actual IME and Explorer drag-and-drop, comprehensive assistive-technology acceptance, VM reset and storage faults remain outside this profile.'
+            $profileDisclosure
+            'Actual IME and Explorer drag-and-drop, comprehensive assistive-technology acceptance, VM reset and storage faults remain outside this profile.'
+            "Profile ID: $env:PROFILE_ID"
             ''
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"

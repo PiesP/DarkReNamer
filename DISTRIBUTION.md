@@ -92,9 +92,14 @@ commit and dispatch the Promote portable prerelease workflow. Supply the
 candidate run ID, run attempt, immutable artifact ID, source SHA, executable
 SHA-256 from `release-handoff.json`, and version tag. Also supply the private
 evidence release ID, asset ID, archive SHA-256 and size, and the exact successful
-VM validation run ID and attempt. Promotion fails unless all
-of those values agree with current `origin/master`, the successful candidate
-workflow metadata, the unexpired artifact metadata, the downloaded handoff
+VM validation run ID and attempt. Select the profile explicitly for both hosted
+validation and promotion: `vm-automated-v1-win11-ntfs` or
+`vm-automated-v2-owned-resources`. The workflow choices default to v2; the
+local validator and hosted wrapper retain v1 defaults for existing callers.
+Promotion fails unless the selected profile ID, typed revision, source blob
+digest and statement schema agree, and all pinned values agree with current
+`origin/master`, the successful candidate workflow metadata, the unexpired
+artifact metadata, the downloaded handoff
 bytes, the original candidate attestation, and the existing remote tag.
 
 The manual VM validation workflow obtains raw evidence from one dedicated,
@@ -108,8 +113,8 @@ can complete. The next workflow step attests only the canonical path-free
 statement. Product, clean harness checkout and hosted verifier must
 use the same pinned master source commit.
 
-The statement can report `passed` only after the verifier derives all 22 target
-verdicts from the fixed 20-cell matrix and 10 independent stability executions,
+The selected statement can report `passed` only after the verifier derives all
+22 target verdicts from the fixed 20-cell matrix and 10 independent stability executions,
 and binds all five gates listed in
 [`SAFETY.md`](SAFETY.md#vm-automated-release-validation). Every slot is its
 predeclared first attempt. A failed or missing slot stops the remaining VM work
@@ -118,12 +123,18 @@ complete campaign. The policy and profile define this requirement, but do not
 claim that a campaign has already passed.
 
 Successful cleanup of resources owned by a failed execution is not release
-acceptance. The original product and strict environment failures remain
+acceptance. Original product and required-environment failures remain
 immutable inputs, even when a separately verified cleanup proof establishes
-that the run's resources were removed. Unknown environment observations,
-missing evidence and unsuccessful restoration still prevent a passing
-statement. This distinction does not relax the fixed first-attempt matrix,
-the same-source candidate/harness/hosted-verifier requirement, or any of the
+that the run's resources were removed. V1 retains its strict whole-runner
+environment predicate; its failed records cannot become v2 passes. V2 retains
+raw ambient process observations but does not require whole-session OS process
+stasis. Missing ownership evidence, unresolved owned lifetimes or roots,
+incomplete observations, unexpected scheduled-task changes, input/focus
+interference, and unsuccessful setting restoration still prevent a passing
+statement. A filename, signature, or absence from the owned Job does not alone
+establish that an observation is harmless. This distinction does not relax the
+fixed first-attempt matrix, the same-source
+candidate/harness/hosted-verifier requirement, or any of the
 five required gates.
 
 The repository owner and the prepared VM evidence producer remain trusted to
@@ -154,8 +165,11 @@ release for the tag is rejected instead of being overwritten. Private raw
 journals, local paths, screenshots and machine identities are never published.
 
 The published item is a **VM-Automated validated prerelease**, limited to the
-fixed Windows VM profile recorded in the statement. Physical-media performance,
-physical power loss, VM reset/storage-fault durability, actual IME and Explorer
+selected Windows VM profile recorded in the statement and release notes. V2
+makes a narrower claim than v1: observed product safety, required environment
+and explicit owned-resource cleanup, without a whole-session OS process-stasis
+guarantee or complete causality for ambient OS activity. Physical-media
+performance, physical power loss, VM reset/storage-fault durability, actual IME and Explorer
 drag-and-drop, and human visual or comprehensive assistive-technology acceptance
 are outside that claim. VM measurements must remain labeled as virtual storage.
 The safety policy's historical formal desktop evidence and its validators retain

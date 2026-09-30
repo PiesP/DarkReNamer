@@ -1016,6 +1016,7 @@ $promotionVmStatement = Assert-OneCommand `
         '-IngressArchiveSize' = '${{ inputs.ingress_archive_size }}'
         '-ValidationRunId' = '${{ inputs.validation_run_id }}'
         '-ValidationRunAttempt' = '${{ inputs.validation_run_attempt }}'
+        '-ProfileId' = '${{ inputs.profile_id }}'
     }) `
     -Message 'Promotion must independently recompute the canonical automated VM statement.'
 $promotionVmAuthority = Assert-OneCommand `
@@ -1025,6 +1026,8 @@ $promotionVmAuthority = Assert-OneCommand `
     -RequiredOptions ([ordered]@{
         '--run-id' = '$env:VALIDATION_RUN_ID'
         '--run-attempt' = '$env:VALIDATION_RUN_ATTEMPT'
+        '--profile-id' = '$env:PROFILE_ID'
+        '--source-root' = '$PWD'
         '--statement' = 'validation-statement.json'
     }) `
     -Message 'Promotion must bind the verified certificate to the exact successful validation attempt.'
@@ -1092,6 +1095,7 @@ $validationWrapper = Assert-OneCommand `
         '-IngressArchiveSize' = '${{ inputs.ingress_archive_size }}'
         '-ValidationRunId' = '${{ github.run_id }}'
         '-ValidationRunAttempt' = '${{ github.run_attempt }}'
+        '-ProfileId' = '${{ inputs.profile_id }}'
     }) `
     -Message 'Hosted validation must derive its statement from exact candidate and ingress pins.'
 $validationCandidateAttestation = Assert-OneCommand `
