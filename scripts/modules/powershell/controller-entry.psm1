@@ -179,6 +179,17 @@ function Get-DrControllerPreservedFiles {
     @($files.ToArray() | Sort-Object file)
 }
 
+function Remove-DrControllerProofRemotingMetadata {
+    param([Parameter(Mandatory)] $Proof)
+    # These are transport annotations added by PowerShell remoting, not proof fields.
+    foreach ($name in @('PSComputerName','RunspaceId','PSShowComputerName')) {
+        if ($Proof -is [Collections.IDictionary] -and $Proof.Contains($name)) {
+            $Proof.Remove($name)
+        }
+        $Proof.PSObject.Properties.Remove($name)
+    }
+}
+
 function Invoke-DrControllerOwnedCleanupAfterFailure {
     param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots)
     Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots -ScriptBlock {
@@ -5262,6 +5273,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         errors=@($_.Exception.Message)
                     }
                 }
+                Remove-DrControllerProofRemotingMetadata -Proof $proof
                 $proof | Add-Member -NotePropertyName preservation_sha256 -NotePropertyValue $receiptHash -Force
                 $proof | Add-Member -NotePropertyName original_transport_sha256 -NotePropertyValue $transportHash -Force
                 $proof | Add-Member -NotePropertyName desktop_lease_sha256 -NotePropertyValue $leaseHash -Force
