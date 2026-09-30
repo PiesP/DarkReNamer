@@ -324,6 +324,36 @@ fn input_contract(
     )
 }
 
+fn profile_dispatch_inputs(
+    path: &str,
+    inputs: &BTreeMap<String, Input>,
+    string_names: &[&str],
+    message: &str,
+) -> Result<(), String> {
+    require(
+        inputs.len() == string_names.len() + 1
+            && string_names.iter().all(|name| {
+                inputs.get(*name).is_some_and(|input| {
+                    input.required == Some(true)
+                        && input.kind.as_deref() == Some("string")
+                        && input.default.is_none()
+                        && input.options.is_empty()
+                })
+            }),
+        message,
+    )?;
+    let profile = inputs.get("profile_id").ok_or_else(|| message.to_owned())?;
+    input_contract(
+        path,
+        profile,
+        "vm-automated-v2-owned-resources",
+        &[
+            "vm-automated-v2-owned-resources",
+            "vm-automated-v1-win11-ntfs",
+        ],
+    )
+}
+
 fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
     let workflow = parse(experiment.path, experiment.source)?;
     manual_only(experiment.path, &workflow)?;
@@ -697,14 +727,10 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         "validation_run_attempt",
         "validation_run_id",
     ];
-    require(
-        inputs.keys().map(String::as_str).eq(names)
-            && inputs.values().all(|input| {
-                input.required == Some(true)
-                    && input.kind.as_deref() == Some("string")
-                    && input.default.is_none()
-                    && input.options.is_empty()
-            }),
+    profile_dispatch_inputs(
+        promotion_path,
+        inputs,
+        &names,
         "promotion inputs must bind the complete immutable candidate identity",
     )?;
     permissions(
@@ -767,6 +793,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ("RELEASE_TAG", "release_tag"),
         ("VALIDATION_RUN_ATTEMPT", "validation_run_attempt"),
         ("VALIDATION_RUN_ID", "validation_run_id"),
+        ("PROFILE_ID", "profile_id"),
     ] {
         env_is_bound(
             promotion_path,
@@ -786,6 +813,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             "--source-ref refs/heads/master",
             "--deny-self-hosted-runners",
             "validation-statement.json",
+            "-ProfileId '${{ inputs.profile_id }}'",
+            "$env:PROFILE_ID -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')",
         ],
         &["cargo build", "cargo test", "rustup toolchain install"],
     )?;
@@ -821,17 +850,10 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         "ingress_asset_id",
         "ingress_release_id",
     ];
-    require(
-        validation_inputs
-            .keys()
-            .map(String::as_str)
-            .eq(validation_names)
-            && validation_inputs.values().all(|input| {
-                input.required == Some(true)
-                    && input.kind.as_deref() == Some("string")
-                    && input.default.is_none()
-                    && input.options.is_empty()
-            }),
+    profile_dispatch_inputs(
+        validation_path,
+        validation_inputs,
+        &validation_names,
         "hosted VM validation inputs must bind candidate and private ingress identity",
     )?;
     permissions(
@@ -867,6 +889,12 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     )?;
     checkout_is_read_only(validation_path, validation_job)?;
     steps_are_mandatory(validation_path, validation_job)?;
+    env_is_bound(
+        validation_path,
+        validation_job,
+        "PROFILE_ID",
+        "${{ inputs.profile_id }}",
+    )?;
     action_policy(
         validation_path,
         validation_job,
@@ -924,6 +952,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             ".github/workflows/release.yaml",
             "--source-ref refs/heads/master",
             "--deny-self-hosted-runners",
+            "-ProfileId '${{ inputs.profile_id }}'",
+            "$env:PROFILE_ID -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')",
         ],
         &["gh release", "upload-artifact", "artifact upload"],
     )
@@ -1223,4 +1253,90 @@ fn promotion_contract_rejects_rebuilding() {
             .as_ref()
             .is_err_and(|error| error.contains("cargo build"))
     );
+}
+
+#[test]
+fn promotion_profile_contract_rejects_missing_or_unbound_choices() -> Result<(), String> {
+    let path = ".github/workflows/promote-release.yaml";
+    let source = include_str!("../../../../.github/workflows/promote-release.yaml");
+    let string_names = [
+        "candidate_artifact_id",
+        "candidate_run_attempt",
+        "candidate_run_id",
+        "candidate_source_sha",
+        "expected_exe_sha256",
+        "ingress_archive_sha256",
+        "ingress_archive_size",
+        "ingress_asset_id",
+        "ingress_release_id",
+        "release_tag",
+        "validation_run_attempt",
+        "validation_run_id",
+    ];
+    let fresh_inputs = || -> Result<BTreeMap<String, Input>, String> {
+        let mut workflow = parse(path, source)?;
+        Ok(workflow
+            .triggers
+            .remove("workflow_dispatch")
+            .flatten()
+            .ok_or("fixture is missing workflow_dispatch")?
+            .inputs)
+    };
+    let valid = |inputs: &BTreeMap<String, Input>| {
+        profile_dispatch_inputs(path, inputs, &string_names, "promotion input contract")
+    };
+
+    assert!(valid(&fresh_inputs()?).is_ok());
+
+    let mut missing = fresh_inputs()?;
+    missing.remove("profile_id");
+    assert!(valid(&missing).is_err());
+
+    let mut unknown = fresh_inputs()?;
+    unknown
+        .get_mut("profile_id")
+        .ok_or("fixture is missing profile_id")?
+        .options
+        .push(Scalar::String("unreviewed-profile".to_owned()));
+    assert!(valid(&unknown).is_err());
+
+    let mut wrong_default = fresh_inputs()?;
+    wrong_default
+        .get_mut("profile_id")
+        .ok_or("fixture is missing profile_id")?
+        .default = Some(Scalar::String("vm-automated-v1-win11-ntfs".to_owned()));
+    assert!(valid(&wrong_default).is_err());
+
+    let mut weakened_identity = fresh_inputs()?;
+    weakened_identity
+        .get_mut("candidate_source_sha")
+        .ok_or("fixture is missing candidate_source_sha")?
+        .required = Some(false);
+    assert!(valid(&weakened_identity).is_err());
+
+    let mut extra_input = fresh_inputs()?;
+    extra_input.insert(
+        "unreviewed_input".to_owned(),
+        Input {
+            required: Some(true),
+            kind: Some("string".to_owned()),
+            default: None,
+            options: Vec::new(),
+        },
+    );
+    assert!(valid(&extra_input).is_err());
+
+    let mut workflow = parse(path, source)?;
+    let job = workflow
+        .jobs
+        .get_mut("publish")
+        .ok_or("fixture is missing publish")?;
+    assert!(env_is_bound(path, job, "PROFILE_ID", "${{ inputs.profile_id }}").is_ok());
+    *job.steps
+        .iter_mut()
+        .find_map(|step| step.env.get_mut("PROFILE_ID"))
+        .ok_or("fixture is missing PROFILE_ID binding")? =
+        Scalar::String("vm-automated-v1-win11-ntfs".to_owned());
+    assert!(env_is_bound(path, job, "PROFILE_ID", "${{ inputs.profile_id }}").is_err());
+    Ok(())
 }
