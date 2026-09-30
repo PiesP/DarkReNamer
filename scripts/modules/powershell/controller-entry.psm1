@@ -5132,9 +5132,9 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 }
                             }
                             catch { $errors.Add($_.Exception.Message) }
-                            $deltaBefore = if ($null -ne $before) { @(Get-V2ProcessDelta -Snapshot $before) } else { $null }
-                            $deltaIntervention = if ($null -ne $intervention) { @(Get-V2ProcessDelta -Snapshot $intervention) } else { $null }
-                            $deltaAfter = if ($null -ne $after) { @(Get-V2ProcessDelta -Snapshot $after) } else { $null }
+                            $deltaBefore = if ($null -ne $before) { ,@(Get-V2ProcessDelta -Snapshot $before) } else { $null }
+                            $deltaIntervention = if ($null -ne $intervention) { ,@(Get-V2ProcessDelta -Snapshot $intervention) } else { $null }
+                            $deltaAfter = if ($null -ne $after) { ,@(Get-V2ProcessDelta -Snapshot $after) } else { $null }
                             $taskDeltaBefore = if ($null -ne $tasksBefore) { Get-V2TaskDelta -Current $tasksBefore } else { $null }
                             $taskDeltaIntervention = if ($null -ne $tasksIntervention) { Get-V2TaskDelta -Current $tasksIntervention } else { $null }
                             $taskDeltaAfter = if ($null -ne $tasksAfter) { Get-V2TaskDelta -Current $tasksAfter } else { $null }
@@ -5159,11 +5159,11 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 runner_process_inventory_complete = [bool]($null -ne $before -and $before.complete -and
                                     $null -ne $intervention -and $intervention.complete -and
                                     $null -ne $after -and $after.complete)
-                                unexpected_runner_tasks = if ($null -ne $taskDeltaBefore) { @($taskDeltaBefore.changed) } else { $null }
+                                unexpected_runner_tasks = if ($null -ne $taskDeltaBefore) { ,@($taskDeltaBefore.changed) } else { $null }
                                 unexpected_runner_processes = $deltaBefore
-                                unexpected_runner_tasks_after_intervention = if ($null -ne $taskDeltaIntervention) { @($taskDeltaIntervention.changed) } else { $null }
+                                unexpected_runner_tasks_after_intervention = if ($null -ne $taskDeltaIntervention) { ,@($taskDeltaIntervention.changed) } else { $null }
                                 unexpected_runner_processes_after_intervention = $deltaIntervention
-                                unexpected_runner_tasks_after_delete = if ($null -ne $taskDeltaAfter) { @($taskDeltaAfter.changed) } else { $null }
+                                unexpected_runner_tasks_after_delete = if ($null -ne $taskDeltaAfter) { ,@($taskDeltaAfter.changed) } else { $null }
                                 unexpected_runner_processes_after_delete = $deltaAfter
                                 removed_runner_tasks = @($removedTasks.ToArray() | Sort-Object -Unique)
                                 terminated_runner_processes = @()
