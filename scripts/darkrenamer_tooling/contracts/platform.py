@@ -18,6 +18,76 @@ def require(condition: bool, message: str) -> None:
         raise EvidenceError(message)
 
 
+def _windows_task_argv(arguments: str) -> list[str]:
+    """Decode the bounded Windows quote/backslash rules used for task arguments."""
+    if not 0 < len(arguments) <= 4096 or any(
+            ord(char) < 32 and char != "\t" for char in arguments):
+        raise ValueError("Invalid Windows task arguments")
+    result: list[str] = []
+    index = 0
+    while index < len(arguments):
+        while index < len(arguments) and arguments[index] in " \t":
+            index += 1
+        if index == len(arguments):
+            break
+        token: list[str] = []
+        quoted = False
+        while index < len(arguments):
+            char = arguments[index]
+            if char in " \t" and not quoted:
+                break
+            if char == "\\":
+                start = index
+                while index < len(arguments) and arguments[index] == "\\":
+                    index += 1
+                count = index - start
+                if index < len(arguments) and arguments[index] == '"':
+                    token.extend("\\" * (count // 2))
+                    if count % 2:
+                        token.append('"')
+                        index += 1
+                        continue
+                else:
+                    token.extend("\\" * count)
+                    continue
+            if arguments[index] == '"':
+                if quoted and index + 1 < len(arguments) and arguments[index + 1] == '"':
+                    token.append('"')
+                    index += 2
+                else:
+                    quoted = not quoted
+                    index += 1
+            else:
+                token.append(arguments[index])
+                index += 1
+        if quoted or not token:
+            raise ValueError("Malformed Windows task arguments")
+        result.append("".join(token))
+        if len(result) > 32:
+            raise ValueError("Too many Windows task arguments")
+    if not result:
+        raise ValueError("Empty Windows task arguments")
+    return result
+
+
+def _v2_task_action_matches(command_line: str, executable: str, arguments: str) -> bool:
+    """Bind observed arguments to the registered action after a known pwsh image."""
+    if not (type(command_line) is str and type(executable) is str and
+            type(arguments) is str and executable.casefold().endswith("\\pwsh.exe") and
+            0 < len(command_line) <= 4096 and command_line[0] not in " \t" and
+            0 < len(arguments) <= 4096):
+        return False
+    try:
+        observed = _windows_task_argv(command_line)
+        registered = _windows_task_argv(arguments)
+    except ValueError:
+        return False
+    return (len(observed) == len(registered) + 1 and
+            observed[0].casefold() in (executable.casefold(),
+                                       (executable[:-4] + ".dll").casefold()) and
+            observed[1:] == registered)
+
+
 def rectangle(value: object) -> dict:
     row = require_exact_keys(value, {"left", "top", "right", "bottom"}, "Display rectangle")
     for coordinate in row.values():
@@ -813,7 +883,8 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
             type(lifecycle["image_path"]) is str and
             lifecycle["image_path"].casefold() == task["action_executable"].casefold() and
             type(lifecycle["command_line"]) is str and 0 < len(lifecycle["command_line"]) <= 4096 and
-            lifecycle["command_line"].endswith(task["action_arguments"]) and
+            _v2_task_action_matches(lifecycle["command_line"], task["action_executable"],
+                                    task["action_arguments"]) and
             name.casefold() in lifecycle["command_line"].casefold() and
             "-acceptanceprofileid vm-automated-v2-owned-resources" in lifecycle["command_line"].casefold(),
             "V2 declared scheduled task execution is unbound or nonterminal.")
@@ -869,7 +940,8 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
                 type(child["image_path"]) is str and
                 child["image_path"].casefold() == execution["action_executable"].casefold() and
                 type(child["command_line"]) is str and
-                child["command_line"].endswith(execution["action_arguments"]),
+                _v2_task_action_matches(child["command_line"], execution["action_executable"],
+                                        execution["action_arguments"]),
                 "V2 rescue task has an unbound or incomplete process lifetime.")
         rescue_pids.add(pid)
     owned_pids = {pid for pid, _ in identities} | {preflight_pid, engine_pid, observer_pid} | rescue_pids

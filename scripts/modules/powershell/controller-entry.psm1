@@ -909,8 +909,29 @@ function Complete-DrControllerV2TaskExecution {
         $lifecycle.command_line.Length -gt 4096 -or
         -not $lifecycle.command_line.Contains($TaskName) -or
         -not $lifecycle.command_line.Contains('-AcceptanceProfileId vm-automated-v2-owned-resources') -or
-        -not $lifecycle.command_line.EndsWith([string]$Engine.action_arguments,[StringComparison]::Ordinal) -or
         $CompletedTicks -le $Engine.registered_last_run_time_ticks) {
+        throw 'The v2 observer did not bind its original process lifetime to the task action.'
+    }
+    # The process reports pwsh.dll and may omit optional path quotes. Decode both
+    # sides on the authenticated guest with its existing native Windows parser.
+    $actionBound = Invoke-Command -Session $Session -ArgumentList `
+        $lifecycle.command_line, $Engine.action_executable, $Engine.action_arguments -ScriptBlock {
+        param($commandLine,$actionExecutable,$actionArguments)
+        $observed = [string[]](Get-DrVmCommandLineArguments -CommandLine $commandLine)
+        $registered = [string[]](Get-DrVmCommandLineArguments -CommandLine ('task.exe ' + $actionArguments))
+        if ($observed.Count -lt 2 -or $observed.Count -ne $registered.Count) { return $false }
+        $siblingDll = [IO.Path]::ChangeExtension($actionExecutable, '.dll')
+        if (-not [string]::Equals($observed[0],$actionExecutable,[StringComparison]::OrdinalIgnoreCase) -and
+            -not [string]::Equals($observed[0],$siblingDll,[StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+        for ($index = 1; $index -lt $observed.Count; $index++) {
+            if (-not [string]::Equals($observed[$index],$registered[$index],
+                [StringComparison]::Ordinal)) { return $false }
+        }
+        return $true
+    }
+    if ($actionBound -isnot [bool] -or -not $actionBound) {
         throw 'The v2 observer did not bind its original process lifetime to the task action.'
     }
     $absent = Invoke-Command -Session $Session -ArgumentList ([int]$lifecycle.pid) -ScriptBlock {
