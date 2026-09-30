@@ -312,9 +312,11 @@ Select either the strict
 [`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile or the
 owned-resources [`config/vm-automated-v2.json`](config/vm-automated-v2.json)
 profile before planning a new campaign. Their schema, ID, revision and source
-blob digest are distinct. Pass `--profile-id vm-automated-v2-owned-resources`
-explicitly for a v2 campaign and independent evidence validation; the local
-CLI and hosted wrapper retain a v1 default for existing callers. The hosted
+blob digest are distinct. Pass `--profile config/vm-automated-v2.json` to the
+campaign runner, `--acceptance-profile-id vm-automated-v2-owned-resources` to
+the native VM backend runner, and `--profile-id vm-automated-v2-owned-resources`
+to independent evidence validation. These local entrypoints and the hosted
+wrapper retain a v1 default for existing callers. The hosted
 workflow dispatch offers an explicit profile choice and defaults to v2. Each
 profile declares the same 22 derived targets and five required gates. The
 campaign runner converts those targets into 20 primary execution cells, because

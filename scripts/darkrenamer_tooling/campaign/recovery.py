@@ -760,7 +760,9 @@ def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target:
 
 def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict, transport: dict,
                               target: dict, *, run_prefix: str,
-                              result_path: str | None = None) -> set[str]:
+                              result_path: str | None = None,
+                              profile_id: str = 'vm-automated-v1-win11-ntfs',
+                              profile_sha256: str | None = None) -> set[str]:
     """Return only the fixed recovery targets derived from one complete execution."""
     require(type(reader) is not type(None) and all(hasattr(reader, name)
                                                    for name in ("json", "bytes", "digest_reference", "sibling")),
@@ -783,7 +785,7 @@ def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict
     else:
         targets = _worker(private, result, bundle, target, close=True)
     verify_cleanup(result.get("raw_cleanup"), transport.get("raw_cleanup"),
-                   require_candidate_export=True)
+                   require_candidate_export=True, profile_id=profile_id, profile_sha256=profile_sha256)
     private.finish()
     require(targets <= RECOVERY_TARGETS, "Recovery verifier derived an unknown target.")
     return targets

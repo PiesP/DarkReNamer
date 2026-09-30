@@ -1,4 +1,4 @@
-"""Run and package the fixed VM-automated v1 campaign through the common VM CLI."""
+"""Run and package a selected fixed VM campaign through the common VM CLI."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from darkrenamer_tooling.contracts.binding import Candidate
 from darkrenamer_tooling.contracts.tooling import staged_tooling_files
 from darkrenamer_tooling.evidence.archive import (
     EvidenceError, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_FILES, load_bounded_json,
+    profile_definition, validate_profile,
 )
 from darkrenamer_tooling.vm import connection as vm_connection, launcher
 from darkrenamer_tooling.vm.launcher import (
@@ -295,7 +296,7 @@ def backend_files(result: dict) -> list[str]:
 
 
 def prepare_backend(source: Path, destination: Path, profile: dict,
-                    harness_sha: str, native_runner) -> dict:
+                    harness_sha: str, native_runner, *, profile_sha256: str | None = None) -> dict:
     source = ordinary_directory(source, "Backend evidence root")
     # Native PowerShell records may contain one UTF-8 BOM. Freeze their exact
     # bytes before parsing and independently derive required test functions
@@ -317,16 +318,24 @@ def prepare_backend(source: Path, destination: Path, profile: dict,
         frozen = frozen_file(source / name)
         pins[name] = FileReference(frozen["sha256"], frozen["size"])
     verify_backend_execution(reader, "bundle.json", "result.json", source_sha=harness_sha,
-                             required_tests=profile["required_backend_test_names"])
+                             required_tests=profile["required_backend_test_names"],
+                             profile_id=profile.get("profile_id", "vm-automated-v1-win11-ntfs"),
+                             profile_sha256=profile_sha256)
     require(transport.get("guest_cleanup") is True, "Backend controller cleanup did not finish.")
-    external_cleanup = verify_controller_cleanup(transport.get("raw_cleanup"))
+    external_cleanup = verify_controller_cleanup(transport.get("raw_cleanup"),
+        profile_id=profile.get("profile_id", "vm-automated-v1-win11-ntfs"),
+        profile_sha256=profile_sha256)
     embedded_transport = result.get("transport")
     require(type(embedded_transport) is dict,
             "Backend result lacks its embedded controller transport.")
-    embedded_cleanup = verify_controller_cleanup(embedded_transport.get("raw_cleanup"))
+    embedded_cleanup = verify_controller_cleanup(embedded_transport.get("raw_cleanup"),
+        profile_id=profile.get("profile_id", "vm-automated-v1-win11-ntfs"),
+        profile_sha256=profile_sha256)
     require(external_cleanup == embedded_cleanup,
             "Backend embedded and external controller cleanup observations differ.")
-    require(native_runner.verify_result(source, manifest, result),
+    native_options = ({"profile_id": profile["profile_id"], "profile_sha256": profile_sha256}
+                      if profile.get("profile_id") == "vm-automated-v2-owned-resources" else {})
+    require(native_runner.verify_result(source, manifest, result, **native_options),
             "Backend native runner result did not pass its existing validator.")
     destination.mkdir()
     selected = [
@@ -437,6 +446,7 @@ def run_command(repo: Path, bundle: Path, input_path: Path | None, runtime: dict
         "--desktop-height", str(runtime["desktop_height"]),
         "--output", str(bundle),
         "--task-kind", runtime["kind"],
+        "--acceptance-profile-id", getattr(args, "profile_id", "vm-automated-v1-win11-ntfs"),
         "--test-timeout-seconds", str(args.test_timeout_seconds),
         *candidate_arguments(args),
     ]
@@ -600,7 +610,9 @@ def zip_info(name: str) -> ZipInfo:
     return info
 
 
-def package_evidence(root: Path, archive_path: Path) -> dict[str, object]:
+def package_evidence(root: Path, archive_path: Path, *,
+                     profile_id: str = "vm-automated-v1-win11-ntfs") -> dict[str, object]:
+    revision, _ = profile_definition(profile_id)
     root = ordinary_directory(root, "Evidence package root")
     archive_path = Path(archive_path)
     require(archive_path.is_absolute() and not archive_path.exists() and not archive_path.is_symlink(),
@@ -608,7 +620,7 @@ def package_evidence(root: Path, archive_path: Path) -> dict[str, object]:
     ordinary_directory(archive_path.parent, "Evidence archive parent")
     files = freeze_tree(root)
     index = {
-        "schema": "darkrenamer-vm-automated-index-v1",
+        "schema": f"darkrenamer-vm-automated-index-v{revision}",
         "files": {name: {"sha256": frozen["sha256"], "size": frozen["size"]}
                   for name, (_path, frozen) in sorted(files.items())},
     }
@@ -679,8 +691,13 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
     profile_path = ordinary_file(Path(args.profile), "VM-automated profile", MAX_INDEX_BYTES)
     profile_frozen = frozen_file(profile_path)
     profile = load_bounded_json(profile_path, max_bytes=MAX_INDEX_BYTES, label="VM-automated profile")
-    require(type(profile) is dict and profile.get("schema") == "darkrenamer-vm-automated-profile-v1",
-            "VM-automated profile schema is invalid.")
+    revision = validate_profile(profile)
+    args.profile_id = profile["profile_id"]
+    _, trusted_profile_path = profile_definition(args.profile_id)
+    trusted_profile_bytes = subprocess.check_output(
+        ["git", "show", harness_sha + ":" + trusted_profile_path], cwd=repo)
+    require(digest_bytes(trusted_profile_bytes) == profile_frozen["sha256"],
+            "Selected profile differs from the same-SHA trusted source profile.")
     connection_path = ordinary_file(Path(args.connection_profile), "Private connection profile", 16 * 1024)
     connection_frozen = frozen_file(connection_path)
     load_bounded_json(connection_path, max_bytes=16 * 1024, label="Private connection profile")
@@ -702,7 +719,7 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
     )
     write_json(output / "plan.json", plan)
     backend = prepare_backend(Path(args.backend_root), output / "backend", profile,
-                              harness_sha, launcher)
+                              harness_sha, launcher, profile_sha256=profile_frozen["sha256"])
     (output / "runs").mkdir()
     attempts = []
     previous_end = created
@@ -715,7 +732,7 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
         if attempt["exit_code"] != 0:
             break
     campaign = {
-        "schema": "darkrenamer-vm-automated-campaign-v1",
+        "schema": f"darkrenamer-vm-automated-campaign-v{revision}",
         "campaign_id": args.campaign_id,
         "plan": "plan.json",
         "attempts": attempts,
@@ -736,7 +753,7 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
     require(clean_source_sha(repo) == harness_sha, "Harness source changed during the campaign.")
     require(clean_source_sha(Path(args.candidate_source_root)) == product_sha,
             "Candidate source changed during the campaign.")
-    archive_reference = package_evidence(output, archive)
+    archive_reference = package_evidence(output, archive, profile_id=args.profile_id)
     print(json.dumps({
         "status": "complete" if valid else "failed",
         "campaign_id": args.campaign_id,
