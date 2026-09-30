@@ -190,6 +190,18 @@ function Remove-DrControllerProofRemotingMetadata {
     }
 }
 
+function Copy-DrControllerV2TaskBaseline {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Baseline)
+    foreach ($record in $Baseline) {
+        if ($null -eq $record) { throw 'V2 task baseline contains an unavailable record.' }
+        # Preserve the original remoted rows in transport; only the v2 proof copy
+        # excludes transport annotations. Unknown data properties remain rejectable.
+        $copy = $record | ConvertTo-Json -Depth 16 -Compress | ConvertFrom-Json
+        Remove-DrControllerProofRemotingMetadata -Proof $copy
+        $copy
+    }
+}
+
 function Invoke-DrControllerOwnedCleanupAfterFailure {
     param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256)
     Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256 -ScriptBlock {
@@ -4927,6 +4939,9 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         )
                     }
                     if ($ownedV2) {
+                        $cleanupTaskContext.baseline_tasks = @(
+                            Copy-DrControllerV2TaskBaseline -Baseline @($runnerTaskBaseline)
+                        )
                         $declared = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
                         if ($null -ne $result) {
                             if ($recovery) {
