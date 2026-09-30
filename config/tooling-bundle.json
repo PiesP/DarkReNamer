@@ -54,7 +54,7 @@
       "bundle": "tooling-campaign-recovery.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.recovery",
-      "sha256": "488c745d60c7a2530b55d5388d08a8b00e33319932192e68aa90b171a0b6d4fe",
+      "sha256": "6a545e884c931687e4c1315509be9f40fcf56dfe52533e3fc999bd47951f9a54",
       "dependencies": [
         "package-root",
         "package-campaign",
