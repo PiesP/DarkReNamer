@@ -13,19 +13,7 @@ from darkrenamer_tooling.contracts.platform import (
     verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
-from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2 as _clean_controller_cleanup_v2
-
-
-def clean_controller_cleanup_v2(**kwargs):
-    """Give the existing synthetic v2 fixture a valid Windows argv0."""
-    cleanup = _clean_controller_cleanup_v2(**kwargs)
-    task = cleanup["owned_resource_evidence"]["task_execution"]
-    executable = task["action_executable"]
-    lifecycle = task["observer_lifecycle"]
-    if lifecycle["command_line"].startswith(executable + " "):
-        lifecycle["command_line"] = '"' + executable + '"' + lifecycle["command_line"][len(executable):]
-    return cleanup
-
+from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
 
 class PlatformTests(unittest.TestCase):
     def setUp(self):
@@ -727,7 +715,12 @@ class V2OwnedResourceTests(unittest.TestCase):
     def test_windows_argv_escaped_quotes_and_backslashes_are_semantic(self):
         executable = r"C:\Program Files\PowerShell\7\pwsh.exe"
         registered = r'-Value "a\"b" -Path "C:\space dir\\"'
-        observed = r'-Value "a""b" -Path "C:\space dir\\"'
+        observed = registered
+        adjacent = r'-Value "a""b" -Path "C:\space dir\\"'
+        with self.assertRaisesRegex(ValueError, "adjacent Windows quotes"):
+            _windows_task_argv(adjacent)
+        self.assertFalse(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' + adjacent,
+                                                  executable, registered))
         self.assertEqual(_windows_task_argv(registered), ["-Value", 'a"b', "-Path", "C:\\space dir\\"])
         self.assertEqual(_windows_task_argv("task.exe " + registered)[1:], _windows_task_argv(registered))
         self.assertTrue(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' + observed,

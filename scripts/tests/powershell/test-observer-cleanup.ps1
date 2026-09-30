@@ -102,15 +102,17 @@ foreach ($entry in @(
         $adjacent='-Value "a""b" -Path "C:\space dir\\"'
         $registeredNative=[string[]](Get-DrVmCommandLineArguments -CommandLine ('task.exe '+$quoted))
         $observedNative=[string[]](Get-DrVmCommandLineArguments -CommandLine ('"C:\Program Files\PowerShell\7\pwsh.dll" '+$adjacent))
-        if($registeredNative.Count -ne 5 -or $observedNative.Count -ne 5 -or
+        if($registeredNative.Count -ne 5 -or
             $registeredNative[1] -cne '-Value' -or $registeredNative[2] -cne 'a"b' -or
             $registeredNative[4] -cne 'C:\space dir\') {
             throw 'Native argv parsing changed adjacent quote or backslash semantics.'
         }
-        for($index=1;$index -lt $registeredNative.Count;$index++) {
-            if($registeredNative[$index] -cne $observedNative[$index]) {
-                throw 'Native argv parsing changed adjacent quote or backslash semantics.'
-            }
+        # Shell32 closes its quote mode after this adjacent quote group. It is
+        # not equivalent to the escaped-quote argument used by the C runtime.
+        if($observedNative.Count -ne 4 -or
+            $observedNative[2] -cne 'a"b -Path C:\space' -or
+            $observedNative[3] -cne 'dir\') {
+            throw 'Native adjacent quotes were treated as escaped quotes.'
         }
     }
     $exe='C:\Program Files\PowerShell\7\pwsh.exe'

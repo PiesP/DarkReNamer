@@ -19,7 +19,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def _windows_task_argv(arguments: str) -> list[str]:
-    """Decode the bounded Windows quote/backslash rules used for task arguments."""
+    """Decode bounded task arguments; reject ambiguous adjacent quote groups."""
     if not 0 < len(arguments) <= 4096 or any(
             ord(char) < 32 and char != "\t" for char in arguments):
         raise ValueError("Invalid Windows task arguments")
@@ -51,12 +51,12 @@ def _windows_task_argv(arguments: str) -> list[str]:
                     token.extend("\\" * count)
                     continue
             if arguments[index] == '"':
-                if quoted and index + 1 < len(arguments) and arguments[index + 1] == '"':
-                    token.append('"')
-                    index += 2
-                else:
-                    quoted = not quoted
-                    index += 1
+                # Shell32 and the C runtime disagree on adjacent quote groups.
+                # Fixed task arguments need none; reject them instead of guessing.
+                if index + 1 < len(arguments) and arguments[index + 1] == '"':
+                    raise ValueError("Ambiguous adjacent Windows quotes")
+                quoted = not quoted
+                index += 1
             else:
                 token.append(arguments[index])
                 index += 1
