@@ -79,6 +79,31 @@ class ToolingBundleTests(unittest.TestCase):
                 self.assertIn("tooling-bundle.json", tooling.staged_tooling_files(root))
                 self.assertIn("tooling-loader.py", tooling.staged_tooling_files(root))
 
+    def test_owned_cleanup_verifier_loads_from_its_verified_closure(self) -> None:
+        verified = self.verified("contracts-owned-cleanup")
+        roles = {entry.role for entry in verified.entries}
+        self.assertIn("campaign-planning", roles)
+        self.assertNotIn("vm-launcher", roles)
+        code = """
+import hashlib
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import tooling_bootstrap
+root = Path(sys.argv[1]).parent
+manifest = root / 'config/tooling-bundle.json'
+verified = tooling_bootstrap.verify_tooling(
+    root=root, manifest_location='config/tooling-bundle.json',
+    expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    mode='checkout', required_roles=('contracts-owned-cleanup',),
+)
+with verified.importer() as imports:
+    module = imports.import_role('contracts-owned-cleanup')
+    assert callable(module.verify_preserved_owned_cleanup)
+"""
+        subprocess.run([sys.executable, "-I", "-c", code, str(REPOSITORY / "scripts")],
+                       check=True, capture_output=True)
+
     def test_campaign_closure_loads_shared_helpers_without_diagnostic_gui(self) -> None:
         verified = self.verified("campaign-runner")
         roles = {entry.role for entry in verified.entries}

@@ -632,6 +632,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
     process = None
     preserved = None
     desktop = None
+    handshake = None
 
     def reap(timeout):
         try:
@@ -653,11 +654,12 @@ def run_controller(root, args, defaults=None, pwsh=None):
             environment = os.environ.copy()
             environment.pop('DR_VM_OWNED_CLEANUP_HANDSHAKE', None)
             if desktop:
-                environment['DR_VM_OWNED_CLEANUP_HANDSHAKE'] = json.dumps({
+                handshake = {
                     'nonce': uuid.uuid4().hex,
                     'lease_id': desktop['leaseId'],
                     'sid': desktop['expectedGuestSid'],
-                }, separators=(',', ':'))
+                }
+                environment['DR_VM_OWNED_CLEANUP_HANDSHAKE'] = json.dumps(handshake, separators=(',', ':'))
             process = subprocess.Popen(command, cwd=cwd, text=True, env=environment)
             # The controller's default whole-suite budget is 2400 seconds; the
             # allowance covers natural OS-process exit and evidence collection.
@@ -672,6 +674,10 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     except (OSError, ValueError, json.JSONDecodeError):
                         time.sleep(0.25)
                         continue
+                    if (handshake is None or type(preserved) is not dict or
+                            preserved.get('nonce') != handshake['nonce'] or
+                            preserved.get('desktop_lease_id') != handshake['lease_id']):
+                        raise ValueError('Owned cleanup receipt differs from the issued handshake.')
                     break
                 time.sleep(0.25)
         if preserved is not None:

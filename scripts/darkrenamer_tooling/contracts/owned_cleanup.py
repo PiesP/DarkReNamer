@@ -9,6 +9,7 @@ import re
 import stat
 
 from darkrenamer_tooling.contracts.platform import require_fixture_root
+from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys
 
 
@@ -23,11 +24,17 @@ def require(condition: bool, message: str) -> None:
         raise EvidenceError(message)
 
 
-def _read_file(path: Path, limit: int) -> bytes:
+def _unalias(path: Path) -> None:
     for component in (path, *path.parents):
-        require(not component.is_symlink() and
-                not getattr(component, "is_junction", lambda: False)(),
+        # st_file_attributes is available on Windows before Path.is_junction.
+        metadata = component.lstat()
+        require(not stat.S_ISLNK(metadata.st_mode) and
+                not (getattr(metadata, "st_file_attributes", 0) & 0x400),
                 f"Evidence path traverses an alias: {path.name}.")
+
+
+def _read_file(path: Path, limit: int) -> bytes:
+    _unalias(path)
     require(path.is_file() and stat.S_ISREG(path.stat().st_mode),
             f"Evidence file is missing or not ordinary: {path.name}.")
     with path.open("rb") as stream:
@@ -59,10 +66,7 @@ def _verify_large_file(root: Path, name: str, row: dict, remaining: int) -> None
     path = root.joinpath(*name.split("/"))
     require(type(row["bytes"]) is int and 0 <= row["bytes"] <= remaining,
             "Preserved file exceeds the remaining aggregate byte bound.")
-    for component in (path, *path.parents):
-        require(not component.is_symlink() and
-                not getattr(component, "is_junction", lambda: False)(),
-                "Preserved file path traverses an alias.")
+    _unalias(path)
     require(path.is_file() and stat.S_ISREG(path.stat().st_mode) and
             path.stat().st_size == row["bytes"],
             "Preserved file is missing, changed, or not ordinary.")
@@ -113,6 +117,80 @@ def _subset(current: dict, frozen: dict, label: str) -> None:
         prior = {row["identity"]: row[binding] for row in frozen[key]}
         require(all(prior.get(row["identity"]) == row[binding] for row in current[key]),
                 f"{label} contains a new or changed {key} identity.")
+
+
+def _reject_owned_entries(snapshot: dict, roots: dict, run_name: str) -> None:
+    prefixes = tuple(row["path"].rstrip("\\").casefold() + "\\" for row in roots.values())
+    require(not any(row["executable_path"].casefold().startswith(prefixes)
+                    for row in snapshot["processes"]) and
+            not any(row["identity"].casefold() == ("\\" + run_name).casefold()
+                    for row in snapshot["tasks"]),
+            "Raw inventory retains an owned process or scheduled task.")
+
+
+def _process_jobs(result: dict, task_kind: str, root: Path | None = None,
+                  files: list[dict] | None = None) -> None:
+    identities = set()
+    starts = []
+
+    def visit(value: object, depth: int = 0) -> None:
+        require(depth <= 32, "Result process evidence exceeds its nesting bound.")
+        if type(value) is list:
+            for item in value:
+                visit(item, depth + 1)
+        elif type(value) is dict:
+            if value.get("boundary") == "started" and "sha256" in value:
+                starts.append(value)
+            if value.get("process_lifecycle") is not None:
+                lifecycle = value["process_lifecycle"]
+                require(type(lifecycle) is dict and type(lifecycle.get("pid")) is int and
+                        0 < lifecycle["pid"] <= 0xFFFFFFFF and
+                        type(lifecycle.get("start_time_utc_ticks")) is str and
+                        re.fullmatch(r"[1-9][0-9]{0,18}", lifecycle["start_time_utc_ticks"]) is not None,
+                        "Result process lifecycle identity is unavailable.")
+                identities.add((lifecycle["pid"], int(lifecycle["start_time_utc_ticks"])))
+            for key, item in value.items():
+                if key != "process_lifecycle":
+                    visit(item, depth + 1)
+
+    visit(result)
+    if task_kind == "recovery":
+        require(root is not None and files is not None and 1 <= len(starts) <= 14,
+                "Recovery process-start references are missing or unbounded.")
+        identities.clear()
+        for reference in starts:
+            require(type(reference.get("bytes")) is int and
+                    0 < reference["bytes"] <= 1024 * 1024 and
+                    type(reference.get("sha256")) is str and
+                    HEX64.fullmatch(reference["sha256"]) is not None,
+                    "Recovery process-start reference is invalid.")
+            matches = [row for row in files if row["bytes"] == reference["bytes"] and
+                       row["sha256"] == reference["sha256"]]
+            require(len(matches) == 1, "Recovery process-start bytes are missing or ambiguous.")
+            data = _read_file(root.joinpath(*matches[0]["file"].split("/")), 1024 * 1024)
+            _reference(matches[0], matches[0]["file"], data, "Recovery process start")
+            start = _json(data, "Recovery process start")
+            binding = start.get("binding")
+            require(start.get("boundary") == "started" and type(binding) is dict and
+                    type(binding.get("pid")) is int and 0 < binding["pid"] <= 0xFFFFFFFF and
+                    type(binding.get("start_time_utc_ticks")) is str and
+                    re.fullmatch(r"[1-9][0-9]{0,18}", binding["start_time_utc_ticks"]) is not None,
+                    "Recovery process-start identity is unavailable.")
+            identity = (binding["pid"], int(binding["start_time_utc_ticks"]))
+            require(identity not in identities, "Recovery repeats a process-start identity.")
+            identities.add(identity)
+    ledger = result.get("process_job_cleanup")
+    if ledger == [] and task_kind == "core" and not identities:
+        gui = result.get("gui")
+        require(type(gui) is dict and gui.get("status") == "failed" and
+                gui.get("job_cleanup") is True and gui.get("process_id") is None and
+                "process_lifecycle" not in gui and gui.get("failure_reason") == "gui_error" and
+                type(gui.get("error_detail")) is dict and
+                set(gui["error_detail"]) == {"exception_type", "message", "native_error"},
+                "Empty process ledger does not prove the process never started.")
+        return
+    require(bool(identities), "Result lacks raw process lifecycle identities.")
+    verify_process_job_cleanup(ledger, expected_processes=sorted(identities))
 
 
 def _roots(value: object, run_name: str) -> dict:
@@ -222,6 +300,7 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
     bundle = _json(bundle_data, "Source bundle")
     require(_source_sha(result) == _source_sha(bundle) == context["source_sha"],
             "Copied result, bundle, and source commit differ.")
+    _process_jobs(result, context["task_kind"], root, receipt["files"])
     if context["task_kind"] != "core":
         require(type(context["observer_sha256"]) is str and
                 HEX64.fullmatch(context["observer_sha256"]) is not None,
@@ -348,6 +427,8 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
             f"{role} root was replaced, reparse, or changed its descriptor.")
     before = _snapshot(proof["pre"], "Finalizer pre-inventory", final=True)
     after = _snapshot(proof["post"], "Finalizer post-inventory", final=True)
+    for inventory in (frozen, before, after):
+        _reject_owned_entries(inventory, roots, receipt["run_name"])
     _subset(before, frozen, "Finalizer pre-inventory")
     _subset(after, frozen, "Finalizer post-inventory")
     presence = require_exact_keys(proof["observed_roots_after"],

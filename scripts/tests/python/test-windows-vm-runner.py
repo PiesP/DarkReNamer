@@ -1658,6 +1658,7 @@ class VmRunnerTests(unittest.TestCase):
         process.wait.side_effect = lambda timeout: events.append('reaped') or 0
         with mock.patch.object(vm, 'managed_desktop', side_effect=desktop_context), \
              mock.patch.object(vm, 'controller_invocation', return_value=['pwsh']), \
+             mock.patch.object(vm.uuid, 'uuid4', return_value=mock.Mock(hex='b' * 32)), \
              mock.patch.object(vm.subprocess, 'Popen', return_value=process) as spawn:
             vm.run_controller(self.root, args)
         self.assertEqual(events, ['start', 'closed', 'reaped'])
@@ -1667,6 +1668,14 @@ class VmRunnerTests(unittest.TestCase):
         signal = json.loads((self.root / 'owned-cleanup-desktop-closed.json').read_text())
         self.assertEqual(signal['nonce'], 'b' * 32)
         self.assertEqual(signal['preservation_sha256'], vm.sha256(receipt_path))
+        (self.root / 'owned-cleanup-desktop-closed.json').unlink()
+        with mock.patch.object(vm, 'managed_desktop', side_effect=desktop_context), \
+             mock.patch.object(vm, 'controller_invocation', return_value=['pwsh']), \
+             mock.patch.object(vm.uuid, 'uuid4', return_value=mock.Mock(hex='c' * 32)), \
+             mock.patch.object(vm.subprocess, 'Popen', return_value=process):
+            with self.assertRaisesRegex(ValueError, 'issued handshake'):
+                vm.run_controller(self.root, args)
+        self.assertFalse((self.root / 'owned-cleanup-desktop-closed.json').exists())
 
     def test_direct_controller_has_no_owned_cleanup_handshake(self):
         args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])

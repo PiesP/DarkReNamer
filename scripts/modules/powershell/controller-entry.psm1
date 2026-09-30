@@ -1192,7 +1192,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     const int FILE_ID_INFO = 18, FILE_ATTRIBUTE_TAG_INFO = 9, FILE_DISPOSITION_INFO = 4;
     const int FILE_ID_EXTD_DIRECTORY_INFO = 19, FILE_ID_EXTD_DIRECTORY_RESTART_INFO = 20;
     readonly List<SafeFileHandle> chain = new List<SafeFileHandle>();
-    int nodes;
+    int nodes, enumerated;
     public string BaseId { get; private set; }
     public string RootId { get; private set; }
 
@@ -1329,7 +1329,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
         public string Id;
         public int Attributes;
     }
-    static List<ChildEntry> Names(SafeFileHandle directory) {
+    static List<ChildEntry> Names(SafeFileHandle directory, int maximumEntries) {
         Ordinary(directory, true);
         List<ChildEntry> names = new List<ChildEntry>();
         byte[] buffer = new byte[65536];
@@ -1358,7 +1358,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
                 Buffer.BlockCopy(buffer, offset + 88, units, 0, (int)byteLength);
                 string name = new string(units);
                 if (name != "." && name != "..") {
-                    if (names.Count >= 20000 || name.Length > 255 ||
+                    if (names.Count >= maximumEntries || name.Length > 255 ||
                         name.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0)
                         throw new InvalidOperationException("Held directory contains an unsafe or oversized entry.");
                     byte[] identifier = new byte[16];
@@ -1399,7 +1399,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
             if (Identity(parent) != expectedBaseId)
                 throw new InvalidOperationException("Owned cleanup base changed after disposition.");
             bool guest = false, trusted = false;
-            foreach (ChildEntry child in Names(parent)) {
+            foreach (ChildEntry child in Names(parent, 20000)) {
                 if (String.Equals(child.Name, guestName, StringComparison.OrdinalIgnoreCase)) guest = true;
                 if (String.Equals(child.Name, trustedName, StringComparison.OrdinalIgnoreCase)) trusted = true;
             }
@@ -1439,6 +1439,11 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
             Identity(chain[chain.Count - 1]) != expectedRootId)
             throw new InvalidOperationException("Owned cleanup root or base identity changed.");
     }
+    List<ChildEntry> Children(SafeFileHandle directory) {
+        List<ChildEntry> entries = Names(directory, 20000 - enumerated);
+        enumerated += entries.Count;
+        return entries;
+    }
     void DeleteEntry(SafeFileHandle parent, ChildEntry child, int depth) {
         if (depth > 64 || ++nodes > 20000)
             throw new InvalidOperationException("Owned cleanup tree exceeds its bound.");
@@ -1450,7 +1455,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
                 Identity(entry).Substring(16) != child.Id)
                 throw new InvalidOperationException("Owned cleanup child changed or became a reparse entry.");
             if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                foreach (ChildEntry nested in Names(entry)) DeleteEntry(entry, nested, depth + 1);
+                foreach (ChildEntry nested in Children(entry)) DeleteEntry(entry, nested, depth + 1);
             }
             if (!SetFileInformationByHandle(entry, FILE_DISPOSITION_INFO,
                     new byte[] { 1 }, 1))
@@ -1459,11 +1464,12 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     }
     public void Delete() {
         nodes = 0;
+        enumerated = 0;
         SafeFileHandle root = chain[chain.Count - 1];
         Ordinary(root, true);
         if (Identity(root) != RootId)
             throw new InvalidOperationException("Owned cleanup root changed before disposition.");
-        foreach (ChildEntry child in Names(root)) DeleteEntry(root, child, 1);
+        foreach (ChildEntry child in Children(root)) DeleteEntry(root, child, 1);
         if (!SetFileInformationByHandle(root, FILE_DISPOSITION_INFO,
                 new byte[] { 1 }, 1))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned root disposition failed.");

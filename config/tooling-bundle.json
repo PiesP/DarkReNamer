@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "22b9293859ac8ee4a270bac93e949330d1625f0927b1be4d4a73c05bac3220f1",
+      "sha256": "36092211f50cec00750827fc06412a143a0b06562f914970ed3dc194b8d601cf",
       "dependencies": [
         "package-root"
       ]
@@ -168,7 +168,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "03c737b1144ef97530b231d9490849dd4c1eb2af7402ca6e4311589fba38c5cf",
+      "sha256": "ae4451986049b6980d2687b77b4e30bb4b627dfe5e23db4b1e11ae4bb5554c5a",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -273,6 +273,23 @@
         "package-root",
         "package-contracts",
         "contracts-state",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-owned-cleanup",
+      "source": "scripts/darkrenamer_tooling/contracts/owned_cleanup.py",
+      "bundle": "tooling-contracts-owned-cleanup.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.owned_cleanup",
+      "sha256": "07fb078bdcaf8cb7ce42241220ff7dc9b232e100b00d326eb98296d28a5115c8",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "contracts-platform",
+        "package-campaign",
+        "campaign-planning",
         "package-evidence",
         "evidence-archive"
       ]
@@ -437,7 +454,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "38f1c11b87e003bfc4ffe11832b8c1c978e4604d9653ffe48623fb382bb09f12",
+      "sha256": "62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a",
       "dependencies": []
     },
     {
@@ -455,7 +472,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "4f7f5ebed94063561377739dbfe24f5b4d4d73368535ce7dd5ce58988cbdb626",
+      "sha256": "edcd73541fb0a1e21ce8bcaac431cfd0cda43a7ea7b24a0eb946f454f40115e8",
       "dependencies": []
     },
     {
@@ -804,7 +821,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "004a78d5697ee66fcb3ab993fb063d61ba06a1a115ae77813ed8ca5c13531bc9",
+      "sha256": "329b8220864b69ff50b382db8d1115edcec6d5323f979977e2e3edf3b1403ae8",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from darkrenamer_tooling.contracts.owned_cleanup import (
-    _restoration, verify_preserved_owned_cleanup,
+    _process_jobs, _reject_owned_entries, _restoration, verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
 
@@ -27,6 +27,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def process_result(source_sha):
+    return {'source_sha': source_sha,
+            'process_lifecycle': {'pid': 123, 'start_time_utc_ticks': '123456'},
+            'process_job_cleanup': [{
+                'pid': 123, 'process_start_time_utc_ticks': '123456',
+                'job_empty': True, 'job_closed': True, 'capture_complete': True,
+                'had_survivors': False, 'forced_termination': False,
+                'active_processes_at_primary_exit': 0, 'active_processes_at_close': 0,
+                'active_processes_at_stop': None, 'active_process_ids_at_stop': [],
+                'total_processes_at_stop': None, 'primary_process_active_at_stop': None,
+                'termination_exit_code': None, 'status': 'clean', 'error': None,
+            }]}
+
+
 class OwnedCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -34,7 +48,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         source_sha = '9' * 40
         bundle_bytes = write(self.root / 'bundle.json', {'source_sha': source_sha})
-        result_bytes = write(self.root / 'original-result.json', {'source_sha': source_sha})
+        result_bytes = write(self.root / 'original-result.json', process_result(source_sha))
         base = 'c' * 48
         self.roots = {
             role: {'path': 'C:\\ProgramData\\DarkReNamerVmRuns\\' + RUN + suffix,
@@ -126,6 +140,62 @@ class OwnedCleanupTests(unittest.TestCase):
             'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
             'acceptance': 'rejected',
         })
+
+    def test_rejects_raw_owned_entries_despite_empty_owned_labels(self):
+        for kind in ('process', 'task'):
+            with self.subTest(kind=kind):
+                inventory = deepcopy(self.frozen)
+                if kind == 'process':
+                    inventory['processes'] = [{'identity': '123|123456',
+                                              'executable_path': self.roots['guest']['path'] + '\\app.exe'}]
+                else:
+                    inventory['tasks'] = [{'identity': '\\' + RUN,
+                                           'definition_sha256': 'a' * 64}]
+                with self.assertRaises(EvidenceError):
+                    _reject_owned_entries(inventory, self.roots, RUN)
+
+    def test_rejects_missing_unclosed_and_unbound_process_jobs(self):
+        for change in ('missing', 'unclosed', 'unbound'):
+            result = process_result('9' * 40)
+            if change == 'missing':
+                result.pop('process_job_cleanup')
+            elif change == 'unclosed':
+                result['process_job_cleanup'][0]['job_closed'] = False
+            else:
+                result['process_lifecycle']['pid'] = 456
+            with self.subTest(change=change), self.assertRaises(EvidenceError):
+                _process_jobs(result, 'core')
+
+    def test_recovery_jobs_bind_digest_verified_private_start_identity(self):
+        result = process_result('9' * 40)
+        result.pop('process_lifecycle')
+        start = {'boundary': 'started', 'binding': {'pid': 123, 'start_time_utc_ticks': '123456'}}
+        data = write(self.root / 'started.json', start)
+        row = {'file': 'started.json', 'bytes': len(data), 'sha256': digest(data)}
+        result['process_crash'] = {'processes': [{'boundary': 'started', **row}]}
+        _process_jobs(result, 'recovery', self.root, [row])
+        with self.assertRaises(EvidenceError):
+            _process_jobs(result, 'recovery', self.root, [])
+        start['binding']['pid'] = 456
+        data = write(self.root / 'started.json', start)
+        row.update(bytes=len(data), sha256=digest(data))
+        result['process_crash']['processes'][0].update(row)
+        with self.assertRaises(EvidenceError):
+            _process_jobs(result, 'recovery', self.root, [row])
+
+    def test_core_job_ledger_includes_rust_binary_and_gui_lifetimes(self):
+        result = process_result('9' * 40)
+        result['gui'] = {'process_lifecycle': result.pop('process_lifecycle')}
+        binary = {'file': 'native-test.exe', 'process_lifecycle': {
+            'pid': 456, 'start_time_utc_ticks': '123457'}}
+        result['tests'] = [binary, {'file': 'not-started.exe', 'status': 'failed'}]
+        receipt = deepcopy(result['process_job_cleanup'][0])
+        receipt.update(pid=456, process_start_time_utc_ticks='123457')
+        result['process_job_cleanup'].append(receipt)
+        _process_jobs(result, 'core')
+        binary.pop('process_lifecycle')
+        with self.assertRaises(EvidenceError):
+            _process_jobs(result, 'core')
 
     def test_rejects_mutated_evidence_and_missing_raw_observations(self):
         for path, value in (
