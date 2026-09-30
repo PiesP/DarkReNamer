@@ -76,7 +76,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "545b5cff9b4f02ec26d950f821f149d6ca0963d4f8ff67821674a56834d6712a",
+      "sha256": "eec3f8b38422d45f3b623c057757ef3ff75e66d2817284614c6f9e9ba0a4607d",
       "dependencies": [
         "package-root",
         "package-campaign",
