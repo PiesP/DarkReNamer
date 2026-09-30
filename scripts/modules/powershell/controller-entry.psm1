@@ -282,7 +282,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
             [void]$ownedPids.Add([int]$v2Evidence.engine_child.pid)
             [void]$ownedPids.Add([int]$v2Evidence.task_execution.observer_lifecycle.pid)
             foreach ($rescue in @($v2Evidence.rescue_executions)) {
-                [void]$ownedPids.Add([int]$rescue.observer_lifecycle.pid)
+                [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
             }
             $known = @{}
             foreach ($row in @($Earlier.processes)) { $known[[int]$row.pid] = $row }
@@ -987,6 +987,9 @@ $coreOutputFileMaximumBytes = 128MB
 $coreOutputAggregateMaximumBytes = 256MB
 
 
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
 $taskSelection = Resolve-ControllerTaskSelection `
     -RequestedKind $TaskKind `
     -HasUiOutput $PSBoundParameters.ContainsKey('AcceptanceOutputRoot') `
@@ -4983,7 +4986,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 [void]$ownedPids.Add([int]$taskContext.engine_child.pid)
                                 [void]$ownedPids.Add([int]$taskContext.task_execution.observer_lifecycle.pid)
                                 foreach ($rescue in @($taskContext.rescue_executions)) {
-                                    [void]$ownedPids.Add([int]$rescue.observer_lifecycle.pid)
+                                    [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
                                 }
                                 @($Snapshot.processes | Where-Object {
                                     $scope = ([string]$_.executable_path + ' ' + [string]$_.command_line)

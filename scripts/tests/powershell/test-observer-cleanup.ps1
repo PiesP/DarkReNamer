@@ -18,6 +18,50 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Reject case variants at real public boundaries before source or VM acquisition.
+foreach ($entry in @(
+    @{file='run-windows-vm-tests.ps1';args=@{BundleRoot='unused';SshHost='fixture'}},
+    @{file='windows-vm-guest.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;ValidateOnly=$true}},
+    @{file='windows-vm-acceptance.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;OutputRoot='unused';ExpectedScriptSha256=('a'*64);ValidateOnly=$true}},
+    @{file='windows-vm-recovery-acceptance.ps1';args=@{BundleRoot='unused';ExpectedSessionId=1;OutputRoot='unused';PrivateEvidenceRoot='unused';ExpectedScriptSha256=('a'*64);ValidateOnly=$true}}
+)) {
+    $entryPath=Join-Path $PSScriptRoot ('../../'+$entry.file)
+    foreach ($profile in @('VM-AUTOMATED-V1-WIN11-NTFS','VM-AUTOMATED-V2-OWNED-RESOURCES')) {
+        $arguments=$entry.args.Clone()
+        $arguments.AcceptanceProfileId=$profile
+        Assert-Fails { & $entryPath @arguments } 'Unsupported VM acceptance profile identity.'
+    }
+}
+
+# A rescue descendant is owned even when its image and command omit run paths.
+& {
+    $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    foreach ($functionName in @('Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
+        $definitions=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
+        },$true))
+        if($errors.Count -or $definitions.Count -ne 1){throw 'V2 owned inventory function is not unique.'}
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $name='unique-run';$root='C:\owned\run';$trustedRoot='C:\owned\run-trusted'
+    $roots=@{guest=@{path=$root};trusted=@{path=$trustedRoot}}
+    $sid='fixture';$desktopSession=2
+    $taskContext=@{declared_processes=@();baseline_tasks=@();preflight_child=@{pid=1};engine_child=@{pid=2}
+        task_execution=@{observer_lifecycle=@{pid=3}}
+        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777}}})}
+    $v2Evidence=$taskContext
+    $owned=[pscustomobject]@{pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
+        executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding'}
+    $ambient=[pscustomobject]@{pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
+        executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding'}
+    $found=@(Get-V2OwnedScopeProcesses @{processes=@($owned,$ambient)})
+    if($found.Count -ne 1 -or $found[0].pid -ne 900){throw 'Rescue descendant escaped normal owned scope.'}
+    Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()}
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($owned)} @{processes=@()} } 'protected execution scope'
+}
+
 # Exercise the production atomic replacement expression with actual files.
 $replaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-proof-replace-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($replaceRoot)

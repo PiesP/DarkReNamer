@@ -73,6 +73,9 @@ function Invoke-DrWindowsVmRecoveryAcceptance {
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
 $script:VmAcceptanceProfileId = $AcceptanceProfileId
 if ($AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources' -and -not $ValidateOnly) {
     Initialize-DrVmObserverLifecycle -ProfileId $AcceptanceProfileId

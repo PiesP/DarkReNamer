@@ -25,7 +25,10 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ToolingManifestSha256 = 'b5ba37c195558952a130334c0d153c3eafb4c9d335b4bb06cf3420630a5733b7'
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
+$ToolingManifestSha256 = '2b34e390c161eace1acc8dfeddca4e70a77681e9dcc0a24bb71ca5700aae3b4b'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {
