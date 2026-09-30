@@ -9,7 +9,10 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 
-from darkrenamer_tooling.contracts.platform import require_fixture_root
+from darkrenamer_tooling.contracts.platform import (
+    V1_PROFILE_ID, V2_PROFILE_ID, _v2_process_rows, _v2_task_rows,
+    _verify_v2_owned_resources, require_fixture_root,
+)
 from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys
 
@@ -341,7 +344,7 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
                     f"{kind} result does not bind the copied restoration document.")
 
 
-def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) -> None:
+def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) -> dict:
     context = require_exact_keys(original.get("owned_cleanup_failure_context"), {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -391,9 +394,39 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
              if context["task_kind"] == "ui" else context["acceptance_mode"] is None),
             "Original acceptance mode is unavailable.")
     _restoration(root, result, context, listed)
+    return result
 
 
-def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
+def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
+                            raw: dict, roots: dict, run_name: str) -> None:
+    evidence = raw["owned_resource_evidence"]
+    sid, session = evidence["runner_sid"], evidence["runner_session_id"]
+    baseline_tasks = _v2_task_rows(evidence["baseline_tasks"], "V2 baseline")
+    identities: dict[int, dict] = {}
+    for label, snapshot in (("frozen", frozen), ("before", before), ("after", after)):
+        require(_v2_task_rows(snapshot["tasks"], f"V2 finalizer {label}") == baseline_tasks,
+                f"V2 finalizer {label} task definition changed.")
+        rows = _v2_process_rows(snapshot["processes"], sid, session, f"V2 finalizer {label}")
+        for row in rows.values():
+            prior = identities.get(row["pid"])
+            require(prior is None or prior == row,
+                    "V2 finalizer process lifetime changed or PID was reused.")
+            identities[row["pid"]] = row
+    owned_pids = {row["pid"] for row in evidence["declared_processes"]}
+    owned_pids.update((evidence["preflight_child"]["pid"], evidence["engine_child"]["pid"],
+                       evidence["task_execution"]["observer_lifecycle"]["pid"]))
+    owned_pids.update(row["task_execution"]["observer_lifecycle"]["pid"]
+                      for row in evidence["rescue_executions"])
+    paths = tuple(row["path"].casefold() for row in roots.values())
+    for row in identities.values():
+        scope = (row["executable_path"] + " " + row["command_line"]).casefold()
+        require(row["pid"] not in owned_pids and row["parent_pid"] not in owned_pids and
+                run_name.casefold() not in scope and not any(path in scope for path in paths),
+                "V2 finalizer retained a protected process scope.")
+
+
+def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PROFILE_ID,
+                                   profile_sha256: str | None = None) -> dict[str, str]:
     """Verify a failed run directly; never turn strict environment failure into acceptance."""
     root = Path(root)
     require(root.is_dir() and not root.is_symlink(), "Owned cleanup evidence root is unavailable.")
@@ -406,20 +439,24 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
         lease_path = root.parent / "desktop-lease.json"
     lease_bytes = _read_file(lease_path, 64 * 1024)
     original = _json(original_bytes, "Original transport")
+    v2 = profile_id == V2_PROFILE_ID
+    require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
+    profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
         "schema_version", "kind", "run_name", "vm_id", "nonce", "desktop_lease_id", "original_transport",
         "files", "failed_snapshot", "root_records",
-    }, "Preservation receipt")
+    } | profile_fields, "Preservation receipt")
     proof = require_exact_keys(_json(proof_bytes, "Owned cleanup proof"), {
         "schema_version", "kind", "run_name", "vm_id", "status", "pre", "post", "roots",
         "observed_roots_before", "observed_roots_after", "errors", "preservation_sha256",
         "desktop_lease_sha256", "original_transport_sha256", "nonce",
-    }, "Owned cleanup proof")
+    } | profile_fields, "Owned cleanup proof")
     signal = require_exact_keys(_json(signal_bytes, "Desktop closure signal"), {
         "schema_version", "nonce", "preservation_sha256", "desktop_lease_sha256",
-    }, "Desktop closure signal")
+    } | profile_fields, "Desktop closure signal")
     lease = _json(lease_bytes, "Desktop lease")
-    require(all(type(document["schema_version"]) is int and document["schema_version"] == 1
+    require(all(type(document["schema_version"]) is int and
+                document["schema_version"] == (2 if v2 else 1)
                 for document in (receipt, proof, signal)) and
             receipt["kind"] == "owned_cleanup_strict_failure_preservation" and
             proof["kind"] == "owned_cleanup_after_strict_failure" and
@@ -433,6 +470,15 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
             HEX32.fullmatch(receipt["desktop_lease_id"]) is not None and
             proof["nonce"] == signal["nonce"] == receipt["nonce"],
             "Owned cleanup run, VM, or nonce binding differs.")
+    if v2:
+        require(type(profile_sha256) is str and HEX64.fullmatch(profile_sha256) is not None and
+                all(document["profile_id"] == V2_PROFILE_ID and
+                    document["profile_sha256"] == profile_sha256
+                    for document in (receipt, proof, signal)) and
+                type(original.get("raw_cleanup")) is dict and
+                original["raw_cleanup"].get("profile_id") == V2_PROFILE_ID and
+                original["raw_cleanup"].get("profile_sha256") == profile_sha256,
+                "V2 preserved cleanup is not bound to the selected profile bytes.")
     _reference(receipt["original_transport"], "original-transport.json", original_bytes,
                "Original transport reference")
     require(proof["original_transport_sha256"] == _digest(original_bytes) and
@@ -445,32 +491,42 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
     require(original.get("status") == "failed" and original.get("guest_cleanup") is False and
             type(original.get("raw_cleanup")) is dict, "Original strict failure is unavailable.")
     raw = original["raw_cleanup"]
-    for key, binding in (("unexpected_runner_tasks", "definition_sha256"),
-                         ("unexpected_runner_tasks_after_intervention", "definition_sha256"),
-                         ("unexpected_runner_processes", "executable_path"),
-                         ("unexpected_runner_processes_after_intervention", "executable_path")):
-        rows = raw.get(key)
-        require(type(rows) is list and all(
-            type(row) is dict and type(row.get("identity")) is str and row["identity"] and
-            type(row.get(binding)) is str and row[binding] for row in rows),
-            f"Original strict failure has an unknown {key} identity or binding.")
-    require(raw.get("unexpected_runner_tasks_after_delete") is None and
-            raw.get("unexpected_runner_processes_after_delete") is None and
-            raw.get("scheduled_task_present") is False and
-            raw.get("guest_root_present") is True and
-            raw.get("trusted_task_root_present") is True and
-            raw.get("process_jobs_closed") is True and
-            raw.get("runner_process_inventory_complete") is True and
-            raw.get("owned_processes_after") == [] and
-            raw.get("removed_runner_tasks") == [] and
-            raw.get("terminated_runner_processes") == [] and
-            raw.get("resource_cleanup_errors") == [] and
-            type(raw.get("runner_process_natural_exit")) is dict and
-            any(bool(raw[key]) for key in (
-                "unexpected_runner_tasks", "unexpected_runner_processes",
-                "unexpected_runner_tasks_after_intervention",
-                "unexpected_runner_processes_after_intervention")),
-            "Original strict OS failure was rewritten or is not classified.")
+    if v2:
+        _verify_v2_owned_resources(raw, profile_sha256=profile_sha256, deleted=False)
+        require(raw.get("scheduled_task_present") is False and
+                raw.get("guest_root_present") is True and
+                raw.get("trusted_task_root_present") is True and
+                raw.get("process_jobs_closed") is True and
+                raw.get("owned_processes_after") == [] and
+                raw.get("terminated_runner_processes") == [],
+                "Original V2 failure was rewritten or retained an owned resource.")
+    else:
+        for key, binding in (("unexpected_runner_tasks", "definition_sha256"),
+                             ("unexpected_runner_tasks_after_intervention", "definition_sha256"),
+                             ("unexpected_runner_processes", "executable_path"),
+                             ("unexpected_runner_processes_after_intervention", "executable_path")):
+            rows = raw.get(key)
+            require(type(rows) is list and all(
+                type(row) is dict and type(row.get("identity")) is str and row["identity"] and
+                type(row.get(binding)) is str and row[binding] for row in rows),
+                f"Original strict failure has an unknown {key} identity or binding.")
+        require(raw.get("unexpected_runner_tasks_after_delete") is None and
+                raw.get("unexpected_runner_processes_after_delete") is None and
+                raw.get("scheduled_task_present") is False and
+                raw.get("guest_root_present") is True and
+                raw.get("trusted_task_root_present") is True and
+                raw.get("process_jobs_closed") is True and
+                raw.get("runner_process_inventory_complete") is True and
+                raw.get("owned_processes_after") == [] and
+                raw.get("removed_runner_tasks") == [] and
+                raw.get("terminated_runner_processes") == [] and
+                raw.get("resource_cleanup_errors") == [] and
+                type(raw.get("runner_process_natural_exit")) is dict and
+                any(bool(raw[key]) for key in (
+                    "unexpected_runner_tasks", "unexpected_runner_processes",
+                    "unexpected_runner_tasks_after_intervention",
+                    "unexpected_runner_processes_after_intervention")),
+                "Original strict OS failure was rewritten or is not classified.")
     files = receipt["files"]
     require(type(files) is list and 1 <= len(files) <= 1024,
             "Preserved file inventory is unavailable or oversized.")
@@ -489,7 +545,24 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
         total += row["bytes"]
     require(total <= 512 * 1024 * 1024 and "original-transport.json" in listed,
             "Preserved files exceed their bound or omit the original transport.")
-    _source_result(root, original, receipt, listed)
+    result = _source_result(root, original, receipt, listed)
+    if v2:
+        require(result.get("process_job_cleanup") ==
+                raw["owned_resource_evidence"]["process_job_cleanup"] and
+                result.get("observer_lifecycle") ==
+                raw["owned_resource_evidence"]["task_execution"]["observer_lifecycle"],
+                "V2 preserved cleanup lifetimes differ from the original result.")
+        for rescue in raw["owned_resource_evidence"]["rescue_executions"]:
+            name = rescue["result_file"]
+            require(name in listed, "V2 rescue output is missing from the preserved inventory.")
+            data = _read_file(root / name, 4 * 1024 * 1024)
+            require(_digest(data) == rescue["result_sha256"],
+                    "V2 rescue output differs from its execution receipt.")
+            document = _json(data, "V2 rescue result")
+            require(document.get("status") == "passed" and
+                    document.get("observer_lifecycle") ==
+                    rescue["task_execution"]["observer_lifecycle"],
+                    "V2 rescue result is unbound to its exact task lifetime.")
     frozen = _snapshot(receipt["failed_snapshot"], "Frozen failure", final=False)
     roots = _roots(receipt["root_records"], receipt["run_name"])
     require(proof["roots"] == roots, "Finalizer root records differ from creation.")
@@ -503,8 +576,13 @@ def verify_preserved_owned_cleanup(root: Path | str) -> dict[str, str]:
     after = _snapshot(proof["post"], "Finalizer post-inventory", final=True)
     for inventory in (frozen, before, after):
         _reject_owned_entries(inventory, roots, receipt["run_name"])
-    _subset(before, frozen, "Finalizer pre-inventory")
-    _subset(after, frozen, "Finalizer post-inventory")
+    if v2:
+        require(raw["owned_resource_evidence"]["root_records"] == roots,
+                "V2 root creation differs from the original raw evidence.")
+        _v2_finalizer_inventory(frozen, before, after, raw, roots, receipt["run_name"])
+    else:
+        _subset(before, frozen, "Finalizer pre-inventory")
+        _subset(after, frozen, "Finalizer post-inventory")
     presence = require_exact_keys(proof["observed_roots_after"],
                                   {"guest_present", "trusted_present"}, "Observed roots after deletion")
     require(presence == {"guest_present": False, "trusted_present": False} and

@@ -12,6 +12,7 @@ from darkrenamer_tooling.contracts.owned_cleanup import (
     verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
+from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
 
 
 RUN = 'DarkReNamerTests-' + 'a' * 32
@@ -337,6 +338,91 @@ class OwnedCleanupTests(unittest.TestCase):
                              ('ui', 'execution_state_restore_failed')):
             with self.subTest(kind=kind, reason=reason), self.assertRaises(EvidenceError):
                 _observer_finished(original, {**result, 'failure_reason': reason}, kind)
+
+
+class V2OwnedCleanupTests(unittest.TestCase):
+    def setUp(self):
+        OwnedCleanupTests.setUp(self)
+        clean = clean_controller_cleanup_v2()
+        evidence = clean['owned_resource_evidence']
+        self.roots = deepcopy(evidence['root_records'])
+        self.frozen = {'complete': True,
+                       'processes': deepcopy(evidence['process_snapshots']['after_intervention']['processes']),
+                       'tasks': [], 'owned_processes': []}
+        result = process_result('9' * 40)
+        result['process_lifecycle'] = {'pid': 3001, 'start_time_utc_ticks': '134041000000000000'}
+        result['process_job_cleanup'] = deepcopy(evidence['process_job_cleanup'])
+        result['observer_lifecycle'] = deepcopy(evidence['task_execution']['observer_lifecycle'])
+        result_bytes = write(self.root / 'original-result.json', result)
+        raw = deepcopy(clean)
+        raw.update(guest_root_present=True, trusted_task_root_present=True,
+                   runner_process_inventory_complete=False,
+                   unexpected_runner_processes_after_delete=None,
+                   unexpected_runner_tasks_after_delete=None,
+                   resource_cleanup_errors=['Original root deletion was deferred.'])
+        resource = raw['owned_resource_evidence']
+        resource['process_snapshots']['after_delete'] = None
+        resource['task_snapshots']['after_delete'] = None
+        resource['observed_roots_before'] = None
+        resource['observed_roots_after'] = {'guest_present': True, 'trusted_present': True}
+        self.original['raw_cleanup'] = raw
+        self.original['owned_cleanup_failure_context']['failed_snapshot'] = self.frozen
+        self.original['owned_cleanup_failure_context']['root_records'] = self.roots
+        self.original['owned_cleanup_failure_context']['source_result'] = {
+            'file': 'original-result.json', 'bytes': len(result_bytes), 'sha256': digest(result_bytes)}
+        self.receipt.update(schema_version=2, run_name=evidence['run_name'],
+                            profile_id='vm-automated-v2-owned-resources',
+                            profile_sha256=V2_PROFILE_SHA256,
+                            failed_snapshot=self.frozen, root_records=self.roots)
+        self.receipt['files'][1] = {'file': 'original-result.json',
+                                    'bytes': len(result_bytes), 'sha256': digest(result_bytes)}
+        self.signal.update(schema_version=2, profile_id='vm-automated-v2-owned-resources',
+                           profile_sha256=V2_PROFILE_SHA256)
+        inventory = {**deepcopy(self.frozen), 'owned_tasks': []}
+        self.proof.update(schema_version=2, run_name=evidence['run_name'],
+                          profile_id='vm-automated-v2-owned-resources',
+                          profile_sha256=V2_PROFILE_SHA256,
+                          pre=inventory, post=deepcopy(inventory), roots=self.roots,
+                          observed_roots_before={role: {**row, 'ordinary_directory': True}
+                                                 for role, row in self.roots.items()})
+        self.rebind_original()
+
+    def rebind_original(self):
+        OwnedCleanupTests.rebind_original(self)
+
+    def verify_v2(self):
+        return verify_preserved_owned_cleanup(self.root,
+                                              profile_id='vm-automated-v2-owned-resources',
+                                              profile_sha256=V2_PROFILE_SHA256)
+
+    def test_v2_failure_cleanup_remains_rejected_even_with_ambient_processes(self):
+        self.assertEqual(self.verify_v2()['acceptance'], 'rejected')
+
+    def test_v2_original_nonzero_task_exit_can_have_owned_cleanup_proof(self):
+        self.original['raw_cleanup']['owned_resource_evidence']['task_execution']['exit_code'] = 0xC0000005
+        self.rebind_original()
+        self.assertEqual(self.verify_v2()['owned_cleanup'], 'owned-clean')
+
+    def test_v2_tampered_profile_task_or_process_scope_fails(self):
+        original = deepcopy(self.original)
+        proof = deepcopy(self.proof)
+        for mutation in ('profile', 'task', 'process', 'observer'):
+            with self.subTest(mutation=mutation):
+                self.original = deepcopy(original)
+                self.proof = deepcopy(proof)
+                if mutation == 'profile':
+                    self.proof['profile_sha256'] = 'c' * 64
+                elif mutation == 'task':
+                    self.proof['post']['tasks'] = [{'identity': '\\Other', 'task_path': '\\',
+                                                    'task_name': 'Other', 'definition_sha256': '1' * 64}]
+                elif mutation == 'process':
+                    self.proof['post']['processes'][1]['command_line'] += self.receipt['run_name']
+                else:
+                    self.original['raw_cleanup']['owned_resource_evidence']['task_execution'][
+                        'observer_lifecycle']['pid'] = 9999
+                self.rebind_original()
+                with self.assertRaises(EvidenceError):
+                    self.verify_v2()
 
 
 if __name__ == '__main__':

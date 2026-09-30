@@ -34,7 +34,10 @@ param(
     [ValidateRange(1, 900)][int] $RuntimeBrokerDiagnosticBudgetSeconds,
     [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
-    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $AcceptanceProfileSha256
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'

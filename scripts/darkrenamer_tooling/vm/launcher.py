@@ -13,7 +13,9 @@ import tempfile
 import time
 import uuid
 
-from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
+from darkrenamer_tooling.contracts.platform import (
+    V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
+)
 from darkrenamer_tooling.contracts.tooling import stage_verified_tooling
 
 TARGET = 'x86_64-pc-windows-msvc'
@@ -214,6 +216,8 @@ def argument_parser():
     parser.add_argument('--desktop-mode', choices=('rdp', 'existing'), default='rdp',
                         help='Prepare a managed RDP desktop (default), or use an existing unlocked desktop.')
     parser.add_argument('--desktop-helper', help='Trusted Windows desktop-session.ps1 path; uses the local RDP profile.')
+    parser.add_argument('--acceptance-profile-id', choices=(V1_PROFILE_ID, V2_PROFILE_ID),
+                        default=V1_PROFILE_ID, help='Bind the selected VM cleanup contract.')
     parser.add_argument('--desktop-scale', type=int, choices=(100, 125, 150, 175, 200, 250, 300), default=200)
     parser.add_argument('--desktop-width', type=int,
                         help='Request a managed RDP desktop width; requires --desktop-height.')
@@ -469,6 +473,12 @@ def prepare_observer_inputs(root, manifest, args):
 
 def controller_task_arguments(root, args, path_converter=str):
     arguments = ['-TaskKind', args.task_kind]
+    if getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID:
+        digest = getattr(args, 'acceptance_profile_sha256', None)
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('V2 controller invocation lacks the frozen profile digest.')
+        arguments += ['-AcceptanceProfileId', V2_PROFILE_ID,
+                      '-AcceptanceProfileSha256', digest]
     if args.task_kind == 'ui':
         arguments += [
             '-AcceptanceOutputRoot', path_converter(root / 'observer-output'),
@@ -687,7 +697,13 @@ def run_controller(root, args, defaults=None, pwsh=None):
             original = read_json_strict(original_path, maximum_bytes=4 * 1024 * 1024)
             lease_path = root / 'desktop-lease.json'
             lease = read_json_strict(lease_path, maximum_bytes=64 * 1024)
-            if (type(preserved) is not dict or preserved.get('schema_version') != 1 or
+            v2 = getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID
+            if (type(preserved) is not dict or type(preserved.get('schema_version')) is not int or
+                    preserved['schema_version'] != (2 if v2 else 1) or
+                    (v2 and (preserved.get('profile_id') != V2_PROFILE_ID or
+                             preserved.get('profile_sha256') != args.acceptance_profile_sha256 or
+                             (original.get('raw_cleanup') or {}).get('profile_id') != V2_PROFILE_ID or
+                             (original.get('raw_cleanup') or {}).get('profile_sha256') != args.acceptance_profile_sha256)) or
                     preserved.get('kind') != 'owned_cleanup_strict_failure_preservation' or
                     not isinstance(preserved.get('nonce'), str) or
                     re.fullmatch(r'[0-9a-f]{32}', preserved['nonce']) is None or
@@ -703,11 +719,14 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     lease.get('cleanup_observed') is not True):
                 raise ValueError('Frozen strict failure or desktop closure is incomplete.')
             signal = {
-                'schema_version': 1,
+                'schema_version': 2 if v2 else 1,
                 'nonce': preserved['nonce'],
                 'preservation_sha256': sha256(receipt_path),
                 'desktop_lease_sha256': sha256(lease_path),
             }
+            if v2:
+                signal.update(profile_id=V2_PROFILE_ID,
+                              profile_sha256=args.acceptance_profile_sha256)
             signal_path = output / 'owned-cleanup-desktop-closed.json'
             temporary = signal_path.with_name(signal_path.name + '.new-' + uuid.uuid4().hex)
             with temporary.open('xb') as stream:
@@ -1033,7 +1052,8 @@ def verify_transport_binding(transport, expected_transport_kind=None, expected_v
     return True
 
 
-def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None):
+def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None,
+                  *, profile_id=V1_PROFILE_ID, profile_sha256=None):
     if type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in (1, 2):
         raise ValueError('VM bundle schema version is invalid.')
     candidate = manifest['schema_version'] == 2
@@ -1123,7 +1143,10 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     if transport.get('guest_cleanup') is not True:
         passed = False
     else:
-        verify_controller_cleanup(transport.get('raw_cleanup'))
+        verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
+                                  profile_sha256=profile_sha256)
+        if profile_id == V2_PROFILE_ID:
+            _verify_v2_result_owned_binding(result, transport)
     if not candidate and total == 0:
         passed = False
     if candidate:
@@ -1502,7 +1525,20 @@ def verify_observer_result(manifest, result, role, observer_sha256):
     return True
 
 
-def verify_observer_transport(root, role, expected_transport_kind, expected_vm_id):
+def _verify_v2_result_owned_binding(result, transport):
+    raw = transport.get('raw_cleanup') if isinstance(transport, dict) else None
+    owned = raw.get('owned_resource_evidence') if isinstance(raw, dict) else None
+    task = owned.get('task_execution') if isinstance(owned, dict) else None
+    jobs = result.get('process_job_cleanup') if isinstance(result, dict) else None
+    if (not isinstance(jobs, list) or not jobs or
+            not isinstance(owned, dict) or jobs != owned.get('process_job_cleanup') or
+            not isinstance(task, dict) or
+            result.get('observer_lifecycle') != task.get('observer_lifecycle')):
+        raise ValueError('V2 cleanup does not bind the result Job and observer lifetimes.')
+
+
+def verify_observer_transport(root, role, expected_transport_kind, expected_vm_id,
+                              *, profile_id=V1_PROFILE_ID, profile_sha256=None, result=None):
     transport = read_json_strict(Path(root) / 'transport.json')
     engine_name = 'acceptance_engine' if role == 'ui' else 'recovery_engine'
     engine = transport.get(engine_name) if isinstance(transport, dict) else None
@@ -1515,7 +1551,10 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
             not isinstance(engine, dict) or engine.get('edition') != 'Core' or
             engine.get('effective_policy') != 'RemoteSigned'):
         raise ValueError('Observer transport result is incomplete or invalid.')
-    verify_controller_cleanup(transport.get('raw_cleanup'))
+    verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
+                              profile_sha256=profile_sha256)
+    if profile_id == V2_PROFILE_ID:
+        _verify_v2_result_owned_binding(result, transport)
     if not is_supported_powershell_version(engine.get('version')):
         raise ValueError('Observer transport engine version is invalid.')
     verify_transport_binding(
@@ -1524,7 +1563,8 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
     return True
 
 
-def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_vm_id):
+def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_vm_id,
+                              *, profile_id=V1_PROFILE_ID, profile_sha256=None):
     root = Path(root)
     inventory = read_json_strict(root / 'recovery-inventory.json')
     if (not isinstance(inventory, dict) or set(inventory) != {
@@ -1597,13 +1637,23 @@ def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_
     if actual != expected:
         raise ValueError('Recovery collection inventory is not complete.')
     verify_observer_transport(
-        root, 'recovery', expected_transport_kind, expected_vm_id)
+        root, 'recovery', expected_transport_kind, expected_vm_id,
+        profile_id=profile_id, profile_sha256=profile_sha256, result=result)
     return result
 
 
 def main(repo, argv=None, tooling=None):
     repo = Path(repo)
     args = parse_arguments(argv)
+    if args.acceptance_profile_id == V2_PROFILE_ID:
+        profile_path = repo / 'config' / 'vm-automated-v2.json'
+        profile = read_json_strict(profile_path, maximum_bytes=1024 * 1024)
+        if (not isinstance(profile, dict) or
+                profile.get('schema') != 'darkrenamer-vm-automated-profile-v2' or
+                profile.get('profile_id') != V2_PROFILE_ID or
+                type(profile.get('revision')) is not int or profile['revision'] != 2):
+            raise ValueError('V2 launcher profile definition is unavailable.')
+        args.acceptance_profile_sha256 = sha256(profile_path)
     if args.prepare_only:
         root = resolve_prepare_output_root(repo, args.output)
         manifest = (build_candidate_bundle(repo, root, args, tooling) if args.candidate_mode
@@ -1642,7 +1692,9 @@ def main(repo, argv=None, tooling=None):
             raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
         result = read_json_strict(
             result_path, maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
-        verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
+        verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id,
+                                 profile_id=args.acceptance_profile_id,
+                                 profile_sha256=getattr(args, 'acceptance_profile_sha256', None))
         total = sum(row.get('passed') or 0 for row in result['tests'])
         print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) +
               ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
@@ -1654,12 +1706,16 @@ def main(repo, argv=None, tooling=None):
         verified = verify_observer_result(
             manifest, result, 'ui', observer_inputs['observer']['sha256'])
         verify_observer_transport(
-            observer_inputs['output'], 'ui', transport_kind, args.expected_vm_id)
+            observer_inputs['output'], 'ui', transport_kind, args.expected_vm_id,
+            profile_id=args.acceptance_profile_id,
+            profile_sha256=getattr(args, 'acceptance_profile_sha256', None), result=result)
         print(('PASS' if transport_ok and verified else 'FAIL') +
               ': UI observer returned review_required with frozen provenance.')
     else:
         result = verify_recovery_inventory(
-            observer_inputs['output'], manifest, transport_kind, args.expected_vm_id)
+            observer_inputs['output'], manifest, transport_kind, args.expected_vm_id,
+            profile_id=args.acceptance_profile_id,
+            profile_sha256=getattr(args, 'acceptance_profile_sha256', None))
         verified = True
         print(('PASS' if transport_ok else 'FAIL') + ': recovery observer returned ' +
               result['status'] + ' with a verified collection inventory.')

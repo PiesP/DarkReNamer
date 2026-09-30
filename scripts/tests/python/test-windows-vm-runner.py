@@ -1553,6 +1553,16 @@ class VmRunnerTests(unittest.TestCase):
         digest_index = command.index('-ExpectedBundleManifestSha256') + 1
         self.assertEqual(command[digest_index], 'a' * 64)
 
+    def test_v2_controller_receives_frozen_profile_digest(self):
+        args = vm.parse_arguments([
+            '--ssh-host', 'darkrenamer-vm',
+            '--acceptance-profile-id', 'vm-automated-v2-owned-resources'])
+        args.acceptance_profile_sha256 = 'b' * 64
+        command = vm.controller_invocation(self.root, args, pwsh='/usr/bin/pwsh')
+        self.assertEqual(command[command.index('-AcceptanceProfileId') + 1],
+                         'vm-automated-v2-owned-resources')
+        self.assertEqual(command[command.index('-AcceptanceProfileSha256') + 1], 'b' * 64)
+
     def desktop_lease(self):
         return {'status': 'ready', 'leasePath': 'C:\\Temp\\owned', 'leaseId': 'a' * 32,
                 'expectedGuestSid': 'S-1-5-21-1-2-3-1001', 'expectedDpi': 192,

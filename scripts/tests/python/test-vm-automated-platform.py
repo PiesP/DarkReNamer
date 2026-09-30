@@ -12,6 +12,7 @@ from darkrenamer_tooling.contracts.platform import (
     verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
+from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
 
 
 class PlatformTests(unittest.TestCase):
@@ -651,6 +652,81 @@ class PlatformTests(unittest.TestCase):
         events[1]["input_method"] = "uia"
         with self.assertRaises(EvidenceError):
             verify_keyboard_events(events, candidate_pid=1234, session_id=2, main_workbench_hwnd=12)
+
+
+class V2OwnedResourceTests(unittest.TestCase):
+    def verify(self, cleanup):
+        verify_controller_cleanup(cleanup, profile_id="vm-automated-v2-owned-resources",
+                                  profile_sha256=V2_PROFILE_SHA256)
+
+    def test_multiple_new_ambient_processes_can_remain_live(self):
+        self.verify(clean_controller_cleanup_v2())
+
+    def test_task_execution_must_exit_zero_for_normal_acceptance(self):
+        cleanup = clean_controller_cleanup_v2()
+        cleanup["owned_resource_evidence"]["task_execution"]["exit_code"] = 1
+        with self.assertRaises(EvidenceError):
+            self.verify(cleanup)
+
+    def test_unknown_or_reused_lifetime_and_owned_scope_fail(self):
+        for mutation in ("pid-reuse", "owned-command", "owner", "missing-process", "task-change"):
+            cleanup = clean_controller_cleanup_v2()
+            evidence = cleanup["owned_resource_evidence"]
+            if mutation == "pid-reuse":
+                row = evidence["process_snapshots"]["after_delete"]["processes"][1]
+                row["pid"] = 4001
+                row["identity"] = "4001|2026-09-30T01:02:04.0000000Z"
+            elif mutation == "owned-command":
+                evidence["process_snapshots"]["after_delete"]["processes"][1]["command_line"] += (
+                    " " + evidence["run_name"])
+            elif mutation == "owner":
+                evidence["process_snapshots"]["after_delete"]["processes"][1]["owner_sid"] = "S-1-5-18"
+            elif mutation == "missing-process":
+                evidence["process_snapshots"]["after_delete"]["complete"] = False
+            else:
+                evidence["task_snapshots"]["after_delete"] = [{
+                    "identity": "\\Unrelated", "task_path": "\\", "task_name": "Unrelated",
+                    "definition_sha256": "1" * 64}]
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify(cleanup)
+
+    def test_profile_and_observer_lifetime_must_be_bound(self):
+        for mutation in ("digest", "observer", "schema", "unregistered-action"):
+            cleanup = clean_controller_cleanup_v2()
+            if mutation == "digest":
+                cleanup["profile_sha256"] = "b" * 64
+            elif mutation == "observer":
+                cleanup["owned_resource_evidence"]["task_execution"]["observer_lifetime_absent"] = False
+            elif mutation == "schema":
+                cleanup["owned_resource_evidence"]["schema_version"] = 2.0
+            else:
+                cleanup["owned_resource_evidence"]["task_execution"]["action_arguments"] = (
+                    '-NoProfile -File "C:\\ProgramData\\DarkReNamerVmRuns\\' +
+                    cleanup["owned_resource_evidence"]["run_name"] +
+                    '\\windows-vm-guest.ps1" -AcceptanceProfileId vm-automated-v2-owned-resources')
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify(cleanup)
+
+    def test_second_rescue_task_requires_its_own_exact_lifetime(self):
+        cleanup = clean_controller_cleanup_v2()
+        evidence = cleanup["owned_resource_evidence"]
+        evidence["rescue_attempts"] = 1
+        with self.assertRaises(EvidenceError):
+            self.verify(cleanup)
+        execution = deepcopy(evidence["task_execution"])
+        execution["registered_last_run_time_ticks"] += 10
+        execution["completed_last_run_time_ticks"] += 20
+        execution["action_arguments"] += " -RestoreTextScaleOnly"
+        execution["observer_lifecycle"]["pid"] = 3100
+        execution["observer_lifecycle"]["start_time_utc_ticks"] = "134041000000000020"
+        execution["observer_lifecycle"]["command_line"] += " -RestoreTextScaleOnly"
+        evidence["rescue_executions"] = [{
+            "kind": "text-scale", "task_execution": execution,
+            "result_file": "text-scale-rescue-result.json", "result_sha256": "c" * 64}]
+        self.verify(cleanup)
+        execution["observer_lifetime_absent"] = False
+        with self.assertRaises(EvidenceError):
+            self.verify(cleanup)
 
 
 if __name__ == "__main__":

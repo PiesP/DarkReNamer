@@ -17,6 +17,8 @@ param(
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
     [switch] $RestoreTextScaleOnly,
     [switch] $ElevatedObserver,
     [string] $TrustedResultPath,
