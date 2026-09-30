@@ -898,6 +898,11 @@ class VmRunnerTests(unittest.TestCase):
         self.result['gui']['job_cleanup'] = False
         self.assertFalse(self.verify())
 
+    def test_missing_output_is_reported_as_collection_failure(self):
+        (self.root / self.result['tests'][0]['stdout']['file']).unlink()
+        with self.assertRaisesRegex(ValueError, 'not collected as an ordinary file'):
+            self.verify()
+
     def test_test_output_size_and_aggregate_bounds_are_verified(self):
         stdout = self.result['tests'][0]['stdout']
         stdout['bytes'] += 1
