@@ -3342,7 +3342,7 @@ public static class DrVmCommandLineNative {
             $argumentVector = [DrVmCommandLineNative]::CommandLineToArgvW(
                 $CommandLine, [ref]$argumentCount)
             if ($argumentVector -eq [IntPtr]::Zero -or
-                $argumentCount -lt 1 -or $argumentCount -gt 32) {
+                $argumentCount -lt 1 -or $argumentCount -gt 64) {
                 if ($argumentVector -ne [IntPtr]::Zero) {
                     [void][DrVmCommandLineNative]::LocalFree($argumentVector)
                 }

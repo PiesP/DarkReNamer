@@ -63,7 +63,7 @@ def _windows_task_argv(arguments: str) -> list[str]:
         if quoted or not token:
             raise ValueError("Malformed Windows task arguments")
         result.append("".join(token))
-        if len(result) > 32:
+        if len(result) > 64:
             raise ValueError("Too many Windows task arguments")
     if not result:
         raise ValueError("Empty Windows task arguments")
