@@ -438,10 +438,22 @@ class PredicateTests(unittest.TestCase):
                   'target': 'x86_64-pc-windows-msvc', 'failure_reason': None,
                   'transport': {'guest_cleanup': guest_cleanup,
                                 'raw_cleanup': clean_controller_cleanup()},
+                  'gui': {'status': 'passed', 'job_cleanup': True,
+                          'process_lifecycle': {'pid': 1235,
+                                                'start_time_utc_ticks': '639000000000000001'}},
+                  'process_job_cleanup': [],
                   'tests': [{'file': 'required-tests.exe', 'sha256': binary_sha,
+                             'status': 'passed', 'job_cleanup': True,
                              'exit_code': 0, 'passed': passed, 'failed': 0, 'ignored': 0,
+                             'process_lifecycle': {'pid': 1234,
+                                                   'start_time_utc_ticks': '639000000000000000'},
                              'stdout': {'file': 'stdout.txt', 'sha256': stdout.sha256, 'bytes': stdout.size},
                              'stderr': {'file': 'stderr.txt', 'sha256': stderr.sha256, 'bytes': stderr.size}}]}
+        for lifecycle in (result['tests'][0]['process_lifecycle'], result['gui']['process_lifecycle']):
+            receipt = deepcopy(self.process_job_cleanup()[0])
+            receipt['pid'] = lifecycle['pid']
+            receipt['process_start_time_utc_ticks'] = lifecycle['start_time_utc_ticks']
+            result['process_job_cleanup'].append(receipt)
         add_indexed_json(root, files, 'backend/bundle.json', bundle)
         add_indexed_json(root, files, 'backend/result.json', result)
         return EvidenceReader(ExtractedEvidence(root, files)), result
@@ -482,6 +494,36 @@ class PredicateTests(unittest.TestCase):
                 with self.assertRaises(EvidenceError):
                     verify_backend_execution(reader, 'backend/bundle.json', 'backend/result.json',
                                              source_sha=self.source_sha, required_tests=['required_regression'])
+
+    def test_backend_execution_requires_exact_complete_clean_process_jobs(self):
+        def missing_receipt(result): result.pop('process_job_cleanup')
+        def missing_lifecycle(result): result['tests'][0].pop('process_lifecycle')
+        def missing_gui_lifecycle(result): result['gui'].pop('process_lifecycle')
+        def missing_gui_receipt(result): result['process_job_cleanup'].pop()
+        def changed_ticks(result): result['process_job_cleanup'][0]['process_start_time_utc_ticks'] = '639000000000000009'
+        def duplicate_lifecycle(result): result['gui']['process_lifecycle'] = deepcopy(result['tests'][0]['process_lifecycle'])
+        def duplicate_job(result): result['process_job_cleanup'].append(deepcopy(result['process_job_cleanup'][0]))
+        def extra_job(result):
+            extra = deepcopy(result['process_job_cleanup'][0])
+            extra['pid'] = 9999
+            result['process_job_cleanup'].append(extra)
+        def failed_close(result): result['process_job_cleanup'][0]['job_closed'] = False
+        def failed_capture(result): result['process_job_cleanup'][0]['capture_complete'] = False
+        def survivor(result): result['process_job_cleanup'][0]['had_survivors'] = True
+
+        mutations = (missing_receipt, missing_lifecycle, missing_gui_lifecycle,
+                     missing_gui_receipt, changed_ticks, duplicate_lifecycle,
+                     duplicate_job, extra_job, failed_close, failed_capture, survivor)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                reader, result = self.backend_records(root)
+                mutation(result)
+                add_indexed_json(root, reader.evidence.files, 'backend/result.json', result)
+                with self.assertRaises(EvidenceError):
+                    verify_backend_execution(reader, 'backend/bundle.json', 'backend/result.json',
+                                             source_sha=self.source_sha,
+                                             required_tests=['required_regression'])
 
     def test_freshness_rejects_copied_process_lifetime_or_changed_vm(self):
         result, transport = self.core_records()
