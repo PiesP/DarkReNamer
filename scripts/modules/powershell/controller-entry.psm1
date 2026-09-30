@@ -518,6 +518,15 @@ function Get-DrControllerRecoveryProcessIdentities {
     return ,$identities
 }
 
+function Test-DrControllerOwnedCleanupFailureEligible {
+    param([AllowNull()][object] $CleanupResult)
+
+    if ($null -eq $CleanupResult) { return $false }
+    $property = $CleanupResult.PSObject.Properties['owned_cleanup_after_strict_failure_eligible']
+    if ($null -eq $property -or $property.Value -isnot [bool]) { return $false }
+    return $property.Value
+}
+
 function Test-DrControllerProcessJobCleanupLedger {
     param(
         [Parameter(Mandatory)][object] $Result,
@@ -5128,8 +5137,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $ownedHandshake = $binding
                 }
             } catch { }
-            if ($null -ne $cleanupResult -and
-                $cleanupResult.owned_cleanup_after_strict_failure_eligible -eq $true -and
+            if ((Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $cleanupResult) -and
                 $transport.status -ceq 'collected' -and
                 $transport.guest_cleanup -eq $false -and
                 $processJobsClosed -and

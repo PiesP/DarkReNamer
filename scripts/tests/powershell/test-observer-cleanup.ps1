@@ -20,6 +20,18 @@ function Assert-Fails {
 
 # Test the same completion predicate serialized into the guest cleanup command.
 Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
+    foreach ($result in @($null, [pscustomobject]@{guest_cleanup=$true},
+        [pscustomobject]@{owned_cleanup_after_strict_failure_eligible=$false},
+        [pscustomobject]@{owned_cleanup_after_strict_failure_eligible='true'},
+        [pscustomobject]@{owned_cleanup_after_strict_failure_eligible=1})) {
+        if (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $result) {
+            throw 'Absent or unknown failure context must not authorize owned cleanup.'
+        }
+    }
+    if (-not (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult (
+        [pscustomobject]@{owned_cleanup_after_strict_failure_eligible=$true}))) {
+        throw 'An explicit typed eligibility result was not recognized.'
+    }
     function New-CleanObservation {
         [pscustomobject]@{
             scheduled_task_present = $false; guest_root_present = $false; trusted_task_root_present = $false
@@ -692,6 +704,10 @@ try {
                     baseline_process_identities = @()
                 }
                 $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                if ($mode -ceq 'clean' -and
+                    (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $observed)) {
+                    throw 'A normal successful cleanup must bypass the strict-failure finalizer.'
+                }
                 if ($null -ne $observed.PSObject.Properties['owned_cleanup_after_strict_failure_eligible']) {
                     if ($observed.guest_cleanup -or $probe.deletes -ne 0 -or
                         $null -ne $observed.raw_cleanup.unexpected_runner_tasks_after_delete -or
