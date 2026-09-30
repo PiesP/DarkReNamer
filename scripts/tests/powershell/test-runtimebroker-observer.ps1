@@ -171,6 +171,27 @@ try {
     $phaseRow = ConvertFrom-DrRuntimeBrokerJson ([IO.File]::ReadAllBytes((Join-Path $backend.Context.Root 'events.jsonl')))
     Assert-ObserverTest ($phaseRow.clock_domain -ceq 'ui-observer' -and $phaseRow.record.recorded_at_utc -ceq $phase.recorded_at_utc) 'Guest marker clock domain changed.'
 
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # Exercise the path used by Core releases without ConvertFrom-Json -DateKind.
+        $fallback = ConvertFrom-DrRuntimeBrokerJsonCoreWithoutDateKind '{"recorded_at_utc":"2026-09-30T00:00:00.0000001Z","details":{"observed":true,"missing":null,"count":42,"ratio":1.25,"items":["2026-09-30T00:00:00.0000002Z",false,[],{"label":"phase"}]}}'
+        Assert-ObserverTest ($fallback -is [pscustomobject] -and $fallback.recorded_at_utc -ceq '2026-09-30T00:00:00.0000001Z' -and
+            $fallback.details -is [pscustomobject] -and $fallback.details.observed -is [bool] -and $fallback.details.observed -and
+            $null -eq $fallback.details.missing -and $fallback.details.count -is [long] -and $fallback.details.count -eq 42 -and
+            $fallback.details.ratio -is [double] -and $fallback.details.ratio -eq 1.25 -and
+            $fallback.details.items -is [array] -and $fallback.details.items.Count -eq 4 -and
+            $fallback.details.items[0] -ceq '2026-09-30T00:00:00.0000002Z' -and
+            $fallback.details.items[1] -is [bool] -and -not $fallback.details.items[1] -and
+            $fallback.details.items[2] -is [array] -and $fallback.details.items[2].Count -eq 0 -and
+            $fallback.details.items[3] -is [pscustomobject] -and $fallback.details.items[3].label -ceq 'phase') 'Core JSON fallback changed typed values or 100 ns timestamps.'
+        $tooDeep = ('[' * 65) + '0' + (']' * 65)
+        $rejected = $false
+        try { $null = ConvertFrom-DrRuntimeBrokerJsonCoreWithoutDateKind $tooDeep } catch { $rejected = $true }
+        Assert-ObserverTest $rejected 'Core JSON fallback accepted excessive nesting.'
+    }
+    $rejected = $false
+    try { $null = ConvertFrom-DrRuntimeBrokerJson ([Text.Encoding]::UTF8.GetBytes(' ' * 4097)) } catch { $rejected = $true }
+    Assert-ObserverTest $rejected 'Diagnostic JSON parser accepted an oversized input.'
+
     $backend = New-FakeBackend (New-TestRoot 'budget') @((New-FakeRecord (New-FakeLease 54 '134351000000000006' 258)))
     $result = Invoke-FakeRun $backend 2048 1500
     Assert-ObserverTest ($result.status -ceq 'diagnostic-incomplete' -and $backend.Context.CloseCount -eq 1) 'Output cap failed open or skipped final cleanup.'

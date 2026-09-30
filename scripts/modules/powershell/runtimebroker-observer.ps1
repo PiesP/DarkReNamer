@@ -475,11 +475,46 @@ function Read-DrRuntimeBrokerJsonBytes {
         return ,$bytes
     } finally { $stream.Dispose() }
 }
+function ConvertFrom-DrRuntimeBrokerJsonElement {
+    param($Element)
+    switch ($Element.ValueKind.ToString()) {
+        'Object' {
+            $properties = [ordered]@{}
+            foreach ($property in $Element.EnumerateObject()) {
+                $properties[$property.Name] = ConvertFrom-DrRuntimeBrokerJsonElement $property.Value
+            }
+            return [pscustomobject]$properties
+        }
+        'Array' {
+            $items = [Collections.Generic.List[object]]::new()
+            foreach ($item in $Element.EnumerateArray()) {
+                $items.Add((ConvertFrom-DrRuntimeBrokerJsonElement $item))
+            }
+            return ,$items.ToArray()
+        }
+        'String' { return $Element.GetString() }
+        'Number' { return ConvertFrom-Json -InputObject ($Element.GetRawText()) }
+        'True' { return $true }
+        'False' { return $false }
+        'Null' { return $null }
+        default { throw 'Unsupported diagnostic JSON value.' }
+    }
+}
+function ConvertFrom-DrRuntimeBrokerJsonCoreWithoutDateKind {
+    param([string]$Text)
+    $options = [System.Text.Json.JsonDocumentOptions]::new()
+    $options.MaxDepth = 64
+    $document = [System.Text.Json.JsonDocument]::Parse($Text, $options)
+    try { return ConvertFrom-DrRuntimeBrokerJsonElement $document.RootElement }
+    finally { $document.Dispose() }
+}
 function ConvertFrom-DrRuntimeBrokerJson {
     param([byte[]]$Bytes)
+    if ($Bytes.Length -gt 4KB) { throw 'Diagnostic JSON byte limit exceeded.' }
     $text = [Text.UTF8Encoding]::new($false,$true).GetString($Bytes).TrimStart([char]0xfeff)
     # PS5 preserves JSON dates as strings; require the same behavior in host-only PS7 tests.
     if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { return ConvertFrom-Json -InputObject $text -DateKind String }
+    if ($PSVersionTable.PSEdition -eq 'Core') { return ConvertFrom-DrRuntimeBrokerJsonCoreWithoutDateKind $text }
     return ConvertFrom-Json -InputObject $text
 }
 
