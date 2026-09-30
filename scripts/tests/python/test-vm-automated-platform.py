@@ -8,11 +8,23 @@ import hashlib
 import unittest
 
 from darkrenamer_tooling.contracts.platform import (
+    _v2_task_action_matches, _windows_task_argv,
     verify_cleanup, verify_controller_cleanup, verify_controller_owned_cleanup, verify_environment,
     verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
-from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
+from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2 as _clean_controller_cleanup_v2
+
+
+def clean_controller_cleanup_v2(**kwargs):
+    """Give the existing synthetic v2 fixture a valid Windows argv0."""
+    cleanup = _clean_controller_cleanup_v2(**kwargs)
+    task = cleanup["owned_resource_evidence"]["task_execution"]
+    executable = task["action_executable"]
+    lifecycle = task["observer_lifecycle"]
+    if lifecycle["command_line"].startswith(executable + " "):
+        lifecycle["command_line"] = '"' + executable + '"' + lifecycle["command_line"][len(executable):]
+    return cleanup
 
 
 class PlatformTests(unittest.TestCase):
@@ -667,6 +679,73 @@ class V2OwnedResourceTests(unittest.TestCase):
         cleanup["owned_resource_evidence"]["task_execution"]["exit_code"] = 1
         with self.assertRaises(EvidenceError):
             self.verify(cleanup)
+
+    def test_quoted_registered_paths_bind_unquoted_pwsh_dll_observation(self):
+        for rescue in (False, True):
+            cleanup = clean_controller_cleanup_v2()
+            evidence = cleanup["owned_resource_evidence"]
+            task = evidence["task_execution"]
+            task["observer_lifecycle"]["command_line"] = (
+                '"' + task["action_executable"][:-4] + '.dll" ' +
+                task["action_arguments"].replace('"', ''))
+            if rescue:
+                execution = deepcopy(task)
+                execution["registered_last_run_time_ticks"] += 10
+                execution["completed_last_run_time_ticks"] += 20
+                execution["action_arguments"] += " -RestoreTextScaleOnly"
+                execution["observer_lifecycle"]["pid"] = 3100
+                execution["observer_lifecycle"]["start_time_utc_ticks"] = "134041000000000020"
+                execution["observer_lifecycle"]["command_line"] += " -RestoreTextScaleOnly"
+                evidence["rescue_attempts"] = 1
+                evidence["rescue_executions"] = [{
+                    "kind": "text-scale", "task_execution": execution,
+                    "result_file": "text-scale-rescue-result.json", "result_sha256": "c" * 64}]
+                target = execution["observer_lifecycle"]
+            else:
+                target = task["observer_lifecycle"]
+            with self.subTest(rescue=rescue, variant="equivalent quoting"):
+                self.verify(cleanup)
+            original = target["command_line"]
+            mutations = {
+                "extra flag": original + " -Unexpected",
+                "duplicate flag": original + " -ElevatedObserver",
+                "changed profile": original.replace("vm-automated-v2-owned-resources",
+                                                    "vm-automated-v1-win11-ntfs"),
+                "changed result path": original.replace("core-result.json", "other-result.json"),
+                "unrelated argv0": original.replace("pwsh.dll", "other.dll", 1),
+                "extra prefix": '"C:\\Other\\launcher.exe" ' + original,
+                "malformed quote": original + ' "unterminated',
+                "changed backslash": original.replace("\\out\\core-result.json",
+                                                       "\\out\\\\core-result.json"),
+            }
+            for label, command_line in mutations.items():
+                target["command_line"] = command_line
+                with self.subTest(rescue=rescue, variant=label), self.assertRaises(EvidenceError):
+                    self.verify(cleanup)
+            target["command_line"] = original
+
+    def test_windows_argv_escaped_quotes_and_backslashes_are_semantic(self):
+        executable = r"C:\Program Files\PowerShell\7\pwsh.exe"
+        registered = r'-Value "a\"b" -Path "C:\space dir\\"'
+        observed = r'-Value "a""b" -Path "C:\space dir\\"'
+        self.assertEqual(_windows_task_argv(registered), ["-Value", 'a"b', "-Path", "C:\\space dir\\"])
+        self.assertEqual(_windows_task_argv("task.exe " + registered)[1:], _windows_task_argv(registered))
+        self.assertTrue(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' + observed,
+                                                 executable, registered))
+        self.assertTrue(_v2_task_action_matches('"' + executable + '" ' + observed,
+                                                 executable, registered))
+        self.assertFalse(_v2_task_action_matches('"C:\\Other\\pwsh.dll" ' + observed,
+                                                  executable, registered))
+        self.assertFalse(_v2_task_action_matches('"C:\\Other\\launcher.exe" "' +
+                                                  executable[:-4] + '.dll" ' + observed,
+                                                  executable, registered))
+        self.assertFalse(_v2_task_action_matches(' "' + executable[:-4] + '.dll" ' + observed,
+                                                  executable, registered))
+        self.assertFalse(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' +
+                                                  observed.replace(r"dir\\", r"dir\\\\"),
+                                                  executable, registered))
+        self.assertFalse(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' +
+                                                  observed + ' "unterminated', executable, registered))
 
     def test_unknown_or_reused_lifetime_and_owned_scope_fail(self):
         for mutation in ("pid-reuse", "owned-command", "owner", "missing-process", "task-change"):
