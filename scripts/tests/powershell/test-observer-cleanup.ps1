@@ -62,6 +62,109 @@ foreach ($entry in @(
     Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($owned)} @{processes=@()} } 'protected execution scope'
 }
 
+# Exercise the host binding through the authenticated guest's native argv decoder.
+& {
+    $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $definition=@($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Complete-DrControllerV2TaskExecution'
+    },$true))
+    if($errors.Count -or $definition.Count -ne 1){throw 'V2 task binding function is not unique.'}
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    function Invoke-Command {
+        param($Session,[object[]]$ArgumentList,$ScriptBlock)
+        if($ArgumentList.Count -eq 1){return $true}
+        & $ScriptBlock @ArgumentList
+    }
+    function Get-DrVmCommandLineArguments {
+        param($CommandLine)
+        if($CommandLine -ceq ('task.exe ' + $registeredArguments)) {
+            return ,([string[]]$registeredArgv)
+        }
+        if($CommandLine -ceq $observedLine) {
+            if($null -eq $observedArgv){throw 'Native argv parse failed.'}
+            return ,([string[]]$observedArgv)
+        }
+        throw 'Unexpected native argv input.'
+    }
+    if($IsWindows) {
+        $nativeDefinition=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmCommandLineArguments'
+        },$true))
+        if($nativeDefinition.Count -ne 1){throw 'Native Windows argv parser is not unique.'}
+        . ([scriptblock]::Create($nativeDefinition[0].Extent.Text.Replace(
+            'function global:Get-DrVmCommandLineArguments',
+            'function Get-DrVmCommandLineArguments')))
+        $quoted='-Value "a\"b" -Path "C:\space dir\\"'
+        $adjacent='-Value "a""b" -Path "C:\space dir\\"'
+        $registeredNative=[string[]](Get-DrVmCommandLineArguments -CommandLine ('task.exe '+$quoted))
+        $observedNative=[string[]](Get-DrVmCommandLineArguments -CommandLine ('"C:\Program Files\PowerShell\7\pwsh.dll" '+$adjacent))
+        if($registeredNative.Count -ne 5 -or
+            $registeredNative[1] -cne '-Value' -or $registeredNative[2] -cne 'a"b' -or
+            $registeredNative[4] -cne 'C:\space dir\') {
+            throw 'Native argv parsing changed adjacent quote or backslash semantics.'
+        }
+        # Shell32 closes its quote mode after this adjacent quote group. It is
+        # not equivalent to the escaped-quote argument used by the C runtime.
+        if($observedNative.Count -ne 4 -or
+            $observedNative[2] -cne 'a"b -Path C:\space' -or
+            $observedNative[3] -cne 'dir\') {
+            throw 'Native adjacent quotes were treated as escaped quotes.'
+        }
+    }
+    $exe='C:\Program Files\PowerShell\7\pwsh.exe'
+    $dll='C:\Program Files\PowerShell\7\pwsh.dll'
+    $name='DarkReNamerTests-1234'
+    $root='C:\ProgramData\DarkReNamerVmRuns\'+$name+'-trusted'
+    foreach($rescue in @($false,$true)) {
+        $switch=if($rescue){' -RestoreTextScaleOnly'}else{''}
+        $registeredArguments='-NoProfile -File "'+$root+'\windows-vm-guest.ps1" '+
+            '-AcceptanceProfileId vm-automated-v2-owned-resources -ElevatedObserver '+
+            '-TrustedResultPath "'+$root+'\out\core-result.json"'+$switch
+        $observedLine='"'+$dll+'" -NoProfile -File '+$root+'\windows-vm-guest.ps1 '+
+            '-AcceptanceProfileId vm-automated-v2-owned-resources -ElevatedObserver '+
+            '-TrustedResultPath '+$root+'\out\core-result.json'+$switch
+        $registeredArgv=@('task.exe','-NoProfile','-File',($root+'\windows-vm-guest.ps1'),
+            '-AcceptanceProfileId','vm-automated-v2-owned-resources','-ElevatedObserver',
+            '-TrustedResultPath',($root+'\out\core-result.json'))
+        if($rescue){$registeredArgv+= '-RestoreTextScaleOnly'}
+        $observedArgv=@($dll)+@($registeredArgv[1..($registeredArgv.Count-1)])
+        $lifecycle=[pscustomobject]@{pid=[long]901;start_time_utc_ticks='134041000000000003';
+            session_id=2;owner_sid='fixture';image_path=$exe;command_line=$observedLine}
+        $engine=[pscustomobject]@{action_executable=$exe;action_arguments=$registeredArguments;
+            registered_last_run_time_ticks=[long]10}
+        $values=@{Session='fixture';TaskName=$name;RunnerSid='fixture';SessionId=2;
+            Engine=$engine;CompletedTicks=[long]11;TaskResult=[long]0;
+            Result=[pscustomobject]@{observer_lifecycle=$lifecycle}}
+        $bound=Complete-DrControllerV2TaskExecution @values
+        if(-not $bound.terminal -or $bound.observer_lifecycle.pid -ne 901){
+            throw 'Equivalent v2 task argv failed its lifetime binding.'
+        }
+        foreach($mutation in @(
+            @{label='extra flag';line=$observedLine+' -Unexpected';argv=@($observedArgv)+@('-Unexpected')},
+            @{label='duplicate flag';line=$observedLine+' -ElevatedObserver';argv=@($observedArgv)+@('-ElevatedObserver')},
+            @{label='changed profile';line=$observedLine.Replace('vm-automated-v2-owned-resources','other-profile');
+                argv=@($observedArgv | ForEach-Object {if($_ -ceq 'vm-automated-v2-owned-resources'){'other-profile'}else{$_}})},
+            @{label='changed path';line=$observedLine.Replace('core-result.json','other-result.json');
+                argv=@($observedArgv | ForEach-Object {if($_ -like '*core-result.json'){$_.Replace('core-result.json','other-result.json')}else{$_}})},
+            @{label='unrelated argv0';line=$observedLine.Replace('pwsh.dll','other.dll');
+                argv=@('C:\Program Files\PowerShell\7\other.dll')+@($observedArgv[1..($observedArgv.Count-1)])},
+            @{label='extra prefix';line='"C:\Other\launcher.exe" '+$observedLine;
+                argv=@('C:\Other\launcher.exe')+@($observedArgv)},
+            @{label='malformed quote';line=$observedLine+' "unterminated';argv=$null}
+        )) {
+            $observedLine=$mutation.line
+            $observedArgv=$mutation.argv
+            $lifecycle.command_line=$observedLine
+            $failure=if($null -eq $observedArgv -and -not $IsWindows){'Native argv parse failed.'}else{'did not bind'}
+            Assert-Fails { Complete-DrControllerV2TaskExecution @values } $failure
+        }
+    }
+}
+
 # Exercise the production atomic replacement expression with actual files.
 $replaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-proof-replace-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($replaceRoot)

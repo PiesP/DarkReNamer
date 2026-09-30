@@ -81,7 +81,7 @@ def clean_controller_cleanup_v2(*, profile_sha256=V2_PROFILE_SHA256, process_job
     lifecycle = deepcopy(observer_lifecycle) if observer_lifecycle is not None else {
         "pid": 3003, "start_time_utc_ticks": "134041000000000003",
         "session_id": 2, "image_path": action,
-        "command_line": action + " " + args, "owner_sid": sid}
+        "command_line": '"' + action + '" ' + args, "owner_sid": sid}
     evidence = {
         "schema_version": 2, "run_name": name, "runner_sid": sid, "runner_session_id": 2,
         "root_records": roots, "baseline_processes": [], "baseline_tasks": [],

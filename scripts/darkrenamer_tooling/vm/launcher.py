@@ -1096,8 +1096,9 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
                     output_bytes > TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES - record['bytes']):
                 raise ValueError('VM test output exceeds its size bound.')
             artifact = root / leaf(record['file'])
-            if (artifact.is_symlink() or not artifact.is_file() or
-                    artifact.stat().st_size != record['bytes']):
+            if artifact.is_symlink() or not artifact.is_file():
+                raise ValueError('VM test output was not collected as an ordinary file.')
+            if artifact.stat().st_size != record['bytes']:
                 raise ValueError('VM test output differs from its recorded byte count.')
             checked_artifact(root, record)
             output_bytes += record['bytes']
