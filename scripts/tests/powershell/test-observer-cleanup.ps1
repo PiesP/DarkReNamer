@@ -163,6 +163,52 @@ foreach ($entry in @(
             Assert-Fails { Complete-DrControllerV2TaskExecution @values } $failure
         }
     }
+    if($IsWindows) {
+        # Registration appends the protected result arguments to the recovery
+        # observer action. Its full argv crosses the old 32-argument limit.
+        $recoveryArgs='-NoProfile -NonInteractive -WindowStyle Normal -File "'+$root+'\windows-vm-recovery-acceptance.ps1" '+
+            '-BundleRoot "'+$root+'\bundle" -ExpectedSessionId 2 '+
+            '-OutputRoot "'+$root+'\out" -EvidenceRoot "'+$root+'\evidence" '+
+            '-PrivateEvidenceRoot "'+$root+'\private" -RuntimeRoot "'+$root+'\runtime" '+
+            '-ExpectedScriptSha256 '+('a'*64)+' -Mode ProcessCrash -FixtureCount 4096 '+
+            '-TimeoutSeconds 300 -RecoveryExport -IntentOnlyCandidateDiscard '+
+            '-AcceptanceProfileId vm-automated-v2-owned-resources -ElevatedObserver '+
+            '-TrustedResultPath "'+$root+'\out\recovery-result.json"'
+        $registeredArguments=$recoveryArgs
+        $observedLine='"'+$dll+'" '+$recoveryArgs
+        $registeredArgv=[string[]](Get-DrVmCommandLineArguments -CommandLine ('task.exe '+$recoveryArgs))
+        $observedArgv=[string[]](Get-DrVmCommandLineArguments -CommandLine $observedLine)
+        if($registeredArgv.Count -ne 34 -or $observedArgv.Count -ne 34 -or
+            $observedArgv[-3] -cne '-ElevatedObserver' -or
+            $observedArgv[-1] -cne ($root+'\out\recovery-result.json')) {
+            throw 'The native parser rejected or changed the complete recovery task action.'
+        }
+        $lifecycle=[pscustomobject]@{pid=[long]901;start_time_utc_ticks='134041000000000003';
+            session_id=2;owner_sid='fixture';image_path=$exe;command_line=$observedLine}
+        $engine=[pscustomobject]@{action_executable=$exe;action_arguments=$recoveryArgs;
+            registered_last_run_time_ticks=[long]10}
+        $values=@{Session='fixture';TaskName=$name;RunnerSid='fixture';SessionId=2;
+            Engine=$engine;CompletedTicks=[long]11;TaskResult=[long]0;
+            Result=[pscustomobject]@{observer_lifecycle=$lifecycle}}
+        if(-not (Complete-DrControllerV2TaskExecution @values).terminal) {
+            throw 'The complete recovery task action failed its lifetime binding.'
+        }
+        $lifecycle.command_line=$observedLine+' -Unexpected'
+        Assert-Fails { Complete-DrControllerV2TaskExecution @values } 'did not bind'
+
+        $boundaryArgs=@(1..63 | ForEach-Object { 'arg'+$_ })
+        $atLimit='task.exe '+($boundaryArgs -join ' ')
+        $parsed=[string[]](Get-DrVmCommandLineArguments -CommandLine $atLimit)
+        if($parsed.Count -ne 64 -or $parsed[-1] -cne 'arg63') {
+            throw 'The native argv parser rejected its 64-argument boundary.'
+        }
+        Assert-Fails {
+            Get-DrVmCommandLineArguments -CommandLine ($atLimit+' arg64') | Out-Null
+        } 'could not be parsed within its bound'
+        Assert-Fails {
+            Get-DrVmCommandLineArguments -CommandLine ('x'*4097) | Out-Null
+        } 'exceeds its bound'
+    }
 }
 
 # V2 proof copies omit only remoting annotations and leave raw observations intact.
