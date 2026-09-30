@@ -662,6 +662,59 @@ class V2OwnedResourceTests(unittest.TestCase):
     def test_multiple_new_ambient_processes_can_remain_live(self):
         self.verify(clean_controller_cleanup_v2())
 
+    def test_closed_helper_pid_can_be_reused_by_later_job_and_rescue(self):
+        cleanup = clean_controller_cleanup_v2()
+        evidence = cleanup["owned_resource_evidence"]
+        preflight_pid = evidence["preflight_child"]["pid"]
+        evidence["engine_child"]["pid"] = preflight_pid
+        evidence["declared_processes"][0]["pid"] = preflight_pid
+        evidence["declared_processes"][0]["start_time_utc_ticks"] = "134041000000000002"
+        evidence["process_job_cleanup"][0]["pid"] = preflight_pid
+        evidence["process_job_cleanup"][0]["process_start_time_utc_ticks"] = "134041000000000002"
+
+        execution = deepcopy(evidence["task_execution"])
+        execution["registered_last_run_time_ticks"] += 10
+        execution["completed_last_run_time_ticks"] += 20
+        execution["action_arguments"] += " -RestoreTextScaleOnly"
+        execution["observer_lifecycle"]["pid"] = evidence["task_execution"]["observer_lifecycle"]["pid"]
+        execution["observer_lifecycle"]["start_time_utc_ticks"] = "134041000000000020"
+        execution["observer_lifecycle"]["command_line"] += " -RestoreTextScaleOnly"
+        evidence["rescue_attempts"] = 1
+        evidence["rescue_executions"] = [{
+            "kind": "text-scale", "task_execution": execution,
+            "result_file": "text-scale-rescue-result.json", "result_sha256": "c" * 64}]
+        self.verify(cleanup)
+        execution["observer_lifecycle"]["start_time_utc_ticks"] = (
+            evidence["task_execution"]["observer_lifecycle"]["start_time_utc_ticks"])
+        with self.assertRaises(EvidenceError):
+            self.verify(cleanup)
+
+    def test_closed_lifetime_pair_replay_malformed_epoch_or_incomplete_closure_fails(self):
+        for mutation in ("job-replay", "engine-replay", "observer-replay", "missing-epoch",
+                         "malformed-epoch", "unclosed-helper"):
+            cleanup = clean_controller_cleanup_v2()
+            evidence = cleanup["owned_resource_evidence"]
+            preflight = evidence["preflight_child"]
+            if mutation == "job-replay":
+                evidence["declared_processes"][0].update(
+                    pid=preflight["pid"], start_time_utc_ticks=preflight["start_time_utc_ticks"])
+                evidence["process_job_cleanup"][0].update(
+                    pid=preflight["pid"], process_start_time_utc_ticks=preflight["start_time_utc_ticks"])
+            elif mutation == "engine-replay":
+                evidence["engine_child"].update(
+                    pid=preflight["pid"], start_time_utc_ticks=preflight["start_time_utc_ticks"])
+            elif mutation == "observer-replay":
+                evidence["task_execution"]["observer_lifecycle"].update(
+                    pid=preflight["pid"], start_time_utc_ticks=preflight["start_time_utc_ticks"])
+            elif mutation == "missing-epoch":
+                del preflight["start_time_utc_ticks"]
+            elif mutation == "malformed-epoch":
+                preflight["start_time_utc_ticks"] = "0"
+            else:
+                preflight["exact_lifetime_absent"] = False
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify(cleanup)
+
     def test_task_execution_must_exit_zero_for_normal_acceptance(self):
         cleanup = clean_controller_cleanup_v2()
         cleanup["owned_resource_evidence"]["task_execution"]["exit_code"] = 1

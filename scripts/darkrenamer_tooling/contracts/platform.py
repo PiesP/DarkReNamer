@@ -711,7 +711,7 @@ def _v2_task_rows(value: object, label: str) -> dict[str, str]:
     return rows
 
 
-def _v2_closed_helper(value: object, label: str) -> int:
+def _v2_closed_helper(value: object, label: str) -> tuple[int, int]:
     row = require_exact_keys(value, {
         "pid", "start_time_utc_ticks", "exit_code", "exited", "streams_complete",
         "exact_lifetime_absent", "process_job_closed",
@@ -723,7 +723,7 @@ def _v2_closed_helper(value: object, label: str) -> int:
             all(row[key] is True for key in
                 ("exited", "streams_complete", "exact_lifetime_absent", "process_job_closed")),
             f"{label} has an unclosed lifetime or Job.")
-    return pid
+    return pid, int(row["start_time_utc_ticks"])
 
 
 def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
@@ -845,9 +845,8 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         verify_process_job_cleanup(jobs, expected_processes=identities)
     else:
         require(jobs == [], "V2 Job cleanup has an undeclared lifetime.")
-    preflight_pid = _v2_closed_helper(evidence["preflight_child"], "V2 registration-query child")
-    engine_pid = _v2_closed_helper(evidence["engine_child"], "V2 PowerShell engine child")
-    require(engine_pid != preflight_pid, "V2 preflight helper PID was reused.")
+    preflight_lifetime = _v2_closed_helper(evidence["preflight_child"], "V2 registration-query child")
+    engine_lifetime = _v2_closed_helper(evidence["engine_child"], "V2 PowerShell engine child")
     task = require_exact_keys(evidence["task_execution"], {
         "task_name", "terminal", "exit_code", "registered_last_run_time_ticks",
         "completed_last_run_time_ticks", "action_executable", "action_arguments",
@@ -857,9 +856,6 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         "pid", "start_time_utc_ticks", "session_id", "image_path", "command_line", "owner_sid",
     }, "V2 observer lifetime")
     observer_pid = require_int(lifecycle["pid"], 1, 0xFFFFFFFF, "V2 observer PID")
-    require(len({preflight_pid, engine_pid, observer_pid} |
-                {candidate for candidate, _ in identities}) == len(identities) + 3,
-            "V2 declared process PIDs overlap or were reused.")
     require(task["task_name"] == name and task["terminal"] is True and
             task["observer_lifetime_absent"] is True and
             type(task["exit_code"]) is int and 0 <= task["exit_code"] <= 0xFFFFFFFF and
@@ -888,11 +884,15 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
             name.casefold() in lifecycle["command_line"].casefold() and
             "-acceptanceprofileid vm-automated-v2-owned-resources" in lifecycle["command_line"].casefold(),
             "V2 declared scheduled task execution is unbound or nonterminal.")
+    observer_lifetime = (observer_pid, int(lifecycle["start_time_utc_ticks"]))
+    owned_lifetimes = set(identities)
+    require(len(owned_lifetimes | {preflight_lifetime, engine_lifetime, observer_lifetime}) ==
+            len(identities) + 3, "V2 owned process lifetime repeats.")
+    owned_lifetimes.update((preflight_lifetime, engine_lifetime, observer_lifetime))
     rescue_attempts = require_int(evidence["rescue_attempts"], 0, 2, "V2 rescue attempts")
     rescues = evidence["rescue_executions"]
     require(type(rescues) is list and len(rescues) == rescue_attempts,
             "V2 rescue task attempt lacks a complete execution receipt.")
-    rescue_pids: set[int] = set()
     rescue_kinds: set[str] = set()
     task_fields = set(task)
     lifecycle_fields = set(lifecycle)
@@ -912,9 +912,7 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
                                    "V2 rescue observer")
         pid = require_int(child["pid"], 1, 0xFFFFFFFF, "V2 rescue observer PID")
         required_switch = "-RestoreTextScaleOnly" if kind == "text-scale" else "-RestoreHighContrastOnly"
-        require(pid not in rescue_pids and pid not in (preflight_pid, engine_pid, observer_pid) and
-                pid not in {candidate for candidate, _ in identities} and
-                execution["task_name"] == name and execution["terminal"] is True and
+        require(execution["task_name"] == name and execution["terminal"] is True and
                 execution["observer_lifetime_absent"] is True and
                 type(execution["exit_code"]) is int and execution["exit_code"] == 0 and
                 type(execution["registered_last_run_time_ticks"]) is int and
@@ -943,8 +941,11 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
                 _v2_task_action_matches(child["command_line"], execution["action_executable"],
                                         execution["action_arguments"]),
                 "V2 rescue task has an unbound or incomplete process lifetime.")
-        rescue_pids.add(pid)
-    owned_pids = {pid for pid, _ in identities} | {preflight_pid, engine_pid, observer_pid} | rescue_pids
+        rescue_lifetime = (pid, int(child["start_time_utc_ticks"]))
+        require(rescue_lifetime not in owned_lifetimes,
+                "V2 rescue task repeats an owned process lifetime.")
+        owned_lifetimes.add(rescue_lifetime)
+    owned_pids = {pid for pid, _ in owned_lifetimes}
     receipt = require_exact_keys(host["runner_process_natural_exit"],
                                  {"schema_version", "status"}, "V2 ambient-process policy")
     require(type(receipt["schema_version"]) is int and receipt["schema_version"] == 2 and
