@@ -555,9 +555,27 @@ function Test-DrControllerPreservedOutputCleanupAuthorization {
                 $snapshot.restoration_required -ne $required -or
                 $snapshot.restoration_verified -isnot [bool] -or
                 -not $snapshot.restoration_verified -or $null -eq $snapshot.original -or
-                $null -eq $snapshot.restored -or
-                ($snapshot.original | ConvertTo-Json -Depth 20 -Compress) -cne
-                ($snapshot.restored | ConvertTo-Json -Depth 20 -Compress)) { return $false }
+                $null -eq $snapshot.restored) { return $false }
+            # Match the observer's established equality rules without modifying
+            # the retained raw document. Null and empty Scheme are equivalent;
+            # UISettings float samples have the observer's existing tolerance.
+            $original = $snapshot.original | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $restored = $snapshot.restored | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            if ($kind -ceq 'high-contrast') {
+                if (-not [string]::Equals([string]$original.scheme, [string]$restored.scheme,
+                    [StringComparison]::Ordinal)) { return $false }
+                $restored.scheme = $original.scheme
+            } else {
+                if (($original.ui_settings_raw_factor -isnot [double] -and
+                        $original.ui_settings_raw_factor -isnot [long]) -or
+                    ($restored.ui_settings_raw_factor -isnot [double] -and
+                        $restored.ui_settings_raw_factor -isnot [long]) -or
+                    -not ([Math]::Abs([double]$original.ui_settings_raw_factor -
+                        [double]$restored.ui_settings_raw_factor) -lt 0.000001)) { return $false }
+                $restored.ui_settings_raw_factor = $original.ui_settings_raw_factor
+            }
+            if (($original | ConvertTo-Json -Depth 20 -Compress) -cne
+                ($restored | ConvertTo-Json -Depth 20 -Compress)) { return $false }
         }
         return $true
     } catch { return $false }

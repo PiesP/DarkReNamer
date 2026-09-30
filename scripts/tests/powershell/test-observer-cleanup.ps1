@@ -236,6 +236,14 @@ try {
         if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
             throw 'Copied failed UI evidence with verified High Contrast restoration was rejected.'
         }
+        $snapshot.original.scheme = $null
+        $snapshot.restored.scheme = ''
+        $snapshotRow = Write-PreservedFixture -Leaf 'high-contrast-restore.json' -Value $snapshot
+        $ui.high_contrast.snapshot.sha256 = $snapshotRow.sha256
+        $args.Inventory = @($snapshotRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'Observer-equivalent null/empty High Contrast Scheme was rejected.'
+        }
         $ui.failure_reason = 'high_contrast_restore_failed'
         $rescue = [ordered]@{
             status = 'passed'; restoration_verified = $true; source_sha = $source
@@ -286,7 +294,8 @@ try {
         $scale = [ordered]@{
             schema_version = 1; source_sha = $source; acceptance_script_sha256 = $observer
             restoration_required = $true; restoration_verified = $true
-            original = [ordered]@{ percent = 100 }; restored = [ordered]@{ percent = 100 }
+            original = [ordered]@{ ui_settings_percent = 100; ui_settings_raw_factor = 1.0 }
+            restored = [ordered]@{ ui_settings_percent = 100; ui_settings_raw_factor = 1.0000005 }
         }
         $scaleRow = Write-PreservedFixture -Leaf 'text-scale-snapshot.json' -Value $scale
         $ui.text_scale = [pscustomobject]@{
@@ -296,6 +305,17 @@ try {
         if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
             throw 'Verified text-scale restoration did not authorize failed evidence cleanup.'
         }
+        $scale.restored.ui_settings_raw_factor = 1.000002
+        $args.Inventory = @((Write-PreservedFixture -Leaf 'text-scale-snapshot.json' -Value $scale),
+            (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        $ui.text_scale.snapshot.sha256 = $args.Inventory[0].sha256
+        $args.Inventory[-1] = Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Out-of-tolerance UISettings restoration authorized cleanup.'
+        }
+        $scale.restored.ui_settings_raw_factor = 1.0000005
+        $scaleRow = Write-PreservedFixture -Leaf 'text-scale-snapshot.json' -Value $scale
+        $ui.text_scale.snapshot.sha256 = $scaleRow.sha256
         $ui.status = 'review_required'
         $args.Inventory = @($scaleRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
         if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
