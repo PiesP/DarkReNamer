@@ -165,6 +165,41 @@ foreach ($entry in @(
     }
 }
 
+# V2 proof copies omit only remoting annotations and leave raw observations intact.
+& {
+    $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    foreach($name in @('Remove-DrControllerProofRemotingMetadata','Copy-DrControllerV2TaskBaseline')){
+        $definitions=@($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+        },$true))
+        if($errors.Count -or $definitions.Count -ne 1){throw 'V2 baseline copy helper is not unique.'}
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $raw=[pscustomobject]@{identity='\fixture';task_path='\';task_name='fixture';
+        definition_sha256=('a'*64);PSComputerName='fixture-host';RunspaceId=[guid]::NewGuid();
+        PSShowComputerName=$true;unrecognized_observation='must-remain-rejectable'}
+    $before=$raw|ConvertTo-Json -Depth 16 -Compress
+    $copied=@(Copy-DrControllerV2TaskBaseline -Baseline @($raw))
+    if($copied.Count -ne 1 -or ($raw|ConvertTo-Json -Depth 16 -Compress) -cne $before){
+        throw 'V2 proof copying modified its original task observation.'
+    }
+    $row=$copied[0]
+    foreach($key in @('PSComputerName','RunspaceId','PSShowComputerName')){
+        if($key -cin @($row.PSObject.Properties.Name)){throw 'V2 proof retained a transport annotation.'}
+    }
+    if($row.identity -cne $raw.identity -or $row.task_path -cne $raw.task_path -or
+        $row.task_name -cne $raw.task_name -or $row.definition_sha256 -cne $raw.definition_sha256 -or
+        $row.unrecognized_observation -cne 'must-remain-rejectable'){
+        throw 'V2 proof copying dropped or changed task data.'
+    }
+    if(@(Copy-DrControllerV2TaskBaseline -Baseline @()).Count -ne 0){
+        throw 'Empty task baseline became a synthetic record.'
+    }
+    Assert-Fails {Copy-DrControllerV2TaskBaseline -Baseline @($null)} 'because it is null'
+}
+
 # Preserve known empty/single inventories across the actual remoting serializer.
 & {
     $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
