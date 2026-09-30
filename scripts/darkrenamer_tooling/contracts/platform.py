@@ -620,8 +620,8 @@ def verify_cleanup(guest: object, transport: object, *, require_candidate_export
         require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
 
 
-def verify_controller_cleanup(transport: object) -> dict:
-    """Validate controller raw cleanup evidence before trusting its pass flag."""
+def verify_controller_owned_cleanup(transport: object) -> dict:
+    """Derive owned-resource cleanup only; this is never an acceptance verdict."""
     host = require_exact_keys(transport, {
         "scheduled_task_present", "guest_root_present", "trusted_task_root_present",
         "process_jobs_closed", "runner_process_inventory_complete",
@@ -638,13 +638,29 @@ def verify_controller_cleanup(transport: object) -> dict:
     require(host["process_jobs_closed"] is True and
             host["runner_process_inventory_complete"] is True,
             "Controller did not confirm closed process jobs and a complete runner inventory.")
+    for key in ("terminated_runner_processes", "resource_cleanup_errors", "owned_processes_after"):
+        require(type(host[key]) is list and not host[key],
+                f"Owned cleanup is incomplete or required intervention: {key}.")
+    # Unknown inventories cannot establish cleanup, even when roots are absent.
+    for key in ("unexpected_runner_tasks", "unexpected_runner_processes",
+                "unexpected_runner_tasks_after_intervention",
+                "unexpected_runner_processes_after_intervention",
+                "unexpected_runner_tasks_after_delete",
+                "unexpected_runner_processes_after_delete", "removed_runner_tasks"):
+        require(type(host[key]) is list, f"Controller inventory is unavailable: {key}.")
+    require(type(host["runner_process_natural_exit"]) is dict,
+            "Controller environment classification evidence is unavailable.")
+    return host
+
+
+def verify_controller_cleanup(transport: object) -> dict:
+    """Require both owned cleanup and the unchanged strict environment predicate."""
+    host = verify_controller_owned_cleanup(transport)
     for key in ("unexpected_runner_tasks", "unexpected_runner_tasks_after_intervention",
                 "unexpected_runner_processes_after_intervention",
                 "unexpected_runner_tasks_after_delete",
-                "unexpected_runner_processes_after_delete",
-                "removed_runner_tasks", "terminated_runner_processes",
-                "resource_cleanup_errors", "owned_processes_after"):
-        require(type(host[key]) is list and not host[key],
+                "unexpected_runner_processes_after_delete", "removed_runner_tasks"):
+        require(not host[key],
                 f"Controller cleanup retained or changed unrelated runner resources: {key}.")
     require(type(host["unexpected_runner_processes"]) is list,
             "Initial runner process inventory is unavailable.")

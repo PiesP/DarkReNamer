@@ -449,6 +449,120 @@ function Test-DrControllerProcessJobCleanupLedger {
     catch { return $false }
 }
 
+function Test-DrControllerPreservedOutputCleanupAuthorization {
+    param(
+        [Parameter(Mandatory)][ValidateSet('ui', 'recovery')][string] $Role,
+        [Parameter(Mandatory)][object] $Result,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Inventory,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $ObserverSha256,
+        [string] $AcceptanceMode,
+        [bool] $HighContrastRequested,
+        [bool] $ProcessJobsClosed,
+        [AllowNull()][object] $ObserverProcess,
+        [AllowNull()][object] $PollFailure
+    )
+
+    try {
+        if (-not $ProcessJobsClosed -or $null -ne $PollFailure -or
+            $null -eq $ObserverProcess -or $ObserverProcess.state -cne 'exited' -or
+            ($ObserverProcess.exit_code -isnot [int] -and
+                $ObserverProcess.exit_code -isnot [long]) -or
+            $Result.status -cnotin $(if ($Role -ceq 'ui') {
+                @('review_required', 'failed', 'environment_blocked', 'unsupported', 'not_run')
+            } else { @('passed', 'failed') }) -or
+            $Result.failure_reason -cin @('execution_state_restore_failed', 'desktop_lock_release_failed')) {
+            return $false
+        }
+        # Some observer finally blocks assign a later cleanup failure after an
+        # execution-state restore failure. Those final reasons cannot prove restore.
+        $ambiguousRestorationFailures = if ($Role -ceq 'recovery') {
+            @('owned_process_cleanup_observation_failed', 'journal_cleanup_observation_failed',
+                'process_job_cleanup_failed', 'runtime_cleanup_refused',
+                'runtime_cleanup_observation_failed', 'candidate_export_cleanup_observation_failed')
+        } else {
+            @('runtime_cleanup_failed', 'raw_cleanup_failed', 'raw_cleanup_observation_failed')
+        }
+        if ($Result.failure_reason -cin $ambiguousRestorationFailures) { return $false }
+
+        $summaryLeaf = if ($Role -ceq 'ui') { 'acceptance-result.json' } else { 'summary.json' }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $summaryCount = 0
+        $summaryPath = $null
+        if ($Inventory.Count -eq 0 -or $Inventory.Count -gt 256) { return $false }
+        foreach ($row in $Inventory) {
+            if ($null -eq $row -or $row.file -isnot [string] -or
+                $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                ($row.bytes -isnot [int] -and $row.bytes -isnot [long]) -or
+                [long]$row.bytes -lt 0 -or -not $seen.Add($row.file)) { return $false }
+            $segments = @(Get-SafeEvidencePathSegments $row.file)
+            if ($segments.Count -eq 0) { return $false }
+            if ($Role -ceq 'ui' -and $segments.Count -ne 1) { return $false }
+            $path = $OutputRoot
+            foreach ($segment in $segments) { $path = Join-Path $path $segment }
+            if ($segments[-1] -ceq $summaryLeaf) {
+                $summaryCount++
+                $summaryPath = $path
+            }
+            Assert-PathWithoutReparse $path
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or $item.Length -ne [long]$row.bytes -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $row.sha256) {
+                return $false
+            }
+        }
+        if ($summaryCount -ne 1) { return $false }
+        $copiedResult = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+        if (($copiedResult | ConvertTo-Json -Depth 32 -Compress) -cne
+            ($Result | ConvertTo-Json -Depth 32 -Compress)) { return $false }
+        if ($Role -ceq 'recovery') { return $true }
+
+        # A failed observer can still have changed desktop settings. The result status
+        # alone cannot certify restoration; use the copied raw restore document.
+        $sourceSha = if ($Result.schema_version -eq 2) {
+            $Result.product.source_sha
+        } else { $Result.source_sha }
+        foreach ($kind in @(
+            $(if ($HighContrastRequested) { 'high-contrast' }),
+            $(if ($AcceptanceMode -ceq 'text-scale') { 'text-scale' })
+        )) {
+            if (-not $kind) { continue }
+            $snapshotLeaf = $kind + '-snapshot.json'
+            if ($kind -ceq 'high-contrast') { $snapshotLeaf = 'high-contrast-restore.json' }
+            $rescueLeaf = $kind + '-rescue-result.json'
+            if (-not $seen.Contains($snapshotLeaf)) { return $false }
+            $snapshotPath = Join-Path $OutputRoot $snapshotLeaf
+            $snapshotHash = (Get-FileHash -LiteralPath $snapshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $reference = if ($kind -ceq 'high-contrast') {
+                $Result.high_contrast.snapshot
+            } else { $Result.text_scale.snapshot }
+            if ($seen.Contains($rescueLeaf)) {
+                $rescue = Get-Content -LiteralPath (Join-Path $OutputRoot $rescueLeaf) -Raw | ConvertFrom-Json
+                if ($rescue.status -cne 'passed' -or $rescue.restoration_verified -isnot [bool] -or
+                    -not $rescue.restoration_verified -or $rescue.source_sha -cne $sourceSha -or
+                    $rescue.acceptance_script_sha256 -cne $ObserverSha256 -or
+                    $rescue.snapshot_sha256 -cne $snapshotHash) { return $false }
+            }
+            elseif ($null -eq $reference -or $reference.file -cne $snapshotLeaf -or
+                $reference.sha256 -cne $snapshotHash) { return $false }
+            $snapshot = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+            $expectedSchema = if ($kind -ceq 'high-contrast') { 2 } else { 1 }
+            $required = if ($kind -ceq 'high-contrast') { $false } else { $true }
+            if ($snapshot.schema_version -ne $expectedSchema -or
+                $snapshot.source_sha -cne $sourceSha -or
+                $snapshot.acceptance_script_sha256 -cne $ObserverSha256 -or
+                $snapshot.restoration_required -isnot [bool] -or
+                $snapshot.restoration_required -ne $required -or
+                $snapshot.restoration_verified -isnot [bool] -or
+                -not $snapshot.restoration_verified -or $null -eq $snapshot.original -or
+                $null -eq $snapshot.restored -or
+                ($snapshot.original | ConvertTo-Json -Depth 20 -Compress) -cne
+                ($snapshot.restored | ConvertTo-Json -Depth 20 -Compress)) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
 function ConvertFrom-DrControllerSpotlightPreflightJson {
     param([AllowNull()][AllowEmptyCollection()][object[]] $Values)
 
@@ -608,6 +722,7 @@ $spotlightPreflight = $null
 $result = $null
 $processJobsClosed = $false
 $acceptancePassed = $false
+$outputPreservedForCleanup = $false
 $observerProcess = $null
 $transportOutputRoot = if ($acceptance) {
     $AcceptanceOutputRoot
@@ -3358,6 +3473,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $null -ne $observerProcess -and
             $observerProcess.state -ceq 'exited' -and
             $observerProcess.exit_code -eq 0
+        if ($null -ne $result) {
+            $outputPreservedForCleanup = Test-DrControllerPreservedOutputCleanupAuthorization `
+                -Role ui -Result $result -Inventory $inventory -OutputRoot $AcceptanceOutputRoot `
+                -ObserverSha256 $observer.sha256 -AcceptanceMode $AcceptanceMode `
+                -HighContrastRequested ([bool]$AcceptanceHighContrast) `
+                -ProcessJobsClosed $processJobsClosed -ObserverProcess $observerProcess `
+                -PollFailure $pollFailure
+        }
         $transport.status = 'collected'
     }
     elseif ($recovery) {
@@ -3586,6 +3709,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $null -ne $observerProcess -and
             $observerProcess.state -ceq 'exited' -and
             $observerProcess.exit_code -eq 0
+        $outputPreservedForCleanup = Test-DrControllerPreservedOutputCleanupAuthorization `
+            -Role recovery -Result $result -Inventory $inventory -OutputRoot $RecoveryOutputRoot `
+            -ObserverSha256 $observer.sha256 -ProcessJobsClosed $processJobsClosed `
+            -ObserverProcess $observerProcess -PollFailure $pollFailure
         $transport.status = 'collected'
     }
     else {
@@ -3944,7 +4071,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 }
                 if ($guestRoot) {
                     $cleanupAuthorized = $transport.status -eq 'collected' -and
-                        (-not $observerTask -or $acceptancePassed)
+                        (-not $observerTask -or $outputPreservedForCleanup)
                     # Preparation-only owns only the completed registration preflight.
                     if ($runtimeBrokerPrepared -and $transport.status -ceq 'diagnostic-prepared') { $cleanupAuthorized = $true }
                     $requiredProcessJobsClosed = $processJobsClosed -or $runtimeBrokerPrepared

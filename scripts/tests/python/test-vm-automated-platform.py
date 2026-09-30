@@ -8,7 +8,7 @@ import hashlib
 import unittest
 
 from darkrenamer_tooling.contracts.platform import (
-    verify_cleanup, verify_controller_cleanup, verify_environment,
+    verify_cleanup, verify_controller_cleanup, verify_controller_owned_cleanup, verify_environment,
     verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
@@ -487,6 +487,38 @@ class PlatformTests(unittest.TestCase):
         host["smart_screen_natural_exit"] = host.pop("runner_process_natural_exit")
         with self.assertRaises(EvidenceError):
             verify_cleanup(guest, host)
+
+    def test_owned_cleanup_does_not_reclassify_environment_failure(self):
+        guest, host = self.clean()
+        delta = [{"identity": "unclassified-os-lifetime"}]
+        host["unexpected_runner_processes"] = delta
+        host["unexpected_runner_processes_after_intervention"] = delta
+        host["unexpected_runner_processes_after_delete"] = delta
+        host["runner_process_natural_exit"]["status"] = "rejected"
+        before = deepcopy(host)
+        self.assertEqual(verify_controller_owned_cleanup(host), before)
+        with self.assertRaises(EvidenceError):
+            verify_controller_cleanup(host)
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+        self.assertEqual(host, before)
+
+    def test_owned_cleanup_requires_complete_observations_and_no_intervention(self):
+        _, clean = self.clean()
+        for field, value in (
+                ("runner_process_inventory_complete", False),
+                ("unexpected_runner_processes_after_delete", None),
+                ("unexpected_runner_tasks_after_delete", None),
+                ("runner_process_natural_exit", None),
+                ("process_jobs_closed", False),
+                ("guest_root_present", True),
+                ("trusted_task_root_present", True),
+                ("scheduled_task_present", True),
+                ("owned_processes_after", [{"pid": 123}]),
+                ("resource_cleanup_errors", ["restoration uncertain"]),
+                ("terminated_runner_processes", [{"exit_observed": True}])):
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_controller_owned_cleanup({**clean, field: value})
 
     def test_cleanup_requires_each_owned_resource_absent_and_clean_journal(self):
         verify_cleanup(*self.clean())

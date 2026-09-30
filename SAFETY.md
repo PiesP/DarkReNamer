@@ -366,6 +366,16 @@ that partial history, but a later retry cannot replace the failed attempt or
 fill its missing slots. Passing requires a new campaign with a new complete
 execution history.
 
+Preserving a failed execution and cleaning its owned resources are separate
+operations. A collected failed UI or recovery result may authorize owned-root
+cleanup only after its complete output inventory has been copied outside the
+guest roots and checked against the retained byte counts, hashes and bound
+result. The observer must be terminal, its process jobs closed, and any changed
+desktop settings verifiably restored. Missing or partial output, uncertain
+restoration and unresolved owned lifetimes retain the roots. Cleanup permission
+does not change the original result, permit another workload, or establish a
+passing campaign. The strict runner-environment predicate below still applies.
+
 Controller cleanup requires complete process and scheduled-task inventories to
 show no runner delta after intervention and after resource removal. One initial
 same-user, same-session process delta may be waited for only when it is one of:

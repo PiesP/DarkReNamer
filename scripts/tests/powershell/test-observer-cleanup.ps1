@@ -160,6 +160,177 @@ try {
     $null = New-Item -ItemType Directory -Path $root
     Invoke-DrTestPowerShellModuleScope -Kind controller -ArgumentList @($root) -Action {
         param($FixtureRoot)
+        $output = Join-Path $FixtureRoot 'preserved-output'
+        [void](New-Item -ItemType Directory -Path $output)
+        $source = 'a' * 40
+        $observer = 'b' * 64
+        $terminal = [pscustomobject]@{ state = 'exited'; exit_code = 1 }
+        function Write-PreservedFixture {
+            param([string] $Leaf, [object] $Value)
+            $path = Join-Path $output $Leaf
+            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+            $Value | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+            [pscustomobject]@{
+                file = $Leaf; bytes = (Get-Item -LiteralPath $path).Length
+                sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+        $ui = [pscustomobject]@{
+            schema_version = 1; source_sha = $source; status = 'failed'
+            failure_reason = 'gui_regression_observer_failed'; high_contrast = $null; text_scale = $null
+        }
+        $uiSummary = Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui
+        $args = @{
+            Role = 'ui'; Result = $ui; Inventory = @($uiSummary); OutputRoot = $output
+            ObserverSha256 = $observer; AcceptanceMode = 'current-dpi'
+            HighContrastRequested = $false; ProcessJobsClosed = $true
+            ObserverProcess = $terminal; PollFailure = $null
+        }
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'A collected failed UI result with closed jobs was not cleanup eligible.'
+        }
+        $args.Inventory = @()
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Missing copied output authorized cleanup.'
+        }
+        $args.Inventory = @($uiSummary)
+        $args.ProcessJobsClosed = $false
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Open process jobs authorized cleanup.'
+        }
+        $args.ProcessJobsClosed = $true
+        $args.ObserverProcess = $null
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'A nonterminal observer authorized cleanup.'
+        }
+        $args.ObserverProcess = $terminal
+        $args.ObserverProcess = [pscustomobject]@{ state = 'exited'; exit_code = $null }
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'An observer without an exact terminal exit code authorized cleanup.'
+        }
+        $args.ObserverProcess = $terminal
+        $args.PollFailure = [Exception]::new('poll failed')
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'An uncertain task poll authorized cleanup.'
+        }
+        $args.PollFailure = $null
+        $ui.failure_reason = 'execution_state_restore_failed'
+        $args.Inventory = @(Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui)
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Uncertain execution-state restoration authorized cleanup.'
+        }
+        $ui.failure_reason = 'gui_regression_observer_failed'
+
+        $snapshot = [ordered]@{
+            schema_version = 2; source_sha = $source; acceptance_script_sha256 = $observer
+            restoration_required = $false; restoration_verified = $true
+            original = [ordered]@{ flags = 1; scheme = 'fixture' }
+            restored = [ordered]@{ flags = 1; scheme = 'fixture' }
+        }
+        $snapshotRow = Write-PreservedFixture -Leaf 'high-contrast-restore.json' -Value $snapshot
+        $ui.high_contrast = [pscustomobject]@{
+            snapshot = [pscustomobject]@{ file = $snapshotRow.file; sha256 = $snapshotRow.sha256 }
+        }
+        $args.HighContrastRequested = $true
+        $args.Inventory = @($snapshotRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'Copied failed UI evidence with verified High Contrast restoration was rejected.'
+        }
+        $ui.failure_reason = 'high_contrast_restore_failed'
+        $rescue = [ordered]@{
+            status = 'passed'; restoration_verified = $true; source_sha = $source
+            acceptance_script_sha256 = $observer; snapshot_sha256 = $snapshotRow.sha256
+        }
+        $rescueRow = Write-PreservedFixture -Leaf 'high-contrast-rescue-result.json' -Value $rescue
+        $args.Inventory = @($snapshotRow, $rescueRow,
+            (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'A verified rescue did not authorize preservation of failed UI evidence.'
+        }
+        $rescue.restoration_verified = $false
+        $args.Inventory = @($snapshotRow,
+            (Write-PreservedFixture -Leaf 'high-contrast-rescue-result.json' -Value $rescue),
+            $args.Inventory[-1])
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'An uncertain rescue authorized cleanup.'
+        }
+        $ui.failure_reason = 'gui_regression_observer_failed'
+        $args.Inventory = @($snapshotRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        foreach ($change in @('missing', 'pending', 'source', 'different', 'hash')) {
+            $savedSource = $snapshot.source_sha
+            $savedVerified = $snapshot.restoration_verified
+            $savedScheme = $snapshot.restored.scheme
+            switch ($change) {
+                'pending' { $snapshot.restoration_verified = $false }
+                'source' { $snapshot.source_sha = 'c' * 40 }
+                'different' { $snapshot.restored.scheme = 'different' }
+            }
+            if ($change -ne 'missing' -and $change -ne 'hash') {
+                [void](Write-PreservedFixture -Leaf 'high-contrast-restore.json' -Value $snapshot)
+            }
+            if ($change -ceq 'hash') {
+                [IO.File]::AppendAllText((Join-Path $output $snapshotRow.file), 'partial')
+            }
+            $args.Inventory = if ($change -ceq 'missing') { @($args.Inventory[1]) } else { @($snapshotRow, $args.Inventory[1]) }
+            if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+                throw "Incomplete $change restoration evidence authorized cleanup."
+            }
+            $snapshot.source_sha = $savedSource
+            $snapshot.restoration_verified = $savedVerified
+            $snapshot.restored.scheme = $savedScheme
+            $snapshotRow = Write-PreservedFixture -Leaf 'high-contrast-restore.json' -Value $snapshot
+            $args.Inventory = @($snapshotRow, $args.Inventory[-1])
+        }
+        $args.HighContrastRequested = $false
+        $args.AcceptanceMode = 'text-scale'
+        $scale = [ordered]@{
+            schema_version = 1; source_sha = $source; acceptance_script_sha256 = $observer
+            restoration_required = $true; restoration_verified = $true
+            original = [ordered]@{ percent = 100 }; restored = [ordered]@{ percent = 100 }
+        }
+        $scaleRow = Write-PreservedFixture -Leaf 'text-scale-snapshot.json' -Value $scale
+        $ui.text_scale = [pscustomobject]@{
+            snapshot = [pscustomobject]@{ file = $scaleRow.file; sha256 = $scaleRow.sha256 }
+        }
+        $args.Inventory = @($scaleRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'Verified text-scale restoration did not authorize failed evidence cleanup.'
+        }
+        $ui.status = 'review_required'
+        $args.Inventory = @($scaleRow, (Write-PreservedFixture -Leaf 'acceptance-result.json' -Value $ui))
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'Review-required UI evidence lost cleanup eligibility.'
+        }
+        $ui.status = 'failed'
+        $scale.restoration_verified = $false
+        $args.Inventory = @((Write-PreservedFixture -Leaf 'text-scale-snapshot.json' -Value $scale), $args.Inventory[-1])
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Pending text-scale restoration authorized cleanup.'
+        }
+
+        $recovery = [pscustomobject]@{
+            schema_version = 1; source_sha = $source; status = 'failed'
+            failure_reason = 'recovery_acceptance_error'
+        }
+        $recoveryRow = Write-PreservedFixture -Leaf 'recovery-fixture/summary.json' -Value $recovery
+        $args.Role = 'recovery'; $args.Result = $recovery; $args.Inventory = @($recoveryRow)
+        $args.AcceptanceMode = $null
+        if (-not (Test-DrControllerPreservedOutputCleanupAuthorization @args)) {
+            throw 'A collected failed recovery result with closed jobs was not cleanup eligible.'
+        }
+        [IO.File]::AppendAllText((Join-Path $output $recoveryRow.file), 'partial')
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Partial recovery copy authorized cleanup.'
+        }
+        $args.Inventory = @(Write-PreservedFixture -Leaf $recoveryRow.file -Value $recovery)
+        $recovery.failure_reason = 'execution_state_restore_failed'
+        $args.Inventory = @(Write-PreservedFixture -Leaf $recoveryRow.file -Value $recovery)
+        if (Test-DrControllerPreservedOutputCleanupAuthorization @args) {
+            throw 'Recovery restoration uncertainty authorized cleanup.'
+        }
+    }
+    Invoke-DrTestPowerShellModuleScope -Kind controller -ArgumentList @($root) -Action {
+        param($FixtureRoot)
         $hashed = [Collections.Generic.List[string]]::new()
         $copied = [Collections.Generic.List[string]]::new()
         function Get-FileHash {
@@ -405,6 +576,26 @@ try {
         $ast = [Management.Automation.Language.Parser]::ParseFile(
             (Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/controller-entry.psm1'), [ref]$tokens, [ref]$errors)
         if ($errors.Count -ne 0) { throw 'Controller cleanup source did not parse.' }
+        $preservationCalls = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Test-DrControllerPreservedOutputCleanupAuthorization'
+        }, $true))
+        if ($preservationCalls.Count -ne 2 -or
+            @($preservationCalls | Where-Object { $_.Extent.Text -notmatch '-Role (ui|recovery)' }).Count -ne 0) {
+            throw 'UI and recovery collection no longer use the preserved-output predicate.'
+        }
+        $authorization = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$cleanupAuthorized'
+        }, $true))
+        if ($authorization.Count -lt 1 -or
+            $authorization[0].Right.Extent.Text -notmatch '\$outputPreservedForCleanup' -or
+            $authorization[0].Right.Extent.Text -match '\$acceptancePassed') {
+            throw 'Guest deletion authorization is still coupled to acceptance success.'
+        }
+        if ($ast.Extent.Text -notmatch '\(\$observerTask -and -not \$acceptancePassed\)') {
+            throw 'The final acceptance rejection was weakened.'
+        }
         $assignment = @($ast.FindAll({ param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$cleanupResult'
         }, $true))
