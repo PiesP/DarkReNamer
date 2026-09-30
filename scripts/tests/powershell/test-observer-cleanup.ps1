@@ -70,6 +70,29 @@ finally { Remove-Item -LiteralPath $replaceRoot -Recurse -Force }
     }
 }
 
+# Remoting annotations must not alter the exact independent proof schema.
+Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
+    foreach ($shape in @('object','dictionary','deserialized-dictionary')) {
+        $proof = if ($shape -ceq 'object') { [pscustomobject]@{status='incomplete';errors=@('retained');unexpected='retained'} }
+            else { [ordered]@{status='incomplete';errors=@('retained');unexpected='retained'} }
+        if ($shape -ceq 'deserialized-dictionary') {
+            $proof = [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($proof))
+        }
+        foreach ($name in @('PSComputerName','RunspaceId','PSShowComputerName')) {
+            $proof | Add-Member -NotePropertyName $name -NotePropertyValue 'transport' -Force
+        }
+        Remove-DrControllerProofRemotingMetadata -Proof $proof
+        $json = $proof | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+        if ($json.status -cne 'incomplete' -or $json.errors[0] -cne 'retained' -or
+            $json.unexpected -cne 'retained' -or @($json.PSObject.Properties.Name).Count -ne 3) {
+            throw "Proof payload changed or remoting annotations leaked for $shape."
+        }
+    }
+    $proof = @{status='incomplete';PSComputerName='transport';RunspaceId='transport';PSShowComputerName=$true}
+    Remove-DrControllerProofRemotingMetadata -Proof $proof
+    if ($proof.Count -ne 1 -or $proof.status -cne 'incomplete') { throw 'Dictionary annotation keys remained.' }
+}
+
 # Test the same completion predicate serialized into the guest cleanup command.
 Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     foreach ($result in @($null, [pscustomobject]@{guest_cleanup=$true},
