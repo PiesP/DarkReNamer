@@ -5,6 +5,7 @@ import base64
 from copy import deepcopy
 from datetime import datetime
 import hashlib
+import subprocess
 import unittest
 
 from darkrenamer_tooling.contracts.platform import (
@@ -792,6 +793,36 @@ class V2OwnedResourceTests(unittest.TestCase):
                                                   executable, registered))
         self.assertFalse(_v2_task_action_matches('"' + executable[:-4] + '.dll" ' +
                                                   observed + ' "unterminated', executable, registered))
+
+    def test_recovery_task_arguments_and_bounded_count_match_exactly(self):
+        executable = r"C:\Program Files\PowerShell\7\pwsh.exe"
+        root = r"C:\ProgramData\DarkReNamerVmRuns\DarkReNamerTests-" + "a" * 32
+        trusted = root + "-trusted"
+        argv = [
+            "-NoProfile", "-NonInteractive", "-WindowStyle", "Normal", "-File",
+            trusted + r"\windows-vm-recovery-acceptance.ps1",
+            "-BundleRoot", trusted + r"\bundle", "-ExpectedSessionId", "2",
+            "-OutputRoot", trusted + r"\out", "-EvidenceRoot", trusted + r"\out\recovery-acceptance",
+            "-PrivateEvidenceRoot", trusted + r"\out\private", "-RuntimeRoot", root + r"\runtime",
+            "-ExpectedScriptSha256", "b" * 64, "-Mode", "ProcessCrash",
+            "-FixtureCount", "4096", "-TimeoutSeconds", "300", "-RecoveryExport",
+            "-IntentOnlyCandidateDiscard", "-AcceptanceProfileId", "vm-automated-v2-owned-resources",
+            "-ElevatedObserver", "-TrustedResultPath", trusted + r"\out\recovery-summary.json",
+        ]
+        self.assertGreater(len(argv) + 1, 32)
+        arguments = subprocess.list2cmdline(argv)
+        observed = subprocess.list2cmdline([executable[:-4] + ".dll", *argv])
+        self.assertTrue(_v2_task_action_matches(observed, executable, arguments))
+        self.assertFalse(_v2_task_action_matches(observed + " -Unexpected", executable, arguments))
+        self.assertFalse(_v2_task_action_matches(observed.replace("4096", "2048"), executable, arguments))
+        self.assertEqual(_windows_task_argv(" ".join(["arg"] * 64)), ["arg"] * 64)
+        with self.assertRaisesRegex(ValueError, "Too many"):
+            _windows_task_argv(" ".join(["arg"] * 65))
+        boundary = " ".join(["arg"] * 63)
+        self.assertTrue(_v2_task_action_matches('"' + executable + '" ' + boundary,
+                                                executable, boundary))
+        self.assertFalse(_v2_task_action_matches('"' + executable + '" ' + boundary + " arg",
+                                                 executable, boundary + " arg"))
 
     def test_unknown_or_reused_lifetime_and_owned_scope_fail(self):
         for mutation in ("pid-reuse", "owned-command", "owner", "missing-process", "task-change"):
