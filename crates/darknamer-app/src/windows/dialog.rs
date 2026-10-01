@@ -1863,7 +1863,10 @@ pub(super) fn select_prepared_file_dialog(
     }
 }
 
-#[implement(IFileDialogEvents)]
+// The callbacks use UI-apartment HWND and Rc state. Disabling automatic
+// agility removes unsupported free-threaded calls; ordinary COM marshaling
+// still follows the caller's apartment rules.
+#[implement(IFileDialogEvents, Agile = false)]
 struct SecureRecoveryExportFolderEvents {
     owner: HWND,
     directory: Rc<RefCell<Option<PreparedRecoveryExportDirectory>>>,
@@ -1964,7 +1967,8 @@ impl IFileDialogEvents_Impl for SecureRecoveryExportFolderEvents_Impl {
     }
 }
 
-#[implement(IFileDialogEvents)]
+// The retained folder and target state belong to the modal UI apartment.
+#[implement(IFileDialogEvents, Agile = false)]
 struct SecureTextSaveDialogEvents {
     owner: HWND,
     target: Rc<RefCell<Option<crate::rename::windows_native::TextExportTarget>>>,
@@ -2248,8 +2252,8 @@ fn show_secure_text_save_dialog(
         folder,
     }
     .into();
-    // SAFETY: dialog and event sink stay live through Show; the dialog is
-    // unadvised before either local interface is dropped.
+    // SAFETY: dialog and event sink stay live through Show. Advise owns a sink
+    // reference until Unadvise succeeds or the dialog itself is released.
     let cookie = unsafe { dialog.Advise(&events) }.map_err(shell_dialog_error)?;
     // SAFETY: the dialog and owner belong to the initialized UI thread; Show
     // is modal and OnFileOk retains the selected leaf's metadata guard while
@@ -2258,16 +2262,29 @@ fn show_secure_text_save_dialog(
     let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
     // SAFETY: cookie is the event registration returned by Advise above.
     let unadvised = unsafe { dialog.Unadvise(cookie) };
-    unadvised.map_err(shell_dialog_error)?;
     drop(events);
     drop(dialog);
+    complete_secure_dialog(
+        shown,
+        unadvised,
+        &target,
+        "save dialog returned without a retained target",
+    )
+}
 
+fn complete_secure_dialog<T>(
+    shown: ::windows::core::Result<()>,
+    unadvised: ::windows::core::Result<()>,
+    selected: &RefCell<Option<T>>,
+    missing_selection: &'static str,
+) -> io::Result<Option<T>> {
+    unadvised.map_err(shell_dialog_error)?;
     match shown {
-        Ok(()) => target
+        Ok(()) => selected
             .borrow_mut()
             .take()
             .map(Some)
-            .ok_or_else(|| io::Error::other("save dialog returned without a retained target")),
+            .ok_or_else(|| io::Error::other(missing_selection)),
         Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
         Err(error) => Err(shell_dialog_error(error)),
     }
@@ -2324,8 +2341,8 @@ fn show_secure_recovery_export_folder_dialog(
         directory: Rc::clone(&directory),
     }
     .into();
-    // SAFETY: dialog and event sink stay live through Show; the dialog is
-    // unadvised before either local interface is dropped.
+    // SAFETY: dialog and event sink stay live through Show. Advise owns a sink
+    // reference until Unadvise succeeds or the dialog itself is released.
     let cookie = unsafe { dialog.Advise(&events) }.map_err(shell_dialog_error)?;
     // SAFETY: dialog and owner belong to the initialized UI thread. Show is
     // modal, and OnFileOk binds the selected shell identity to retained native
@@ -2333,17 +2350,14 @@ fn show_secure_recovery_export_folder_dialog(
     let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
     // SAFETY: cookie is the event registration returned by Advise above.
     let unadvised = unsafe { dialog.Unadvise(cookie) };
-    unadvised.map_err(shell_dialog_error)?;
     drop(events);
     drop(dialog);
-
-    match shown {
-        Ok(()) => directory.borrow_mut().take().map(Some).ok_or_else(|| {
-            io::Error::other("folder dialog returned without a retained export directory")
-        }),
-        Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
-        Err(error) => Err(shell_dialog_error(error)),
-    }
+    complete_secure_dialog(
+        shown,
+        unadvised,
+        &directory,
+        "folder dialog returned without a retained export directory",
+    )
 }
 
 fn report_recovery_export_folder_error(owner: HWND, error: &io::Error) {
@@ -2523,6 +2537,165 @@ pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::marker::PhantomData;
+    use windows_core::{IInspectable, IUnknown};
+    use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+
+    struct TestOle {
+        _apartment: PhantomData<Rc<()>>,
+    }
+
+    impl TestOle {
+        fn initialize() -> io::Result<Self> {
+            // SAFETY: the reserved pointer is null; Drop balances each
+            // successful initialization on this test's current thread.
+            let status = unsafe { OleInitialize(null()) };
+            if status < 0 {
+                Err(io::Error::other(format!(
+                    "test OLE initialization failed: 0x{:08X}",
+                    status as u32
+                )))
+            } else {
+                Ok(Self {
+                    _apartment: PhantomData,
+                })
+            }
+        }
+    }
+
+    impl Drop for TestOle {
+        fn drop(&mut self) {
+            // SAFETY: this guard stays on the initializing test thread and
+            // outlives both locally created file-dialog COM objects.
+            unsafe { OleUninitialize() };
+        }
+    }
+
+    fn assert_file_dialog_event_sink_interfaces(
+        events: &IFileDialogEvents,
+    ) -> windows_core::Result<()> {
+        let unknown = events.cast::<IUnknown>()?;
+        let supported = unknown.cast::<IFileDialogEvents>()?;
+        assert_eq!(supported.cast::<IUnknown>()?, unknown);
+        let inspectable = events.cast::<IInspectable>()?;
+        assert_eq!(inspectable.cast::<IUnknown>()?, unknown);
+        assert!(events.cast::<windows_core::imp::IAgileObject>().is_err());
+        assert!(events.cast::<windows_core::imp::IMarshal>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn secure_recovery_export_folder_events_are_apartment_bound() -> windows_core::Result<()> {
+        let directory = Rc::new(RefCell::new(None));
+        let events: IFileDialogEvents = SecureRecoveryExportFolderEvents {
+            owner: null_mut(),
+            directory: Rc::clone(&directory),
+        }
+        .into();
+        assert_eq!(Rc::strong_count(&directory), 2);
+        assert_file_dialog_event_sink_interfaces(&events)?;
+        drop(events);
+        assert_eq!(Rc::strong_count(&directory), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn secure_text_save_dialog_events_are_apartment_bound() -> windows_core::Result<()> {
+        let target = Rc::new(RefCell::new(None));
+        let folder = Rc::new(RefCell::new(None));
+        let events: IFileDialogEvents = SecureTextSaveDialogEvents {
+            owner: null_mut(),
+            target: Rc::clone(&target),
+            folder: Rc::clone(&folder),
+        }
+        .into();
+        assert_eq!(Rc::strong_count(&target), 2);
+        assert_eq!(Rc::strong_count(&folder), 2);
+        assert_file_dialog_event_sink_interfaces(&events)?;
+        drop(events);
+        assert_eq!(Rc::strong_count(&target), 1);
+        assert_eq!(Rc::strong_count(&folder), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn secure_dialogs_release_registered_event_sinks() -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = TestOle::initialize()?;
+
+        // SAFETY: OLE is initialized on this test thread; the local interface
+        // and its event registration are released before the guard drops.
+        let save: IFileSaveDialog =
+            unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER) }?;
+        let target = Rc::new(RefCell::new(None));
+        let folder = Rc::new(RefCell::new(None));
+        let save_events: IFileDialogEvents = SecureTextSaveDialogEvents {
+            owner: null_mut(),
+            target: Rc::clone(&target),
+            folder: Rc::clone(&folder),
+        }
+        .into();
+        // SAFETY: the test keeps both apartment-bound COM objects alive until
+        // their exact registration has been removed.
+        let save_cookie = unsafe { save.Advise(&save_events) }?;
+        assert_eq!(Rc::strong_count(&target), 2);
+        assert_eq!(Rc::strong_count(&folder), 2);
+        drop(save_events);
+        assert_eq!(Rc::strong_count(&target), 2);
+        assert_eq!(Rc::strong_count(&folder), 2);
+        // SAFETY: save_cookie came from this save dialog's Advise call.
+        unsafe { save.Unadvise(save_cookie) }?;
+        assert_eq!(Rc::strong_count(&target), 1);
+        assert_eq!(Rc::strong_count(&folder), 1);
+        drop(save);
+
+        // SAFETY: the same initialized apartment owns this dialog and sink.
+        let open: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }?;
+        let directory = Rc::new(RefCell::new(None));
+        let open_events: IFileDialogEvents = SecureRecoveryExportFolderEvents {
+            owner: null_mut(),
+            directory: Rc::clone(&directory),
+        }
+        .into();
+        // SAFETY: both COM objects stay on this initialized test apartment.
+        let open_cookie = unsafe { open.Advise(&open_events) }?;
+        assert_eq!(Rc::strong_count(&directory), 2);
+        drop(open_events);
+        assert_eq!(Rc::strong_count(&directory), 2);
+        // SAFETY: open_cookie came from this open dialog's Advise call.
+        unsafe { open.Unadvise(open_cookie) }?;
+        assert_eq!(Rc::strong_count(&directory), 1);
+        drop(open);
+        Ok(())
+    }
+
+    #[test]
+    fn secure_dialog_completion_handles_injected_show_outcomes() -> io::Result<()> {
+        let selected = RefCell::new(Some(7_u8));
+        assert_eq!(
+            complete_secure_dialog(Ok(()), Ok(()), &selected, "missing")?,
+            Some(7)
+        );
+        assert_eq!(*selected.borrow(), None);
+        assert!(complete_secure_dialog(Ok(()), Ok(()), &selected, "missing").is_err());
+
+        let cancelled =
+            WindowsError::from_hresult(::windows::core::HRESULT(0x8007_04C7_u32 as i32));
+        assert_eq!(
+            complete_secure_dialog(Err(cancelled), Ok(()), &selected, "missing")?,
+            None
+        );
+        let failed = WindowsError::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert!(complete_secure_dialog(Err(failed), Ok(()), &selected, "missing").is_err());
+        let unadvise_failed =
+            WindowsError::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        selected.replace(Some(9));
+        assert!(
+            complete_secure_dialog(Ok(()), Err(unadvise_failed), &selected, "missing").is_err()
+        );
+        assert_eq!(*selected.borrow(), Some(9));
+        Ok(())
+    }
 
     thread_local! {
         static PROMPT_QUIT_AT_ENTRY: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
