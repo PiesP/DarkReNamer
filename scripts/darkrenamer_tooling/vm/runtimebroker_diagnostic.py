@@ -133,12 +133,18 @@ def load_plan(path, expected_sha256):
 
 
 def workload_arguments(attempt, plan):
-    arguments = attempt['launcher_arguments']
+    arguments = list(attempt['launcher_arguments'])
     if any(v.split('=', 1)[0] in {'--output', '--prepare-only', '--vm-name',
                                   '--credential-helper', '--desktop-mode'}
            for v in arguments):
         raise ValueError('Plan must use unchanged managed RDP with SSH and exclusive output.')
+    # Frozen diagnostic plans predate the new-campaign v2 default. Keep their
+    # strict contract explicit without rewriting the hash-bound plan bytes.
+    if not any(value.split('=', 1)[0] == '--acceptance-profile-id' for value in arguments):
+        arguments += ['--acceptance-profile-id', launcher.V1_PROFILE_ID]
     args = launcher.parse_arguments(arguments)
+    if args.acceptance_profile_id != launcher.V1_PROFILE_ID:
+        raise ValueError('Historical RuntimeBroker diagnostics require the strict v1 profile.')
     if (not args.ssh_host or not args.candidate_mode or args.desktop_mode != 'rdp'
             or args.task_kind != 'ui'
             or args.acceptance_mode != 'current-dpi'

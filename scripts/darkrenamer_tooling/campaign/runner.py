@@ -766,7 +766,8 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
 def argument_parser(repo: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path,
-                        default=Path(repo) / "config" / "vm-automated-v1.json")
+                        default=Path(repo) / "config" / "vm-automated-v2.json",
+                        help="Frozen campaign profile (default: v2 owned resources).")
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)

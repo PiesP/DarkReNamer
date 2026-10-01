@@ -310,16 +310,16 @@ physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
 ### VM-Automated campaign development
 
-Select either the strict
-[`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile or the
-owned-resources [`config/vm-automated-v2.json`](config/vm-automated-v2.json)
-profile before planning a new campaign. Their schema, ID, revision and source
-blob digest are distinct. Pass `--profile config/vm-automated-v2.json` to the
-campaign runner, `--acceptance-profile-id vm-automated-v2-owned-resources` to
-the native VM backend runner, and `--profile-id vm-automated-v2-owned-resources`
-to independent evidence validation. These local entrypoints and the hosted
-wrapper retain a v1 default for existing callers. The hosted
-workflow dispatch offers an explicit profile choice and defaults to v2. Each
+The campaign runner, native VM backend runner, independent evidence validator,
+and hosted wrapper default to the owned-resources
+[`config/vm-automated-v2.json`](config/vm-automated-v2.json) profile. Select the
+strict [`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile
+explicitly when validating historical v1 evidence. Their schema, ID, revision
+and source blob digest are distinct. Use `--profile config/vm-automated-v1.json`
+for a v1 campaign, `--acceptance-profile-id vm-automated-v1-win11-ntfs` for its
+native VM backend, and `--profile-id vm-automated-v1-win11-ntfs` for independent
+v1 evidence validation. The hosted workflow dispatch offers an explicit profile
+choice and defaults to v2. Each
 profile declares the same 22 derived targets and five required gates. The
 campaign runner converts those targets into 20 primary execution cells, because
 process crash, recovery export and Intent-only candidate discard share one
@@ -378,6 +378,8 @@ registration preflight, the original acceptance baselines, the selected UI
 workload, strict cleanup, desktop teardown and bounded follow-up. Preparation-only
 attempts stop after the original baselines and never launch the candidate.
 Diagnostic snapshots and phase journals are separate from acceptance evidence.
+This historical utility explicitly retains strict v1 for frozen plans with an
+omitted profile; it rejects v2 selection rather than changing the original contract.
 
 Each attempt has a 900-second total budget, with at most 360 seconds of
 post-cleanup observation within that budget. The controller reserves time for

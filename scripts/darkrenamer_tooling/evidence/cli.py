@@ -30,7 +30,8 @@ from darkrenamer_tooling.evidence.archive import (
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument('--profile-id', choices=tuple(PROFILE_DEFINITIONS),
-                        default='vm-automated-v1-win11-ntfs')
+                        default='vm-automated-v2-owned-resources',
+                        help='Select the evidence contract (default: v2 owned resources).')
     for name in ('archive', 'candidate-handoff-root', 'trusted-source-root', 'gate-metadata', 'output'):
         result.add_argument('--' + name, type=Path, required=True)
     for name in ('archive-sha256', 'archive-size', 'candidate-run-id', 'candidate-run-attempt',
@@ -48,14 +49,15 @@ def validate(args: argparse.Namespace) -> bytes:
     source = args.trusted_source_root.resolve(strict=True)
     components = trusted_component_hashes(source, source_sha)
     tooling = trusted_tooling_inventory(source, source_sha, ("vm-launcher",))
-    revision, profile_path = profile_definition(getattr(args, 'profile_id', 'vm-automated-v1-win11-ntfs'))
+    selected_profile_id = getattr(args, 'profile_id', 'vm-automated-v2-owned-resources')
+    revision, profile_path = profile_definition(selected_profile_id)
     entry = subprocess.check_output(['git', 'ls-tree', source_sha, '--', profile_path], cwd=source, text=True).strip()
     require(entry.startswith('100644 blob ') and entry.endswith('\t' + profile_path),
             'Required profile is not an ordinary trusted source blob.')
     profile_bytes = subprocess.check_output(['git', 'show', source_sha + ':' + profile_path], cwd=source)
     profile = parse_bounded_json_bytes(profile_bytes, label='trusted profile')
     require(validate_profile(profile) == revision and
-            profile['profile_id'] == getattr(args, 'profile_id', 'vm-automated-v1-win11-ntfs'),
+            profile['profile_id'] == selected_profile_id,
             'Trusted source profile differs from explicit selection.')
     profile_digest = hashlib.sha256(profile_bytes).hexdigest()
 

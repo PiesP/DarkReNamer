@@ -14,7 +14,7 @@ param(
     [string] $ValidationRunId,
     [string] $ValidationRunAttempt,
     [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
-    [string] $ProfileId = 'vm-automated-v1-win11-ntfs',
+    [string] $ProfileId = 'vm-automated-v2-owned-resources',
     [string] $CandidateHandoffRoot,
     [string] $TrustedSourceRoot,
     [string] $OutputPath,

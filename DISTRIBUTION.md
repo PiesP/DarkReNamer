@@ -94,8 +94,8 @@ SHA-256 from `release-handoff.json`, and version tag. Also supply the private
 evidence release ID, asset ID, archive SHA-256 and size, and the exact successful
 VM validation run ID and attempt. Select the profile explicitly for both hosted
 validation and promotion: `vm-automated-v1-win11-ntfs` or
-`vm-automated-v2-owned-resources`. The workflow choices default to v2; the
-local validator and hosted wrapper retain v1 defaults for existing callers.
+`vm-automated-v2-owned-resources`. Workflow choices, the local validator and
+hosted wrapper default to v2; supply v1 explicitly for historical v1 evidence.
 Promotion fails unless the selected profile ID, typed revision, source blob
 digest and statement schema agree, and all pinned values agree with current
 `origin/master`, the successful candidate workflow metadata, the unexpired

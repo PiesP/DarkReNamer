@@ -1228,6 +1228,7 @@ class VmRunnerTests(unittest.TestCase):
         self.assert_arguments_rejected(['--ssh-host', 'vm', *common])
         identity = '12345678-1234-5678-9abc-1234567890ab'
         running = vm.parse_arguments(['--ssh-host', 'vm', '--expected-vm-id', identity, *common])
+        running.acceptance_profile_sha256 = 'b' * 64
         self.assertTrue(running.candidate_mode)
         self.assertEqual(running.expected_vm_id, identity)
         bundle = self.root / 'candidate-plan'
@@ -1238,6 +1239,7 @@ class VmRunnerTests(unittest.TestCase):
         self.assertIn('-ExpectedBundleManifestSha256', command)
         self.assertIn(hashlib.sha256((bundle / 'bundle.json').read_bytes()).hexdigest(), command)
         direct = vm.parse_arguments(['--vm-name', 'vm', '--expected-vm-id', identity, *common])
+        direct.acceptance_profile_sha256 = 'b' * 64
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
             direct_command = vm.controller_invocation(
                 bundle, direct, {'helper': 'C:\\helper.ps1'})
@@ -1252,6 +1254,7 @@ class VmRunnerTests(unittest.TestCase):
             '--acceptance-mode', 'current-dpi', '--acceptance-appearance', 'system',
             '--acceptance-high-contrast',
         ])
+        ui.acceptance_profile_sha256 = 'b' * 64
         ui_command = vm.controller_invocation(self.root, ui, pwsh='/usr/bin/pwsh')
         for value in (
                 '-TaskKind', 'ui', '-AcceptanceOutputRoot', '-AcceptanceManifest',
@@ -1265,6 +1268,7 @@ class VmRunnerTests(unittest.TestCase):
             '--task-kind', 'recovery', '--recovery-mode', 'ProcessCrash',
             '--recovery-export', '--recovery-intent-only-candidate-discard',
         ])
+        recovery.acceptance_profile_sha256 = 'b' * 64
         recovery_command = vm.controller_invocation(
             self.root, recovery, pwsh='/usr/bin/pwsh')
         for value in (
@@ -1452,6 +1456,7 @@ class VmRunnerTests(unittest.TestCase):
     def test_direct_vm_identity_is_validated_and_passed_to_the_controller(self):
         identity = '12345678-1234-5678-9abc-1234567890ab'
         args = vm.parse_arguments(['--vm-name', 'VM', '--expected-vm-id', identity.upper()])
+        args.acceptance_profile_sha256 = 'b' * 64
         self.assertEqual(args.expected_vm_id, identity)
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
             command = vm.controller_invocation(self.root, args, {'helper': 'C:\\helper.ps1'})
@@ -1517,6 +1522,7 @@ class VmRunnerTests(unittest.TestCase):
     def test_ssh_plan_uses_local_pwsh_without_windows_host_calls(self):
         output = self.root / 'ssh-output'
         args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm', '--output', str(output)])
+        args.acceptance_profile_sha256 = 'b' * 64
         with mock.patch.object(vm, 'windows_host_defaults', side_effect=AssertionError('Windows host defaults used')), \
              mock.patch.object(vm, 'winpath', side_effect=AssertionError('wslpath used')), \
              mock.patch.object(vm, 'require_pwsh74', return_value='/usr/bin/pwsh'):
@@ -1532,11 +1538,14 @@ class VmRunnerTests(unittest.TestCase):
             '-BundleRoot', str(output), '-SshHost', 'darkrenamer-vm',
             '-TestTimeoutSeconds', '300', '-ExpectedBundleManifestSha256',
             hashlib.sha256((root / 'bundle.json').read_bytes()).hexdigest(),
-            '-TaskKind', 'core'])
+            '-TaskKind', 'core', '-AcceptanceProfileId', vm.V2_PROFILE_ID,
+            '-AcceptanceProfileSha256', 'b' * 64])
 
     def test_both_transports_use_the_same_controller(self):
         ssh_args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm'])
         direct_args = vm.parse_arguments(['--vm-name', 'vm'])
+        ssh_args.acceptance_profile_sha256 = 'b' * 64
+        direct_args.acceptance_profile_sha256 = 'b' * 64
         root = self.root
         ssh = vm.controller_invocation(root, ssh_args, pwsh='/usr/bin/pwsh')
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
@@ -1550,6 +1559,7 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_controller_uses_manifest_digest_frozen_before_observer_preparation(self):
         args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm'])
+        args.acceptance_profile_sha256 = 'b' * 64
         args.expected_bundle_manifest_sha256 = 'a' * 64
         (self.root / 'bundle.json').write_text('{"changed_after_freeze":true}')
 
@@ -1567,6 +1577,17 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index('-AcceptanceProfileId') + 1],
                          'vm-automated-v2-owned-resources')
         self.assertEqual(command[command.index('-AcceptanceProfileSha256') + 1], 'b' * 64)
+
+    def test_cli_profile_defaults_to_v2_and_retains_explicit_v1(self):
+        self.assertEqual(vm.parse_arguments(['--ssh-host', 'darkrenamer-vm']).acceptance_profile_id,
+                         vm.V2_PROFILE_ID)
+        self.assertEqual(vm.parse_arguments([
+            '--ssh-host', 'darkrenamer-vm', '--acceptance-profile-id', vm.V1_PROFILE_ID
+        ]).acceptance_profile_id, vm.V1_PROFILE_ID)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            vm.parse_arguments([
+                '--ssh-host', 'darkrenamer-vm', '--acceptance-profile-id', 'unknown'
+            ])
 
     def desktop_lease(self):
         return {'status': 'ready', 'leasePath': 'C:\\Temp\\owned', 'leaseId': 'a' * 32,
@@ -1639,7 +1660,9 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(len(set(observed)), 2)
 
     def test_owned_cleanup_signal_follows_managed_desktop_closure(self):
-        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        args = vm.parse_arguments([
+            '--ssh-host', 'vm', '--acceptance-profile-id', vm.V1_PROFILE_ID
+        ])
         original = {'guest_cleanup': False, 'raw_cleanup': {
             'unexpected_runner_tasks_after_delete': None,
             'unexpected_runner_processes_after_delete': None,

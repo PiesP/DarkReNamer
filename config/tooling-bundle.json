@@ -98,7 +98,7 @@
       "bundle": "tooling-campaign-runner.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.runner",
-      "sha256": "f8254d8175a73c15881f858db4bdb715eda95c5da47181f6932f21675f45d121",
+      "sha256": "2362b231741808c2f580be9b86f0b9552606b18850c5787833bc914b44c5943e",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -167,7 +167,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "425cf713eaa847fb6fe6573ce9ea3c339075b4be2c15990291dc19acc623bbed",
+      "sha256": "6d67c5072b4a33f88d73ead380215f13433f65fdd1e07b84c301af80d60398db",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -186,7 +186,7 @@
       "bundle": "tooling-vm-runtimebroker-diagnostic.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.runtimebroker_diagnostic",
-      "sha256": "68977492fe8053c7d45cbf55364205798ecee299521fe1ba65abcb14ead7020e",
+      "sha256": "b549f622cf1b81c1a870ba0052a73abaf06fe7a2a34bfa265d2856ab362ac469",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -436,7 +436,7 @@
       "bundle": "tooling-evidence-cli.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.cli",
-      "sha256": "02f78cb00f690a399b59ec70546138a67808430072ee8fd98d16f7c470ab8c39",
+      "sha256": "8a469980b31ec1d208e6ed0ce77fa9ecf722d9107004479746ccaf48777562b7",
       "dependencies": [
         "tooling-loader",
         "package-root",

@@ -217,7 +217,8 @@ def argument_parser():
                         help='Prepare a managed RDP desktop (default), or use an existing unlocked desktop.')
     parser.add_argument('--desktop-helper', help='Trusted Windows desktop-session.ps1 path; uses the local RDP profile.')
     parser.add_argument('--acceptance-profile-id', choices=(V1_PROFILE_ID, V2_PROFILE_ID),
-                        default=V1_PROFILE_ID, help='Bind the selected VM cleanup contract.')
+                        default=V2_PROFILE_ID,
+                        help='Bind the selected VM cleanup contract (default: v2 owned resources).')
     parser.add_argument('--desktop-scale', type=int, choices=(100, 125, 150, 175, 200, 250, 300), default=200)
     parser.add_argument('--desktop-width', type=int,
                         help='Request a managed RDP desktop width; requires --desktop-height.')

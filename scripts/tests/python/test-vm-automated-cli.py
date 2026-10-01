@@ -219,6 +219,26 @@ class CliFixture:
 
 
 class VmAutomatedCliTests(unittest.TestCase):
+    def test_cli_profile_defaults_to_v2_and_rejects_unknown(self):
+        self.assertEqual(cli.parser().parse_args([
+            '--profile-id', 'vm-automated-v1-win11-ntfs',
+            *self._required_cli_args(),
+        ]).profile_id, 'vm-automated-v1-win11-ntfs')
+        self.assertEqual(cli.parser().parse_args(self._required_cli_args()).profile_id,
+                         'vm-automated-v2-owned-resources')
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parser().parse_args(['--profile-id', 'unknown', *self._required_cli_args()])
+
+    @staticmethod
+    def _required_cli_args():
+        return [item for name in (
+            'archive', 'candidate-handoff-root', 'trusted-source-root', 'gate-metadata',
+            'output', 'archive-sha256', 'archive-size', 'candidate-run-id',
+            'candidate-run-attempt', 'candidate-artifact-id', 'candidate-source-sha',
+            'expected-exe-sha256', 'release-id', 'asset-id', 'validation-run-id',
+            'validation-run-attempt',
+        ) for item in ('--' + name, 'fixture')]
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory()
@@ -245,6 +265,19 @@ class VmAutomatedCliTests(unittest.TestCase):
                 "sha256": hashlib.sha256(fixture.profile_bytes).hexdigest()})
             args = fixture.args()
             args.profile_id = "vm-automated-v1-win11-ntfs"
+            with self.assertRaises(EvidenceError):
+                cli.validate(args)
+
+            args = fixture.args()
+            del args.profile_id
+            statement = parse_canonical_statement_bytes(cli.validate(args))
+            self.assertEqual(statement['profile']['revision'], 2)
+
+    def test_omitted_profile_rejects_v1_archive_before_extraction(self):
+        args = self.fixture.args()
+        del args.profile_id
+        with patch.object(cli, 'open_indexed_evidence_archive',
+                          side_effect=AssertionError('archive extraction was reached')):
             with self.assertRaises(EvidenceError):
                 cli.validate(args)
 

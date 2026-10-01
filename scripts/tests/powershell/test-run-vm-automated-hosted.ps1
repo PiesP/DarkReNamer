@@ -204,7 +204,8 @@ function Invoke-HostedInvocationScenario {
         [Parameter(Mandatory)][ValidateSet(
             'success', 'candidate-attestation-failure', 'raw-validator-failure', 'cleanup-failure'
         )][string] $Scenario,
-        [string] $ProfileId = 'vm-automated-v1-win11-ntfs'
+        [string] $ProfileId = 'vm-automated-v2-owned-resources',
+        [switch] $ExplicitProfile
     )
 
     $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -334,6 +335,7 @@ function Invoke-HostedInvocationScenario {
     $wrapperSucceeded = $false
     $candidateAttestationAttempted = $false
     $statementAttestationReached = $false
+    $profileSelection = if ($ExplicitProfile) { @{ ProfileId = $ProfileId } } else { @{} }
     try {
         try {
             & $wrapper `
@@ -349,7 +351,7 @@ function Invoke-HostedInvocationScenario {
                 -IngressArchiveSize '3' `
                 -ValidationRunId '53' `
                 -ValidationRunAttempt '1' `
-                -ProfileId $ProfileId `
+                @profileSelection `
                 -CandidateHandoffRoot $fixture.candidate `
                 -TrustedSourceRoot $fixture.trusted `
                 -OutputPath $fixture.output `
@@ -409,15 +411,22 @@ if (-not $success.wrapper_succeeded -or -not $success.output_exists -or
     -not $success.statement_attestation_reached -or $success.scratch_count -ne 0 -or
     $success.events -notcontains 'scratch-cleanup-attempt' -or
     $success.events -notcontains 'candidate-attestation:scratch=0' -or
-    $success.events -notcontains 'profile:vm-automated-v1-win11-ntfs') {
+    $success.events -notcontains 'profile:vm-automated-v2-owned-resources') {
     throw 'Successful hosted invocation did not clean private scratch before attestation.'
 }
 
-$v2 = Invoke-HostedInvocationScenario -Scenario success `
+$v1 = Invoke-HostedInvocationScenario -Scenario success -ExplicitProfile `
+    -ProfileId 'vm-automated-v1-win11-ntfs'
+if (-not $v1.wrapper_succeeded -or
+    $v1.events -notcontains 'profile:vm-automated-v1-win11-ntfs') {
+    throw 'Hosted explicit v1 selection was not passed to the independent raw validator.'
+}
+
+$v2 = Invoke-HostedInvocationScenario -Scenario success -ExplicitProfile `
     -ProfileId 'vm-automated-v2-owned-resources'
 if (-not $v2.wrapper_succeeded -or
     $v2.events -notcontains 'profile:vm-automated-v2-owned-resources') {
-    throw 'Hosted v2 selection was not passed to the independent raw validator.'
+    throw 'Hosted explicit v2 selection was not passed to the independent raw validator.'
 }
 
 $profileRoot = Join-Path ([IO.Path]::GetTempPath()) (
