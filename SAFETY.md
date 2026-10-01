@@ -348,6 +348,24 @@ once. It retains only a final component bounded by
 `MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`. Native API failures remain typed planning
 blockers.
 
+Process-token queries adopt only the real handle returned by a successful
+OpenProcessToken into `OwnedHandle`, exactly once. The process pseudo-handle
+stays borrowed. Native queries borrow the owner's raw handle until return;
+standard ownership replaces the custom CloseHandle guard without changing the
+elevation policy. GDI, library, menu and global-memory resources retain their
+resource-specific destructors and must not be adopted as `OwnedHandle`.
+
+Prepared clipboard memory has a non-Copy HGLOBAL owner recording its byte
+capacity. UTF-16 population checks that capacity and completes allocation,
+locking, copying and unlocking before OpenClipboard or EmptyClipboard. Preparation,
+session-opening, emptying and publication failures leave the block locally owned
+and its destructor centralizes GlobalFree. Only successful SetClipboardData
+relinquishes ownership; a later CloseClipboard failure does not reclaim the
+system-owned block. Failure after EmptyClipboard cannot restore the prior
+clipboard contents. Native allocation/clipboard calls remain necessary for the
+movable-memory transfer contract; exact UTF-16 units, including surrogates, are
+preserved independently of display text.
+
 Native rename and single-entry directory query buffers use explicit `repr(C)`
 records with complete bounded UTF-16 array fields. Compile-time checks compare
 their field offsets and alignment with the pinned SDK records and prove backing
