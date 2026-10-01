@@ -49,6 +49,10 @@ const FORCED_EXPLANATION_ID: u16 = 0xA130;
 const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
 const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
+#[cfg(test)]
+thread_local! {
+    static FORCE_GROUP_SUBCLASS_REMOVAL_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
 const WM_APP_APPEARANCE_REDRAW: u32 = WM_APP + 0x53;
 const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정 (미리보기)";
@@ -165,10 +169,10 @@ struct AppearanceDialogWindowState {
     model: AppearanceDialogModel,
     viewport: HWND,
     density_group: HWND,
-    density_group_state: *mut AppearanceGroupSubclassState,
+    density_group_state: Option<Rc<AppearanceGroupSubclassState>>,
     density: [HWND; 4],
     emphasis_group: HWND,
-    emphasis_group_state: *mut AppearanceGroupSubclassState,
+    emphasis_group_state: Option<Rc<AppearanceGroupSubclassState>>,
     emphasis: [HWND; 3],
     forced_explanation: HWND,
     checkboxes: [HWND; 3],
@@ -176,11 +180,11 @@ struct AppearanceDialogWindowState {
     reset: HWND,
     ok: HWND,
     cancel: HWND,
-    font: OwnedFont,
+    font: Rc<OwnedFont>,
     measured: AppearanceDialogMetrics,
     layout: Option<AppearanceDialogLayout>,
     scroll_y: i32,
-    appearance_resources: Option<AppearanceResources>,
+    appearance_resources: Option<Rc<AppearanceResources>>,
     system_theme: Option<ResolvedTheme>,
     dpi: u32,
     armed: bool,
@@ -204,16 +208,17 @@ struct AppearanceDialogInit {
     adopted: *mut bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AppearanceGroupStyle {
-    background: HBRUSH,
-    border: HBRUSH,
+    resources: Rc<AppearanceResources>,
     text: u32,
 }
 
 struct AppearanceGroupSubclassState {
     label: &'static str,
-    style: Option<AppearanceGroupStyle>,
+    retired: Cell<bool>,
+    style: RefCell<Option<AppearanceGroupStyle>>,
+    font: RefCell<Rc<OwnedFont>>,
 }
 
 pub(super) fn prepare_appearance_dialog(
@@ -638,10 +643,10 @@ pub(super) fn create_appearance_dialog_window(
         model: AppearanceDialogModel::new(appearance, forced_colors),
         viewport: null_mut(),
         density_group: null_mut(),
-        density_group_state: null_mut(),
+        density_group_state: None,
         density: [null_mut(); 4],
         emphasis_group: null_mut(),
-        emphasis_group_state: null_mut(),
+        emphasis_group_state: None,
         emphasis: [null_mut(); 3],
         forced_explanation: null_mut(),
         checkboxes: [null_mut(); 3],
@@ -649,7 +654,7 @@ pub(super) fn create_appearance_dialog_window(
         reset: null_mut(),
         ok: null_mut(),
         cancel: null_mut(),
-        font: OwnedFont::default(),
+        font: Rc::new(OwnedFont::default()),
         measured: AppearanceDialogMetrics::default(),
         layout: None,
         scroll_y: 0,
@@ -755,8 +760,11 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         0xA100,
         BS_GROUPBOX as u32,
     )?;
-    state.density_group_state =
-        install_appearance_group_subclass(state.density_group, DENSITY_GROUP_LABEL)?;
+    state.density_group_state = Some(install_appearance_group_subclass(
+        state.density_group,
+        DENSITY_GROUP_LABEL,
+        Rc::clone(&state.font),
+    )?);
     state.density = [
         child(
             body,
@@ -798,8 +806,11 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         0xA110,
         BS_GROUPBOX as u32,
     )?;
-    state.emphasis_group_state =
-        install_appearance_group_subclass(state.emphasis_group, EMPHASIS_GROUP_LABEL)?;
+    state.emphasis_group_state = Some(install_appearance_group_subclass(
+        state.emphasis_group,
+        EMPHASIS_GROUP_LABEL,
+        Rc::clone(&state.font),
+    )?);
     state.emphasis = [
         child(
             body,
@@ -997,18 +1008,18 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
         .resolve(state.model.forced_colors(), state.system_theme);
     let mut replacement = semantic_palette(resolved.theme).and_then(|palette| {
         set_native_control_theme_disabled(state, true)
-            .then(|| AppearanceResources::create(palette).ok())
+            .then(|| AppearanceResources::create(palette).ok().map(Rc::new))
             .flatten()
     });
     if replacement.as_ref().is_none_or(|resources| {
         !update_appearance_group_styles(
-            [state.density_group_state, state.emphasis_group_state],
-            Some(resources),
+            [&state.density_group_state, &state.emphasis_group_state],
+            Some(Rc::clone(resources)),
         )
     }) {
         set_native_control_theme_disabled(state, false);
         update_appearance_group_styles(
-            [state.density_group_state, state.emphasis_group_state],
+            [&state.density_group_state, &state.emphasis_group_state],
             None,
         );
         replacement = None;
@@ -1045,51 +1056,69 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
 fn install_appearance_group_subclass(
     window: HWND,
     label: &'static str,
-) -> io::Result<*mut AppearanceGroupSubclassState> {
-    let state = Box::into_raw(Box::new(AppearanceGroupSubclassState {
+    font: Rc<OwnedFont>,
+) -> io::Result<Rc<AppearanceGroupSubclassState>> {
+    let state = Rc::new(AppearanceGroupSubclassState {
         label,
-        style: None,
-    }));
+        retired: Cell::new(false),
+        style: RefCell::new(None),
+        font: RefCell::new(font),
+    });
+    let callback_owner = Rc::into_raw(Rc::clone(&state));
     // SAFETY: window is a live dialog-owned group box, the callback has the
-    // documented ABI, and state is reclaimed by that window's WM_NCDESTROY.
-    if unsafe {
+    // documented ABI. Refdata owns one Rc until successful removal.
+    let installed = unsafe {
         SetWindowSubclass(
             window,
             Some(appearance_group_subclass),
             APPEARANCE_GROUP_SUBCLASS_ID,
-            state as usize,
+            callback_owner as usize,
         )
-    } == 0
-    {
-        // SAFETY: installation failed, so no callback owns this allocation.
-        unsafe { drop(Box::from_raw(state)) };
-        Err(io::Error::last_os_error())
+    };
+    if installed == 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: installation failed, so no callback owns this Rc share.
+        unsafe { drop(Rc::from_raw(callback_owner)) };
+        Err(error)
     } else {
         Ok(state)
     }
 }
 
 fn update_appearance_group_styles(
-    groups: [*mut AppearanceGroupSubclassState; 2],
-    resources: Option<&AppearanceResources>,
+    groups: [&Option<Rc<AppearanceGroupSubclassState>>; 2],
+    resources: Option<Rc<AppearanceResources>>,
 ) -> bool {
-    let style = resources.map(|resources| AppearanceGroupStyle {
-        background: resources.dialog_brush(),
-        border: resources.border_brush(),
-        text: resources.palette().text_primary,
-    });
     let mut updated_all = true;
     for group in groups {
-        if !group.is_null() {
-            // SAFETY: each pointer is the callback-owned Box returned at install
-            // time and remains live until its child WM_NCDESTROY. Dialog state is
-            // UI-thread confined and updates it without sending a window message.
-            unsafe { (*group).style = style };
+        if let Some(group) = group.as_ref().filter(|group| !group.retired.get()) {
+            let replacement = resources.as_ref().map(|resources| AppearanceGroupStyle {
+                resources: Rc::clone(resources),
+                text: resources.palette().text_primary,
+            });
+            // Drop the displaced GDI owner after the RefCell borrow ends.
+            let previous = group.style.replace(replacement);
+            drop(previous);
         } else {
             updated_all = false;
         }
     }
     updated_all
+}
+
+fn remove_appearance_group_subclass(window: HWND) -> bool {
+    #[cfg(test)]
+    if FORCE_GROUP_SUBCLASS_REMOVAL_FAILURE.with(|forced| forced.replace(false)) {
+        return false;
+    }
+    // SAFETY: this removes only the exact callback/id installed on this child.
+    unsafe {
+        RemoveWindowSubclass(
+            window,
+            Some(appearance_group_subclass),
+            APPEARANCE_GROUP_SUBCLASS_ID,
+        ) != 0
+    }
 }
 
 unsafe extern "system" fn appearance_group_subclass(
@@ -1100,76 +1129,105 @@ unsafe extern "system" fn appearance_group_subclass(
     _subclass_id: usize,
     state_ref: usize,
 ) -> LRESULT {
-    if message == WM_NCDESTROY {
-        // SAFETY: this exact callback/id pair was installed on window above.
-        unsafe {
-            RemoveWindowSubclass(
-                window,
-                Some(appearance_group_subclass),
-                APPEARANCE_GROUP_SUBCLASS_ID,
-            )
-        };
-        // SAFETY: forward final destruction while the callback state remains live.
-        let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
-        if state_ref != 0 {
-            // SAFETY: WM_NCDESTROY is the single reclamation point for this
-            // Box::into_raw allocation.
-            unsafe {
-                drop(Box::from_raw(
-                    state_ref as *mut AppearanceGroupSubclassState,
-                ))
-            };
-        }
-        return result;
-    }
     if state_ref == 0 {
-        // SAFETY: no callback-owned state exists, so retain native handling.
+        // SAFETY: null refdata cannot be accessed; retain native handling.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
-    // SAFETY: refdata is the live callback-owned allocation until WM_NCDESTROY.
-    let state = unsafe { &*(state_ref as *const AppearanceGroupSubclassState) };
-    match message {
-        WM_ERASEBKGND if state.style.is_some() => 1,
-        WM_PAINT if state.style.is_some() => {
-            let mut paint = PAINTSTRUCT::default();
-            // SAFETY: window is live and paint remains writable until EndPaint.
-            let dc = unsafe { BeginPaint(window, &mut paint) };
-            if !dc.is_null() {
-                paint_appearance_group(window, dc, state);
+    let state_ptr = state_ref as *const AppearanceGroupSubclassState;
+    // SAFETY: the installed callback's refdata owns one Rc share throughout
+    // this entry. This active share survives nested WM_NCDESTROY and removal.
+    let state = unsafe {
+        Rc::increment_strong_count(state_ptr);
+        Rc::from_raw(state_ptr)
+    };
+    if message == WM_NCDESTROY {
+        if state.retired.replace(true) {
+            // SAFETY: an outer destruction already owns removal and retirement.
+            return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        }
+        // Clear the child's shares; active paint snapshots remain owners until
+        // their outer callback returns.
+        let previous_style = state.style.replace(None);
+        drop(previous_style);
+        // A failed detach may retain this state allocation, but must not also
+        // retain a dialog font after the child has stopped using it.
+        let previous_font = state.font.replace(Rc::new(OwnedFont::default()));
+        drop(previous_font);
+        let removed = remove_appearance_group_subclass(window);
+        // SAFETY: the active Rc keeps state live through nested default handling.
+        let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        if removed {
+            // SAFETY: successful removal detaches the publication. Only the
+            // outer first WM_NCDESTROY can release its single Rc share.
+            unsafe { drop(Rc::from_raw(state_ptr)) };
+        }
+        // If removal is uncertain, retain at most this window's one refdata
+        // share rather than leave native callbacks with a dangling pointer.
+        return result;
+    }
+    if state.retired.get() {
+        // SAFETY: the child is already retiring; keep native handling only.
+        return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    }
+    let style = state.style.borrow().clone();
+    let font = Rc::clone(&state.font.borrow());
+    if let Some(style) = style.as_ref() {
+        match message {
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                // SAFETY: window is live and paint remains writable until EndPaint.
+                let dc = unsafe { BeginPaint(window, &mut paint) };
+                if !dc.is_null() && !state.retired.get() {
+                    paint_appearance_group(window, dc, &state, style, &font);
+                }
+                // SAFETY: pair this BeginPaint with its original HWND and PAINTSTRUCT.
+                // After retirement this is best-effort native cleanup, not a claim
+                // that the destroyed HWND remains valid; no drawing depends on it.
+                unsafe { EndPaint(window, &paint) };
+                return 0;
             }
-            // SAFETY: balance the exact BeginPaint call above.
-            unsafe { EndPaint(window, &paint) };
-            0
-        }
-        WM_PRINTCLIENT if state.style.is_some() && wparam != 0 => {
-            paint_appearance_group(window, wparam as HDC, state);
-            1
-        }
-        _ => {
-            // SAFETY: every unowned message is forwarded unchanged exactly once.
-            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+            WM_PRINTCLIENT if wparam != 0 => {
+                paint_appearance_group(window, wparam as HDC, &state, style, &font);
+                return 1;
+            }
+            _ => {}
         }
     }
+    // SAFETY: every unowned message is forwarded unchanged exactly once.
+    unsafe { DefSubclassProc(window, message, wparam, lparam) }
 }
 
-fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclassState) {
-    let Some(style) = state.style else {
+fn paint_appearance_group(
+    window: HWND,
+    dc: HDC,
+    state: &AppearanceGroupSubclassState,
+    style: &AppearanceGroupStyle,
+    font: &OwnedFont,
+) {
+    if state.retired.get() {
         return;
-    };
+    }
     let mut client = RECT::default();
-    // SAFETY: window/DC/brushes are live and client is writable.
+    // SAFETY: the active callback owns the DC and the style retains its brush set.
     unsafe {
         GetClientRect(window, &mut client);
-        FillRect(dc, &client, style.background);
+        FillRect(dc, &client, style.resources.dialog_brush());
     }
     let label = wide(state.label);
-    // SAFETY: the live group box returns its borrowed font handle.
-    let font = unsafe { SendMessageW(window, WM_GETFONT, 0, 0) } as HFONT;
-    let previous = if font.is_null() {
+    // WM_GETFONT can enter a test or control subclass and destroy the child.
+    // The cloned OwnedFont is the dialog's WM_SETFONT object and remains live
+    // even if that borrowed query result is invalidated by nested teardown.
+    // SAFETY: the group is live at entry and the query retains no pointer.
+    let control_font = unsafe { SendMessageW(window, WM_GETFONT, 0, 0) } as HFONT;
+    if state.retired.get() {
+        return;
+    }
+    let previous = if control_font.is_null() || font.as_raw().is_null() {
         null_mut()
     } else {
-        // SAFETY: font remains control-owned for this synchronous paint.
-        unsafe { SelectObject(dc, font) }
+        // SAFETY: this font is owned by the active paint snapshot.
+        unsafe { SelectObject(dc, font.as_raw()) }
     };
     let mut measured = RECT::default();
     // SAFETY: label/DC/measured remain live for this calculation-only draw.
@@ -1190,7 +1248,7 @@ fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclass
     let mut frame = client;
     frame.top = frame.top.saturating_add(text_height / 2);
     // SAFETY: frame/DC/border are live and client-bounded.
-    unsafe { FrameRect(dc, &frame, style.border) };
+    unsafe { FrameRect(dc, &frame, style.resources.border_brush()) };
     let mut label_background = RECT {
         left: client.left.saturating_add(horizontal_padding),
         top: client.top,
@@ -1204,7 +1262,7 @@ fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclass
     label_background.right = label_background.right.min(client.right);
     // SAFETY: label band and palette resources remain live for this paint.
     unsafe {
-        FillRect(dc, &label_background, style.background);
+        FillRect(dc, &label_background, style.resources.dialog_brush());
         SetBkMode(dc, TRANSPARENT as i32);
         SetTextColor(dc, style.text);
     }
@@ -1284,21 +1342,40 @@ fn action_for_command(
 }
 
 fn recreate_font(state: &mut AppearanceDialogWindowState) {
-    let font = create_message_font(state.dpi);
-    if font.is_null() {
+    let raw_font = create_message_font(state.dpi);
+    if raw_font.is_null() {
         return;
     }
-    for control in controls(state) {
-        // SAFETY: every child is live and the font remains state-owned until replaced.
-        unsafe { SendMessageW(control, WM_SETFONT, font as usize, 1) };
+    let mut owned_font = OwnedFont::default();
+    owned_font.replace(raw_font);
+    let font = Rc::new(owned_font);
+    for group in [&state.density_group_state, &state.emphasis_group_state] {
+        if let Some(group) = group.as_ref().filter(|group| !group.retired.get()) {
+            let previous = group.font.replace(Rc::clone(&font));
+            drop(previous);
+        }
     }
-    state.measured = measure_appearance_dialog(window_for_control(state.density_group), font);
-    state.font.replace(font);
-}
-
-fn window_for_control(control: HWND) -> HWND {
-    // SAFETY: control is a live child while dialog state is live.
-    unsafe { GetParent(control) }
+    // Controls still retain the previous HFONT until their WM_SETFONT returns.
+    let previous_font = std::mem::replace(&mut state.font, font);
+    for control in controls(state) {
+        if (control == state.density_group
+            && state
+                .density_group_state
+                .as_ref()
+                .is_some_and(|group| group.retired.get()))
+            || (control == state.emphasis_group
+                && state
+                    .emphasis_group_state
+                    .as_ref()
+                    .is_some_and(|group| group.retired.get()))
+        {
+            continue;
+        }
+        // SAFETY: every child is live and the font is owned by dialog/group state.
+        unsafe { SendMessageW(control, WM_SETFONT, raw_font as usize, 1) };
+    }
+    state.measured = measure_appearance_dialog(state.viewport, raw_font);
+    drop(previous_font);
 }
 
 fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetrics {
@@ -1889,7 +1966,7 @@ unsafe extern "system" fn appearance_viewport_subclass(
             let mut rect = RECT::default();
             // SAFETY: viewport/DC are live for this synchronous erase callback.
             unsafe { GetClientRect(window, &mut rect) };
-            let brush = state.appearance_resources.as_ref().map_or_else(
+            let brush = state.appearance_resources.as_deref().map_or_else(
                 || {
                     // SAFETY: system color brush is process-global and cached.
                     unsafe { GetSysColorBrush(COLOR_WINDOW) }
@@ -2006,7 +2083,7 @@ unsafe extern "system" fn appearance_dialog_proc(
             // synchronous button custom-draw notification.
             let state = unsafe { &*state_ptr };
             if let Some(result) =
-                draw_custom_button(state.appearance_resources.as_ref(), state.ok, lparam)
+                draw_custom_button(state.appearance_resources.as_deref(), state.ok, lparam)
             {
                 result
             } else {
@@ -2020,7 +2097,7 @@ unsafe extern "system" fn appearance_dialog_proc(
             let mut rect = RECT::default();
             // SAFETY: window/DC are live and rect is writable.
             unsafe { GetClientRect(window, &mut rect) };
-            let brush = state.appearance_resources.as_ref().map_or_else(
+            let brush = state.appearance_resources.as_deref().map_or_else(
                 || {
                     // SAFETY: system brush is process-global and cached.
                     unsafe { GetSysColorBrush(COLOR_WINDOW) }
@@ -2034,7 +2111,7 @@ unsafe extern "system" fn appearance_dialog_proc(
         WM_DRAWITEM if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live and draw payload is synchronous.
             let state = unsafe { &*state_ptr };
-            let resources = state.appearance_resources.as_ref();
+            let resources = state.appearance_resources.as_deref();
             if draw_owner_separator(resources, state.separator, lparam)
                 || draw_owner_button(resources, lparam)
             {
@@ -2213,7 +2290,8 @@ unsafe extern "system" fn appearance_dialog_proc(
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, SetPixel};
+    use std::rc::Weak;
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, InvalidateRect, ReleaseDC, SetPixel};
     use windows_sys::Win32::System::SystemServices::{SS_OWNERDRAW, SS_TYPEMASK};
     use windows_sys::Win32::UI::Controls::{
         CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
@@ -2226,6 +2304,55 @@ mod native_tests {
     };
 
     struct TestWindow(HWND);
+
+    struct GroupDestroyHook {
+        trigger_message: u32,
+        destroy_target: HWND,
+        brush_owner: Weak<AppearanceResources>,
+        font_owner: Option<Weak<OwnedFont>>,
+        destroy_count: Cell<usize>,
+        brush_alive_after_destroy: Cell<bool>,
+        font_alive_after_destroy: Cell<bool>,
+    }
+
+    unsafe extern "system" fn destroy_group_in_nested_callback(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        refdata: usize,
+    ) -> LRESULT {
+        if message == WM_NCDESTROY {
+            // SAFETY: the hook owns this exact test-only registration.
+            unsafe { RemoveWindowSubclass(window, Some(destroy_group_in_nested_callback), 9) };
+            // SAFETY: forward this exact native destruction message.
+            return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        }
+        // SAFETY: refdata points to the live stack fixture until the
+        // synchronous paint and nested destruction callbacks end.
+        let fixture = unsafe { &*(refdata as *const GroupDestroyHook) };
+        if message == fixture.trigger_message && fixture.destroy_count.get() == 0 {
+            fixture
+                .destroy_count
+                .set(fixture.destroy_count.get().saturating_add(1));
+            // SAFETY: this exact test-owned target is live on first entry;
+            // its destruction nests inside the production group paint.
+            unsafe { DestroyWindow(fixture.destroy_target) };
+            fixture
+                .brush_alive_after_destroy
+                .set(fixture.brush_owner.upgrade().is_some());
+            fixture.font_alive_after_destroy.set(
+                fixture
+                    .font_owner
+                    .as_ref()
+                    .is_some_and(|font| font.upgrade().is_some()),
+            );
+            return i32::from(message == WM_ERASEBKGND) as LRESULT;
+        }
+        // SAFETY: unchanged messages continue through the native chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
 
     impl TestWindow {
         const fn raw(&self) -> HWND {
@@ -2412,6 +2539,399 @@ mod native_tests {
     }
 
     #[test]
+    fn group_paint_retains_resources_through_nested_child_destruction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and current module are valid for
+        // this hidden, test-owned top-level owner.
+        let owner = TestWindow(unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        });
+        if owner.raw().is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
+            13,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?);
+        let resources = Rc::new(AppearanceResources::create(GRAPHITE_DARK)?);
+        let weak_resources = Rc::downgrade(&resources);
+        let (group_window, group_weak) = {
+            let mut lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing"))?;
+            let state = lease.state_mut();
+            let group = state
+                .density_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("density group missing"))?;
+            let previous = group.style.replace(Some(AppearanceGroupStyle {
+                resources: Rc::clone(&resources),
+                text: resources.palette().text_primary,
+            }));
+            drop(previous);
+            (state.density_group, Rc::downgrade(group))
+        };
+        drop(resources);
+        let hook = GroupDestroyHook {
+            trigger_message: WM_GETFONT,
+            destroy_target: group_window,
+            brush_owner: weak_resources.clone(),
+            font_owner: None,
+            destroy_count: Cell::new(0),
+            brush_alive_after_destroy: Cell::new(false),
+            font_alive_after_destroy: Cell::new(false),
+        };
+        // SAFETY: group_window is a live dialog child. The stack fixture lives
+        // through its synchronous print and nested WM_NCDESTROY callbacks.
+        // SAFETY: the live child accepts this callback/id and the test fixture
+        // remains allocated until synchronous destruction finishes.
+        let installed = unsafe {
+            SetWindowSubclass(
+                group_window,
+                Some(destroy_group_in_nested_callback),
+                9,
+                (&raw const hook) as usize,
+            )
+        };
+        assert_ne!(installed, 0);
+        // The DC belongs to the parent, so child destruction cannot invalidate
+        // the test's WM_PRINTCLIENT payload or its later ReleaseDC.
+        // SAFETY: dialog is still live and owns this acquired client DC.
+        let dc = unsafe { GetDC(dialog.raw()) };
+        if dc.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: WM_PRINTCLIENT takes this live DC and synchronously triggers
+        // the controlled nested font-query hook on the same live child.
+        let painted = unsafe { SendMessageW(group_window, WM_PRINTCLIENT, dc as WPARAM, 0) };
+        // SAFETY: dc was acquired from the still-live dialog above.
+        unsafe { ReleaseDC(dialog.raw(), dc) };
+        assert_eq!(painted, 1);
+        assert_eq!(hook.destroy_count.get(), 1);
+        assert!(hook.brush_alive_after_destroy.get());
+        assert!(weak_resources.upgrade().is_none());
+        // SAFETY: this copied handle is queried only to confirm destruction.
+        let child_live = unsafe { IsWindow(group_window) };
+        assert_eq!(child_live, 0);
+
+        {
+            let mut lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing after child close"))?;
+            let state = lease.state_mut();
+            let group = state
+                .density_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("density group missing"))?;
+            assert!(group.retired.get());
+            assert!(group.style.borrow().is_none());
+            let replacement = Rc::new(AppearanceResources::create(GRAPHITE_DARK)?);
+            assert!(!update_appearance_group_styles(
+                [&state.density_group_state, &state.emphasis_group_state],
+                Some(replacement),
+            ));
+            apply_dialog_appearance(dialog.raw(), state);
+        }
+        assert!(weak_resources.upgrade().is_none());
+        // SAFETY: dialog is still live and its destruction drops the parent's
+        // final group Rc; the detached native registration holds none.
+        unsafe { DestroyWindow(dialog.raw()) };
+        assert!(group_weak.upgrade().is_none());
+        assert_eq!(hook.destroy_count.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn group_paint_retains_brush_and_font_after_nested_parent_destruction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and module are live for this
+        // test-owned top-level owner.
+        let owner = TestWindow(unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        });
+        if owner.raw().is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
+            16,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?);
+        let resources = Rc::new(AppearanceResources::create(GRAPHITE_DARK)?);
+        let weak_resources = Rc::downgrade(&resources);
+        let (group_window, weak_group, weak_other_group, weak_font) = {
+            let mut lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing"))?;
+            let state = lease.state_mut();
+            let group = state
+                .density_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("density group missing"))?;
+            let previous = group.style.replace(Some(AppearanceGroupStyle {
+                resources: Rc::clone(&resources),
+                text: resources.palette().text_primary,
+            }));
+            drop(previous);
+            (
+                state.density_group,
+                Rc::downgrade(group),
+                Rc::downgrade(
+                    state
+                        .emphasis_group_state
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("emphasis group missing"))?,
+                ),
+                Rc::downgrade(&state.font),
+            )
+        };
+        drop(resources);
+        let hook = GroupDestroyHook {
+            trigger_message: WM_GETFONT,
+            destroy_target: dialog.raw(),
+            brush_owner: weak_resources.clone(),
+            font_owner: Some(weak_font.clone()),
+            destroy_count: Cell::new(0),
+            brush_alive_after_destroy: Cell::new(false),
+            font_alive_after_destroy: Cell::new(false),
+        };
+        // SAFETY: the child and fixture remain live until nested parent
+        // destruction and the outer synchronous print callback finish.
+        let installed = unsafe {
+            SetWindowSubclass(
+                group_window,
+                Some(destroy_group_in_nested_callback),
+                9,
+                (&raw const hook) as usize,
+            )
+        };
+        assert_ne!(installed, 0);
+        // Use the still-live top-level owner DC as the valid print payload;
+        // destroying the dialog cannot invalidate this DC.
+        // SAFETY: owner is live and its acquired DC is released below.
+        let dc = unsafe { GetDC(owner.raw()) };
+        if dc.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: the group is live on entry and the owner DC remains valid
+        // throughout nested dialog/child destruction.
+        let painted = unsafe { SendMessageW(group_window, WM_PRINTCLIENT, dc as WPARAM, 0) };
+        // SAFETY: this exact DC belongs to the still-live owner.
+        unsafe { ReleaseDC(owner.raw(), dc) };
+        assert_eq!(painted, 1);
+        assert_eq!(hook.destroy_count.get(), 1);
+        assert!(hook.brush_alive_after_destroy.get());
+        assert!(hook.font_alive_after_destroy.get());
+        assert!(weak_resources.upgrade().is_none());
+        assert!(weak_font.upgrade().is_none());
+        assert!(weak_group.upgrade().is_none());
+        assert!(weak_other_group.upgrade().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn group_begin_paint_skips_drawing_after_nested_erase_destroys_child()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and module are live for these exact
+        // test-owned windows.
+        let owner = TestWindow(unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        });
+        if owner.raw().is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
+            14,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?);
+        let resources = Rc::new(AppearanceResources::create(GRAPHITE_DARK)?);
+        let weak_resources = Rc::downgrade(&resources);
+        let group_window = {
+            let mut lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing"))?;
+            let state = lease.state_mut();
+            let group = state
+                .emphasis_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("emphasis group missing"))?;
+            let previous = group.style.replace(Some(AppearanceGroupStyle {
+                resources: Rc::clone(&resources),
+                text: resources.palette().text_primary,
+            }));
+            drop(previous);
+            state.emphasis_group
+        };
+        drop(resources);
+        let hook = GroupDestroyHook {
+            trigger_message: WM_ERASEBKGND,
+            destroy_target: group_window,
+            brush_owner: weak_resources.clone(),
+            font_owner: None,
+            destroy_count: Cell::new(0),
+            brush_alive_after_destroy: Cell::new(false),
+            font_alive_after_destroy: Cell::new(false),
+        };
+        // SAFETY: the stack fixture outlives this synchronous paint and its
+        // nested final destruction callback.
+        // SAFETY: the live child accepts this callback/id and the test fixture
+        // remains allocated until synchronous destruction finishes.
+        let installed = unsafe {
+            SetWindowSubclass(
+                group_window,
+                Some(destroy_group_in_nested_callback),
+                9,
+                (&raw const hook) as usize,
+            )
+        };
+        assert_ne!(installed, 0);
+        // SAFETY: the live child gets a real invalid region whose erase is
+        // deferred until BeginPaint, then UpdateWindow delivers native WM_PAINT.
+        let invalidated = unsafe { InvalidateRect(group_window, null(), 1) };
+        assert_ne!(invalidated, 0);
+        // SAFETY: this exact child remains live until the nested erase callback.
+        // UpdateWindow may report failure after the callback destroys its target;
+        // the hook count below proves that WM_PAINT reached BeginPaint.
+        unsafe { UpdateWindow(group_window) };
+        assert_eq!(hook.destroy_count.get(), 1);
+        assert!(hook.brush_alive_after_destroy.get());
+        assert!(weak_resources.upgrade().is_none());
+        // SAFETY: this copied handle is queried only to confirm destruction.
+        let child_live = unsafe { IsWindow(group_window) };
+        assert_eq!(child_live, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn group_failed_detach_retains_only_inert_refdata_until_test_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and module are live for these
+        // test-owned windows.
+        let owner = TestWindow(unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        });
+        if owner.raw().is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
+            15,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?);
+        let resources = Rc::new(AppearanceResources::create(GRAPHITE_DARK)?);
+        let weak_resources = Rc::downgrade(&resources);
+        let (group_window, group_ptr, weak_group, weak_font) = {
+            let mut lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing"))?;
+            let state = lease.state_mut();
+            let group = state
+                .density_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("density group missing"))?;
+            let previous = group.style.replace(Some(AppearanceGroupStyle {
+                resources: Rc::clone(&resources),
+                text: resources.palette().text_primary,
+            }));
+            drop(previous);
+            (
+                state.density_group,
+                Rc::as_ptr(group),
+                Rc::downgrade(group),
+                Rc::downgrade(&state.font),
+            )
+        };
+        drop(resources);
+        FORCE_GROUP_SUBCLASS_REMOVAL_FAILURE.with(|forced| forced.set(true));
+        // SAFETY: this live test-owned child sends WM_NCDESTROY synchronously.
+        let destroyed = unsafe { DestroyWindow(group_window) };
+        assert_ne!(destroyed, 0);
+        assert!(!FORCE_GROUP_SUBCLASS_REMOVAL_FAILURE.with(Cell::get));
+        // SAFETY: this copied handle is queried only to confirm destruction.
+        let child_live = unsafe { IsWindow(group_window) };
+        assert_eq!(child_live, 0);
+        {
+            let lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance state missing after child close"))?;
+            let group = lease
+                .state()
+                .density_group_state
+                .as_ref()
+                .ok_or_else(|| io::Error::other("density group missing after child close"))?;
+            assert!(group.retired.get());
+            assert!(group.style.borrow().is_none());
+            assert!(group.font.borrow().as_raw().is_null());
+            assert_eq!(Rc::strong_count(group), 2);
+        }
+        assert!(weak_resources.upgrade().is_none());
+        drop(dialog);
+        assert!(weak_font.upgrade().is_none());
+        assert!(weak_group.upgrade().is_some());
+        // SAFETY: the test forced an unsuccessful removal, but the exact native
+        // child is now fully destroyed and cannot dispatch the retained refdata.
+        unsafe { drop(Rc::from_raw(group_ptr)) };
+        assert!(weak_group.upgrade().is_none());
+        Ok(())
+    }
+
+    #[test]
     fn appearance_focus_scroll_keeps_dark_footer_background()
     -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: null requests the current process module. The system STATIC
@@ -2454,7 +2974,8 @@ mod native_tests {
                 // required by apply_dialog_appearance. Install the same owned
                 // production brush set so this callback-paint regression stays
                 // runnable there; native Windows reaches this state normally.
-                state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+                state.appearance_resources =
+                    Some(Rc::new(AppearanceResources::create(GRAPHITE_DARK)?));
             }
             (
                 state.viewport,
@@ -2677,7 +3198,7 @@ mod native_tests {
         };
         let state_lease = try_appearance_dialog_state(dialog)
             .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
-        let resources = state_lease.state().appearance_resources.as_ref();
+        let resources = state_lease.state().appearance_resources.as_deref();
         assert!(!draw_owner_separator(
             resources,
             null_mut(),
@@ -2741,7 +3262,7 @@ mod native_tests {
         unsafe { GetClientRect(ok, &mut custom.rc) };
         let state_lease = try_appearance_dialog_state(dialog)
             .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
-        let resources = state_lease.state().appearance_resources.as_ref();
+        let resources = state_lease.state().appearance_resources.as_deref();
         assert_eq!(
             draw_custom_button(
                 resources,
