@@ -65,6 +65,22 @@ class FakeNativeRunner:
 
 
 class CampaignRunnerTests(unittest.TestCase):
+    def test_cli_profile_defaults_to_v2_and_retains_explicit_v1(self) -> None:
+        parser = runner.argument_parser(REPOSITORY)
+        self.assertEqual(parser.get_default("profile"),
+                         REPOSITORY / "config" / "vm-automated-v2.json")
+        selected = parser.parse_args([
+            "--profile", str(REPOSITORY / "config" / "vm-automated-v1.json"),
+            "--connection-profile", "connection.json", "--output-root", "output",
+            "--archive", "archive.zip", "--backend-root", "backend",
+            "--candidate-handoff-root", "handoff", "--candidate-source-root", "source",
+            "--candidate-run-metadata", "run.json", "--candidate-artifact-metadata", "artifact.json",
+            "--candidate-source-sha", CANDIDATE_SHA, "--candidate-workflow-run", "10",
+            "--candidate-run-attempt", "2", "--candidate-artifact-id", "30",
+            "--candidate-executable-sha256", "a" * 64,
+        ])
+        self.assertEqual(selected.profile, REPOSITORY / "config" / "vm-automated-v1.json")
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

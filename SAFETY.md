@@ -334,9 +334,11 @@ manual acceptance evidence bound to the tested source SHA and storage setup.
 ## VM-Automated release validation
 
 Release validation uses automated source checks, Windows backend tests, and
-candidate-bound Windows VM observations under an explicitly selected
+candidate-bound Windows VM observations under a selected
 [`config/vm-automated-v1.json`](config/vm-automated-v1.json) or
-[`config/vm-automated-v2.json`](config/vm-automated-v2.json) profile. The v1
+[`config/vm-automated-v2.json`](config/vm-automated-v2.json) profile. Local and
+hosted validation entrypoints default to v2; historical v1 evidence requires an
+explicit v1 selection. The v1
 strict contract and its historical failures retain their original meaning. V2
 is the separate owned-resources contract described below. Human input
 and visual review are not required pass conditions and cannot substitute for

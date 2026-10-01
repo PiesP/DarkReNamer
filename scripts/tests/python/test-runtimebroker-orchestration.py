@@ -32,6 +32,7 @@ class DiagnosticTests(unittest.TestCase):
         self.args = SimpleNamespace(
             ssh_host='configured-vm', candidate_mode=True, desktop_mode='rdp',
             task_kind='ui', acceptance_mode='current-dpi', expected_vm_id=self.plan['vm_id'],
+            acceptance_profile_id=diagnostic.launcher.V1_PROFILE_ID,
             candidate_source_sha=diagnostic.PRODUCT_SHA,
             candidate_executable_sha256=diagnostic.PRODUCT_EXE_SHA256,
             test_timeout_seconds=300, acceptance_high_contrast=False,
@@ -58,6 +59,26 @@ class DiagnosticTests(unittest.TestCase):
         data = diagnostic.document_bytes(self.plan)
         path.write_bytes(data)
         return path, hashlib.sha256(data).hexdigest()
+
+    def test_historical_plan_pins_v1_without_rewriting_arguments(self):
+        attempt = self.plan['attempts'][0]
+        for supplied in ([], ['--acceptance-profile-id=' + diagnostic.launcher.V1_PROFILE_ID]):
+            attempt['launcher_arguments'] = list(supplied)
+            with mock.patch.object(diagnostic.launcher, 'parse_arguments', return_value=self.args) as parse:
+                self.assertEqual(diagnostic.workload_arguments(attempt, self.plan).acceptance_profile_id,
+                                 diagnostic.launcher.V1_PROFILE_ID)
+                forwarded = parse.call_args.args[0]
+                self.assertEqual(forwarded, supplied or [
+                    '--acceptance-profile-id', diagnostic.launcher.V1_PROFILE_ID])
+            self.assertEqual(attempt['launcher_arguments'], supplied)
+
+    def test_historical_diagnostic_rejects_explicit_v2(self):
+        self.plan['attempts'][0]['launcher_arguments'] = [
+            '--acceptance-profile-id', diagnostic.launcher.V2_PROFILE_ID]
+        self.args.acceptance_profile_id = diagnostic.launcher.V2_PROFILE_ID
+        with mock.patch.object(diagnostic.launcher, 'parse_arguments', return_value=self.args):
+            with self.assertRaisesRegex(ValueError, 'strict v1'):
+                diagnostic.workload_arguments(self.plan['attempts'][0], self.plan)
 
     def test_frozen_plan_rejects_digest_change_and_duplicate_properties(self):
         path, digest = self.save_plan()
