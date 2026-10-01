@@ -20,26 +20,21 @@ run. Screenshots remained external and were bound by filename, dimensions,
 digest, UI or scenario target, appearance, surface, and the same executable
 digest.
 
-The machine-readable field contract remains
-[`config/schemas/windows-acceptance-evidence.schema.json`](../../config/schemas/windows-acceptance-evidence.schema.json).
-The historical tools remain available for interpreting existing evidence:
+The standalone draft generator, benchmark importer, evidence validator, release
+acceptance validator, their four dedicated suites, visual fixture and schema
+were retired from the active tree. Reproduce them from immutable pre-retirement
+commit [`c6c81b742f1490759de811202813aa0f2551f198`](https://github.com/PiesP/DarkReNamer/tree/c6c81b742f1490759de811202813aa0f2551f198),
+using that revision's `DEVELOPMENT.md` and `scripts/test-tooling.ps1 -Scope Historical`.
+They require PowerShell 7.4 or newer and Git; binary/handoff validation also needs
+the original source-bound executable, handoff and private external evidence.
+Physical-media and desktop procedures require their actual Windows environment.
+Use each artifact's recorded source revision for its original tool/schema
+contract; the pre-retirement revision is a reproduction entrypoint, not a claim
+that old evidence belongs to that source.
 
-- [`scripts/new-windows-acceptance-draft.ps1`](../../scripts/new-windows-acceptance-draft.ps1)
-  creates a new path-free draft from a local executable or validated Actions
-  handoff. It does not observe a host or establish coverage.
-- [`scripts/validate-windows-acceptance-evidence.ps1`](../../scripts/validate-windows-acceptance-evidence.ps1)
-  validates structure, bindings, privacy fields, unique targets, and draft or
-  formal-gate semantics with PowerShell 7.4 or newer.
-- [`scripts/validate-release-acceptance.ps1`](../../scripts/validate-release-acceptance.ps1)
-  cross-checks historical formal evidence and external PNGs against an exact
-  downloaded Actions handoff.
-
-Their tests run through `scripts/test-tooling.ps1 -Scope Historical`. GUI
-regression and Wine gallery tests use `-Scope Diagnostics`. Both are explicit
-selections outside the default current tooling gate; see
-[Tooling tests](../../DEVELOPMENT.md#tooling-tests) for filters and result reports.
-Use each historical evidence artifact's recorded source commit to interpret
-the tool and schema contract that produced it.
+Current campaign observers, v1/v2 profiles and independent verification remain
+active. GUI regression and Wine gallery tests remain opt-in with
+`-Scope Diagnostics`; see [Tooling tests](../../DEVELOPMENT.md#tooling-tests).
 
 Evidence files, screenshots, traces, benchmark roots, operator or machine
 identities, local paths, volume serials, and detailed narratives remain outside
@@ -129,8 +124,8 @@ began could indicate cleanup failure and was unusable. The skip estimate never
 established behavioral parity or waived the separate physical SSD and HDD
 evidence needed for a production optimization decision.
 
-`scripts/add-windows-acceptance-benchmark.ps1` imported exactly five private,
-source-bound logs and a path-free `benchmark-context.json` into a new draft. It
+The retired `scripts/add-windows-acceptance-benchmark.ps1` imported exactly five
+private, source-bound logs and a path-free `benchmark-context.json` into a new draft. It
 never edited evidence in place or overwrote the output. Inputs and output parents
 had to remain external, private, and free of reparse points.
 

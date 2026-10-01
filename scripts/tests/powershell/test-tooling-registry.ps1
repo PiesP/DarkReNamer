@@ -50,7 +50,7 @@ function New-RegistryFixture {
     $null = New-Item -ItemType Directory -Path $scripts,$config
     Copy-Item -LiteralPath $suitePath -Destination (Join-Path $scripts 'test-tooling.ps1')
     $null = New-Item -ItemType Directory -Path (Join-Path $scripts 'tests/support')
-    Set-Content -LiteralPath (Join-Path $scripts 'tests/support/visual-evidence-fixture.ps1') -Value '# fixture helper'
+    Set-Content -LiteralPath (Join-Path $scripts 'tests/support/fixture-helper.ps1') -Value '# fixture helper'
     Set-Content -LiteralPath (Join-Path $scripts 'tests/support/windows-binary-fixture.ps1') -Value '# support fixture'
     Set-Content -LiteralPath (Join-Path $scripts 'test-windows-vm.py') -Value '# VM CLI'
     foreach ($item in $Files.GetEnumerator()) {
@@ -411,7 +411,7 @@ print('Python subprocess ran')
         -Fragment 'scripts/test-windows-vm.py'
 
     $fixtureHelperRoot = New-RegistryFixture `
-        -Entries @((New-TestEntry -Id 'fixture-helper' -Path 'scripts/tests/support/visual-evidence-fixture.ps1')) `
+        -Entries @((New-TestEntry -Id 'fixture-helper' -Path 'scripts/tests/support/fixture-helper.ps1')) `
         -Files @{}
     $roots.Add($fixtureHelperRoot)
     Assert-FailsWith -Result (Invoke-RegistryFixture -Root $fixtureHelperRoot -Arguments @('-List')) `
