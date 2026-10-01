@@ -281,13 +281,18 @@ module declaration in `src/lib.rs`, the two Windows rename adapter declarations
 in `src/rename/mod.rs`, and the native backend integration-test crate. Code
 outside those boundaries must remain safe Rust.
 
-`unsafe_source_inventory_matches_the_reviewed_budget` in
-`tests/unsafe_policy.rs` enforces exact per-file lexical budgets. Those budgets
-are review caps rather than evidence of soundness: additions fail, and removals
-must lower the corresponding budget in the same reviewed change. Every modified
-exception still requires a local `SAFETY` justification and must pass the
-Windows Clippy gate while `undocumented_unsafe_blocks` and
-`unsafe_op_in_unsafe_fn` remain denied.
+`unsafe_source_inventory_stays_within_reviewed_native_boundaries` in
+`tests/unsafe_policy.rs` restricts unsafe constructs to explicitly reviewed
+locations and construct kinds. Unlisted locations, unsafe implementations,
+unsafe traits, unsafe attributes and mutable statics fail the gate. Lexical
+counts are diagnostic, not evidence of soundness; reducing allowed unsafe usage
+does not require a synchronized count table. Every modified exception, including
+additions within an allowed location, still requires native-boundary review and
+a local `SAFETY` justification. The Windows Clippy gate keeps
+`undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` denied.
+
+The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
+It does not measure a compiled executable's PE import table.
 
 The native UI exceptions exist where Win32 handle, message, drawing, theme, and
 subclass APIs cannot be expressed through the safe bindings. Those call sites
