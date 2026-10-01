@@ -28,11 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
-        run: >-
-          rustup toolchain install 1.97.1
-          --profile minimal
-          --component rustfmt
-          --component clippy
+        run: rustup toolchain install
 
       - name: Enforce the Rust-only source tree
         shell: bash
@@ -74,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install
 
       - name: Run workspace tests
         run: cargo test --workspace --all-targets --all-features --locked
@@ -90,14 +86,14 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install
 
       - name: Restore pinned Rust security tools
         id: security-tools-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/darkrenamer-security-tools
-          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-audit-0.22.2-deny-0.20.2
+          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2
 
       - name: Install pinned Rust security tools
         if: steps.security-tools-cache.outputs.cache-hit != 'true'
@@ -145,10 +141,7 @@ jobs:
 
       - name: Install pinned Rust toolchain
         shell: pwsh
-        run: >-
-          rustup toolchain install 1.97.1
-          --profile minimal
-          --component clippy
+        run: rustup toolchain install
 
       - name: Validate Windows tests and lints
         shell: pwsh
