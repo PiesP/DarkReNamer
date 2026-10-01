@@ -325,6 +325,23 @@ once. It retains only a final component bounded by
 `MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`. Native API failures remain typed planning
 blockers.
 
+Native rename and single-entry directory query buffers use explicit `repr(C)`
+records with complete bounded UTF-16 array fields. Compile-time checks compare
+their field offsets and alignment with the pinned SDK records and prove backing
+capacity for the exact bytes passed to the OS. Appending storage after an SDK
+one-element array would still require raw pointer arithmetic and would not make
+an extended slice of that Rust field valid. Rename copies into its real array
+after rejecting empty, NUL-containing or over-limit leaves; no-replacement flags
+and the retained source/parent handles remain unchanged. Directory output is
+initialized on every call, validates returned bytes and complete bounded name
+lengths, and rejects a next-entry offset in single-entry mode before slicing.
+Unpaired surrogates remain exact UTF-16 units. NtSetInformationFile and
+NtQueryDirectoryFile are retained because path-based alternatives do not preserve
+identity-bound no-replacement operations and retained-directory enumeration.
+Each synchronous call borrows live handles and an aligned, sufficiently large
+record only until return; cancellation and aggregate admission budgets still
+apply independently of buffer representation.
+
 Rust toolchain or Windows binding upgrades, and every release-candidate review,
 must re-evaluate whether safe `Default`, RAII ownership, typed COM wrappers, or
 typed native APIs can replace any remaining exception before accepting the
