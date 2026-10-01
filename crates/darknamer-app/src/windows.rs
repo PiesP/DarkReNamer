@@ -51,7 +51,9 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
     Win32WindowHandle, WindowHandle,
 };
-use windows_sys::core::{GUID, HRESULT, IID_IUnknown};
+#[cfg(test)]
+use windows_sys::core::GUID;
+use windows_sys::core::HRESULT;
 
 mod appearance;
 mod appearance_dialog;
@@ -153,9 +155,10 @@ use text_io::{
     TEXT_EXPORT_CLEANUP_WARNING_TITLE, compare_windows, legacy_path, path_wide, read_legacy_text,
     text_export_cleanup_warning_korean, wide, write_legacy_text_to_target,
 };
+#[cfg(test)]
+use windows_sys::Win32::Foundation::E_NOINTERFACE;
 use windows_sys::Win32::Foundation::{
-    E_FAIL, E_NOINTERFACE, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, POINTL, RECT, S_OK,
-    SYSTEMTIME, WPARAM,
+    E_FAIL, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, RECT, S_OK, SYSTEMTIME, WPARAM,
 };
 use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 #[cfg(test)]
@@ -179,17 +182,16 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
-use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
+use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
+#[cfg(test)]
+use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(test)]
 use windows_sys::Win32::System::Memory::{
     MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     VirtualProtect,
 };
-use windows_sys::Win32::System::Ole::{
-    CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize, RegisterDragDrop, ReleaseStgMedium,
-    RevokeDragDrop,
-};
+use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize};
 #[cfg(test)]
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
