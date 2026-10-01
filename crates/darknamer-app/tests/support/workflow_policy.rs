@@ -818,19 +818,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ],
         &["cargo build", "cargo test", "rustup toolchain install"],
     )?;
-    let recompute = promotion_script
-        .find("run-vm-automated-hosted.ps1")
-        .ok_or_else(|| "promotion must recompute automated VM evidence".to_owned())?;
-    let verify = promotion_script
-        .find("validate-vm-automated-authority.py validation-run")
-        .ok_or_else(|| "promotion must verify validation authority".to_owned())?;
-    let publish = promotion_script
-        .find("gh release create")
-        .ok_or_else(|| "promotion must retain its publication step".to_owned())?;
-    require(
-        recompute < verify && verify < publish,
-        "promotion publication must remain unreachable before recomputation and authority verification",
-    )?;
+    // Executable promotion ordering is checked by the PowerShell AST suite.
+    // Keep YAML structure, authority and release-binding checks here.
 
     let validation_path = ".github/workflows/vm-acceptance.yaml";
     let validation = parse(

@@ -243,7 +243,14 @@ foreach ($entry in @(
     if(@(Copy-DrControllerV2TaskBaseline -Baseline @()).Count -ne 0){
         throw 'Empty task baseline became a synthetic record.'
     }
-    Assert-Fails {Copy-DrControllerV2TaskBaseline -Baseline @($null)} 'because it is null'
+    # Parameter binding errors are localized; require the stable null-rejection ID.
+    $nullRejected = $false
+    try { Copy-DrControllerV2TaskBaseline -Baseline @($null) }
+    catch {
+        if ($_.FullyQualifiedErrorId -cne 'ParameterArgumentValidationErrorNullNotAllowed,Copy-DrControllerV2TaskBaseline') { throw }
+        $nullRejected = $true
+    }
+    if (-not $nullRejected) { throw 'A null task baseline passed parameter validation.' }
 }
 
 # Preserve known empty/single inventories across the actual remoting serializer.

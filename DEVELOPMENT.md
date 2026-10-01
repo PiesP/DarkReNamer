@@ -42,6 +42,25 @@ RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-feat
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 ```
 
+## Routine maintenance workflow
+
+1. During edits, run focused Cargo tests or existing tooling selections with
+   `-Id` or `-Category`; use `-List` to inspect the selection. Keep external
+   `-ResultPath` reports when failure preservation or timings matter.
+2. Complete the host-appropriate gate above and merge through the existing
+   required `pr-gate/quality`, `pr-gate/unit`, `pr-gate/windows` and
+   `pr-gate/security` checks. Use `-Scope All` when runner, shared loaders,
+   fixtures or shared contracts affect the remaining registered suites.
+3. For release acceptance, freeze one source and immutable candidate, execute
+   the source-bound VM campaign below, then independently verify it through the
+   existing hosted path. Maintenance CI is not a fresh candidate verdict;
+   promotion and publication require separate authorization.
+4. Run RuntimeBroker, standalone GUI, Wine/gallery or optimization diagnostics
+   only for a concrete investigation, using their existing bounded utilities
+   and opt-in scopes. Ambient OS activity alone does not mandate diagnosis or
+   create a release requirement. Preserve failures and inspect their evidence
+   before a corrective change justifies another workload.
+
 ## Tooling tests
 
 `scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.

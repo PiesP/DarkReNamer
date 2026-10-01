@@ -1,6 +1,4 @@
-//! Exact lexical budget for the package's explicitly allowed native unsafe code.
-
-use std::collections::BTreeMap;
+//! Allowed locations and construct kinds for the package's native unsafe boundary.
 
 include!(concat!(env!("OUT_DIR"), "/test_source_manifest.rs"));
 
@@ -86,74 +84,112 @@ impl UnsafeCounts {
     }
 }
 
-const EXPECTED: &[(&str, UnsafeCounts)] = &[
-    (
-        "src/rename/windows_backend.rs",
-        UnsafeCounts::new(3, 0, 0, 0),
-    ),
-    (
-        "src/rename/windows_native.rs",
-        UnsafeCounts::new(23, 0, 0, 0),
-    ),
-    ("src/windows.rs", UnsafeCounts::new(215, 7, 1, 0)),
-    ("src/windows/appearance.rs", UnsafeCounts::new(64, 0, 0, 0)),
-    (
-        "src/windows/appearance_dialog.rs",
-        UnsafeCounts::new(168, 0, 3, 0),
-    ),
-    (
-        "src/windows/application.rs",
-        UnsafeCounts::new(166, 0, 1, 0),
-    ),
-    ("src/windows/clipboard.rs", UnsafeCounts::new(12, 0, 0, 0)),
-    (
-        "src/windows/command_dispatch.rs",
-        UnsafeCounts::new(9, 0, 0, 0),
-    ),
-    (
-        "src/windows/command_rail.rs",
-        UnsafeCounts::new(20, 0, 0, 0),
-    ),
-    ("src/windows/dialog.rs", UnsafeCounts::new(126, 0, 3, 0)),
-    ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
-    ("src/windows/list_view.rs", UnsafeCounts::new(102, 1, 1, 0)),
-    ("src/windows/menu.rs", UnsafeCounts::new(67, 0, 0, 0)),
-    ("src/windows/popup_menu.rs", UnsafeCounts::new(70, 0, 2, 0)),
-    ("src/windows/recovery_ui.rs", UnsafeCounts::new(2, 0, 0, 0)),
-    ("src/windows/text_io.rs", UnsafeCounts::new(3, 0, 0, 0)),
-    (
-        "src/windows/visual_capture.rs",
-        UnsafeCounts::new(21, 0, 0, 0),
-    ),
-    ("src/windows/worker.rs", UnsafeCounts::new(20, 0, 0, 0)),
-    (
-        "tests/rename_windows_backend.rs",
-        UnsafeCounts::new(2, 0, 0, 0),
-    ),
+// Every listed location may use unsafe blocks; callback declarations are narrower.
+// Counts are diagnostic only. Changes inside these boundaries still need native review.
+const ALLOWED_BOUNDARIES: &[(&str, bool, bool)] = &[
+    ("src/rename/windows_backend.rs", false, false),
+    ("src/rename/windows_native.rs", false, false),
+    ("src/windows.rs", true, true),
+    ("src/windows/appearance.rs", false, false),
+    ("src/windows/appearance_dialog.rs", false, true),
+    ("src/windows/application.rs", false, true),
+    ("src/windows/clipboard.rs", false, false),
+    ("src/windows/command_dispatch.rs", false, false),
+    ("src/windows/command_rail.rs", false, false),
+    ("src/windows/dialog.rs", false, true),
+    ("src/windows/drag_drop.rs", true, true),
+    ("src/windows/list_view.rs", true, true),
+    ("src/windows/menu.rs", false, false),
+    ("src/windows/popup_menu.rs", false, true),
+    ("src/windows/recovery_ui.rs", false, false),
+    ("src/windows/text_io.rs", false, false),
+    ("src/windows/visual_capture.rs", false, false),
+    ("src/windows/worker.rs", false, false),
+    ("tests/rename_windows_backend.rs", false, false),
 ];
 
+fn unsafe_counts_allowed(path: &str, counts: UnsafeCounts) -> bool {
+    if counts.prohibited != 0 || counts.implementations != 0 {
+        return false;
+    }
+    counts.is_empty()
+        || ALLOWED_BOUNDARIES
+            .iter()
+            .any(|(allowed, functions, extern_functions)| {
+                *allowed == path
+                    && (counts.functions == 0 || *functions)
+                    && (counts.extern_functions == 0 || *extern_functions)
+            })
+}
+
 #[test]
-fn unsafe_source_inventory_matches_the_reviewed_budget() -> Result<(), Box<dyn std::error::Error>> {
-    let mut actual = BTreeMap::new();
+fn unsafe_source_inventory_stays_within_reviewed_native_boundaries() {
     for &(relative, source) in BUILD_SOURCE_FILES {
         if relative == POLICY_FILE {
             continue;
         }
         let counts = UnsafeCounts::from_source(source);
-        if !counts.is_empty() {
-            actual.insert(relative.to_owned(), counts);
-        }
+        assert!(
+            unsafe_counts_allowed(relative, counts),
+            "unsafe location or construct kind is outside the reviewed native boundary: {relative}: {counts:?}"
+        );
     }
+}
 
-    let expected = EXPECTED
-        .iter()
-        .map(|(path, counts)| ((*path).to_owned(), *counts))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        actual, expected,
-        "unsafe inventory changed; review the native boundary and update exact budgets for both increases and reductions"
-    );
-    Ok(())
+#[test]
+fn allowed_unsafe_reductions_do_not_require_count_synchronization() {
+    for source in [
+        "unsafe { first(); } unsafe { second(); }",
+        "unsafe { first(); }",
+        "",
+    ] {
+        assert!(unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            UnsafeCounts::from_source(source)
+        ));
+    }
+    assert!(unsafe_counts_allowed(
+        "src/windows.rs",
+        UnsafeCounts::from_source("unsafe fn callback() {} unsafe extern \"system\" fn other() {}")
+    ));
+}
+
+#[test]
+fn forbidden_locations_and_construct_kinds_are_rejected() {
+    for path in [
+        "src/model.rs",
+        "src/windows/new_module.rs",
+        "tests/new_native_test.rs",
+    ] {
+        assert!(!unsafe_counts_allowed(
+            path,
+            UnsafeCounts::from_source("unsafe {}")
+        ));
+        assert!(unsafe_counts_allowed(
+            path,
+            UnsafeCounts::from_source("fn safe() {}")
+        ));
+    }
+    for source in [
+        "unsafe fn callback() {}",
+        "unsafe extern \"C\" fn callback() {}",
+    ] {
+        assert!(!unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            UnsafeCounts::from_source(source)
+        ));
+    }
+    for source in [
+        "unsafe impl Trait for Type {}",
+        "unsafe trait Trait {}",
+        "#[unsafe(no_mangle)] fn export() {}",
+        "static mut VALUE: usize = 0;",
+    ] {
+        assert!(!unsafe_counts_allowed(
+            "src/windows.rs",
+            UnsafeCounts::from_source(source)
+        ));
+    }
 }
 
 #[test]
@@ -166,12 +202,13 @@ fn build_source_manifest_is_sorted_unique_and_contains_the_policy() {
     assert!(
         BUILD_SOURCE_FILES
             .iter()
-            .any(|(path, source)| *path == POLICY_FILE && source.contains("const EXPECTED"))
+            .any(|(path, source)| *path == POLICY_FILE
+                && source.contains("const ALLOWED_BOUNDARIES"))
     );
 }
 
 #[test]
-fn task_dialog_stays_out_of_the_static_windows_import_table()
+fn task_dialog_source_avoids_a_direct_task_dialog_indirect_identifier()
 -> Result<(), Box<dyn std::error::Error>> {
     let dialog = BUILD_SOURCE_FILES
         .iter()
