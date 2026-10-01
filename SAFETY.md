@@ -294,6 +294,36 @@ a local `SAFETY` justification. The Windows Clippy gate keeps
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.
 
+The following bounded design dispositions retain existing behavior:
+
+- **CallbackState / CallbackStateLease: retain the current protocol.** A sole
+  UI-thread lease rejects nested borrowing; destruction removes publication and
+  defers exactly one reclamation until that lease ends. Retirement and color
+  sidecars remain disjoint from the leased value. An Rc-backed owner with
+  RefCell::try_borrow_mut could replace borrowing/reclamation internals, but must
+  also retain a strong owner before callback dispatch, remove publication before
+  destruction, and keep sidecars independently accessible during a value borrow.
+  RefCell alone does not keep a destroyed window's allocation alive. A UI-thread
+  registry would additionally require explicit registration/removal and generation
+  checks for reused HWNDs; an HWND alone is not a lifetime token. Either approach
+  needs a separate state-lifetime change covering nested callbacks, modal owners,
+  unpublished windows and final sidecar reclamation. The existing lease regression
+  cases remain the current contract; COM ownership cleanup does not replace it.
+- **System popup discovery/subclassing: retain current appearance.** The code
+  customizes native popup cascade markers using bounded same-thread discovery,
+  exact subclass identity/generation checks and resource-specific cleanup. Removing
+  it would change visible behavior. Its current appearance benefit is retained;
+  any simplification needs a separate maintainer decision, not an unsafe cleanup.
+- **TaskDialog dynamic loading: retain the no-direct-import contract.** System32
+  loading observes the activation context and holds the module through every call.
+  The checked union conversion relies on the exact exported ABI; transmute does
+  not improve that proof. Direct import or a loading dependency requires a separate
+  compatibility-policy change.
+- **Windows text and message operations: retain native semantics.** Windows
+  comparison/code-page behavior, exact UTF-16 handling and native messages and
+  callbacks have no established behavior-equivalent safe replacement here.
+  One-line wrappers hiding unsafe tokens would leave their obligations unchanged.
+
 The native UI exceptions exist where Win32 handle, message, drawing, theme, and
 subclass APIs cannot be expressed through the safe bindings. Those call sites
 must validate window and object ownership, use owned snapshots instead of live
