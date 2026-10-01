@@ -1080,6 +1080,21 @@ mod tests {
         fake.revoke_during_get = Some(registration);
         fake.drop_observer = Some(Arc::clone(&observer));
         let mut effect = DROPEFFECT(DROP_EFFECT_COPY);
+        // Complete the normal DragEnter negotiation before Drop; without it
+        // Drop correctly rejects the unnegotiated provider before GetData.
+        // SAFETY: registration owns the live interface, and the borrowed fake
+        // provider and effect storage remain valid for this synchronous call.
+        unsafe {
+            ((*vtable).DragEnter)(
+                raw,
+                fake.interface(),
+                MODIFIERKEYS_FLAGS(0),
+                ComPoint::default(),
+                &mut effect,
+            )
+        }
+        .ok()?;
+        assert_eq!(effect.0, DROP_EFFECT_COPY);
         // SAFETY: OLE holds the registered target on entry. The provider is
         // live throughout this synchronous generated-vtable callback.
         let status = unsafe {
@@ -1095,6 +1110,7 @@ mod tests {
         assert_eq!(effect.0, DROP_EFFECT_NONE);
         assert_eq!(fake.observed_drops_after_revoke.load(Ordering::Acquire), 0);
         assert_eq!(observer.load(Ordering::Acquire), 1);
+        assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
         assert!(fake.revoke_during_get.is_none());
         assert!(fake.global.is_null());
         // SAFETY: ReleaseStgMedium has consumed the transferred HGLOBAL once.
