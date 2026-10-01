@@ -276,11 +276,16 @@ pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPi
                 SRCCOPY | CAPTUREBLT,
             )
         };
+        // Capture the copy error before ReleaseDC can overwrite the thread's
+        // last-error value. A successful copy ignores any stale last error.
+        let copy_result = if copied == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
         // SAFETY: window_dc came from this exact live window and is released once.
         unsafe { ReleaseDC(window, window_dc) };
-        if copied == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        copy_result?;
         resources.deselect_bitmap()?;
         pixels = read_pixels(&resources, &mut info, height, pixel_bytes)?;
         colors = distinct_colors(&pixels);
