@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::mem::{offset_of, size_of};
+use std::mem::{align_of, offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -16,9 +16,9 @@ use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_INTERNAL_INFORMATION,
     FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
-    FILE_SYNCHRONOUS_IO_NONALERT, FileIdBothDirectoryInformation, FileInternalInformation,
-    FileRenameInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
-    NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
+    FILE_RENAME_INFORMATION_0, FILE_SYNCHRONOUS_IO_NONALERT, FileIdBothDirectoryInformation,
+    FileInternalInformation, FileRenameInformation, NtCreateFile, NtQueryDirectoryFile,
+    NtQueryInformationFile, NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING,
@@ -1293,6 +1293,131 @@ impl From<io::Error> for DirectoryQueryError {
     }
 }
 
+// Own the complete flexible-array storage as a Rust field. The SDK record's
+// one-element FileName cannot be used to form a longer Rust slice.
+#[repr(C)]
+struct DirectoryNameBuffer {
+    next_entry_offset: u32,
+    file_index: u32,
+    creation_time: i64,
+    last_access_time: i64,
+    last_write_time: i64,
+    change_time: i64,
+    end_of_file: i64,
+    allocation_size: i64,
+    file_attributes: u32,
+    file_name_length: u32,
+    ea_size: u32,
+    short_name_length: i8,
+    short_name: [u16; 12],
+    file_id: i64,
+    file_name: [u16; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS],
+}
+
+impl DirectoryNameBuffer {
+    fn empty() -> Self {
+        Self {
+            next_entry_offset: 0,
+            file_index: 0,
+            creation_time: 0,
+            last_access_time: 0,
+            last_write_time: 0,
+            change_time: 0,
+            end_of_file: 0,
+            allocation_size: 0,
+            file_attributes: 0,
+            file_name_length: 0,
+            ea_size: 0,
+            short_name_length: 0,
+            short_name: [0; 12],
+            file_id: 0,
+            file_name: [0; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS],
+        }
+    }
+
+    fn name(&self, bytes_written: usize) -> io::Result<&[u16]> {
+        if self.next_entry_offset != 0 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let units = validated_directory_name_units(
+            bytes_written,
+            Self::os_bytes(),
+            self.file_name_length,
+            self.file_name.len(),
+        )?;
+        Ok(&self.file_name[..units])
+    }
+
+    const fn os_bytes() -> usize {
+        offset_of!(Self, file_name) + MAX_WINDOWS_LEAF_NAME_UTF16_UNITS * size_of::<u16>()
+    }
+}
+
+const _: () = {
+    assert!(align_of::<DirectoryNameBuffer>() == align_of::<FILE_ID_BOTH_DIR_INFORMATION>());
+    assert!(
+        offset_of!(DirectoryNameBuffer, next_entry_offset)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, NextEntryOffset)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, file_index)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileIndex)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, creation_time)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, CreationTime)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, last_access_time)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, LastAccessTime)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, last_write_time)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, LastWriteTime)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, change_time)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, ChangeTime)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, end_of_file)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, EndOfFile)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, allocation_size)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, AllocationSize)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, file_attributes)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileAttributes)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, file_name_length)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileNameLength)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, ea_size)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, EaSize)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, short_name_length)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, ShortNameLength)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, short_name)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, ShortName)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, file_id)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileId)
+    );
+    assert!(
+        offset_of!(DirectoryNameBuffer, file_name)
+            == offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName)
+    );
+    assert!(DirectoryNameBuffer::os_bytes() <= size_of::<DirectoryNameBuffer>());
+};
+
 pub(crate) fn query_directory_names_cancellable(
     directory: &File,
     limit: usize,
@@ -1300,11 +1425,7 @@ pub(crate) fn query_directory_names_cancellable(
     mut remaining_path_bytes: usize,
     cancellation_requested: &dyn Fn() -> bool,
 ) -> Result<(Vec<Vec<u16>>, bool, bool), DirectoryQueryError> {
-    let name_capacity = 255_usize;
-    let bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName)
-        .checked_add(name_capacity * size_of::<u16>())
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let elements = bytes.div_ceil(size_of::<FILE_ID_BOTH_DIR_INFORMATION>());
+    let bytes = DirectoryNameBuffer::os_bytes();
     let buffer_size =
         u32::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut names = Vec::new();
@@ -1318,8 +1439,9 @@ pub(crate) fn query_directory_names_cancellable(
         .try_reserve(limit.min(maximum_budgeted_names))
         .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
     let mut restart = true;
-    let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
     loop {
+        // Clear each result so short or inconsistent output cannot reuse stale data.
+        let mut buffer = DirectoryNameBuffer::empty();
         if cancellation_requested() {
             return Err(DirectoryQueryError::Cancelled);
         }
@@ -1334,7 +1456,7 @@ pub(crate) fn query_directory_names_cancellable(
                 None,
                 ptr::null(),
                 ptr::from_mut(&mut status_block),
-                buffer.as_mut_ptr().cast(),
+                ptr::from_mut(&mut buffer).cast(),
                 buffer_size,
                 FileIdBothDirectoryInformation,
                 true,
@@ -1356,16 +1478,8 @@ pub(crate) fn query_directory_names_cancellable(
                 i32::try_from(code).unwrap_or(i32::MAX),
             )));
         }
-        let entry = &buffer[0];
-        let name_units = validated_directory_name_units(
-            status_block.Information,
-            bytes,
-            entry.FileNameLength,
-            name_capacity,
-        )?;
-        // SAFETY: FileNameLength was returned for this initialized flexible
-        // array and is bounded by the allocation above.
-        let name = unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_units) };
+        let name = buffer.name(status_block.Information)?;
+        let name_units = name.len();
         if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
             continue;
         }
@@ -1507,38 +1621,71 @@ pub(crate) fn file_identity(file: &File) -> io::Result<NativeIdentity> {
     })
 }
 
+// Keep the SDK union and header ABI, but give the bounded leaf real storage.
+#[repr(C)]
+struct RenameBuffer {
+    flags: FILE_RENAME_INFORMATION_0,
+    root_directory: HANDLE,
+    file_name_length: u32,
+    file_name: [u16; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS],
+}
+
+impl RenameBuffer {
+    fn new(root_directory: HANDLE, leaf: &[u16]) -> io::Result<Self> {
+        if leaf.is_empty() || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS || leaf.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "relative leaf is invalid",
+            ));
+        }
+        let name_bytes = leaf
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let mut buffer = Self {
+            flags: FILE_RENAME_INFORMATION_0 { Flags: 0 },
+            root_directory,
+            file_name_length: name_bytes,
+            file_name: [0; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS],
+        };
+        buffer.file_name[..leaf.len()].copy_from_slice(leaf);
+        Ok(buffer)
+    }
+
+    fn os_bytes(&self) -> io::Result<u32> {
+        offset_of!(Self, file_name)
+            .checked_add(self.file_name_length as usize)
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
+    }
+}
+
+const _: () = {
+    assert!(align_of::<RenameBuffer>() == align_of::<FILE_RENAME_INFORMATION>());
+    assert!(offset_of!(RenameBuffer, flags) == offset_of!(FILE_RENAME_INFORMATION, Anonymous));
+    assert!(
+        offset_of!(RenameBuffer, root_directory)
+            == offset_of!(FILE_RENAME_INFORMATION, RootDirectory)
+    );
+    assert!(
+        offset_of!(RenameBuffer, file_name_length)
+            == offset_of!(FILE_RENAME_INFORMATION, FileNameLength)
+    );
+    assert!(offset_of!(RenameBuffer, file_name) == offset_of!(FILE_RENAME_INFORMATION, FileName));
+    assert!(
+        offset_of!(RenameBuffer, file_name) + MAX_WINDOWS_LEAF_NAME_UTF16_UNITS * size_of::<u16>()
+            <= size_of::<RenameBuffer>()
+    );
+};
+
 pub(crate) fn rename_noreplace(
     source: &File,
     destination_parent: &File,
     destination_leaf: &[u16],
 ) -> io::Result<()> {
-    let name_bytes = destination_leaf
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "leaf is too large"))?;
-    let file_name_length = u32::try_from(name_bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "leaf is too large"))?;
-    let buffer_bytes = offset_of!(FILE_RENAME_INFORMATION, FileName)
-        .checked_add(name_bytes)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename is too large"))?;
-    let buffer_size = u32::try_from(buffer_bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rename is too large"))?;
-    let elements = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFORMATION>());
-    let mut buffer = vec![FILE_RENAME_INFORMATION::default(); elements];
-    buffer[0].Anonymous.Flags = 0;
-    buffer[0].RootDirectory = destination_parent.as_raw_handle();
-    buffer[0].FileNameLength = file_name_length;
-
-    // SAFETY: buffer is aligned for FILE_RENAME_INFO and sized through the
-    // checked flexible-array offset. The UTF-16 leaf fits exactly within it.
-    unsafe {
-        let target = buffer
-            .as_mut_ptr()
-            .cast::<u8>()
-            .add(offset_of!(FILE_RENAME_INFORMATION, FileName))
-            .cast::<u16>();
-        ptr::copy_nonoverlapping(destination_leaf.as_ptr(), target, destination_leaf.len());
-    }
+    let buffer = RenameBuffer::new(destination_parent.as_raw_handle(), destination_leaf)?;
+    let buffer_size = buffer.os_bytes()?;
     let mut status_block = IO_STATUS_BLOCK::default();
     // SAFETY: source and destination-parent handles remain live, buffer fields
     // and size are checked, flags omit replacement, and the native API is synchronous.
@@ -1546,7 +1693,7 @@ pub(crate) fn rename_noreplace(
         NtSetInformationFile(
             source.as_raw_handle(),
             ptr::from_mut(&mut status_block),
-            buffer.as_ptr().cast(),
+            ptr::from_ref(&buffer).cast(),
             buffer_size,
             FileRenameInformation,
         )
@@ -1565,6 +1712,67 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_buffer_bounds_preserve_exact_units_and_os_length() -> io::Result<()> {
+        for leaf in [
+            vec![0xd800],
+            vec![0xdc00; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS],
+        ] {
+            let buffer = RenameBuffer::new(ptr::null_mut(), &leaf)?;
+            assert_eq!(&buffer.file_name[..leaf.len()], leaf);
+            assert_eq!(
+                buffer.file_name_length as usize,
+                leaf.len() * size_of::<u16>()
+            );
+            assert_eq!(
+                buffer.os_bytes()? as usize,
+                offset_of!(FILE_RENAME_INFORMATION, FileName) + leaf.len() * size_of::<u16>()
+            );
+            assert!(buffer.os_bytes()? as usize <= size_of::<RenameBuffer>());
+        }
+        for leaf in [
+            vec![],
+            vec![0],
+            vec![65; MAX_WINDOWS_LEAF_NAME_UTF16_UNITS + 1],
+        ] {
+            assert!(matches!(RenameBuffer::new(ptr::null_mut(), &leaf),
+                Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn directory_buffer_rejects_inconsistent_results_and_preserves_surrogates() -> io::Result<()> {
+        let fixed_bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+        let mut buffer = DirectoryNameBuffer::empty();
+        assert!(buffer.name(0).is_err());
+        for units in [1, MAX_WINDOWS_LEAF_NAME_UTF16_UNITS] {
+            buffer.file_name.fill(0xd800);
+            buffer.file_name_length = (units * size_of::<u16>()) as u32;
+            assert_eq!(
+                buffer.name(fixed_bytes + units * size_of::<u16>())?,
+                vec![0xd800; units]
+            );
+            assert!(
+                buffer
+                    .name(fixed_bytes + units * size_of::<u16>() - 1)
+                    .is_err()
+            );
+        }
+        buffer.file_name_length = 2;
+        buffer.next_entry_offset = 8;
+        assert!(buffer.name(fixed_bytes + 2).is_err());
+        buffer.next_entry_offset = 0;
+        buffer.file_name_length = 3;
+        assert!(buffer.name(fixed_bytes + 3).is_err());
+        buffer.file_name_length =
+            ((MAX_WINDOWS_LEAF_NAME_UTF16_UNITS + 1) * size_of::<u16>()) as u32;
+        assert!(buffer.name(DirectoryNameBuffer::os_bytes()).is_err());
+        buffer.file_name_length = 2;
+        assert!(buffer.name(DirectoryNameBuffer::os_bytes() + 1).is_err());
+        Ok(())
+    }
 
     #[test]
     fn ntfs_file_reference_preserves_the_64_bit_index_number_bit_pattern() {
