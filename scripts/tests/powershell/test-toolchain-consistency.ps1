@@ -9,31 +9,54 @@ $repositoryRoot = Split-Path -Parent $toolingScriptsRoot
 $toolchainText = Get-Content -LiteralPath (Join-Path $repositoryRoot 'rust-toolchain.toml') -Raw
 $cargoText = Get-Content -LiteralPath (Join-Path $repositoryRoot 'Cargo.toml') -Raw
 
-$channelMatch = [regex]::Match($toolchainText, '(?m)^channel\s*=\s*"([^"]+)"\s*$')
+$channelMatches = [regex]::Matches($toolchainText, '(?m)^channel\s*=\s*"([^"]+)"\s*$')
 $rustVersionMatch = [regex]::Match($cargoText, '(?m)^rust-version\s*=\s*"([^"]+)"\s*$')
-if (-not $channelMatch.Success -or -not $rustVersionMatch.Success) {
-    throw 'The pinned toolchain channel and workspace rust-version must both be explicit.'
+if ($channelMatches.Count -ne 1 -or -not $rustVersionMatch.Success) {
+    throw 'The pinned toolchain channel must be unique and workspace rust-version must be explicit.'
 }
 
-$channel = $channelMatch.Groups[1].Value
+$channel = $channelMatches[0].Groups[1].Value
+if ($channel -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "Toolchain channel '$channel' must be an exact stable Rust version."
+}
 if ($rustVersionMatch.Groups[1].Value -cne $channel) {
     throw "Cargo rust-version '$($rustVersionMatch.Groups[1].Value)' differs from toolchain channel '$channel'."
 }
 
+$activeToolchain = (& rustup show active-toolchain 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or
+    $activeToolchain -cnotmatch "^$([regex]::Escape($channel))-[^\s]+\s+\(overridden by .*[\\/]rust-toolchain\.toml'\)$") {
+    throw "rustup did not select the checked-out pinned toolchain: $activeToolchain"
+}
+
 $workflows = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot '.github/workflows') -File -Include '*.yaml', '*.yml'
+$expectedInstallCounts = @{
+    'ci.yaml' = 4
+    'release.yaml' = 1
+    'benchmark-planning.yaml' = 1
+    'binary-size-matrix.yaml' = 1
+    'profile-benchmark-matrix.yaml' = 1
+    'profile-planning-matrix.yaml' = 1
+}
 $installCount = 0
 foreach ($workflow in $workflows) {
     $text = Get-Content -LiteralPath $workflow.FullName -Raw
-    foreach ($match in [regex]::Matches($text, 'rustup\s+toolchain\s+install\s+([^\s\\]+)')) {
+    $installMatches = [regex]::Matches($text, '(?m)\brustup\s+toolchain\s+install\b[^\r\n]*')
+    $expected = if ($expectedInstallCounts.ContainsKey($workflow.Name)) {
+        $expectedInstallCounts[$workflow.Name]
+    } else { 0 }
+    if ($installMatches.Count -ne $expected) {
+        throw "$($workflow.Name) has $($installMatches.Count) Rust installs; expected $expected."
+    }
+    foreach ($match in $installMatches) {
         $installCount++
-        $installed = $match.Groups[1].Value
-        if ($installed -cne $channel) {
-            throw "$($workflow.Name) installs Rust '$installed' instead of pinned channel '$channel'."
+        if ($match.Value -cnotmatch '^rustup toolchain install\s*$') {
+            throw "$($workflow.Name) must install the toolchain selected by rust-toolchain.toml."
         }
     }
 }
-if ($installCount -eq 0) {
-    throw 'No explicit workflow toolchain installation was found.'
+if ($installCount -ne 9) {
+    throw "Expected nine workflow toolchain installations, found $installCount."
 }
 
 Write-Host "Toolchain consistency tests passed for Rust $channel ($installCount workflow installs)."

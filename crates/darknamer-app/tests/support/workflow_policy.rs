@@ -427,7 +427,7 @@ pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
     const PATH: &str = ".github/workflows/ci.yaml";
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
-    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-audit-0.22.2-deny-0.20.2";
+    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2";
 
     let workflow = parse(PATH, include_str!("../../../../.github/workflows/ci.yaml"))?;
     let security = workflow
@@ -455,7 +455,7 @@ pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
             && with_is(cache, "key", CACHE_KEY)
             && !cache.with.contains_key("restore-keys"),
         format!(
-            "{PATH} security tools cache must use the pinned action, exact tools root, and exact version key without restore prefixes"
+            "{PATH} security tools cache must use the pinned action, exact tools root, and toolchain-file-bound key without restore prefixes"
         ),
     )?;
 

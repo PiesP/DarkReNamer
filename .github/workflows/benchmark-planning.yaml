@@ -60,7 +60,7 @@ jobs:
 
       - name: Install pinned Rust toolchain
         shell: pwsh
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install
 
       - name: Measure planning directionally on virtual storage
         shell: pwsh
