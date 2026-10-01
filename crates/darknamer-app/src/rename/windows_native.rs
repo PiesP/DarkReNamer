@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::mem::{align_of, offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use windows_sys::Wdk::Storage::FileSystem::{
     NtQueryInformationFile, NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING,
+    HANDLE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
@@ -259,16 +259,6 @@ pub(crate) const fn token_elevation_is_unsafe(value: u32) -> bool {
     value != 0
 }
 
-struct TokenHandle(HANDLE);
-
-impl Drop for TokenHandle {
-    fn drop(&mut self) {
-        // SAFETY: this guard owns the token handle returned by OpenProcessToken
-        // and closes it exactly once.
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
 /// Returns whether the current process token is elevated.
 ///
 /// # Errors
@@ -282,7 +272,9 @@ pub fn process_is_elevated() -> io::Result<bool> {
     if opened == 0 {
         return Err(io::Error::last_os_error());
     }
-    let token = TokenHandle(token);
+    // SAFETY: successful OpenProcessToken produced one owned real handle.
+    // The GetCurrentProcess pseudo-handle remains borrowed and is never adopted.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut elevation = TOKEN_ELEVATION::default();
     let mut returned = 0_u32;
     let size = u32::try_from(size_of::<TOKEN_ELEVATION>())
@@ -291,7 +283,7 @@ pub fn process_is_elevated() -> io::Result<bool> {
     // writable buffers with the exact checked size for this synchronous query.
     let success = unsafe {
         GetTokenInformation(
-            token.0,
+            token.as_raw_handle(),
             TokenElevation,
             ptr::from_mut(&mut elevation).cast(),
             size,
