@@ -20,9 +20,7 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FileRenameInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
     NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
-use windows_sys::Win32::Foundation::{
-    HANDLE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING,
-};
+use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
