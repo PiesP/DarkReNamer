@@ -1,7 +1,9 @@
 use std::ffi::c_void;
 use std::io;
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
+use std::rc::Rc;
 
 use ::windows::UI::ViewManagement::{UIColorType, UISettings};
 use ::windows::Win32::System::WinRT::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize};
@@ -35,7 +37,11 @@ use super::*;
 use crate::{ButtonMnemonicRendering, button_mnemonic_rendering};
 
 /// Balances a successful WinRT initialization on the native UI thread.
-pub(super) struct WinRtGuard;
+pub(super) struct WinRtGuard {
+    // RoUninitialize must run on the initializing apartment. Only initialize
+    // creates this guard, and Rc makes it neither Send nor Sync.
+    _apartment: PhantomData<Rc<()>>,
+}
 
 impl WinRtGuard {
     pub(super) fn initialize() -> Option<Self> {
@@ -43,7 +49,9 @@ impl WinRtGuard {
         // successful S_OK or S_FALSE result is balanced by this guard's Drop.
         unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }
             .ok()
-            .map(|()| Self)
+            .map(|()| Self {
+                _apartment: PhantomData,
+            })
     }
 }
 

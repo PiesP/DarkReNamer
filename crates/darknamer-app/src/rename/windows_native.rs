@@ -869,32 +869,32 @@ where
                 let target_entry =
                     open_text_export_target_for_replace(parent.file(), &target.leaf, identity)?;
 
-                // SAFETY: all three UTF-16 paths are NUL-terminated and remain
-                // live for this synchronous call; the names are siblings on
-                // the retained NTFS volume, and reserved arguments are null.
-                let replaced = unsafe {
-                    ReplaceFileW(
-                        target_path.as_ptr(),
-                        stage_path.as_ptr(),
-                        backup_path.as_ptr(),
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                    )
-                };
-                drop(target_entry);
-                if replaced == 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+                replace_text_export_with_recovery(
+                    || {
+                        // SAFETY: all three UTF-16 paths are NUL-terminated and remain
+                        // live for this synchronous call; the names are siblings on
+                        // the retained NTFS volume, and reserved arguments are null.
+                        unsafe {
+                            ReplaceFileW(
+                                target_path.as_ptr(),
+                                stage_path.as_ptr(),
+                                backup_path.as_ptr(),
+                                0,
+                                ptr::null(),
+                                ptr::null(),
+                            )
+                        }
+                    },
+                    || drop(target_entry),
+                    || {
                         restore_text_export_backup(
                             parent.file(),
                             &backup_leaf,
                             &target.leaf,
                             identity,
-                        )?;
-                    }
-                    return Err(error);
-                }
+                        )
+                    },
+                )?;
 
                 stage_committed = true;
                 let backup_path = PathBuf::from(std::ffi::OsString::from_wide(
@@ -919,6 +919,33 @@ where
         cleanup_text_export_stage(parent.file(), &stage_leaf, stage_file_reference)?;
     }
     result
+}
+
+fn replace_text_export_with_recovery<F, G, H>(
+    replace: F,
+    release_target_entry: G,
+    restore_backup: H,
+) -> io::Result<()>
+where
+    F: FnOnce() -> i32,
+    G: FnOnce(),
+    H: FnOnce() -> io::Result<()>,
+{
+    let replaced = replace();
+    // GetLastError belongs to the ReplaceFileW call, not handle cleanup.
+    let replacement_error = if replaced == 0 {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+    release_target_entry();
+    if let Some(error) = replacement_error {
+        if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+            restore_backup()?;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn create_text_export_stage(parent: &File) -> io::Result<(Vec<u16>, File)> {
@@ -1704,6 +1731,76 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use windows_sys::Win32::Foundation::SetLastError;
+
+    fn set_last_error_for_test(code: u32) {
+        // SAFETY: SetLastError changes only the calling test thread's error value.
+        unsafe { SetLastError(code) };
+    }
+
+    #[test]
+    fn replace_error_survives_cleanup_and_selects_backup_recovery() {
+        let restored = Cell::new(false);
+        let result = replace_text_export_with_recovery(
+            || {
+                set_last_error_for_test(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as u32);
+                0
+            },
+            || {
+                set_last_error_for_test(5);
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(5));
+            },
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result.err().and_then(|error| error.raw_os_error()),
+            Some(1177)
+        );
+        assert!(restored.get());
+    }
+
+    #[test]
+    fn other_replace_error_survives_cleanup_without_backup_recovery() {
+        let restored = Cell::new(false);
+        let result = replace_text_export_with_recovery(
+            || {
+                set_last_error_for_test(32);
+                0
+            },
+            || set_last_error_for_test(5),
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result.err().and_then(|error| error.raw_os_error()),
+            Some(32)
+        );
+        assert!(!restored.get());
+    }
+
+    #[test]
+    fn successful_replace_ignores_stale_last_error() {
+        let restored = Cell::new(false);
+        let result = replace_text_export_with_recovery(
+            || {
+                set_last_error_for_test(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as u32);
+                1
+            },
+            || set_last_error_for_test(5),
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!restored.get());
+    }
 
     #[test]
     fn rename_buffer_bounds_preserve_exact_units_and_os_length() -> io::Result<()> {
