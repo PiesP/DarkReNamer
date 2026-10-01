@@ -324,6 +324,29 @@ The following bounded design dispositions retain existing behavior:
   callbacks have no established behavior-equivalent safe replacement here.
   One-line wrappers hiding unsafe tokens would leave their obligations unchanged.
 
+OLE drop targets use the pinned `windows` bindings' `IDropTarget` implementation
+and typed `IDataObject` calls. The generated COM implementation owns interface
+layout, QueryInterface and reference counting; this delegation does not prove the
+remaining native crossings safe. Each registration retains an owned interface
+until its exact HWND is revoked, including partial list/overlay registration.
+Every callback holds a local strong reference before provider calls or UI
+dispatch, so reentrant revocation cannot reclaim its implementation mid-call.
+Provider callback arguments remain borrowed, and no application-state lease may
+survive a provider call. `#[implement(IDropTarget, Agile = false)]` disables the
+macro's default IAgileObject and free-threaded marshaler support. The target
+remains confined to its OLE UI apartment; generated interface support must not
+authorize cross-thread UI state access.
+Unlike the former two-interface implementation, the pinned macro also exposes
+its IInspectable metadata identity and library-specific borrowed dynamic-cast
+convention. These are accepted binding-provided introspection, not new
+application operations or marshaling authorization; the app never uses the
+dynamic-cast pseudo-interface. The interface regression test checks canonical
+IUnknown identity and rejects IDataObject, IAgileObject and IMarshal queries.
+Successful GetData output immediately enters a non-Copy medium owner, which
+checks the TYMED discriminant before union access and calls ReleaseStgMedium
+exactly once. Typed COM does not replace that medium contract, bounded UTF-16
+extraction, or state/authorization revalidation after provider-controlled work.
+
 The native UI exceptions exist where Win32 handle, message, drawing, theme, and
 subclass APIs cannot be expressed through the safe bindings. Those call sites
 must validate window and object ownership, use owned snapshots instead of live
@@ -354,6 +377,23 @@ exact checked writable slice, bounds each allocation by
 once. It retains only a final component bounded by
 `MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`. Native API failures remain typed planning
 blockers.
+
+Native rename and single-entry directory query buffers use explicit `repr(C)`
+records with complete bounded UTF-16 array fields. Compile-time checks compare
+their field offsets and alignment with the pinned SDK records and prove backing
+capacity for the exact bytes passed to the OS. Appending storage after an SDK
+one-element array would still require raw pointer arithmetic and would not make
+an extended slice of that Rust field valid. Rename copies into its real array
+after rejecting empty, NUL-containing or over-limit leaves; no-replacement flags
+and the retained source/parent handles remain unchanged. Directory output is
+initialized on every call, validates returned bytes and complete bounded name
+lengths, and rejects a next-entry offset in single-entry mode before slicing.
+Unpaired surrogates remain exact UTF-16 units. NtSetInformationFile and
+NtQueryDirectoryFile are retained because path-based alternatives do not preserve
+identity-bound no-replacement operations and retained-directory enumeration.
+Each synchronous call borrows live handles and an aligned, sufficiently large
+record only until return; cancellation and aggregate admission budgets still
+apply independently of buffer representation.
 
 Rust toolchain or Windows binding upgrades, and every release-candidate review,
 must re-evaluate whether safe `Default`, RAII ownership, typed COM wrappers, or
