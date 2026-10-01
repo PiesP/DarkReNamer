@@ -242,6 +242,34 @@ mod tests {
     }
 
     #[test]
+    fn close_failure_after_transfer_preserves_published_memory() -> io::Result<()> {
+        let memory = PreparedClipboardMemory::allocate(4)?;
+        let raw = memory.allocation;
+        let mut publication_calls = 0;
+        let result = publish_prepared_clipboard_data(
+            || Ok(memory),
+            |memory| {
+                memory.transfer(|published| {
+                    assert_eq!(published, raw);
+                    publication_calls += 1;
+                    Ok(())
+                })?;
+                // Model CloseClipboard failing after SetClipboardData succeeded.
+                Err(io::Error::from_raw_os_error(5))
+            },
+        );
+
+        assert_eq!(result.err().and_then(|error| error.raw_os_error()), Some(5));
+        assert_eq!(publication_calls, 1);
+        // SAFETY: successful transfer left this fake publisher owning the block,
+        // even though the subsequent session-close error escaped publication.
+        assert!(unsafe { GlobalSize(raw) } >= 4);
+        // SAFETY: only the fake publisher owns and frees the transferred block.
+        assert!(unsafe { GlobalFree(raw) }.is_null());
+        Ok(())
+    }
+
+    #[test]
     fn failed_publication_frees_memory_and_success_relinquishes_it() -> io::Result<()> {
         let failed = PreparedClipboardMemory::allocate(4)?;
         let failed_raw = failed.allocation;
