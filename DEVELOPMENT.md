@@ -55,9 +55,10 @@ record in the same change.
 
 The default `Current` scope covers current runtime, release and evidence contracts.
 `Diagnostics` contains targeted GUI regression and Wine gallery tooling;
-`Historical` contains the former Windows acceptance tool chain. The latter scopes
-are opt-in and remain registered. Use `All` when changing the runner or shared
-code that affects every scope. List the current platform's selection or run a
+`Historical` remains a supported selection for historical reproduction, but the
+obsolete standalone acceptance chain has been retired and has no current entries.
+Diagnostics are opt-in and remain registered. Use `All` when changing the runner
+or shared code that affects every scope. List the current platform's selection or run a
 focused scope/category:
 
 ```powershell
@@ -86,8 +87,9 @@ The current scope includes shared PNG/connection tests and a real evidence CLI
 subprocess smoke test on Ubuntu and Windows. The smoke test uses synthetic
 archives to check successful canonical output, incomplete-campaign rejection,
 exit codes and private extraction cleanup; it does not execute a VM campaign.
-Historical acceptance evidence uses
-`config/schemas/windows-acceptance-evidence.schema.json`.
+The retired standalone acceptance tools and their schema are available only at
+the immutable revision linked in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md).
 
 ## Authenticated tooling modules
 
@@ -410,9 +412,10 @@ available for interpreting historical evidence and targeted diagnostics; they
 do not replace the current VM-Automated campaign above or establish a release
 verdict.
 
-The historical acceptance and GUI/Wine tooling tests use the explicit scopes
-described in [Tooling tests](#tooling-tests). Keep the Wine gallery as a diagnostic
-fallback only when the prepared VM cannot perform the required check.
+GUI/Wine tooling tests use the explicit diagnostic scope described in
+[Tooling tests](#tooling-tests). Historical standalone tests are retired;
+reproduce them from the linked pre-retirement revision. Keep the Wine gallery as
+a diagnostic fallback only when the prepared VM cannot perform the required check.
 
 The planning benchmark and binary/profile matrix workflows are manually dispatched
 experiments. Use the representative planning measurement when investigating the
