@@ -222,13 +222,14 @@ mod tests {
     }
     #[test]
     fn prepared_memory_checks_capacity_and_preserves_exact_utf16() -> io::Result<()> {
-        let units = [65, 0xd800, 0xdc00, 0];
+        // Separate the high/low surrogate so both remain unpaired.
+        let units = [65, 0xd800, 66, 0xdc00, 0];
         let memory = prepare_clipboard_allocation(
             &units,
             PreparedClipboardMemory::allocate,
             PreparedClipboardMemory::populate,
         )?;
-        assert!(memory.populate(&[65; 5]).is_err());
+        assert!(memory.populate(&[65; 6]).is_err());
         // SAFETY: the owner keeps this populated allocation live and unlocked.
         let locked = unsafe { GlobalLock(memory.allocation) } as *const u16;
         assert!(!locked.is_null());
