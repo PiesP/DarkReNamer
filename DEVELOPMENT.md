@@ -55,8 +55,9 @@ record in the same change.
 
 The default `Current` scope covers current runtime, release and evidence contracts.
 `Diagnostics` contains targeted GUI regression and Wine gallery tooling;
-`Historical` remains a supported selection for historical reproduction, but the
-obsolete standalone acceptance chain has been retired and has no current entries.
+`Historical` remains a recognized scope for old registries, but the retired
+standalone chain has no current entries; selecting it here fails with no matches.
+Reproduce historical tests from the pre-retirement checkout linked below.
 Diagnostics are opt-in and remain registered. Use `All` when changing the runner
 or shared code that affects every scope. List the current platform's selection or run a
 focused scope/category:
@@ -66,7 +67,6 @@ focused scope/category:
 ./scripts/test-tooling.ps1 -Category release
 ./scripts/test-tooling.ps1 -Id tooling-registry,tooling-bootstrap
 ./scripts/test-tooling.ps1 -Scope Diagnostics
-./scripts/test-tooling.ps1 -Scope Historical
 ./scripts/test-tooling.ps1 -Scope All -ResultPath /absolute/external/tooling-results.json
 ```
 
