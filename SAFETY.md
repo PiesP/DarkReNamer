@@ -81,8 +81,14 @@ selected file identity and link count are checked after staging. Since Windows
 permits a same-user rename while the retained leaf handle is open, the final
 path is reopened and checked against the selected identity immediately before
 `ReplaceFileW`; that name-based call still has a narrow same-user race after
-the recheck. A missing leaf is committed with an exclusive, handle-relative
-no-replace rename, so a later occupant is never overwritten.
+the recheck. A failed replacement's last-error is captured into an owned error
+immediately after the native return, before releasing the retained target entry.
+Only that saved code selects the existing identity-checked, no-replace backup
+restoration for error 1177; handle cleanup cannot change the recovery decision.
+A successful replacement ignores stale last-error and retains the existing
+committed-with-cleanup-warning outcome. A missing leaf is committed with an
+exclusive, handle-relative no-replace rename, so a later occupant is never
+overwritten.
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 The multi-select file picker extracts only the remaining source capacity plus
@@ -347,6 +353,23 @@ checks the TYMED discriminant before union access and calls ReleaseStgMedium
 exactly once. Typed COM does not replace that medium contract, bounded UTF-16
 extraction, or state/authorization revalidation after provider-controlled work.
 
+The secure text-save and recovery-export-folder event sinks also use
+`#[implement(IFileDialogEvents, Agile = false)]`. Their owner HWND and
+`Rc<RefCell<_>>` selection state belong to the initialized UI apartment. The
+dialog registration and local owned interface keep each sink alive through
+modal dispatch; the registration is removed before normal local release.
+Callback interface parameters stay borrowed. Disabling automatic IAgileObject
+and IMarshal support removes the unsupported free-threaded contract; it does
+not forbid every correctly marshaled COM use. It grants no permission to move
+raw interfaces or access UI selection state across threads.
+
+`WinRtGuard` is created only after successful `RoInitialize` and carries a
+private `PhantomData<Rc<()>>` marker, preventing safe transfer or sharing across
+threads. Its resource-specific destructor balances initialization on the UI
+apartment after the WinRT queries finish. The existing module-private OLE guard
+remains local to its initialization and UI run scope; broader guard redesign is
+deferred because no wrong-thread use was identified in those call sites.
+
 The native UI exceptions exist where Win32 handle, message, drawing, theme, and
 subclass APIs cannot be expressed through the safe bindings. Those call sites
 must validate window and object ownership, use owned snapshots instead of live
@@ -355,6 +378,28 @@ dispatch, and restore borrowed drawing state and locally owned GDI resources.
 Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
+
+Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
+owns each group state, and subclass refdata owns one separate strong share.
+Each callback acquires an active strong share before dispatch. Short `RefCell`
+borrows copy strong palette/font owners before `BeginPaint` or `WM_GETFONT`;
+no interior borrow survives a native call. Those owners retain the GDI resources
+through nested style refresh or destruction, rather than copying raw handles.
+Child `WM_NCDESTROY` marks its exact state retired once and clears its resource
+shares. Paint rechecks that retirement after reentrant dispatch and skips further
+drawing with a destroyed child or its paint DC. Each `BeginPaint` is paired
+with `EndPaint` using its original HWND and PAINTSTRUCT; a nested destruction
+does not establish that the HWND remains valid or that native cleanup succeeds.
+No subsequent drawing depends on that cleanup. Parent style updates skip
+retired state through their owned share and never dereference an independently
+freed child allocation. The teardown attempts to remove the exact subclass
+before forwarding final destruction and releases its publication share only
+after confirmed removal. If removal is uncertain, at most one inert refdata
+share per child is retained; its cleared
+palette/font shares cannot retain the dialog's drawing resources. Installation
+failure releases the unregistered share, while partial parent creation retains
+registered shares until child teardown. The global callback protocol and popup
+ownership remain unchanged.
 
 Modal input/details prompts keep one caller-owned `CallbackState<PromptState>`
 allocation until all synchronous callbacks return. Each state-reading callback
