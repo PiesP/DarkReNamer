@@ -678,7 +678,8 @@ class Fixture:
                                  32773 if scene == "selected-inactive" else 1000],
                 "focused_uia": None,
                 "selection": {"count": 1 if selected_name else 0, "name": selected_name},
-                "selected_row_cell": current_cell if scene.startswith("selected-") else None,
+                "selected_row_cell": ({**current_cell, "keyboard_focusable": scene == "selected-active"}
+                                      if scene.startswith("selected-") else None),
                 "proposed_name": proposal_name, "proposed_cell": proposal,
                 "current_name_cell": (control("current-0", names[0], 260 - 900, 140, 900, 24,
                                                native_handle=2001) if proposal_name else None),
@@ -1594,11 +1595,36 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     evidence.validate_focused_pair_results(changed)
 
     def test_pair_has_66_bound_captures_and_distinct_verdict(self):
+        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
+        scenes = raw["assertions"]["scenario"]["scenes"]
+        self.assertIs(scenes["selected-active"][0]["state"]["selected_row_cell"]["keyboard_focusable"], True)
+        self.assertIs(scenes["selected-inactive"][0]["state"]["selected_row_cell"]["keyboard_focusable"], False)
         result = self.validate()
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "dark-tracking-and-intersection-validated")
         self.assertEqual(set(result["raster_regions"]),
                          set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking", "same_glyph"})
+
+    def test_pair_selection_cell_identity_and_geometry_stay_bound_across_focus(self):
+        for field, expected in (("bounds", "native row geometry"),
+                                ("name", "native row geometry"),
+                                ("keyboard_focusable", "focusability is invalid")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                for step in raw["assertions"]["scenario"]["scenes"]["selected-inactive"]:
+                    cell = step["state"]["selected_row_cell"]
+                    if field == "bounds":
+                        cell["bounds"]["x"] += 1
+                    elif field == "name":
+                        cell["name"] += "-other"
+                    else:
+                        cell["keyboard_focusable"] = "false"
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
 
     def test_pair_preference_and_tooltip_changes_rejected(self):
         for key, value, expected in (

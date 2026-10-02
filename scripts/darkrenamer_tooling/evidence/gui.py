@@ -1477,6 +1477,8 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 require(isinstance(selected_cell, dict) and selected_cell.get("offscreen") is False and
                         isinstance(selected_cell.get("bounds"), dict),
                         f"Appearance {scene} selected cell is missing.")
+                require(type(selected_cell.get("keyboard_focusable")) is bool,
+                        f"Appearance {scene} selected cell focusability is invalid.")
             else:
                 require(selected_cell is None, f"Appearance {scene} unexpectedly claims a selected cell.")
             if scene in {"collision", "warning"}:
@@ -1729,8 +1731,12 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 "Appearance selection capture geometry changed.")
         active_state = active_step["state"]
         inactive_state = inactive_step["state"]
+        active_cell = active_state["selected_row_cell"]
+        inactive_cell = inactive_state["selected_row_cell"]
+        # UIA focusability may follow the intentional native focus transition.
         require(typed_equal(active_state["selection"], inactive_state["selection"]) and
-                typed_equal(active_state["selected_row_cell"], inactive_state["selected_row_cell"]),
+                typed_equal({key: value for key, value in active_cell.items() if key != "keyboard_focusable"},
+                            {key: value for key, value in inactive_cell.items() if key != "keyboard_focusable"}),
                 "Appearance active/inactive selection changed native row geometry.")
         selected_bounds = active_state["selected_row_cell"]["bounds"]
         window = active_state["window"]["rect"]
