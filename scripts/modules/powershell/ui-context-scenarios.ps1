@@ -1130,6 +1130,86 @@ function Save-ObserverAppearanceCapture {
     $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $capture -Appearance $Appearance -Surface $Surface))
     $capture
 }
+function Invoke-ObserverAppearanceScrollProbe {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][string] $EvidenceRoot, [Parameter(Mandatory)][string] $Phase,
+        [Parameter(Mandatory)][string] $Appearance, [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures)
+    Assert-AutomationBinding -Element $Grid.element -Process $Application.process -ExpectedSession $SessionId -Label 'appearance scrollbar list' -RequireWindowHandle
+    $window = [IntPtr]$Grid.element.Current.NativeWindowHandle
+    $scrollObject = $null
+    if (-not $Grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+        throw 'Appearance scrollbar probe lacks native scrolling.'
+    }
+    $scrollPattern = [Windows.Automation.ScrollPattern]$scrollObject
+    $axes = [ordered]@{}
+    foreach ($axis in 0..1) {
+        $axisName = if ($axis -eq 0) { 'horizontal' } else { 'vertical' }
+        $scrollPattern.SetScrollPercent(0.0, 0.0)
+        $Grid.element.SetFocus()
+        [void](Assert-ObserverAppearanceNoTooltip -Application $Application)
+        $bar = [DarkReNamerVmAcceptanceNative]::ReadScrollBarComponents($window, $axis)
+        $length = if ($axis -eq 0) { $bar[2] - $bar[0] } else { $bar[3] - $bar[1] }
+        if ($bar.Count -ne 13 -or ($bar[7] -band 0x18000) -ne 0 -or $bar[4] -lt 1 -or
+            $bar[5] -lt $bar[4] -or $bar[6] -le $bar[5] -or $bar[6] -gt $length - $bar[4]) {
+            throw 'Appearance scrollbar probe has invalid native thumb geometry.'
+        }
+        $point = [DarkReNamerVmAcceptanceNative+Point]::new()
+        $point.X = if ($axis -eq 0) { $bar[0] + [int][Math]::Floor(($bar[5] + $bar[6]) / 2.0) } else { [int][Math]::Floor(($bar[0] + $bar[2]) / 2.0) }
+        $point.Y = if ($axis -eq 1) { $bar[1] + [int][Math]::Floor(($bar[5] + $bar[6]) / 2.0) } else { [int][Math]::Floor(($bar[1] + $bar[3]) / 2.0) }
+        $hit = [DarkReNamerVmAcceptanceNative]::WindowFromPoint($point)
+        $pidObserved = [uint32]0
+        $thread = [DarkReNamerVmNative]::GetWindowThreadProcessId($hit, [ref]$pidObserved)
+        $root = [DarkReNamerVmAcceptanceNative]::GetAncestor($hit, 2)
+        if ($hit -ne $window -or $thread -eq 0 -or $pidObserved -ne $Application.process.Id -or
+            $root -ne [IntPtr]$Application.main_handle -or
+            [DarkReNamerVmNative]::GetForegroundWindow() -ne $root) {
+            throw 'Appearance scrollbar thumb is obscured or belongs to a different window.'
+        }
+        $initial = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($window, $axis))
+        $steps = [Collections.Generic.List[object]]::new()
+        try {
+            [DarkReNamerVmAcceptanceNative]::MoveCursor($point.X, $point.Y)
+            Start-Sleep -Milliseconds 150
+            [DarkReNamerVmAcceptanceNative]::PressLeftButton()
+            foreach ($stage in @('held', 'moving', 'released')) {
+                if ($stage -eq 'moving') {
+                    $delta = [Math]::Max(8, [int][Math]::Floor(($length - 2 * $bar[4] - ($bar[6] - $bar[5])) / 3.0))
+                    $moveX = if ($axis -eq 0) { $point.X + $delta } else { $point.X }
+                    $moveY = if ($axis -eq 1) { $point.Y + $delta } else { $point.Y }
+                    [DarkReNamerVmAcceptanceNative]::MoveCursor($moveX, $moveY)
+                }
+                elseif ($stage -eq 'released') { [DarkReNamerVmAcceptanceNative]::ReleaseLeftButton() }
+                Start-Sleep -Milliseconds 200
+                $gui = @([DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$Application.main_handle, [uint32]$Application.process.Id))
+                if (($stage -ne 'released' -and $gui[1] -ne $window.ToInt64()) -or
+                    ($stage -eq 'released' -and $gui[1] -ne 0)) {
+                    throw "Appearance scrollbar $stage capture state differs from native tracking."
+                }
+                $steps.Add([ordered]@{
+                    stage = $stage; native_gui = $gui
+                    components = @([DarkReNamerVmAcceptanceNative]::ReadScrollBarComponents($window, $axis))
+                    scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($window, $axis))
+                    capture = Save-ObserverAppearanceCapture -Application $Application -Window $Application.main -EvidenceRoot $EvidenceRoot -Leaf "appearance-scroll-$axisName-$stage-$Phase.png" -Appearance $Appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+                })
+            }
+            if ($steps[2].scroll[3] -le $initial[3]) { throw 'Appearance native thumb drag did not scroll the list.' }
+        }
+        finally {
+            [DarkReNamerVmAcceptanceNative]::ReleaseLeftButton()
+            Start-Sleep -Milliseconds 150
+            $scrollPattern.SetScrollPercent(0.0, 0.0)
+            [void](Assert-ObserverAppearanceNoTooltip -Application $Application)
+        }
+        $axes[$axisName] = [ordered]@{
+            list_hwnd = $window.ToInt64(); target = [ordered]@{ x = $point.X; y = $point.Y; hit_window = $hit.ToInt64(); root_window = $root.ToInt64() }
+            initial_scroll = $initial; steps = $steps.ToArray()
+            restored_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($window, $axis))
+        }
+        if ($axes[$axisName].restored_scroll[3] -ne $initial[3]) { throw 'Appearance scrollbar viewport was not restored.' }
+    }
+    $axes
+}
 function Invoke-ObserverAppearancePairScenario {
     param(
         [Parameter(Mandatory)][object] $Verified,
@@ -1263,9 +1343,13 @@ function Invoke-ObserverAppearancePairScenario {
                     ([Windows.Automation.ScrollPattern]$scrollObject).SetScrollPercent(0.0, [Windows.Automation.ScrollPattern]::NoScroll)
                 }
                 if ($scene -eq 'selected-inactive') {
-                    [void](Move-RailFocusToCommand -Process $application.process -ExpectedSession $SessionId -AutomationId '32773')
+                    $focusButton = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                        -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) `
+                        -TimeoutSeconds $WaitSeconds -Label 'appearance inactive-selection focus target' -RequireEnabled -RequireWindowHandle
+                    $focusButton.SetFocus()
                 }
                 else { $grid.element.SetFocus() }
+                Start-Sleep -Milliseconds 150
                 $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance settled list focus'
                 $expectedFocus = if ($scene -eq 'selected-inactive') { '32773' } else { '1000' }
                 # UIA may report a focused ListItem after row selection. Bind
@@ -1273,7 +1357,7 @@ function Invoke-ObserverAppearancePairScenario {
                 $nativeFocus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$application.main_handle, [uint32]$application.process.Id)
                 if ([string]$nativeFocus[2] -cne $expectedFocus -or
                     ($scene -ne 'selected-inactive' -and $nativeFocus[0] -ne $listHandle.ToInt64()) -or
-                    ($scene -eq 'selected-inactive' -and $nativeFocus[0] -ne $focused.Current.NativeWindowHandle)) {
+                    ($scene -eq 'selected-inactive' -and $nativeFocus[0] -ne $focusButton.Current.NativeWindowHandle)) {
                     throw "Appearance $scene native focus did not settle: control=$($nativeFocus[2]), UIA=$($focused.Current.AutomationId)."
                 }
                 $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
@@ -1462,10 +1546,12 @@ function Invoke-ObserverAppearancePairScenario {
             if ((Get-ObserverPublicApplyState -Application $application -SessionId $SessionId -Label 'appearance prompt Cancel Apply').enabled) {
                 throw 'Appearance canceled prompt enabled Apply.'
             }
+            $scrollbars = Invoke-ObserverAppearanceScrollProbe -Application $application -Grid $grid -EvidenceRoot $EvidenceRoot -Phase $step -Appearance $appearance -SessionId $SessionId -Captures $Captures
             $preferenceHash = Assert-ObserverAppearanceColumnPreference -Path $columnPreference.path -ExpectedBytes $columnPreferenceBytes
             $interactions.Add([ordered]@{
                 phase = $step; appearance = $appearance; buttons = $buttons
                 native_menu = $menu; advanced_appearance = $advanced; input_prompt = $promptState
+                scrollbars = $scrollbars
                 column_preference_sha256 = $preferenceHash
                 selected = Get-ObserverAppearanceSelection -Grid $grid
                 appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId

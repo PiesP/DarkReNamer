@@ -444,7 +444,7 @@ external output directory. The observer has a 600-second timeout and the
 collected output is capped at 120 MiB. The immutable run input records the
 existing `vm-automated-v1-win11-ntfs` cleanup profile used by this diagnostic.
 
-The diagnostic retains 48 original guest desktop PNGs. Eight main states
+The diagnostic retains 66 original guest desktop PNGs. Eight main states
 (empty, one unchanged multilingual row, overflow, changed proposal, empty-stem
 warning, collision, active selection, and inactive selection) each run
 Light → Dark → Light in one process. Five button states (normal, disabled,
@@ -465,6 +465,13 @@ verifying its process and native class, with the dismissal count recorded; a
 still-visible overlay rejects capture. Interaction captures intentionally retain
 their target state. Dialog
 Cancel and appearance-setting rollback are checked without applying file changes.
+
+Both native scrollbar thumbs are pressed, moved, and released in each theme phase.
+The observer binds the hit HWND and native mouse capture to the list, records
+`SCROLLBARINFO` components and `SCROLLINFO`, verifies that dragging advances the
+viewport, and restores the initial position in `finally`. The additional 18
+original PNGs and bounded bar luminance observations are diagnostic evidence;
+tracking capture alone does not establish scrollbar color conformance.
 
 The independent verifier checks source/EXE/environment bindings, exact capture
 inventory, state invariance, proposed-name semantic pixels, selection transitions,

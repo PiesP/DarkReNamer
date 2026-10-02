@@ -29,6 +29,8 @@ PAIR_RUN_ID = "appearance-pair-light-dark-light"
 PAIR_SCENES = ("empty", "unchanged", "overflow", "changed", "collision", "warning",
                "selected-active", "selected-inactive")
 PAIR_PHASES = ("light-before", "dark", "light-after")
+PAIR_SCROLL_AXES = ("horizontal", "vertical")
+PAIR_SCROLL_STAGES = ("held", "moving", "released")
 PAIR_BUTTON_STATES = ("normal", "disabled", "hover", "pressed", "keyboard-focus")
 PAIR_MODAL_SURFACES = {"native-menu": "native-menu", "advanced": "advanced-appearance",
                        "input-prompt": "input-prompt"}
@@ -41,6 +43,8 @@ def pair_capture_specs() -> dict[str, str]:
            for scene in PAIR_SCENES for phase in PAIR_PHASES},
         **{f"appearance-button-{state}-{phase}.png": "main-workbench"
            for state in PAIR_BUTTON_STATES for phase in PAIR_PHASES},
+        **{f"appearance-scroll-{axis}-{stage}-{phase}.png": "main-workbench"
+           for axis in PAIR_SCROLL_AXES for stage in PAIR_SCROLL_STAGES for phase in PAIR_PHASES},
         **{f"appearance-{kind}-{phase}.png": surface
            for kind, surface in PAIR_MODAL_SURFACES.items() for phase in PAIR_PHASES},
     }
@@ -1673,6 +1677,59 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                             default.get("automation_id") == "1" and default.get("enabled") is True and
                             entry.get("default_button_id") == 1,
                             "Appearance prompt label or native default button differs.")
+        scrollbars = interaction.get("scrollbars")
+        require(isinstance(scrollbars, dict) and set(scrollbars) == set(PAIR_SCROLL_AXES),
+                "Appearance scrollbar axis observations are incomplete.")
+        for axis in PAIR_SCROLL_AXES:
+            entry = scrollbars[axis]
+            require(isinstance(entry, dict) and type(entry.get("list_hwnd")) is int and
+                    entry["list_hwnd"] == scenes["overflow"][0]["state"]["native_focus"][0],
+                    "Appearance scrollbar list identity differs.")
+            target = entry.get("target", {})
+            require(target.get("hit_window") == entry["list_hwnd"] and
+                    target.get("root_window") == actual["target"]["hwnd"] and
+                    all(type(target.get(key)) is int for key in ("x", "y")),
+                    "Appearance scrollbar hit target differs.")
+            initial, restored = entry.get("initial_scroll"), entry.get("restored_scroll")
+            require(all(isinstance(value, list) and len(value) == 5 and
+                        all(type(item) is int for item in value) for value in (initial, restored)) and
+                    typed_equal(initial[:4], restored[:4]) and initial[3] == 0,
+                    "Appearance scrollbar initial viewport was not restored.")
+            steps = entry.get("steps")
+            require(isinstance(steps, list) and len(steps) == 3 and
+                    [step.get("stage") for step in steps if isinstance(step, dict)] == list(PAIR_SCROLL_STAGES),
+                    "Appearance scrollbar tracking stages are incomplete.")
+            for step in steps:
+                stage = step["stage"]
+                gui, bar, scroll = step.get("native_gui"), step.get("components"), step.get("scroll")
+                require(isinstance(gui, list) and len(gui) == 3 and
+                        all(type(item) is int for item in gui) and gui[0] == entry["list_hwnd"] and
+                        gui[1] == (0 if stage == "released" else entry["list_hwnd"]) and gui[2] == 1000,
+                        "Appearance scrollbar native capture state differs.")
+                require(isinstance(bar, list) and len(bar) == 13 and
+                        all(type(item) is int for item in bar) and not (bar[7] & 0x18000),
+                        "Appearance scrollbar component observation differs.")
+                length = bar[2] - bar[0] if axis == "horizontal" else bar[3] - bar[1]
+                require(bar[0] < bar[2] and bar[1] < bar[3] and bar[4] >= 1 and
+                        bar[4] <= bar[5] < bar[6] <= length - bar[4],
+                        "Appearance scrollbar thumb geometry differs.")
+                require(isinstance(scroll, list) and len(scroll) == 5 and
+                        all(type(item) is int for item in scroll) and typed_equal(scroll[:3], initial[:3]) and
+                        (stage != "released" or scroll[3] > initial[3]),
+                        "Appearance scrollbar native drag did not advance the viewport.")
+                if stage == "held":
+                    require(bar[0] <= target["x"] < bar[2] and bar[1] <= target["y"] < bar[3] and
+                            bar[5] <= (target["x"] - bar[0] if axis == "horizontal" else target["y"] - bar[1]) < bar[6],
+                            "Appearance scrollbar press missed the native thumb.")
+                name = f"appearance-scroll-{axis}-{stage}-{phase}.png"
+                width, height, rgba = capture_pixels(step.get("capture"), name, appearance, "main-workbench")
+                require((width, height) == (window["width"], window["height"]),
+                        "Appearance scrollbar capture dimensions differ.")
+                rect = {"left": bar[0] - window["left"], "top": bar[1] - window["top"],
+                        "right": bar[2] - window["left"], "bottom": bar[3] - window["top"]}
+                diagnostics.setdefault("scrollbar_tracking", []).append({
+                    "phase": phase, "axis": axis, "stage": stage, "components": bar,
+                    "scroll": scroll, "bar_luma": pair_region_luma(rgba, width, height, rect, f"{axis}-{stage}")})
         diagnostics.setdefault("interactions", []).append({"phase": phase, "buttons": list(buttons)})
     return diagnostics
 

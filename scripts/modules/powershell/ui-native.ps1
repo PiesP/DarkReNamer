@@ -985,6 +985,20 @@ public static class DarkReNamerVmAcceptanceNative {
             info.ThumbTop, info.ThumbBottom, checked((int)info.States[0]) };
     }
 
+    public static int[] ReadScrollBarComponents(IntPtr window, int bar) {
+        if (bar != 0 && bar != 1) throw new ArgumentException("Invalid scrollbar axis.");
+        NativeScrollBarInfo info = new NativeScrollBarInfo {
+            Size = (uint)Marshal.SizeOf(typeof(NativeScrollBarInfo)), States = new uint[6]
+        };
+        if (!GetScrollBarInfo(window, bar == 0 ? -6 : -5, ref info))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new [] { info.Bounds.Left, info.Bounds.Top, info.Bounds.Right, info.Bounds.Bottom,
+            info.LineButtonSize, info.ThumbTop, info.ThumbBottom,
+            checked((int)info.States[0]), checked((int)info.States[1]),
+            checked((int)info.States[2]), checked((int)info.States[3]),
+            checked((int)info.States[4]), checked((int)info.States[5]) };
+    }
+
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint expectedProcessId) {
         List<WindowMeasurement> windows = new List<WindowMeasurement>();
         EnumerateWindowsChecked(delegate(IntPtr window, IntPtr parameter) {

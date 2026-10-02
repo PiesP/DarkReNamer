@@ -738,10 +738,32 @@ class Fixture:
                                              pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
                                                       width=300, height=200),
                                              appearance, "input-prompt", 300, 200)}
+            scrollbars = {}
+            for axis in evidence.PAIR_SCROLL_AXES:
+                bar = ([40, 432, 620, 449, 17, 17, 117] if axis == "horizontal" else
+                       [623, 125, 640, 432, 17, 17, 77]) + [0] * 6
+                initial = [0, 1000, 100, 0, 0]
+                steps = []
+                for stage in evidence.PAIR_SCROLL_STAGES:
+                    observed_bar = list(bar)
+                    if stage != "held":
+                        observed_bar[5] += 50
+                        observed_bar[6] += 50
+                    steps.append({"stage": stage,
+                                  "native_gui": [2001, 0 if stage == "released" else 2001, 1000],
+                                  "components": observed_bar,
+                                  "scroll": [0, 1000, 100, 0 if stage == "held" else 100, 100],
+                                  "capture": add_capture(f"appearance-scroll-{axis}-{stage}-{phase}.png",
+                                                         pair_png(base), appearance, "main-workbench")})
+                scrollbars[axis] = {"list_hwnd": 2001, "initial_scroll": initial,
+                                    "restored_scroll": initial, "steps": steps,
+                                    "target": {"x": 100 if axis == "horizontal" else 630,
+                                               "y": 440 if axis == "horizontal" else 160,
+                                               "hit_window": 2001, "root_window": 1001}}
             interactions.append({"phase": phase, "appearance": appearance, "buttons": buttons,
                                  "native_menu": {"popup_hwnd": 4001, "popup": popup,
                                                  "capture": menu_capture},
-                                 "advanced_appearance": advanced, "input_prompt": prompt,
+                                 "advanced_appearance": advanced, "input_prompt": prompt, "scrollbars": scrollbars,
                                  "column_preference_sha256": "c" * 64,
                                  "selected": {"count": 1, "name": "00-한국어-日本語.txt"},
                                  "appearance_menu": menu_state(appearance)})
@@ -1339,12 +1361,12 @@ class AppearancePairEvidenceTests(unittest.TestCase):
     def validate(self):
         return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
 
-    def test_pair_has_48_bound_captures_and_distinct_verdict(self):
+    def test_pair_has_66_bound_captures_and_distinct_verdict(self):
         result = self.validate()
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "diagnostic-only")
         self.assertEqual(set(result["raster_regions"]),
-                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions"})
+                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking"})
 
     def test_pair_preference_and_tooltip_changes_rejected(self):
         for key, value, expected in (
@@ -1368,7 +1390,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw["screenshots"].pop()
         write_json(raw_path, raw)
         self.fixture.refresh(self.run)
-        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 48 original captures"):
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 66 original captures"):
             self.validate()
 
     def test_pair_source_executable_and_environment_bindings_rejected(self):
@@ -1415,6 +1437,29 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     interaction["input_prompt"][field] = value
                 else:
                     interaction[field] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
+
+    def test_pair_scroll_tracking_binding_and_restoration_rejected(self):
+        for field, message in (("capture", "native capture state"),
+                               ("geometry", "thumb geometry"),
+                               ("drag", "did not advance"),
+                               ("restore", "was not restored")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                bar = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]
+                if field == "capture":
+                    bar["steps"][0]["native_gui"][1] = 0
+                elif field == "geometry":
+                    bar["steps"][0]["components"][6] = 0
+                elif field == "drag":
+                    bar["steps"][2]["scroll"][3] = 0
+                else:
+                    bar["restored_scroll"][3] = 1
                 write_json(path, raw)
                 self.fixture.refresh(self.run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
