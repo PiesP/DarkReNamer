@@ -1057,15 +1057,15 @@ $promotionLightweightTag = $promotionLightweightTags[-1]
 $promotionPublish = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name 'gh' `
-    -BeforeDelimiter @('release', 'create', '$env:RELEASE_TAG', '--verify-tag', '--prerelease', '--notes-file', 'release-notes.md', 'dist/THIRD_PARTY_LICENSES.html') `
+    -BeforeDelimiter @('release', 'create', '$env:RELEASE_TAG', '--verify-tag', '$latestFlag', '@channelFlags', '--notes-file', 'release-notes.md', 'dist/THIRD_PARTY_LICENSES.html') `
     -RequiredOptions ([ordered]@{
         '--title' = 'DarkReNamer $env:RELEASE_TAG'
         '--notes-file' = 'release-notes.md'
     }) `
-    -Message 'Promotion must create the prerelease with the validated tag and release notes.'
+    -Message 'Promotion must create the selected release channel with the validated tag and release notes.'
 Assert-ImmediateNativeExitCheck `
     -Record $promotionPublish `
-    -Message 'Promotion must fail immediately when prerelease publication fails.'
+    -Message 'Promotion must fail immediately when publication fails.'
 Assert-InOrder `
     -Records @(
         $promotionMetadata,
@@ -1331,7 +1331,7 @@ Assert-OutputContract `
     -Blocks $workflowBlocks[$promotionPath] `
     -LiteralPath 'release-notes.md' `
     -RequiredText @(
-        'VM-Automated Windows prerelease.'
+        'VM-Automated Windows $channelLabel.'
         'exact immutable candidate artifact'
         'not rebuilt during promotion'
         'automated VM profile passed its authenticated hosted validation gate'
@@ -1340,6 +1340,116 @@ Assert-OutputContract `
         'physical-power-loss durability'
     ) `
     -Message 'Promotion must write the required automated-profile and acceptance disclosure.'
+
+# Execute the actual channel guard and publication block with a local gh double.
+# The existing command-order assertions above keep the evidence gates mandatory.
+$channelBlocks = @($workflowBlocks[$promotionPath] | Where-Object {
+    $_.script.Contains('Release channel choice is invalid.', [StringComparison]::Ordinal)
+})
+$publicationBlocks = @($workflowBlocks[$promotionPath] | Where-Object {
+    $_.line -eq $promotionPublish.line
+})
+if ($channelBlocks.Count -ne 1 -or $publicationBlocks.Count -ne 1 -or
+    $channelBlocks[0].line -ge $promotionMetadata.line) {
+    throw 'The release channel guard must run before candidate acquisition and publication.'
+}
+
+function Invoke-PromotionChannelFixture {
+    param(
+        [AllowEmptyString()][string] $Channel,
+        [AllowEmptyString()][string] $Latest,
+        [string] $Profile = 'vm-automated-v2-owned-resources',
+        [int] $PublishExitCode = 0
+    )
+
+    $fixtureEnvironment = @{
+        RELEASE_CHANNEL = $Channel; MAKE_LATEST = $Latest; PROFILE_ID = $Profile
+        RELEASE_TAG = 'v0.2.0'; CANDIDATE_SOURCE_SHA = ('a' * 40)
+        EXPECTED_EXE_SHA256 = ('b' * 64); CANDIDATE_RUN_ID = '11'
+        CANDIDATE_RUN_ATTEMPT = '1'; CANDIDATE_ARTIFACT_ID = '12'
+        VALIDATION_RUN_ID = '13'; VALIDATION_RUN_ATTEMPT = '1'
+    }
+    $savedEnvironment = @{}
+    foreach ($key in $fixtureEnvironment.Keys) {
+        $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key)
+        [Environment]::SetEnvironmentVariable($key, $fixtureEnvironment[$key])
+    }
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-channel-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $fixtureRoot)
+    $script:promotionFixtureArgs = @()
+    $exitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+    $savedExitCode = if ($null -ne $exitCodeVariable) { $exitCodeVariable.Value } else { $null }
+    function gh {
+        $script:promotionFixtureArgs = @($args)
+        $global:LASTEXITCODE = $PublishExitCode
+    }
+    Push-Location $fixtureRoot
+    try {
+        & ([scriptblock]::Create($channelBlocks[0].script))
+        & ([scriptblock]::Create($publicationBlocks[0].script))
+        $notes = Get-Content -LiteralPath 'release-notes.md' -Raw
+        $expectedLabel = if ($Channel -ceq 'release') { 'stable release' } else { 'prerelease' }
+        if (-not $notes.Contains("VM-Automated Windows $expectedLabel.", [StringComparison]::Ordinal)) {
+            throw 'The release notes must disclose the selected channel.'
+        }
+        $arguments = $script:promotionFixtureArgs
+        $expectedPrerelease = if ($Channel -ceq 'prerelease') { 1 } else { 0 }
+        if (@($arguments | Where-Object { $_ -ceq '--prerelease' }).Count -ne $expectedPrerelease -or
+            @($arguments | Where-Object { $_ -ceq "--latest=$Latest" }).Count -ne 1 -or
+            @($arguments | Where-Object { $_ -ceq '--verify-tag' }).Count -ne 1 -or
+            ($arguments[0..2] -join ' ') -cne 'release create v0.2.0') {
+            throw 'The publication flags must preserve the selected channel, latest decision and existing tag.'
+        }
+        $assets = @($arguments | Where-Object { $_ -like 'dist/*' -or $_ -ceq 'validation-statement.json' })
+        $expectedAssets = @(
+            'dist/DarkReNamer.exe', 'dist/DarkReNamer.cdx.json', 'dist/DarkReNamer-debug-symbols.zip',
+            'dist/SHA256SUMS.txt', 'dist/LICENSE', 'dist/THIRD_PARTY_LICENSES.html',
+            'dist/THIRD_PARTY_NOTICES.md', 'dist/DISTRIBUTION.md', 'dist/release-handoff.json',
+            'dist/release-metrics.json', 'validation-statement.json'
+        )
+        if ($assets.Count -ne $expectedAssets.Count -or
+            ($assets -join '|') -cne ($expectedAssets -join '|')) {
+            throw 'Both channels must publish the same complete candidate and statement set.'
+        }
+    }
+    finally {
+        Pop-Location
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+        foreach ($key in $savedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key])
+        }
+        if ($null -ne $exitCodeVariable) {
+            $global:LASTEXITCODE = $savedExitCode
+        }
+        else {
+            Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Invoke-PromotionChannelFixture -Channel release -Latest false
+Invoke-PromotionChannelFixture -Channel release -Latest true
+Invoke-PromotionChannelFixture -Channel prerelease -Latest false
+Invoke-PromotionChannelFixture -Channel prerelease -Latest false -Profile vm-automated-v1-win11-ntfs
+foreach ($invalidChannel in @('', 'stable', 'RELEASE')) {
+    Assert-Fails -Action {
+        Invoke-PromotionChannelFixture -Channel $invalidChannel -Latest false
+    } -ExpectedFragment 'Release channel choice is invalid.'
+}
+foreach ($invalidLatest in @('', '1', 'TRUE')) {
+    Assert-Fails -Action {
+        Invoke-PromotionChannelFixture -Channel release -Latest $invalidLatest
+    } -ExpectedFragment 'MAKE_LATEST must be true or false.'
+}
+Assert-Fails -Action {
+    Invoke-PromotionChannelFixture -Channel release -Latest false -Profile vm-automated-v1-win11-ntfs
+} -ExpectedFragment 'Stable releases require the VM-Automated v2 profile.'
+Assert-Fails -Action {
+    Invoke-PromotionChannelFixture -Channel prerelease -Latest true
+} -ExpectedFragment 'A prerelease cannot be marked Latest.'
+Assert-Fails -Action {
+    Invoke-PromotionChannelFixture -Channel release -Latest false -PublishExitCode 1
+} -ExpectedFragment 'GitHub release publication failed.'
 
 # The Rust policy test owns YAML structure, step conditions, permissions, and action pins.
 # These fixtures exercise the PowerShell AST boundary used for executable command semantics.

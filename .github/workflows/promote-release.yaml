@@ -438,7 +438,7 @@ jobs:
             'The executable is intentionally unsigned. Verify SHA256SUMS.txt and the original candidate attestation before use.'
           ) | Out-File -LiteralPath release-notes.md -Encoding utf8
 
-          $channelFlags = if ($env:RELEASE_CHANNEL -ceq 'prerelease') { @('--prerelease') } else { @() }
+          $channelFlags = @(if ($env:RELEASE_CHANNEL -ceq 'prerelease') { '--prerelease' })
           $latestFlag = "--latest=$env:MAKE_LATEST"
           gh release create $env:RELEASE_TAG `
             --verify-tag `
