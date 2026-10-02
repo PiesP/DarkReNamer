@@ -14,11 +14,17 @@ additional interface languages.
 
 ## Download
 
-Download the newest portable prerelease and its checksum from
+Download a portable release and its checksum from
 [GitHub Releases](https://github.com/PiesP/DarkReNamer/releases). The runnable
 product is one installer-free `DarkReNamer.exe`. Current builds are unsigned;
 read the [distribution policy](DISTRIBUTION.md#current-unsigned-handoff) before
 using a release and verify the supplied checksum and provenance.
+
+Regular releases are intended for general use within the supported scope;
+prereleases are labeled separately. Both use the documented automated
+validation, with regular releases requiring VM-Automated v2. See
+[release channels and approval](DISTRIBUTION.md#release-channels-and-approval)
+for the publication contract and remaining limitations.
 
 Source is maintained in the
 [DarkReNamer repository](https://github.com/PiesP/DarkReNamer). To build it
@@ -83,7 +89,9 @@ automated source checks and a fixed Windows VM profile to the exact candidate
 executable. The policy does not show that any particular campaign has passed,
 and this README makes no VM campaign pass claim.
 
-VM-Automated v1 does not cover physical-device performance, physical power
+VM-Automated v2 checks observed product safety, required environment and owned
+resource cleanup. It does not guarantee whole-session OS process stasis.
+It does not cover physical-device performance, physical power
 loss, VM reset or storage faults, human visual or comprehensive assistive
 technology acceptance, or actual IME and Explorer drag-and-drop interaction.
 It also does not establish manually verified runtime parity with DarkNamer.

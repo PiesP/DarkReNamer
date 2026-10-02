@@ -6,13 +6,57 @@ manual Portable prerelease candidate workflow packages and validates the
 selected `master` commit, attests those exact files, and retains an immutable
 Actions handoff artifact. It cannot create a tag or release. The separate
 promotion workflow downloads that artifact by its immutable artifact ID and
-creates a GitHub **prerelease** without rebuilding it.
+creates a new GitHub release or prerelease without rebuilding it.
+
+## Release channels and approval
+
+A regular release is intended for general use within the documented support
+and feature scope. Its quality decision uses the existing VM-Automated v2
+profile and evidence bound to the exact source and candidate executable.
+It does not expand the automated profile's guarantees. Supported use remains
+Windows 11 or later on x64, without elevation, on supported local NTFS paths:
+file and directory renames within one parent, and regular-file moves to an
+existing folder on the same volume.
+
+The next unused product version follows the new-release path below, with
+`release_channel=release`. Prereleases remain available through
+`release_channel=prerelease`. A regular release requires the
+`vm-automated-v2-owned-resources` profile; v1 remains a historical prerelease
+option. Both channels require the same five gates and exact identity checks.
+Selecting a channel does not authorize publication or bypass validation.
+
+Before creating the tag or dispatching promotion, obtain explicit maintainer
+authorization for the version, source SHA, EXE SHA-256, candidate run/attempt/
+artifact, campaign/profile, hosted validation run/attempt and statement digest,
+and chosen channel. Record the approval in an issue comment or the existing
+handoff, including ignored or unexecuted tests and the documented limitations.
+The regular-release decision accepts the current unsigned `NotSigned` policy
+and the narrow same-user race in Save Names / Save Paths replacement described
+in [the safety model](SAFETY.md); it does not claim race-free writes or formal
+memory soundness. Human Explorer/IME or visual/accessibility acceptance,
+physical-media performance, physical power loss and VM reset/storage faults
+remain outside this release guarantee, rather than additional mandatory gates.
+New blocking defects or failed mandatory gates still prevent publication.
+
+This policy authorizes preparation of future regular releases, not publication
+of an unrecorded candidate. Each new source needs its own immutable candidate,
+complete first-attempt campaign and hosted verification. Existing published
+prereleases retain their original channel, tags, files and approval records;
+changing their metadata into regular releases is not a supported promotion
+path. In particular, prior evidence cannot be relabeled for a newer policy or
+harness commit.
+
+The `make_latest` workflow input is a separate explicit decision and defaults
+to `false`. It may be `true` only for a regular release. Channel selection and
+latest designation are distinct; neither changes the supported environment.
+Regular-release status does not require a 1.0.0 version number; the tag must
+still match the chosen Cargo workspace version exactly.
 
 ## Current unsigned handoff
 
 The current executable is intentionally Authenticode `NotSigned`. The packaging
 workflow fails if that status changes without an explicit policy update. A
-published prerelease contains:
+published release or prerelease contains:
 
 - `DarkReNamer.exe`;
 - `SHA256SUMS.txt`;
@@ -85,10 +129,11 @@ the variable; it is not a claim that independent EXE or PDB builds are
 byte-for-byte reproducible. VM-Automated validation remains separate from
 packaging validation. The release scope does not claim power-loss durability.
 
-## Immutable prerelease promotion
+## Immutable release promotion
 
 After inspecting the candidate, create the version tag on that exact `master`
-commit and dispatch the Promote portable prerelease workflow. Supply the
+commit and dispatch the Promote portable release workflow. Select the approved
+`release_channel` (`release` by default) and `make_latest` decision. Supply the
 candidate run ID, run attempt, immutable artifact ID, source SHA, executable
 SHA-256 from `release-handoff.json`, and version tag. Also supply the private
 evidence release ID, asset ID, archive SHA-256 and size, and the exact successful
@@ -164,7 +209,8 @@ candidate handoff files and the verified validation statement. An existing
 release for the tag is rejected instead of being overwritten. Private raw
 journals, local paths, screenshots and machine identities are never published.
 
-The published item is a **VM-Automated validated prerelease**, limited to the
+The published item is a **VM-Automated validated release or prerelease**,
+according to its approved channel, limited to the
 selected Windows VM profile recorded in the statement and release notes. V2
 makes a narrower claim than v1: observed product safety, required environment
 and explicit owned-resource cleanup, without a whole-session OS process-stasis

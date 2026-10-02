@@ -15,10 +15,16 @@ DarkReNamer는 [DarkNamer](https://github.com/nanpuhaha/DarkNamer)의 비공식
 ## 다운로드
 
 [GitHub Releases](https://github.com/PiesP/DarkReNamer/releases)에서 최신 포터블
-프리릴리스와 체크섬을 받으세요. 실행 파일은 설치 과정이 필요 없는
+릴리스와 체크섬을 받으세요. 실행 파일은 설치 과정이 필요 없는
 `DarkReNamer.exe` 하나입니다. 현재 빌드는 서명되지 않았습니다. 릴리스를
 사용하기 전에 [배포 정책 — 영어](DISTRIBUTION.md#current-unsigned-handoff)을
 읽고 제공된 체크섬과 출처 증명을 확인하세요.
+
+정식 릴리스는 문서화된 지원 범위 안에서 일반 사용자를 대상으로 배포하며,
+프리릴리스는 별도로 표시합니다. 두 채널 모두 기존 자동 검증을 사용하고,
+정식 릴리스는 VM-Automated v2를 요구합니다. 승인 기준과 남은 제한은
+[릴리스 채널 및 승인 — 영어](DISTRIBUTION.md#release-channels-and-approval)을
+참조하세요.
 
 소스는 [DarkReNamer 저장소](https://github.com/PiesP/DarkReNamer)에서
 관리합니다. 직접 빌드하려면 [개발 안내 — 영어](DEVELOPMENT.md)를 따르세요.
@@ -76,7 +82,9 @@ v0.1 파일 시스템 지원 범위는 재분석 지점을 통과하지 않는 �
 정의됩니다. 정책 문서 자체는 특정 캠페인의 통과를 증명하지 않으며, 이
 README도 VM 캠페인 통과를 주장하지 않습니다.
 
-VM-Automated v1은 실제 장치 성능, 물리적 전원 손실, VM 재설정 또는 저장 장치
+VM-Automated v2는 관찰된 제품 안전성, 필수 실행 환경, 소유 자원 정리를
+확인합니다. 세션 전체의 OS 프로세스가 그대로 유지됨을 보장하지 않습니다.
+실제 장치 성능, 물리적 전원 손실, VM 재설정 또는 저장 장치
 오류, 사람의 시각 검토 또는 포괄적인 보조 기술 검증, 실제 IME 및 Explorer
 드래그 앤 드롭을 다루지 않습니다. DarkNamer와 수동으로 검증한 런타임 동등성도
 입증하지 않습니다. 과거 수동·물리적 검증 요구 사항은

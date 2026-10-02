@@ -708,7 +708,7 @@ missing, substituted or inconsistent evidence, but they cannot prove that the
 producer or VM administrator reported every observation honestly.
 
 The hosted validation and promotion boundary is described in
-[`DISTRIBUTION.md`](DISTRIBUTION.md#immutable-prerelease-promotion). An attestation
+[`DISTRIBUTION.md`](DISTRIBUTION.md#immutable-release-promotion). An attestation
 binds the checked statement and workflow execution; it does not make a
 compromised VM or administrator a trustworthy hardware observer. The
 owner-authenticated archive ingress still relies on the raw producer to report
