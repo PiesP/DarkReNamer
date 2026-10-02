@@ -15,6 +15,7 @@ import unittest
 import zlib
 
 from darkrenamer_tooling.evidence import gui as evidence
+from controller_cleanup_fixture import clean_controller_cleanup_v2
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
@@ -1425,6 +1426,122 @@ class AppearancePairEvidenceTests(unittest.TestCase):
 
     def validate(self):
         return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
+
+    def v2_transport(self):
+        """Bind a synthetic V2 cleanup record to the paired observer result."""
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        profile_path = self.run / "inputs" / "vm-automated-v2.json"
+        profile_path.write_bytes(profile)
+        profile_hash = digest(profile)
+        manifest["acceptance_profile_id"] = "vm-automated-v2-owned-resources"
+        manifest["acceptance_profile_sha256"] = profile_hash
+        manifest["acceptance_profile"] = {
+            "file": "inputs/vm-automated-v2.json", "bytes": len(profile), "sha256": profile_hash,
+        }
+        manifest["command"] += ["--acceptance-profile-id", "vm-automated-v2-owned-resources"]
+        write_json(manifest_path, manifest)
+        raw_path = self.run / "output" / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        jobs = clean_controller_cleanup_v2()["owned_resource_evidence"]["process_job_cleanup"]
+        jobs[0]["pid"] = raw["assertions"]["scenario"]["process_id"]
+        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        owned = cleanup["owned_resource_evidence"]
+        raw["process_job_cleanup"] = owned["process_job_cleanup"]
+        raw["observer_lifecycle"] = owned["task_execution"]["observer_lifecycle"]
+        write_json(raw_path, raw)
+        transport_path = self.run / "output" / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["raw_cleanup"] = cleanup
+        write_json(transport_path, transport)
+        self.fixture.refresh(self.run)
+        return manifest, transport, raw
+
+    def check_v2_transport(self, manifest, transport, raw):
+        transport_path = self.run / "output" / "transport.json"
+        write_json(transport_path, transport)
+        receipt = {"bytes": len(transport_path.read_bytes()),
+                   "sha256": digest(transport_path.read_bytes())}
+        evidence.validate_pair_transport(self.run, {"transport.json": receipt}, 0, manifest, raw)
+
+    def test_v2_pair_accepts_bound_owned_cleanup_with_ambient_processes(self):
+        manifest, transport, raw = self.v2_transport()
+        self.assertTrue(transport["raw_cleanup"]["unexpected_runner_processes"])
+        self.check_v2_transport(manifest, transport, raw)
+        self.assertEqual(self.validate()["status"], "passed")
+
+    def test_v2_pair_rejects_unbound_profile_artifact_and_selection(self):
+        manifest, _, _ = self.v2_transport()
+        profile_path = self.run / "inputs" / "vm-automated-v2.json"
+        manifest_path = self.run / "input-manifest.json"
+        original_profile = profile_path.read_bytes()
+        mutations = (
+            lambda value: value.pop("acceptance_profile_sha256"),
+            lambda value: value.pop("acceptance_profile"),
+            lambda value: value.__setitem__("acceptance_profile_sha256", "0" * 64),
+            lambda value: value["command"].remove("--acceptance-profile-id"),
+            lambda value: value.__setitem__("acceptance_profile_id", "unknown-profile"),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                current = deepcopy(manifest)
+                mutate(current)
+                write_json(manifest_path, current)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_input_manifest(self.run, SOURCE)
+        write_json(manifest_path, manifest)
+        profile_path.write_bytes(original_profile + b" ")
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_input_manifest(self.run, SOURCE)
+        original_document = json.loads(original_profile)
+        for field, value in (("profile_id", "unexpected-v2"), ("revision", 3)):
+            with self.subTest(profile_field=field):
+                changed = {**original_document, field: value}
+                changed_bytes = json_bytes(changed)
+                profile_path.write_bytes(changed_bytes)
+                current = deepcopy(manifest)
+                current["acceptance_profile_sha256"] = digest(changed_bytes)
+                current["acceptance_profile"] = {
+                    **current["acceptance_profile"], "bytes": len(changed_bytes),
+                    "sha256": digest(changed_bytes),
+                }
+                write_json(manifest_path, current)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_input_manifest(self.run, SOURCE)
+
+    def test_v2_pair_rejects_wrong_profile_hash_and_incomplete_owned_cleanup(self):
+        manifest, transport, raw = self.v2_transport()
+        mutations = (
+            lambda m, t, r: m.__setitem__("acceptance_profile_sha256", "0" * 64),
+            lambda m, t, r: t["raw_cleanup"].__setitem__("owned_processes_after", [3001]),
+            lambda m, t, r: t["raw_cleanup"]["owned_resource_evidence"]["process_snapshots"]["after_delete"].__setitem__("complete", False),
+            lambda m, t, r: t["raw_cleanup"]["owned_resource_evidence"]["task_snapshots"]["after_delete"].append({"name": "unexpected-task"}),
+            lambda m, t, r: r.__setitem__("process_job_cleanup", []),
+            lambda m, t, r: r.__setitem__("observer_lifecycle", {"pid": 9999}),
+            lambda m, t, r: r["assertions"]["scenario"].__setitem__("process_id", 9999),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                current_manifest, current_transport, current_raw = (deepcopy(manifest), deepcopy(transport), deepcopy(raw))
+                mutate(current_manifest, current_transport, current_raw)
+                with self.assertRaises(ValueError):
+                    self.check_v2_transport(current_manifest, current_transport, current_raw)
+
+    def test_focused_pair_rejects_mixed_acceptance_profiles(self):
+        pairs = [
+            {"run_id": run_id, "application_sha256": "a" * 64,
+             "build_identity": {"acceptance_profile_id": evidence.V2_PROFILE_ID,
+                                "acceptance_profile_sha256": "b" * 64}}
+            for run_id in evidence.PAIR_CONFIGURATIONS
+        ]
+        for key, value in (("acceptance_profile_id", evidence.V1_PROFILE_ID),
+                           ("acceptance_profile_sha256", "c" * 64)):
+            with self.subTest(key=key):
+                changed = deepcopy(pairs)
+                changed[-1]["build_identity"][key] = value
+                with self.assertRaisesRegex(evidence.EvidenceError, "same build bundle"):
+                    evidence.validate_focused_pair_results(changed)
 
     def high_contrast_probe(self):
         """Exercise three bound System captures without decoding the 66-scene pair."""

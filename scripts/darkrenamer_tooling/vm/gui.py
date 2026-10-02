@@ -23,6 +23,9 @@ from darkrenamer_tooling.contracts.tooling import staged_tooling_files
 SAFE_LEAF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
+V1_PROFILE_ID = "vm-automated-v1-win11-ntfs"
+V2_PROFILE_ID = "vm-automated-v2-owned-resources"
+V2_PROFILE_FILE = "vm-automated-v2.json"
 MAX_PNG_PIXELS = 32 * 1024 * 1024
 MAX_PNG_DECODED_BYTES = 128 * 1024 * 1024
 RUNS = (
@@ -517,7 +520,8 @@ def source_identity(repo: Path) -> tuple[str, str]:
     return source_sha, source_tree
 
 
-def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict, dict]:
+def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
+                        acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict]:
     manifest = read_json(bundle / "bundle.json")
     source_sha, source_tree = source_identity(repo)
     require(manifest.get("source_sha") == source_sha and manifest.get("source_state") == "clean",
@@ -541,6 +545,9 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
         "Cargo.lock": repo / "Cargo.lock",
         "test-windows-vm.py": scripts / "test-windows-vm.py",
     }
+    if acceptance_profile_id == V2_PROFILE_ID:
+        sources[V2_PROFILE_FILE] = ordinary_file(repo / "config" / V2_PROFILE_FILE, 1024 * 1024,
+                                                 "V2 acceptance profile")
     for name in staged_tooling_files(bundle):
         require(name not in sources, "Tooling bundle member collides with a GUI input.")
         sources[name] = bundle / name
@@ -574,6 +581,7 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
             "lockfile": rows["Cargo.lock"],
             "builder": rows["test-windows-vm.py"],
         },
+        **({"acceptance_profile": rows[V2_PROFILE_FILE]} if acceptance_profile_id == V2_PROFILE_ID else {}),
         "source_sha": source_sha,
         "source_tree": source_tree,
     }
@@ -582,7 +590,7 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
 def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_sha256: str,
                    host_preflight: dict, guest_preflight: dict,
                    reference: dict | None = None) -> dict:
-    _, inputs = run_input_artifacts(repo, bundle, run_root)
+    _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
     result = {
         "schema_version": 1,
         "run_id": run["run_id"],
@@ -604,9 +612,11 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
-            *(["--diagnostic", "appearance-pair", "--desktop-width", str(run["width"]),
+            *(["--diagnostic", "appearance-pair"] if run["mode"] == "appearance-pair" else []),
+            *(["--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
-              if run["mode"] == "appearance-pair" else []),
+              if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
+            *(["--acceptance-profile-id", V2_PROFILE_ID] if run.get("acceptance_profile_id") == V2_PROFILE_ID else []),
             *(["--configuration-set", "focused"] if run["mode"] == "appearance-pair"
               and run["run_id"] != APPEARANCE_PAIR_ID else []),
         ],
@@ -614,7 +624,12 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
     if reference is not None:
         result["full_context_reference"] = reference
     if run["mode"] == "appearance-pair":
-        result["acceptance_profile_id"] = "vm-automated-v1-win11-ntfs"
+        result["acceptance_profile_id"] = run.get("acceptance_profile_id", V1_PROFILE_ID)
+        if result["acceptance_profile_id"] == V2_PROFILE_ID:
+            require(run["acceptance_profile_sha256"] == inputs["acceptance_profile"]["sha256"],
+                    "V2 acceptance profile changed between selection and immutable staging.")
+            result["acceptance_profile"] = inputs["acceptance_profile"]
+            result["acceptance_profile_sha256"] = inputs["acceptance_profile"]["sha256"]
     return result
 
 
@@ -670,7 +685,15 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
     ]
     if run["mode"] == "appearance-pair":
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
-                    "-AcceptanceProfileId", "vm-automated-v1-win11-ntfs"]
+                    "-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
+        if run.get("acceptance_profile_id") == V2_PROFILE_ID:
+            manifest = read_json(run_root / "input-manifest.json")
+            staged = ordinary_file(run_root / "inputs" / V2_PROFILE_FILE, 1024 * 1024, "Staged V2 profile")
+            require(manifest.get("acceptance_profile_id") == V2_PROFILE_ID and
+                    manifest.get("acceptance_profile_sha256") == run["acceptance_profile_sha256"] == digest(staged) and
+                    manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
+                    "V2 controller profile differs from its immutable staged manifest.")
+            command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
         if run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
     return command
@@ -921,6 +944,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--diagnostic", choices=["appearance-pair"])
     parser.add_argument("--configuration-set", choices=["focused"])
+    parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--desktop-width", type=int, default=1366)
     parser.add_argument("--desktop-height", type=int, default=768)
     parser.add_argument("--desktop-dpi", type=int, choices=[96, 120, 144, 192], default=96)
@@ -932,12 +956,30 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Desktop selection requires --diagnostic appearance-pair.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
+    require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
+            "Acceptance profile selection requires --diagnostic appearance-pair.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
     selected_runs = (FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
+    if args.diagnostic == "appearance-pair":
+        selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
+        profile_digest = None
+        if selected_profile == V2_PROFILE_ID:
+            profile_file = ordinary_file(Path(repo) / "config" / V2_PROFILE_FILE, 1024 * 1024,
+                                         "V2 acceptance profile")
+            profile_document = read_json(profile_file)
+            require(profile_document.get("schema") == "darkrenamer-vm-automated-profile-v2" and
+                    profile_document.get("profile_id") == V2_PROFILE_ID and
+                    type(profile_document.get("revision")) is int and
+                    profile_document.get("revision") == 2,
+                    "V2 acceptance profile definition is unavailable.")
+            profile_digest = digest(profile_file)
+        selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
+                               **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
+                              for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)

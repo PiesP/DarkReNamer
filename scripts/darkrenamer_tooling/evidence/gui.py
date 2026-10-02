@@ -14,6 +14,7 @@ import sys
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
+from darkrenamer_tooling.contracts.platform import V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup
 
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -387,6 +388,8 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
         required.add("full_context_reference")
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == PAIR_MODE:
         required.add("acceptance_profile_id")
+        if value.get("acceptance_profile_id") == V2_PROFILE_ID:
+            required.update({"acceptance_profile", "acceptance_profile_sha256"})
     manifest = exact_keys(value, required, "input manifest")
     require(int_equals(manifest["schema_version"], 1), "input manifest schema_version must be integer 1.")
     require(isinstance(manifest["run_id"], str) and SAFE_LEAF.fullmatch(manifest["run_id"]),
@@ -409,8 +412,17 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
     if request["mode"] == PAIR_MODE:
-        require(manifest["acceptance_profile_id"] == "vm-automated-v1-win11-ntfs",
-                "Appearance pair acceptance profile differs from its declared v1 contract.")
+        require(manifest["acceptance_profile_id"] in {V1_PROFILE_ID, V2_PROFILE_ID},
+                "Appearance pair acceptance profile is unsupported.")
+        if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
+            profile_artifact = checked_artifact(run_root, manifest["acceptance_profile"], "acceptance profile")
+            require(profile_artifact["file"] == "inputs/vm-automated-v2.json" and
+                    manifest["acceptance_profile_sha256"] == profile_artifact["sha256"],
+                    "Appearance V2 profile hash or artifact differs from its immutable manifest.")
+            profile, _ = read_json(run_root, Path(profile_artifact["file"]), "appearance V2 profile")
+            require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v2" and
+                    profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 2),
+                    "Appearance V2 profile definition is invalid.")
     validate_host_platform(manifest["host_preflight"], "input manifest host_preflight")
     validate_guest_platform(manifest["guest_preflight"], "input manifest guest_preflight")
     command = manifest["command"]
@@ -418,6 +430,15 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
     if request["mode"] == PAIR_MODE:
+        selected = manifest["acceptance_profile_id"]
+        option = "--acceptance-profile-id"
+        require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
+        if option in command:
+            index = command.index(option)
+            require(index + 1 < len(command) and command[index + 1] == selected,
+                    "Appearance acceptance profile command differs from its manifest.")
+        else:
+            require(selected == V1_PROFILE_ID, "Appearance V2 profile must be selected explicitly in the command.")
         run_id = manifest["run_id"]
         desktop = request["desktop"]
         requested = (request["appearance"], desktop["width"], desktop["height"], desktop["dpi"],
@@ -874,7 +895,7 @@ def validate_raw_result(run_root: Path, manifest: dict, result: dict, collection
     return raw_value
 
 
-def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], normalized_exit: int) -> None:
+def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], normalized_exit: int) -> dict:
     value, raw = read_json(run_root / "output", Path("transport.json"), "raw transport result")
     receipt = collection_files["transport.json"]
     require(receipt["bytes"] == len(raw) and receipt["sha256"] == sha256_bytes(raw),
@@ -888,6 +909,23 @@ def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], n
     exit_code = observer["exit_code"]
     require(type(exit_code) is int and exit_code == 0 and exit_code == normalized_exit,
             "Transport observer terminal exit code must be integer zero and match the normalized result.")
+    return value
+
+
+def validate_pair_transport(run_root: Path, collection_files: dict[str, dict], normalized_exit: int,
+                            manifest: dict, raw: dict) -> None:
+    transport = validate_transport_exit(run_root, collection_files, normalized_exit)
+    if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
+        cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
+                                            profile_sha256=manifest["acceptance_profile_sha256"])
+        owned = cleanup["owned_resource_evidence"]
+        jobs = raw.get("process_job_cleanup")
+        require(isinstance(jobs, list) and jobs and typed_equal(jobs, owned["process_job_cleanup"]) and
+                typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]),
+                "Appearance V2 cleanup does not bind the result Job and observer lifetimes.")
+        candidate_pid = nested(raw, "assertions", "scenario", "process_id")
+        require(type(candidate_pid) is int and any(job["pid"] == candidate_pid for job in jobs),
+                "Appearance V2 captured candidate is not bound to an owned process Job.")
 
 
 def validate_raw_semantics(result: dict, raw: dict, mode: str, cleanup: dict,
@@ -2204,8 +2242,8 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             work["left"] <= window["left"] < window["right"] <= work["right"] and
             work["top"] <= window["top"] < window["bottom"] <= work["bottom"],
             "Appearance work area or target window lies outside its monitor.")
-    validate_transport_exit(run_root, files, result["exit_code"])
     raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "appearance observer")
+    validate_pair_transport(run_root, files, result["exit_code"], manifest, raw)
     observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"), "appearance observations")
     require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) == files["acceptance-result.json"]["sha256"] and
             files["acceptance-observations.json"]["sha256"] == sha256_bytes(observation_bytes) and
@@ -2254,6 +2292,8 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             "application_sha256": artifacts["application"]["sha256"],
             "build_identity": {"source_tree": manifest["source_tree"],
                                "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+                               "acceptance_profile_id": manifest["acceptance_profile_id"],
+                               "acceptance_profile_sha256": manifest.get("acceptance_profile_sha256"),
                                "artifact_sha256": {name: artifact["sha256"] for name, artifact in artifacts.items()}},
             "font_environment": {"installed_fonts": environment["installed_fonts"],
                                  "system_fonts": environment["target_rendering"]["system_font_recipe"]["fonts"]},

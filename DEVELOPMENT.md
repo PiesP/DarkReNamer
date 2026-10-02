@@ -442,7 +442,17 @@ the request alone is not evidence. Other bounded choices are width 800–1920,
 height 600–1080, and DPI 96, 120, 144, or 192. Each new attempt needs a new
 external output directory. The observer has a 600-second timeout and the
 collected output is capped at 120 MiB. The immutable run input records the
-existing `vm-automated-v1-win11-ntfs` cleanup profile used by this diagnostic.
+existing `vm-automated-v1-win11-ntfs` cleanup profile by default. An explicit
+`--acceptance-profile-id vm-automated-v2-owned-resources` selects the existing
+V2 owned-resource cleanup contract for this diagnostic only. The launcher
+freezes the unchanged `config/vm-automated-v2.json` bytes and digest in each
+input, binds the controller arguments to them, and independently verifies the
+complete V2 cleanup inventory and the observer Job and process lifetimes.
+This option requires `--diagnostic appearance-pair`; it does not change the
+default four-run regression, either profile definition, or the release matrix.
+V2 permits ambient process deltas only under its established ownership and
+required-environment checks. Preserved V1 failures retain their original verdict.
+Selecting V2 cleanup here does not establish complete V2 release acceptance.
 
 The diagnostic retains 66 original guest desktop PNGs. Eight main states
 (empty, one unchanged multilingual row, overflow, changed proposal, empty-stem

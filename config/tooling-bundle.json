@@ -205,7 +205,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "3ac53b707560b56465cbd90e5d568e29898899bf8908e74ffe347d89eedc7b01",
+      "sha256": "545064563aeb50fb3411b9050f1f79279746887eae6a33e00f32c35bee42a899",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -421,13 +421,14 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "0cd11c78d1300eba2e4754d34ebbd3ba2b0440b38e272bf6a3463b868d21a661",
+      "sha256": "e0dd8eaaf714ba76f08b4196b573134c855ca0f9bd5c4571df5a0c261681520e",
       "dependencies": [
         "tooling-loader",
         "package-root",
         "package-evidence",
         "evidence-errors",
-        "evidence-png"
+        "evidence-png",
+        "contracts-platform"
       ]
     },
     {
