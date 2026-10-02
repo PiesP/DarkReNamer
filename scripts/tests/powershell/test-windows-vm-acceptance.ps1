@@ -3216,8 +3216,8 @@ $applicationStartCalls = @($captureAst.FindAll({
     $node -is [Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
 }, $true))
-if ($applicationStartCalls.Count -ne 5) {
-    throw 'Expected all five current-DPI and GUI regression application start sites.'
+if ($applicationStartCalls.Count -ne 6) {
+    throw 'Expected all six current-DPI and GUI diagnostic application start sites.'
 }
 foreach ($call in $applicationStartCalls) {
     $lifecycleBindings = @($call.CommandElements | Where-Object {

@@ -423,6 +423,38 @@ After a strict OS-delta rejection, a separately hash-bound coordinator cleanup
 proof may establish only workload-owned cleanup before the next declared
 attempt. It cannot replace the original receipt or reclassify acceptance.
 
+### Paired appearance diagnostic
+
+On a clean, committed source checkout with the prepared VM available, run the
+opt-in baseline at a supported 1366×768 desktop and 96 DPI:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic appearance-pair \
+  --desktop-width 1366 --desktop-height 768 --desktop-dpi 96 \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-appearance-pair-attempt
+```
+
+The selected managed RDP helper must support explicit display geometry. The
+observer checks the actual target monitor and window DPI before scene capture;
+the request alone is not evidence. Other bounded choices are width 800–1920,
+height 600–1080, and DPI 96, 120, 144, or 192. Each new attempt needs a new
+external output directory. The observer has a 600-second timeout and the
+collected output is capped at 120 MiB. The immutable run input records the
+existing `vm-automated-v1-win11-ntfs` cleanup profile used by this diagnostic.
+
+The baseline captures empty, one unchanged multilingual row, and 60-row
+horizontal-plus-vertical overflow, each as Light → Dark → Light in one process.
+It retains nine original desktop PNGs and native/UIA state, including scroll
+ranges, menu-checked appearance, geometry, file identities, and unchanged Apply.
+The independent verifier checks source/EXE/environment bindings, pair presence,
+state invariance, and list-interior raster regions. Scrollbar pixels are
+reported as a diagnostic measurement pending an explicit design decision.
+The baseline reports changed/warning/collision previews, selection transitions,
+input prompt, system-theme following, and Forced Colors as not run. It does not
+complete the four fixed GUI regression runs or release acceptance.
+
 ## Historical acceptance and GUI diagnostics
 
 Standalone UI and recovery observer staging, the former formal acceptance

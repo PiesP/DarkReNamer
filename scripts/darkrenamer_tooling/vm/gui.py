@@ -1,4 +1,4 @@
-"""Build and run the four source-bound DarkReNamer GUI regression cells."""
+"""Run four fixed GUI cells or one opt-in paired appearance diagnostic."""
 
 from __future__ import annotations
 
@@ -63,6 +63,14 @@ RUNS = (
         "text_scale_percent": 100,
     },
 )
+APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
+
+
+def appearance_pair_run(width: int, height: int, dpi: int) -> dict:
+    return {
+        "run_id": APPEARANCE_PAIR_ID, "mode": "appearance-pair", "appearance": "light",
+        "width": width, "height": height, "dpi": dpi, "text_scale_percent": 100,
+    }
 
 FULL_CONTEXT_SEMANTICS = {
     "repeated_scope_exact", "repeated_default_cancel",
@@ -579,10 +587,15 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+            *(["--diagnostic", "appearance-pair", "--desktop-width", str(run["width"]),
+               "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
+              if run["mode"] == "appearance-pair" else []),
         ],
     }
     if reference is not None:
         result["full_context_reference"] = reference
+    if run["mode"] == "appearance-pair":
+        result["acceptance_profile_id"] = "vm-automated-v1-win11-ntfs"
     return result
 
 
@@ -623,7 +636,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                        profile: dict, lease: dict) -> list[str]:
     pwsh = shutil.which("pwsh")
     require(pwsh is not None, "GUI regression transport requires PowerShell 7.4 or newer as pwsh.")
-    return [
+    command = [
         pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
         str(repo / "scripts" / "run-windows-vm-tests.ps1"),
         "-BundleRoot", str(bundle),
@@ -636,11 +649,16 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceAppearance", run["appearance"],
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
+    if run["mode"] == "appearance-pair":
+        command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
+                    "-AcceptanceProfileId", "vm-automated-v1-win11-ntfs"]
+    return command
 
 
 def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
     output = run_root / "output"
     files = []
+    total_bytes = 0
     for path in sorted(output.rglob("*")):
         if not path.is_file() or path.name == "run-result.json":
             continue
@@ -650,7 +668,12 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
             "bytes": path.stat().st_size,
             "sha256": digest(path),
         })
+        total_bytes += path.stat().st_size
     require(files, "A GUI regression run returned no raw output.")
+    if run_id == APPEARANCE_PAIR_ID:
+        require(total_bytes <= 120 * 1024 * 1024 and
+                sum(row["relative_path"].endswith(".png") for row in files) == 9,
+                "Appearance pair must stay within 120 MiB and exactly nine original PNGs.")
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -739,7 +762,45 @@ def finalize_run(run_root: Path) -> None:
     write_json(collection_path, collection_document(run_root, input_sha256, manifest["run_id"]), exclusive=True)
     result_path = run_root / "output" / "run-result.json"
     require(not result_path.exists(), "Normalized run result already exists.")
-    write_json(result_path, normalize_run_result(run_root, input_sha256), exclusive=True)
+    normalized = (normalize_pair_result(run_root, input_sha256)
+                  if manifest["request"]["mode"] == "appearance-pair"
+                  else normalize_run_result(run_root, input_sha256))
+    write_json(result_path, normalized, exclusive=True)
+
+
+def normalize_pair_result(run_root: Path, input_sha256: str) -> dict:
+    manifest = read_json(run_root / "input-manifest.json")
+    output = run_root / "output"
+    observer = read_json(output / "acceptance-result.json")
+    observations = read_json(output / "acceptance-observations.json")
+    require(observer.get("observations", {}).get("sha256") == digest(output / "acceptance-observations.json")
+            and observer.get("acceptance_observations") == observations,
+            "Appearance observer result does not bind its collected observations.")
+    transport = read_json(output / "transport.json")
+    require(transport.get("observer_process") == {"state": "exited", "exit_code": 0},
+            "Appearance observer process did not exit successfully.")
+    preflight = read_json(output / "platform-preflight.json")
+    environment = observations.get("environment", {})
+    window = environment.get("main_window", {})
+    artifacts = manifest["artifacts"]
+    return {
+        "schema_version": 1, "diagnostic": "appearance-pair", "run_id": manifest["run_id"],
+        "input_manifest_sha256": input_sha256, "collection_sha256": digest(run_root / "collection.json"),
+        "cleanup_sha256": digest(output / "cleanup.json"), "source_sha": manifest["source_sha"],
+        "application_sha256": artifacts["application"]["sha256"],
+        "runner_sha256": artifacts["runner"]["sha256"],
+        "observer_sha256": artifacts["observer"]["sha256"],
+        "observer_result_sha256": digest(output / "acceptance-result.json"),
+        "host_platform": manifest["host_preflight"], "guest_platform": preflight["guest_platform"],
+        "actual": {
+            "monitor": window.get("target_monitor"), "work_area": window.get("target_work_area"),
+            "hwnd_dpi": environment.get("hwnd_dpi"),
+            "text_scale_percent": environment.get("text_scale_factor_percent"),
+            "target": {"hwnd": window.get("hwnd"), "process_id": window.get("process_id"),
+                       "window_rect": window.get("rect")},
+        },
+        "status": observer.get("status"), "exit_code": 0,
+    }
 
 
 def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: dict,
@@ -806,7 +867,8 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
     finalize_run(run_root)
 
 
-def validate_all(repo: Path, result_root: Path, output_root: Path) -> None:
+def validate_all(repo: Path, result_root: Path, output_root: Path,
+                 diagnostic: str | None = None) -> None:
     validator = repo / "scripts" / "validate-gui-regression-evidence.py"
     ordinary_file(validator, 2 * 1024 * 1024, "GUI regression evidence validator")
     source_sha, _ = source_identity(repo)
@@ -814,9 +876,13 @@ def validate_all(repo: Path, result_root: Path, output_root: Path) -> None:
         sys.executable, "-I", str(validator), "--result-root", str(result_root),
         "--expected-source-sha", source_sha,
     ]
-    for run in RUNS:
+    runs = (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else RUNS
+    for run in runs:
         command += ["--run", run["run_id"]]
-    command += ["--require-complete-set"]
+    if diagnostic == "appearance-pair":
+        command += ["--diagnostic", "appearance-pair"]
+    else:
+        command += ["--require-complete-set"]
     completed = subprocess.run(command, cwd=repo, check=True, capture_output=True)
     report = json.loads(completed.stdout)
     write_json(output_root / "validation-result.json", report, exclusive=True)
@@ -826,8 +892,18 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
+    parser.add_argument("--diagnostic", choices=["appearance-pair"])
+    parser.add_argument("--desktop-width", type=int, default=1366)
+    parser.add_argument("--desktop-height", type=int, default=768)
+    parser.add_argument("--desktop-dpi", type=int, choices=[96, 120, 144, 192], default=96)
     args = parser.parse_args(argv)
     repo = Path(repo)
+    require(args.desktop_width in range(800, 1921) and args.desktop_height in range(600, 1081),
+            "Appearance pair desktop must be between 800x600 and 1920x1080.")
+    require(args.diagnostic or (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
+            "Desktop selection requires --diagnostic appearance-pair.")
+    selected_runs = (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),) \
+        if args.diagnostic == "appearance-pair" else RUNS
     root = checked_new_root(args.output_root, repo)
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
@@ -839,7 +915,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     runs_root.mkdir()
     launcher.build_bundle(repo, bundle, tooling)
     reference = None
-    for run in RUNS:
+    for run in selected_runs:
         run_root = runs_root / run["run_id"]
         run_root.mkdir()
         if run["mode"] == "tooltip":
@@ -850,11 +926,12 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             exclusive=True,
         )
         execute_run(repo, run_root / "inputs", run_root, run, profile, launcher)
-    validate_all(repo, runs_root, root)
+    validate_all(repo, runs_root, root, args.diagnostic)
     print(json.dumps({
-        "status": "validated",
+        "status": "diagnostic-validated" if args.diagnostic else "validated",
         "source_sha": read_json(bundle / "bundle.json")["source_sha"],
-        "runs": [run["run_id"] for run in RUNS],
+        "runs": [run["run_id"] for run in selected_runs],
+        "diagnostic": args.diagnostic,
         "output_root": str(root),
     }))
     return 0

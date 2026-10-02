@@ -607,7 +607,17 @@ function Invoke-GuiRegressionAcceptance {
             $processLifecycleObservations = Get-GuiRegressionProcessLifecycleCollection `
                 -Result $result `
                 -RawRegression $rawRegression
-            if ($RegressionMode -in @('standard', 'text-scale')) {
+            if ($RegressionMode -eq 'appearance-pair') {
+                $scenario = Invoke-ObserverAppearancePairScenario `
+                    -Verified $verified `
+                    -RuntimeRoot $effectiveRuntimeRoot `
+                    -EvidenceRoot $resolved.output_root `
+                    -SessionId $session `
+                    -WaitSeconds $TimeoutSeconds `
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations
+            }
+            elseif ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
                     -Verified $verified `
                     -RuntimeRoot $effectiveRuntimeRoot `
@@ -646,9 +656,12 @@ function Invoke-GuiRegressionAcceptance {
             $result.appearance.observed = $scenario.appearance
             $result.assertions.scenario = $scenario
         }
-        $result.keyboard.status = 'passed'
-        $result.accessibility.status = 'passed'
+        $result.keyboard.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
+        if ($RegressionMode -eq 'appearance-pair') {
+            $result.assertions['scope'] = 'appearance-pair-baseline-three-scenes'
+        }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'
         $result.failure_reason = $null

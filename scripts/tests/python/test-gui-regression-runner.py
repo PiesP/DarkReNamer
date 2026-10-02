@@ -54,6 +54,22 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_appearance_pair_selects_one_bounded_run_and_explicit_v1_profile(self):
+        pair = runner.appearance_pair_run(1366, 768, 96)
+        self.assertEqual(pair["mode"], "appearance-pair")
+        self.assertEqual(pair["run_id"], runner.APPEARANCE_PAIR_ID)
+        self.assertEqual(len(runner.RUNS), 4)
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "pair", pair,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertEqual(command[command.index("-AcceptanceMode") + 1], "appearance-pair")
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1],
+                         "vm-automated-v1-win11-ntfs")
+        self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
+
     def test_consumer_policies_preserve_formats_alpha_and_axis_limits(self):
         grayscale = png_bytes(1, 1, 0, b"\0\x12")
         self.assertEqual(evidence.decode_png(grayscale, "gray"), (1, 1, b"\x12\x12\x12\xff"))

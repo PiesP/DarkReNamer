@@ -24,6 +24,10 @@ MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
 MAX_COLLECTION_BYTES = 512 * 1024 * 1024
 REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
+PAIR_MODE = "appearance-pair"
+PAIR_RUN_ID = "appearance-pair-light-dark-light"
+PAIR_SCENES = ("empty", "unchanged", "overflow")
+PAIR_PHASES = ("light-before", "dark", "light-after")
 
 FULL_CONTEXT_SEMANTICS = {
     "repeated_scope_exact",
@@ -302,16 +306,22 @@ def validate_guest_platform(value: object, label: str) -> dict:
 
 def validate_request(value: object) -> dict:
     request = exact_keys(value, {"mode", "appearance", "desktop", "text_scale_percent"}, "request")
-    require(request["mode"] in RUN_MODES, "request.mode is invalid.")
+    require(request["mode"] in RUN_MODES | {PAIR_MODE}, "request.mode is invalid.")
     require(request["appearance"] in {"light", "dark"}, "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
     checked_int(desktop["width"], 800, 8192, "request.desktop.width")
     checked_int(desktop["height"], 600, 4320, "request.desktop.height")
     checked_int(desktop["dpi"], 96, 480, "request.desktop.dpi")
     text = checked_int(request["text_scale_percent"], 100, 225, "request.text_scale_percent")
-    expected = FIXED_REQUESTS[request["mode"]]
-    require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
-            "Request does not match its fixed four-cell regression tuple.")
+    if request["mode"] == PAIR_MODE:
+        require(request["appearance"] == "light" and text == 100 and
+                800 <= desktop["width"] <= 1920 and 600 <= desktop["height"] <= 1080 and
+                desktop["dpi"] in {96, 120, 144, 192},
+                "Appearance pair request is outside its bounded display configurations.")
+    else:
+        expected = FIXED_REQUESTS[request["mode"]]
+        require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
+                "Request does not match its fixed four-cell regression tuple.")
     return request
 
 
@@ -340,6 +350,8 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     }
     if isinstance(value, dict) and "full_context_reference" in value:
         required.add("full_context_reference")
+    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == PAIR_MODE:
+        required.add("acceptance_profile_id")
     manifest = exact_keys(value, required, "input manifest")
     require(int_equals(manifest["schema_version"], 1), "input manifest schema_version must be integer 1.")
     require(isinstance(manifest["run_id"], str) and SAFE_LEAF.fullmatch(manifest["run_id"]),
@@ -361,12 +373,20 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
+    if request["mode"] == PAIR_MODE:
+        require(manifest["acceptance_profile_id"] == "vm-automated-v1-win11-ntfs",
+                "Appearance pair acceptance profile differs from its declared v1 contract.")
     validate_host_platform(manifest["host_preflight"], "input manifest host_preflight")
     validate_guest_platform(manifest["guest_preflight"], "input manifest guest_preflight")
     command = manifest["command"]
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
+    if request["mode"] == PAIR_MODE:
+        require(manifest["run_id"] == PAIR_RUN_ID and
+                command[0:3] == ["python3", "-I", "scripts/run-gui-regression.py"] and
+                command.count("--diagnostic") == 1 and command.count(PAIR_MODE) == 1,
+                "Appearance pair manifest identity or command is invalid.")
     if request["mode"] == "tooltip":
         require("full_context_reference" in manifest,
                 "The tooltip run requires a direct full-context reference.")
@@ -1205,12 +1225,233 @@ def validate_text_pair(runs: list[dict]) -> None:
                 f"Text150 did not visibly enlarge both dimensions of the same rasterized glyphs: {sample_id}")
 
 
+def pair_region_luma(rgba: bytes, image_width: int, image_height: int,
+                     rect: dict, point: str) -> float:
+    left, top = int(rect["left"]), int(rect["top"])
+    right, bottom = int(rect["right"]), int(rect["bottom"])
+    require(0 <= left < right <= image_width and 0 <= top < bottom <= image_height,
+            f"Appearance {point} region lies outside its original PNG.")
+    x = min(right - 3, max(left + 2, (left + right) // 2))
+    y = min(bottom - 3, max(top + 2, (top + bottom) // 2))
+    samples = []
+    for row in range(y - 2, y + 3):
+        for column in range(x - 2, x + 3):
+            offset = (row * image_width + column) * 4
+            pixel = rgba[offset:offset + 4]
+            require(pixel[3] == 255, "Appearance raster region contains transparent pixels.")
+            samples.append((pixel[0] * 2126 + pixel[1] * 7152 + pixel[2] * 722) / 10000)
+    return sum(samples) / len(samples)
+
+
+def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
+                         actual: dict) -> dict:
+    scenario = nested(raw, "assertions", "scenario")
+    require(isinstance(scenario, dict) and scenario.get("appearance") == "light-dark-light" and
+            scenario.get("process_id") == actual["target"]["process_id"] and
+            scenario.get("normal_exit_code") == 0 and
+            nested(scenario, "fixture", "disk_unchanged") is True and
+            nested(scenario, "fixture", "journal_residue_count") == 0,
+            "Appearance scenario identity, safe fixture, or normal exit is missing.")
+    scenes = scenario.get("scenes")
+    require(isinstance(scenes, dict) and set(scenes) == set(PAIR_SCENES),
+            "Appearance pair scene set is incomplete.")
+    require(isinstance(raw.get("screenshots"), list) and len(raw["screenshots"]) == 9,
+            "Appearance pair requires exactly nine original captures.")
+    captures = {row.get("file"): row for row in raw["screenshots"] if isinstance(row, dict)}
+    require(len(captures) == 9, "Appearance pair captures are duplicated or invalid.")
+    require({name for name in collection_files if name.endswith(".png")} == set(captures),
+            "Appearance pair collected PNG inventory differs from its captures.")
+    diagnostics = {}
+    for scene in PAIR_SCENES:
+        steps = scenes[scene]
+        require(isinstance(steps, list) and len(steps) == 3 and
+                [step.get("phase") for step in steps if isinstance(step, dict)] == list(PAIR_PHASES),
+                f"Appearance {scene} Light-Dark-Light phases are incomplete.")
+        stable = None
+        measurements = []
+        for step in steps:
+            phase = step["phase"]
+            appearance = "dark" if phase == "dark" else "light"
+            require(step.get("appearance") == appearance, f"Appearance {scene} phase theme differs.")
+            state = step.get("state")
+            require(isinstance(state, dict) and state.get("row_count") == {"empty": 0, "unchanged": 1, "overflow": 60}[scene] and
+                    state.get("apply_enabled") is False and state.get("focus_automation_id") == "1000",
+                    f"Appearance {scene} data, Apply, or settled focus differs.")
+            menu = state.get("appearance_menu")
+            require(isinstance(menu, dict) and menu.get("hwnd") == actual["target"]["hwnd"] and
+                    menu.get("pid") == actual["target"]["process_id"] and
+                    menu.get("menu_checked") == [
+                        {"command_id": 0x9010, "checked": False},
+                        {"command_id": 0x9011, "checked": appearance == "light"},
+                        {"command_id": 0x9012, "checked": appearance == "dark"},
+                    ], f"Appearance {scene} menu did not confirm the observed theme.")
+            require(isinstance(state.get("current_names"), list) and len(state["current_names"]) == state["row_count"] and
+                    all(isinstance(name, str) and name for name in state["current_names"]),
+                    f"Appearance {scene} row names are incomplete.")
+            invariant = {key: state.get(key) for key in (
+                "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
+                "apply_enabled", "status", "focus_automation_id", "list_physical_target", "list", "window")}
+            physical = state.get("list_physical_target")
+            require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
+                    physical["hit_window"] > 0 and physical.get("root_window") == actual["target"]["hwnd"],
+                    f"Appearance {scene} list was obscured during capture.")
+            if stable is None:
+                stable = invariant
+            else:
+                require(typed_equal(invariant, stable),
+                        f"Appearance {scene} data, geometry, selection, focus, or scroll state changed with theme.")
+            if scene == "overflow":
+                require(state.get("columns") == [900, 900, 260],
+                        "Appearance overflow column widths differ from the fixture.")
+                for axis in ("horizontal_scroll", "vertical_scroll"):
+                    scroll = state.get(axis)
+                    require(isinstance(scroll, list) and len(scroll) == 5 and
+                            all(type(value) is int for value in scroll) and
+                            scroll[1] - scroll[0] + 1 > scroll[2],
+                            f"Appearance overflow lacks a native {axis} range.")
+            capture = step.get("capture")
+            name = f"appearance-{scene}-{phase}.png"
+            require(isinstance(capture, dict) and capture.get("file") == name and
+                    captures[name].get("sha256") == capture.get("sha256") == collection_files[name]["sha256"] and
+                    captures[name].get("appearance") == appearance and
+                    captures[name].get("surface") == "main-workbench",
+                    f"Appearance {scene} {phase} capture binding differs.")
+            png = read_bytes(run_root / "output", Path(name), MAX_ARTIFACT_BYTES, "appearance PNG")
+            width, height, rgba = decode_png(png, name)
+            require(width == capture.get("width") == captures[name].get("width") and
+                    height == capture.get("height") == captures[name].get("height"),
+                    f"Appearance {scene} PNG dimensions differ from observation.")
+            observed_window = state.get("window", {})
+            window = observed_window.get("rect", {}) if isinstance(observed_window, dict) else {}
+            require(window.get("width") == width and window.get("height") == height,
+                    f"Appearance {scene} PNG differs from its captured window bounds.")
+            require(observed_window.get("hwnd") == actual["target"]["hwnd"] and
+                    observed_window.get("process_id") == actual["target"]["process_id"] and
+                    observed_window.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                    typed_equal(window, actual["target"]["window_rect"]),
+                    f"Appearance {scene} window differs from independent postlaunch bounds.")
+            bounds = state.get("list", {}).get("bounds", {})
+            require(all(type(bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")),
+                    f"Appearance {scene} list bounds are missing.")
+            x = round(bounds["x"] - window["left"])
+            y = round(bounds["y"] - window["top"])
+            list_width = round(bounds["width"])
+            list_height = round(bounds["height"])
+            interior = {"left": x + 8, "right": x + min(40, list_width - 8),
+                        "top": y + list_height // 2, "bottom": y + list_height // 2 + 8}
+            body_luma = pair_region_luma(rgba, width, height, interior, "list interior")
+            sample = {"phase": phase, "body_luma": round(body_luma, 2)}
+            if scene == "overflow":
+                for label, region in {
+                    "horizontal_scrollbar": {"left": x + list_width // 2 - 4, "right": x + list_width // 2 + 4,
+                                             "top": y + list_height - 15, "bottom": y + list_height - 7},
+                    "vertical_scrollbar": {"left": x + list_width - 15, "right": x + list_width - 7,
+                                           "top": y + list_height // 2 - 4, "bottom": y + list_height // 2 + 4},
+                    "scrollbar_intersection": {"left": x + list_width - 15, "right": x + list_width - 7,
+                                               "top": y + list_height - 15, "bottom": y + list_height - 7},
+                }.items():
+                    sample[label] = round(pair_region_luma(rgba, width, height, region, label), 2)
+            measurements.append(sample)
+        if scene in {"empty", "unchanged"}:
+            require(measurements[0]["body_luma"] > 150 and measurements[1]["body_luma"] < 130 and
+                    measurements[2]["body_luma"] > 150 and
+                    abs(measurements[0]["body_luma"] - measurements[2]["body_luma"]) <= 15,
+                    f"Appearance {scene} light/dark/light interior raster violation.")
+        diagnostics[scene] = measurements
+    return diagnostics
+
+
+def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
+    require(run_id == PAIR_RUN_ID, "Appearance pair run id is invalid.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "Appearance pair run directory is missing or unsafe.")
+    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    require(manifest["request"]["mode"] == PAIR_MODE, "Appearance pair request mode is missing.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 120 * 1024 * 1024,
+            "Appearance pair exceeds its declared 120 MiB output budget.")
+    preflight, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    result, result_bytes = read_json(run_root / "output", Path("run-result.json"), "appearance result")
+    result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
+        "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256", "runner_sha256",
+        "observer_sha256", "observer_result_sha256", "host_platform", "guest_platform", "actual",
+        "status", "exit_code"}, "appearance result")
+    artifacts = manifest["artifacts"]
+    require(result["schema_version"] == 1 and result["diagnostic"] == PAIR_MODE and
+            result["run_id"] == run_id and result["input_manifest_sha256"] == input_hash and
+            result["collection_sha256"] == sha256_bytes(collection_bytes) and
+            result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            result["source_sha"] == source_sha and
+            result["application_sha256"] == artifacts["application"]["sha256"] and
+            result["runner_sha256"] == artifacts["runner"]["sha256"] and
+            result["observer_sha256"] == artifacts["observer"]["sha256"] and
+            result["guest_platform"] == preflight["guest_platform"] and
+            result["host_platform"] == manifest["host_preflight"] and
+            result["status"] == "review_required" and result["exit_code"] == 0,
+            "Appearance result binding or terminal status differs.")
+    actual = result["actual"]
+    target = validate_target(actual.get("target"), "appearance target")
+    require(typed_equal(target, postlaunch["target"]) and
+            actual.get("hwnd_dpi") == manifest["request"]["desktop"]["dpi"] and
+            actual.get("text_scale_percent") == 100,
+            "Appearance target or display differs from request and postlaunch observation.")
+    monitor = validate_rectangle(actual["monitor"], "appearance monitor")
+    work = validate_rectangle(actual["work_area"], "appearance work area")
+    require((monitor["width"], monitor["height"]) ==
+            (manifest["request"]["desktop"]["width"], manifest["request"]["desktop"]["height"]),
+            "Appearance observed monitor geometry differs from requested geometry.")
+    window = target["window_rect"]
+    require(monitor["left"] <= work["left"] < work["right"] <= monitor["right"] and
+            monitor["top"] <= work["top"] < work["bottom"] <= monitor["bottom"] and
+            work["left"] <= window["left"] < window["right"] <= work["right"] and
+            work["top"] <= window["top"] < window["bottom"] <= work["bottom"],
+            "Appearance work area or target window lies outside its monitor.")
+    validate_transport_exit(run_root, files, result["exit_code"])
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "appearance observer")
+    observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"), "appearance observations")
+    require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) == files["acceptance-result.json"]["sha256"] and
+            files["acceptance-observations.json"]["sha256"] == sha256_bytes(observation_bytes) and
+            raw.get("source_sha") == source_sha and
+            raw.get("application", {}).get("sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("observations", {}).get("sha256") == sha256_bytes(observation_bytes) and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(raw.get("assertions", {}).get("scenario"), observations.get("scenario")) and
+            raw.get("status") == "review_required" and raw.get("guest_cleanup") is True and
+            raw.get("assertions", {}).get("overall") == "passed" and
+            raw.get("assertions", {}).get("scope") == "appearance-pair-baseline-three-scenes" and
+            nested(raw, "keyboard", "status") == "not_run" and
+            nested(raw, "accessibility", "status") == "not_run" and
+            nested(raw, "capture", "status") == "passed",
+            "Appearance observer source, executable, observation, or cleanup binding differs.")
+    environment = observations.get("environment")
+    style = environment.get("system_visual_style") if isinstance(environment, dict) else None
+    require(isinstance(environment, dict) and environment.get("hwnd_dpi") == actual["hwnd_dpi"] and
+            environment.get("text_scale_factor_percent") == 100 and
+            environment.get("physical_screen") == monitor and
+            environment.get("work_area") == actual["work_area"] and
+            isinstance(style, dict) and style.get("forced_colors") is False and
+            isinstance(style.get("theme_color"), str) and style.get("theme_color") and
+            isinstance(style.get("theme_size"), str) and style.get("theme_size") and
+            checked_digest(style.get("theme_path_sha256"), "appearance system theme path") and
+            observations.get("scenario", {}).get("environment") == environment,
+            "Appearance raw and normalized environment binding differs.")
+    diagnostics = validate_pair_scenes(run_root, raw, files, actual)
+    return {"run_id": run_id, "mode": PAIR_MODE, "input_manifest_sha256": input_hash,
+            "result_sha256": sha256_bytes(result_bytes), "status": "passed",
+            "raster_regions": diagnostics, "native_scrollbar_theme": "diagnostic-only"}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", required=True, type=Path)
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE])
     return parser.parse_args(argv)
 
 
@@ -1221,6 +1462,21 @@ def main(repo: Path, argv=None) -> int:
             "--expected-source-sha must be a full lowercase Git SHA.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
+    if args.diagnostic == PAIR_MODE:
+        require(not args.require_complete_set and args.runs == [PAIR_RUN_ID],
+                "Appearance pair is one opt-in run and cannot complete the four-cell set.")
+        pair = validate_pair_run(root, args.runs[0], args.expected_source_sha)
+        print(json.dumps({
+            "schema_version": 1, "diagnostic": PAIR_MODE, "status": "passed",
+            "source_sha": args.expected_source_sha, "runs": [pair],
+            "state_invariance": "passed", "raster_regions": "passed",
+            "native_scrollbar_theme": "diagnostic-only",
+            "rendering_conformance": "not-assessed", "design_approval": "not-assessed",
+            "omitted_scenes": ["changed-warning-collision-preview", "selection-focus-transitions",
+                                "input-prompt", "forced-colors", "system-theme-following"],
+            "full_four_run_regression": "not-run", "release_campaign": "not-run",
+        }, ensure_ascii=False, indent=2))
+        return 0
     runs = [validate_run(root, run_id, args.expected_source_sha) for run_id in args.runs]
     modes = [run["manifest"]["request"]["mode"] for run in runs]
     require(len(modes) == len(set(modes)), "Validated runs contain duplicate modes.")

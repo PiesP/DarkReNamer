@@ -50,6 +50,19 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
 
+def pair_png(rgb: tuple[int, int, int]) -> bytes:
+    width, height = 800, 552
+    background = bytes((*rgb, 255))
+    contrasting = b"\x00\x00\x00\xff" if rgb[0] > 128 else b"\xff\xff\xff\xff"
+    pixels = bytearray()
+    for y in range(height):
+        pixels.append(0)
+        pixels.extend(contrasting * 8 if y < 8 else background * 8)
+        pixels.extend(background * (width - 8))
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
+
+
 def physical_menu_apply_entry() -> dict:
     def menu_item(name: str, automation_id: str, x: float, y: float,
                   width: float, height: float) -> dict:
@@ -536,11 +549,97 @@ class Fixture:
             "exit_code": 0,
             "assertions": {
                 "overall": "passed",
-                "semantics": {name: True for name in evidence.MODE_SEMANTICS[request["mode"]]},
+                "semantics": {name: True for name in evidence.MODE_SEMANTICS.get(request["mode"], ())},
             },
             "status": "review_required",
         }
+        if request["mode"] == evidence.PAIR_MODE:
+            result = {
+                "schema_version": 1, "diagnostic": evidence.PAIR_MODE, "run_id": run.name,
+                "input_manifest_sha256": input_hash,
+                "collection_sha256": digest((run / "collection.json").read_bytes()),
+                "cleanup_sha256": digest(cleanup_bytes), "source_sha": manifest["source_sha"],
+                "application_sha256": manifest["artifacts"]["application"]["sha256"],
+                "runner_sha256": manifest["artifacts"]["runner"]["sha256"],
+                "observer_sha256": manifest["artifacts"]["observer"]["sha256"],
+                "observer_result_sha256": digest(raw_bytes),
+                "host_platform": manifest["host_preflight"],
+                "guest_platform": json.loads((output / "platform-preflight.json").read_text())["guest_platform"],
+                "actual": {
+                    "monitor": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+                    "work_area": {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552},
+                    "target": {"hwnd": 1001, "process_id": 4242, "window_rect":
+                               {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552}},
+                    "hwnd_dpi": 96, "text_scale_percent": 100,
+                },
+                "status": "review_required", "exit_code": 0,
+            }
         write_json(output / "run-result.json", result)
+
+    def build_pair(self) -> Path:
+        run = self.build(evidence.PAIR_RUN_ID, "standard")
+        output = run / "output"
+        manifest = json.loads((run / "input-manifest.json").read_text())
+        manifest["request"]["mode"] = evidence.PAIR_MODE
+        manifest["acceptance_profile_id"] = "vm-automated-v1-win11-ntfs"
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py", "--diagnostic", evidence.PAIR_MODE]
+        write_json(run / "input-manifest.json", manifest)
+        (output / "screen.png").unlink()
+        (output / "text-raster-metrics.json").unlink()
+        raw = json.loads((output / "acceptance-result.json").read_text())
+        environment = raw["assertions"]["scenario"]["environment"]
+        environment["system_visual_style"] = {
+            "theme_path_sha256": "e" * 64, "theme_color": "NormalColor",
+            "theme_size": "NormalSize", "forced_colors": False,
+        }
+        captures = []
+        scenes = {}
+        for scene, count in (("empty", 0), ("unchanged", 1), ("overflow", 60)):
+            names = [f"{index:02d}-한국어-日本語.txt" for index in range(count)]
+            state = {
+                "row_count": count, "current_names": names,
+                "columns": [900, 900, 260] if scene == "overflow" else [400, 300, 200],
+                "horizontal_scroll": [0, 2000, 800, 0, 0] if scene == "overflow" else None,
+                "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
+                "apply_enabled": False, "status": "변경 없음", "focus_automation_id": "1000",
+                "list_physical_target": {"x": 340, "y": 275, "hit_window": 2001, "root_window": 1001},
+                "list": {"bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
+                "window": {"hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
+                           "rect": {"left": 0, "top": 0, "right": 800, "bottom": 552,
+                                     "width": 800, "height": 552}},
+            }
+            steps = []
+            for phase in evidence.PAIR_PHASES:
+                appearance = "dark" if phase == "dark" else "light"
+                state["appearance_menu"] = {"hwnd": 1001, "pid": 4242, "menu_checked": [
+                    {"command_id": 0x9010, "checked": False},
+                    {"command_id": 0x9011, "checked": appearance == "light"},
+                    {"command_id": 0x9012, "checked": appearance == "dark"},
+                ]}
+                name = f"appearance-{scene}-{phase}.png"
+                image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245))
+                (output / name).write_bytes(image)
+                capture = {"file": name, "sha256": digest(image), "width": 800, "height": 552}
+                captures.append({**capture, "appearance": appearance, "surface": "main-workbench"})
+                steps.append({"phase": phase, "appearance": appearance,
+                              "state": json.loads(json.dumps(state)), "capture": capture})
+            scenes[scene] = steps
+        raw["screenshots"] = captures
+        raw["keyboard"]["status"] = "not_run"
+        raw["accessibility"]["status"] = "not_run"
+        raw["assertions"]["scope"] = "appearance-pair-baseline-three-scenes"
+        raw["assertions"]["scenario"] = {
+            "environment": environment, "appearance": "light-dark-light", "process_id": 4242,
+            "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0},
+            "scenes": scenes,
+        }
+        write_json(output / "acceptance-result.json", raw)
+        observations = json.loads((output / "acceptance-observations.json").read_text())
+        observations["environment"] = environment
+        observations.pop("text_raster_targets", None)
+        write_json(output / "acceptance-observations.json", observations)
+        self.refresh(run)
+        return run
 
     def reference(self, target: Path) -> dict:
         return {
@@ -1104,6 +1203,75 @@ class GuiEvidenceTests(unittest.TestCase):
             self.assertEqual(normalized["exit_code"], 0)
             with self.assertRaisesRegex(evidence.EvidenceError, "terminal exit code"):
                 self.validate(self.standard)
+
+
+class AppearancePairEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.fixture = Fixture(self.root)
+        self.run = self.fixture.build_pair()
+
+    def validate(self):
+        return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
+
+    def test_pair_has_nine_bound_captures_and_distinct_verdict(self):
+        result = self.validate()
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["native_scrollbar_theme"], "diagnostic-only")
+        self.assertEqual(set(result["raster_regions"]), set(evidence.PAIR_SCENES))
+
+    def test_missing_pair_capture_rejected(self):
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["screenshots"].pop()
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly nine original captures"):
+            self.validate()
+
+    def test_pair_source_executable_and_environment_bindings_rejected(self):
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["source_sha"] = "f" * 40
+        write_json(manifest_path, manifest)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "source_sha"):
+            self.validate()
+
+        self.setUp()
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["application"]["sha256"] = "f" * 64
+        write_json(manifest_path, manifest)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "artifacts.application bytes"):
+            self.validate()
+
+        self.setUp()
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["assertions"]["scenario"]["environment"]["hwnd_dpi"] = 144
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "environment binding"):
+            self.validate()
+
+    def test_pair_region_visual_violation_rejected_with_matching_receipt(self):
+        name = "appearance-empty-dark.png"
+        image = pair_png((245, 245, 245))
+        (self.run / "output" / name).write_bytes(image)
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        raw["assertions"]["scenario"]["scenes"]["empty"][1]["capture"]["sha256"] = digest(image)
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "interior raster violation"):
+            self.validate()
 
 
 if __name__ == "__main__":

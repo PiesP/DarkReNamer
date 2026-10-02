@@ -859,6 +859,13 @@ function Invoke-ObserverStandardScenario {
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $application
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        $visualStyle = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+        $environment['system_visual_style'] = [ordered]@{
+            theme_path_sha256 = Get-LowerTextSha256 -Value $visualStyle.ThemePath
+            theme_color = $visualStyle.ThemeColor
+            theme_size = $visualStyle.ThemeSize
+            forced_colors = ($visualStyle.Flags -band 1) -ne 0
+        }
         $requested = $script:contract.requested_small_workspace
         $requestedModePrefix = '{0}x{1}@' -f $requested.width,$requested.height
         $environment['requested_small_workspace'] = [ordered]@{
@@ -954,4 +961,154 @@ function Invoke-ObserverStandardScenario {
             Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
         }
     }
+}
+
+# A diagnostic scene retains one application process while only the app appearance changes.
+function Get-ObserverAppearanceFixtureState {
+    param([Parameter(Mandatory)][string] $Root, [Parameter(Mandatory)][string[]] $Paths)
+    $parent = Split-Path -Parent $Paths[0]
+    $parentItem = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+    if ($Paths.Count -ne 60 -or
+        @((Get-ChildItem -LiteralPath $Root -Force)).Count -ne 1 -or
+        -not $parentItem.PSIsContainer -or
+        ($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        @((Get-ChildItem -LiteralPath $parent -Force)).Count -ne 60) {
+        throw 'Appearance fixture must contain exactly sixty owned files.'
+    }
+    $rows = [Collections.Generic.List[object]]::new()
+    foreach ($path in $Paths) {
+        $file = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $file.Length -gt 1MB) { throw 'Appearance fixture file is unsafe.' }
+        $rows.Add([ordered]@{
+            path = $file.FullName
+            name = $file.Name
+            content_sha256 = Get-LowerSha256 -Path $file.FullName
+            identity = [DarkReNamerVmNative]::GetFileIdentity($file.FullName)
+        })
+    }
+    $rows.ToArray()
+}
+function Invoke-ObserverAppearancePairScenario {
+    param(
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
+    )
+    $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'appearance-fixture'
+    $parent = New-PrivateDirectory -Parent $root -Leaf '한국어-日本語-long-path-2026'
+    $paths = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt 60; $index++) {
+        $leaf = '{0:D2}-한국어-日本語-{1}.txt' -f $index,('긴이름-長い名前-' * 6)
+        $path = Join-Path $parent $leaf
+        [IO.File]::WriteAllText($path, ('appearance-fixture-{0:D2}' -f $index), [Text.UTF8Encoding]::new($false))
+        [IO.File]::SetLastWriteTimeUtc($path, [DateTime]::Parse('2026-01-01T00:00:00Z').AddMinutes($index))
+        $paths.Add($path)
+    }
+    $oneList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths @($paths[0]) -Leaf 'appearance-one-utf16le.txt'
+    $remainingList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths @($paths.ToArray() | Select-Object -Skip 1) -Leaf 'appearance-remaining-utf16le.txt'
+    $initial = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
+    $application = $null
+    try {
+        $applicationPath = Join-Path $Verified.root $Verified.application.file
+        if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+            throw 'Appearance application changed after bundle verification.'
+        }
+        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'appearance pair application' -ProcessLifecycleObservations $ProcessLifecycleObservations
+        $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
+        $environment = Get-ObserverEnvironmentMetadata -Application $application
+        $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        $requested = $script:contract.requested_small_workspace
+        $environment['requested_small_workspace'] = [ordered]@{
+            width = [int]$requested.width; height = [int]$requested.height
+            actual_screen_matches = $environment.physical_screen.width -eq $requested.width -and $environment.physical_screen.height -eq $requested.height
+            display_mode_advertised = $true; status = 'observed-exact'; mutation_attempted = $false
+        }
+        Write-JsonUtf8Bom -Path (Join-Path $EvidenceRoot 'environment-preflight.json') -Value $environment
+        if (-not $environment.requested_small_workspace.actual_screen_matches -or
+            $environment.hwnd_dpi -ne $script:contract.expected_dpi -or
+            $minimum.dpi -ne $script:contract.expected_dpi -or
+            $environment.text_scale_factor_percent -ne $script:contract.expected_text_scale_percent) {
+            throw 'environment_blocked: appearance pair display, DPI, or text scale differs from request.'
+        }
+        $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $scenes = [ordered]@{}
+        foreach ($scene in @('empty', 'unchanged', 'overflow')) {
+            if ($scene -eq 'unchanged') {
+                [void](Import-GuiRegressionPathList -Application $application -PathsFile $oneList -ExpectedRows 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+            }
+            elseif ($scene -eq 'overflow') {
+                [void](Import-GuiRegressionPathList -Application $application -PathsFile $remainingList -ExpectedRows 60 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+                $listHandle = [IntPtr]$grid.element.Current.NativeWindowHandle
+                foreach ($column in 0..2) {
+                    if (-not [DarkReNamerVmAcceptanceNative]::SetListViewColumnWidth($listHandle, $column, @(900, 900, 260)[$column])) {
+                        throw 'Appearance pair could not establish deterministic overflowing column widths.'
+                    }
+                }
+            }
+            $steps = [Collections.Generic.List[object]]::new()
+            foreach ($step in @('light-before', 'dark', 'light-after')) {
+                $appearance = if ($step -eq 'dark') { 'dark' } else { 'light' }
+                [void](Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $appearance)
+                Start-Sleep -Milliseconds 200
+                $count = [int]$grid.pattern.Current.RowCount
+                if ($count -ne @{'empty'=0; 'unchanged'=1; 'overflow'=60}[$scene]) { throw 'Appearance scene row count changed.' }
+                $names = [Collections.Generic.List[string]]::new()
+                for ($index = 0; $index -lt $count; $index++) {
+                    $names.Add([string]$grid.pattern.GetItem($index, 0).Current.Name)
+                }
+                $listHandle = [IntPtr]$grid.element.Current.NativeWindowHandle
+                $columns = @(0..2 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+                $horizontal = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0)
+                $vertical = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1)
+                if ($scene -eq 'overflow') {
+                    foreach ($axis in 0..1) {
+                        $scroll = if ($axis -eq 0) { $horizontal } else { $vertical }
+                        if ($null -eq $scroll -or $scroll.Count -ne 5 -or $scroll[1] - $scroll[0] + 1 -le $scroll[2]) {
+                            throw 'Appearance overflow fixture did not expose both scrollbars.'
+                        }
+                    }
+                }
+                $apply = Get-ObserverPublicApplyState -Application $application -SessionId $SessionId -Label 'appearance unchanged Apply'
+                if ($apply.enabled) { throw 'Unchanged appearance fixture unexpectedly enabled Apply.' }
+                $grid.element.SetFocus()
+                $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance settled list focus'
+                if ($focused.Current.AutomationId -cne '1000') { throw 'Appearance list focus did not settle.' }
+                $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
+                $state = [ordered]@{
+                    row_count = $count; current_names = $names.ToArray(); columns = $columns
+                    horizontal_scroll = if ($null -eq $horizontal) { $null } else { @($horizontal) }
+                    vertical_scroll = if ($null -eq $vertical) { $null } else { @($vertical) }
+                    apply_enabled = [bool]$apply.enabled; status = [string]$status.Current.Name
+                    focus_automation_id = [string]$focused.Current.AutomationId
+                    appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
+                    list_physical_target = Get-GuiRegressionPhysicalTarget -Element $grid.element -Application $application -SessionId $SessionId -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance unobscured list'
+                    list = Get-ElementObservation -Element $grid.element
+                    window = Get-ObserverNativeWindowMetrics -Window $application.main
+                }
+                $leaf = "appearance-$scene-$step.png"
+                $capture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $application.main -Process $application.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf $leaf -Label "appearance $scene $step"
+                $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $capture -Appearance $appearance -Surface 'main-workbench'))
+                $steps.Add([ordered]@{ phase = $step; appearance = $appearance; state = $state; capture = $capture })
+            }
+            $scenes[$scene] = $steps.ToArray()
+        }
+        $after = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
+        if (-not (Test-ObserverFixtureStateEqual -Expected $initial -Actual $after)) {
+            throw 'Appearance pair changed a fixture file, content digest, or NTFS identity.'
+        }
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+        [ordered]@{
+            environment = $environment; appearance = 'light-dark-light'; process_id = [int]$application.process.Id
+            fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0 }
+            scenes = $scenes; normal_exit_code = $exitCode
+            limitations = @('baseline-scenes-only: changed-warning-collision, selection, input-prompt, and forced-colors not-run')
+        }
+    }
+    finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
 }
