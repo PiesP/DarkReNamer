@@ -1468,11 +1468,26 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             expected_widths = [(width * dpi + 48) // 96 for width in preference["primary_width_dip"]]
             require(state.get("columns") == expected_widths,
                     "Appearance column widths differ from persisted settings.")
+            proposal_viewport = state.get("proposal_viewport")
+            if scene in {"changed", "collision", "warning"}:
+                scroll = state.get("horizontal_scroll")
+                require(isinstance(scroll, list) and len(scroll) == 5 and
+                        all(type(value) is int for value in scroll) and scroll[2] > 0 and
+                        scroll[1] - scroll[0] - scroll[2] + 1 > 0,
+                        "Appearance proposal lacks a native horizontal viewport.")
+                requested = scroll[0] + ((scroll[1] - scroll[0] - scroll[2] + 1) * 45 + 50) // 100
+                require(typed_equal(proposal_viewport, {
+                    "query": "LVM_SCROLL horizontal scalar pixels after focus", "percent": 45,
+                    "requested": requested, "observed": requested,
+                }) and scroll[3] == scroll[4] == requested,
+                        "Appearance proposal viewport differs from exact native pixel request.")
+            else:
+                require(proposal_viewport is None, "Appearance non-proposal scene changed the proposal viewport.")
             invariant = {key: state.get(key) for key in (
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
                 "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list",
                 "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell",
-                "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window", "target_rendering")}
+                "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window", "target_rendering", "proposal_viewport")}
             physical = state.get("list_physical_target")
             require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
                     physical["hit_window"] > 0 and physical.get("root_window") == actual["target"]["hwnd"],

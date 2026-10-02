@@ -1404,6 +1404,13 @@ function Invoke-ObserverAppearancePairScenario {
                     ($scene -eq 'selected-inactive' -and $nativeFocus[0] -ne $focusButton.Current.NativeWindowHandle)) {
                     throw "Appearance $scene native focus did not settle: control=$($nativeFocus[2]), UIA=$($focused.Current.AutomationId)."
                 }
+                $proposalViewport = $null
+                if ($null -ne $proposedCell) {
+                    $position = [DarkReNamerVmAcceptanceNative]::SetListHorizontalViewport($listHandle, [uint32]$application.process.Id)
+                    $proposalViewport = [ordered]@{ query = 'LVM_SCROLL horizontal scalar pixels after focus'; percent = 45; requested = $position[0]; observed = $position[1] }
+                    $proposedCell = $grid.pattern.GetItem(0, 1)
+                    $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance exact viewport focus'
+                }
                 $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
                 if (($scene -eq 'collision' -and $status.Current.Name.IndexOf('대상 경로 충돌', [StringComparison]::Ordinal) -lt 0) -or
                     ($scene -eq 'warning' -and $status.Current.Name.IndexOf('이름 본체가 비어 있는 항목', [StringComparison]::Ordinal) -lt 0)) {
@@ -1426,6 +1433,7 @@ function Invoke-ObserverAppearancePairScenario {
                     row_count = $count; current_names = $names.ToArray(); columns = $columns
                     column_preference_sha256 = $preferenceHash
                     horizontal_scroll = if ($null -eq $horizontal) { $null } else { @($horizontal) }
+                    proposal_viewport = $proposalViewport
                     vertical_scroll = if ($null -eq $vertical) { $null } else { @($vertical) }
                     horizontal_scrollbar_bounds = if ($null -eq $horizontalBounds) { $null } else { @($horizontalBounds) }
                     vertical_scrollbar_bounds = if ($null -eq $verticalBounds) { $null } else { @($verticalBounds) }
@@ -1571,6 +1579,13 @@ function Invoke-ObserverAppearancePairScenario {
                     -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix edit' -RequireWindowHandle
                 $ok = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
                     -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix default OK' -RequireEnabled -RequireWindowHandle
+                $label = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
+                    -AutomationId '1002' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix native label' -RequireWindowHandle
+                $labelNative = [DarkReNamerVmAcceptanceNative]::DescribeWindow([IntPtr]$label.Current.NativeWindowHandle)
+                if ($label.Current.Name -cne '붙일 문자열' -or $labelNative[3] -ine 'Static' -or $labelNative[4] -cne '붙일 문자열' -or
+                    [int]$labelNative[2] -ne $application.process.Id) {
+                    throw 'Appearance prefix native label identity differs.'
+                }
                 $defaultId = [DarkReNamerVmAcceptanceNative]::ReadDefaultPushButtonId([IntPtr]$ok.Current.NativeWindowHandle)
                 if ($edit.Current.Name -cne '붙일 문자열' -or $defaultId -ne 1) {
                     throw "Appearance prefix prompt lost its label or default button: label=$($edit.Current.Name), default=$defaultId."
@@ -1579,6 +1594,13 @@ function Invoke-ObserverAppearancePairScenario {
                     window = Get-ElementObservation -Element $prompt
                     native_window = Get-ObserverNativeWindowMetrics -Window $prompt
                     edit = Get-ElementObservation -Element $edit
+                    same_glyph_label = [ordered]@{
+                        control = Get-ElementObservation -Element $label
+                        native_window = Get-ObserverNativeWindowMetrics -Window $label
+                        native_class = $labelNative[3]
+                        text_sha256 = Get-LowerTextSha256 -Value '붙일 문자열'
+                        query = 'bound STATIC/GetWindowTextW original prompt raster'
+                    }
                     default_button = Get-ElementObservation -Element $ok
                     default_button_id = $defaultId
                     default_button_query = 'WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID'

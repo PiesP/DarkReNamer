@@ -458,7 +458,10 @@ The isolated fixture loads supported persisted user column widths before
 startup, so empty and one-row scenes retain horizontal overflow. Native/UIA
 state binds process/window, columns, scroll ranges and rectangles, settled focus,
 selection, proposed-name cells, enabled states, and unchanged file identities.
-The viewport is observed after any proposal exposure and focus settlement.
+After proposal exposure and focus settlement, the fixture uses scalar
+`LVM_SCROLL` horizontal pixels to set the same rounded 45% native range position.
+The requested and observed pixels must match exactly; UIA percentage rounding
+does not relax viewport invariance. Other scenes only observe their viewport.
 Main scene captures settle the cursor on the title bar and reject visible owned
 tooltips. A retained tooltip is dismissed through standard `TTM_POP` only after
 verifying its process and native class, with the dismissal count recorded; a

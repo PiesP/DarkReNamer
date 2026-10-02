@@ -1042,6 +1042,34 @@ public static class DarkReNamerVmAcceptanceNative {
         return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };
     }
 
+    public static int[] SetListHorizontalViewport(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        StringBuilder className = new StringBuilder(128);
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId
+            || GetClassName(window, className, className.Capacity) == 0
+            || className.ToString() != "SysListView32")
+            throw new InvalidOperationException("Viewport target differs from bound native ListView.");
+        int[] before = TryReadScrollInfo(window, 0);
+        if (before == null || before[2] <= 0)
+            throw new InvalidOperationException("Native horizontal viewport is unavailable.");
+        long available = (long)before[1] - before[0] - before[2] + 1;
+        if (available <= 0) throw new InvalidOperationException("Native ListView has no horizontal overflow.");
+        int requested = checked((int)(before[0] + (available * 45 + 50) / 100));
+        int delta = checked(requested - before[3]);
+        if (delta != 0) {
+            IntPtr result;
+            // LVM_SCROLL uses scalar pixel deltas in report view; no remote pointer is passed.
+            if (SendMessageTimeoutW(window, 0x1014, new IntPtr(delta), IntPtr.Zero,
+                    3, 500, out result) == IntPtr.Zero || result == IntPtr.Zero)
+                throw new InvalidOperationException("Native ListView viewport request failed.");
+        }
+        int[] after = TryReadScrollInfo(window, 0);
+        if (after == null || after[0] != before[0] || after[1] != before[1]
+            || after[2] != before[2] || after[3] != requested || after[4] != requested)
+            throw new InvalidOperationException("Native ListView viewport did not settle exactly.");
+        return new [] { requested, after[3] };
+    }
+
     public static int[] TryReadScrollBarBounds(IntPtr window, int bar) {
         NativeScrollBarInfo info = new NativeScrollBarInfo {
             Size = (uint)Marshal.SizeOf(typeof(NativeScrollBarInfo)),

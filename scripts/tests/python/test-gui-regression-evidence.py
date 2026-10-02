@@ -663,7 +663,11 @@ class Fixture:
                 "columns": [900, 900, 260],
                 "column_preference_sha256": "c" * 64,
                 "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True, "dismissed_tooltip_count": 0},
-                "horizontal_scroll": [0, 2000, 800, 0, 0] if scene == "overflow" else None,
+                "horizontal_scroll": ([0, 2000, 800, 540, 540] if proposal_name else
+                                      [0, 2000, 800, 0, 0] if scene == "overflow" else None),
+                "proposal_viewport": ({"query": "LVM_SCROLL horizontal scalar pixels after focus",
+                                      "percent": 45, "requested": 540, "observed": 540}
+                                     if proposal_name else None),
                 "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
                 "horizontal_scrollbar_bounds": [40, 432, 620, 449, 0, 0, 0] if scene == "overflow" else None,
                 "vertical_scrollbar_bounds": [623, 125, 640, 432, 0, 0, 0] if scene == "overflow" else None,
@@ -1418,6 +1422,23 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.run)
         with self.assertRaisesRegex(evidence.EvidenceError, "exactly 66 original captures"):
             self.validate()
+
+    def test_proposal_viewport_must_match_exact_native_request(self):
+        for key in ("proposal_viewport", "horizontal_scroll"):
+            with self.subTest(key=key):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                state = raw["assertions"]["scenario"]["scenes"]["changed"][0]["state"]
+                if key == "proposal_viewport":
+                    state[key]["observed"] += 6
+                else:
+                    state[key][3] += 6
+                    state[key][4] += 6
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, "exact native pixel request"):
+                    self.validate()
 
     def test_pair_source_executable_and_environment_bindings_rejected(self):
         manifest_path = self.run / "input-manifest.json"
