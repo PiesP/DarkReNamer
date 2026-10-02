@@ -660,7 +660,7 @@ function Invoke-GuiRegressionAcceptance {
         $result.accessibility.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
-            $result.assertions['scope'] = 'appearance-pair-baseline-three-scenes'
+            $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v2'
         }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'

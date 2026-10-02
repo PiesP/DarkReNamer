@@ -444,19 +444,43 @@ external output directory. The observer has a 600-second timeout and the
 collected output is capped at 120 MiB. The immutable run input records the
 existing `vm-automated-v1-win11-ntfs` cleanup profile used by this diagnostic.
 
-The baseline captures empty, one unchanged multilingual row, and 60-row
-horizontal-plus-vertical overflow, each as Light → Dark → Light in one process.
-The isolated fixture loads supported persisted user column widths before startup,
-so even empty and one-row scenes retain horizontal overflow. It retains nine
-original desktop PNGs and native/UIA state, including scroll ranges, settings
-hash, menu-checked appearance, geometry, file identities, and unchanged Apply.
-Each capture settles the cursor on the title bar and rejects visible owned tooltips.
-The independent verifier checks source/EXE/environment bindings, pair presence,
-state invariance, and list-interior raster regions. Scrollbar pixels are
-reported as a diagnostic measurement pending an explicit design decision.
-The baseline reports changed/warning/collision previews, selection transitions,
-input prompt, system-theme following, and Forced Colors as not run. It does not
-complete the four fixed GUI regression runs or release acceptance.
+The diagnostic retains 48 original guest desktop PNGs. Eight main states
+(empty, one unchanged multilingual row, overflow, changed proposal, empty-stem
+warning, collision, active selection, and inactive selection) each run
+Light → Dark → Light in one process. Five button states (normal, disabled,
+hover, held pressed, and keyboard focus), the native View menu, advanced
+appearance, and a cancellable prefix prompt are also paired. Button release
+outside the enabled Prefix command cancels activation; Apply is never invoked.
+The warning uses the valid leaf `.txt`, keeping its empty-stem warning distinct
+from an invalid name or collision.
+
+The isolated fixture loads supported persisted user column widths before
+startup, so empty and one-row scenes retain horizontal overflow. Native/UIA
+state binds process/window, columns, scroll ranges and rectangles, settled focus,
+selection, proposed-name cells, enabled states, and unchanged file identities.
+The viewport is observed after any proposal exposure and focus settlement.
+Main scene captures settle the cursor on the title bar and reject visible owned
+tooltips; interaction captures intentionally retain their target state. Dialog
+Cancel and appearance-setting rollback are checked without applying file changes.
+
+The independent verifier checks source/EXE/environment bindings, exact capture
+inventory, state invariance, proposed-name semantic pixels, selection transitions,
+and button-state pixel differences. Scrollbar pixels remain a diagnostic
+measurement until the native-chrome conformance and interaction checks are
+completed. Forced Colors, system-theme following, and the DPI/text-size matrix
+are separate outstanding checks. This opt-in diagnostic does not complete the
+four fixed GUI regression runs or release acceptance.
+
+The painting policy keeps control outlines, default outlines, and decorative
+hairlines one physical pixel. Focus inset, pressed displacement, and existing
+separator slots/padding scale in DIP. Adjacent buttons share one outline seam;
+allocated separator slots are cleared and contain one centered hairline.
+Interactive outlines use `control_outline`; header, status, group and dialog
+separators use `divider_subtle`. Disabled labels use the distinct readable
+`text_disabled` role. Native focus rectangles and selected-row precedence are
+retained. Dark scrollbar tracks use the window surface, with a stronger thumb
+ramp from the existing outline/foreground roles; native geometry and input remain
+owned by the ListView. Native/Forced Colors disables this custom chrome.
 
 ## Historical acceptance and GUI diagnostics
 

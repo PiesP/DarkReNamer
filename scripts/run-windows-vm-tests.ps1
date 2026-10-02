@@ -45,7 +45,7 @@ if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v
     throw 'Unsupported VM acceptance profile identity.'
 }
 
-$ToolingManifestSha256 = 'c3a5ab1c66a8880cb6740bc4fca085c3c0afa2bb9dc3a32b906aabd181839476'
+$ToolingManifestSha256 = '0889e0ea59e9944faac23f36d84107a4b93456298e1569067fcfe2decddc72dd'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {
