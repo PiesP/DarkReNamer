@@ -50,15 +50,20 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
 
-def pair_png(rgb: tuple[int, int, int]) -> bytes:
-    width, height = 800, 552
+def pair_png(rgb: tuple[int, int, int], *, width: int = 800, height: int = 552,
+             patches: tuple[tuple[int, int, int, int, tuple[int, int, int]], ...] = ()) -> bytes:
     background = bytes((*rgb, 255))
     contrasting = b"\x00\x00\x00\xff" if rgb[0] > 128 else b"\xff\xff\xff\xff"
     pixels = bytearray()
     for y in range(height):
         pixels.append(0)
-        pixels.extend(contrasting * 8 if y < 8 else background * 8)
-        pixels.extend(background * (width - 8))
+        row = bytearray(background * width)
+        if y < 8:
+            row[:32] = contrasting * 8
+        for left, top, right, bottom, color in patches:
+            if top <= y < bottom:
+                row[left * 4:right * 4] = bytes((*color, 255)) * (right - left)
+        pixels.extend(row)
     header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
@@ -594,8 +599,49 @@ class Fixture:
         }
         captures = []
         scenes = {}
-        for scene, count in (("empty", 0), ("unchanged", 1), ("overflow", 60)):
+        def add_capture(name: str, image: bytes, appearance: str, surface: str,
+                        width: int = 800, height: int = 552) -> dict:
+            (output / name).write_bytes(image)
+            receipt = {"file": name, "sha256": digest(image), "width": width, "height": height}
+            captures.append({**receipt, "appearance": appearance, "surface": surface})
+            return receipt
+
+        def menu_state(appearance: str) -> dict:
+            return {"hwnd": 1001, "pid": 4242, "menu_checked": [
+                {"command_id": 0x9010, "checked": False},
+                {"command_id": 0x9011, "checked": appearance == "light"},
+                {"command_id": 0x9012, "checked": appearance == "dark"},
+            ]}
+
+        def control(automation_id: str, name: str, x: int, y: int, width: int,
+                    height: int, enabled: bool = True, native_handle: int = 3001) -> dict:
+            return {"automation_id": automation_id, "name": name,
+                    "control_type": "ControlType.Button", "enabled": enabled,
+                    "keyboard_focusable": True, "offscreen": False,
+                    "native_handle": native_handle,
+                    "bounds": {"x": x, "y": y, "width": width, "height": height}}
+
+        main_window = {"hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
+                       "rect": {"left": 0, "top": 0, "right": 800, "bottom": 552,
+                                "width": 800, "height": 552}}
+        native_list = {"hwnd": 2001, "process_id": 4242, "hwnd_dpi": 96,
+                       "rect": {"left": 40, "top": 100, "right": 640, "bottom": 450,
+                                "width": 600, "height": 350}}
+        current_cell = control("row-0", "00-한국어-日本語.txt", 45, 140, 160, 24,
+                               native_handle=2001)
+        proposed_cell = control("proposal-0", "", 260, 140, 260, 24,
+                                native_handle=2001)
+        proposed_cell["control_type"] = "ControlType.DataItem"
+        for scene in evidence.PAIR_SCENES:
+            count = evidence.PAIR_SCENE_ROWS[scene]
             names = [f"{index:02d}-한국어-日本語.txt" for index in range(count)]
+            proposal_name = {"changed": "paired-change-00.txt",
+                             "collision": "paired-collision.txt",
+                             "warning": ".txt"}.get(scene)
+            proposal = {**proposed_cell, "name": proposal_name} if proposal_name else None
+            selected_name = names[0] if scene.startswith("selected-") else names[2] if proposal_name else None
+            status = {"collision": "대상 경로 충돌", "warning": "이름 본체가 비어 있는 항목",
+                      "changed": "변경 가능"}.get(scene, "변경 없음")
             state = {
                 "row_count": count, "current_names": names,
                 "columns": [900, 900, 260],
@@ -603,39 +649,109 @@ class Fixture:
                 "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True},
                 "horizontal_scroll": [0, 2000, 800, 0, 0] if scene == "overflow" else None,
                 "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
-                "apply_enabled": False, "status": "변경 없음", "focus_automation_id": "1000",
+                "horizontal_scrollbar_bounds": [40, 432, 620, 449, 0, 0, 0] if scene == "overflow" else None,
+                "vertical_scrollbar_bounds": [623, 125, 640, 432, 0, 0, 0] if scene == "overflow" else None,
+                "apply_enabled": scene in {"changed", "warning"}, "status": status,
+                "focus_automation_id": "32773" if scene == "selected-inactive" else "1000",
+                "selection": {"count": 1 if selected_name else 0, "name": selected_name},
+                "selected_row_cell": current_cell if scene.startswith("selected-") else None,
+                "proposed_name": proposal_name, "proposed_cell": proposal,
                 "list_physical_target": {"x": 340, "y": 275, "hit_window": 2001, "root_window": 1001},
-                "list": {"bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
-                "window": {"hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
-                           "rect": {"left": 0, "top": 0, "right": 800, "bottom": 552,
-                                     "width": 800, "height": 552}},
+                "list": {"native_handle": 2001, "bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
+                "native_list": native_list, "window": main_window,
             }
             steps = []
             for phase in evidence.PAIR_PHASES:
                 appearance = "dark" if phase == "dark" else "light"
-                state["appearance_menu"] = {"hwnd": 1001, "pid": 4242, "menu_checked": [
-                    {"command_id": 0x9010, "checked": False},
-                    {"command_id": 0x9011, "checked": appearance == "light"},
-                    {"command_id": 0x9012, "checked": appearance == "dark"},
-                ]}
+                state["appearance_menu"] = menu_state(appearance)
                 name = f"appearance-{scene}-{phase}.png"
-                image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245))
-                (output / name).write_bytes(image)
-                capture = {"file": name, "sha256": digest(image), "width": 800, "height": 552}
-                captures.append({**capture, "appearance": appearance, "surface": "main-workbench"})
+                patches = ()
+                if proposal_name:
+                    semantic_rgb = {
+                        "changed": {"light": (35, 83, 151), "dark": (133, 183, 255)},
+                        "collision": {"light": (169, 22, 33), "dark": (255, 137, 145)},
+                        "warning": {"light": (142, 83, 0), "dark": (255, 194, 92)},
+                    }[scene][appearance]
+                    patches = ((300, 148, 330, 156, semantic_rgb),)
+                elif scene.startswith("selected-"):
+                    color = ((51, 96, 160) if scene == "selected-active" else (170, 178, 189))
+                    patches = ((45, 143, 180, 161, color),)
+                image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245), patches=patches)
+                capture = add_capture(name, image, appearance, "main-workbench")
                 steps.append({"phase": phase, "appearance": appearance,
                               "state": json.loads(json.dumps(state)), "capture": capture})
             scenes[scene] = steps
+        interactions = []
+        for phase in evidence.PAIR_PHASES:
+            appearance = "dark" if phase == "dark" else "light"
+            base = (36, 36, 36) if appearance == "dark" else (245, 245, 245)
+            button_colors = {
+                "light": {"normal": (255, 255, 255), "disabled": (235, 237, 240),
+                          "hover": (240, 244, 250), "pressed": (226, 232, 240),
+                          "keyboard-focus": (255, 255, 255)},
+                "dark": {"normal": (42, 45, 50), "disabled": (34, 37, 41),
+                         "hover": (52, 57, 64), "pressed": (32, 35, 40),
+                         "keyboard-focus": (42, 45, 50)},
+            }[appearance]
+            buttons = {}
+            for button_state in evidence.PAIR_BUTTON_STATES:
+                disabled = button_state == "disabled"
+                x, y = 660, 120 if disabled else 200
+                rect = (x, y, 770, y + 32, button_colors[button_state])
+                patches = (rect,)
+                if button_state == "keyboard-focus":
+                    patches += ((664, 204, 766, 207, (0, 0, 0) if appearance == "light" else (255, 255, 255)),)
+                name = f"appearance-button-{button_state}-{phase}.png"
+                buttons[button_state] = {
+                    "control": control("32771" if disabled else "32773",
+                                       "적용" if disabled else "이름 앞에 문자열 붙이기",
+                                       x, y, 110, 32, enabled=not disabled),
+                    "focus_automation_id": "32773" if button_state in {"pressed", "keyboard-focus"} else "1000",
+                    "native_button_state": (12 if button_state == "pressed" else
+                                            8 if button_state == "keyboard-focus" else 0),
+                    "target": {"x": 715, "y": y + 16, "hit_window": 3001, "root_window": 1001},
+                    "capture": add_capture(name, pair_png(base, patches=patches), appearance, "main-workbench"),
+                }
+            menu_capture = add_capture(f"appearance-native-menu-{phase}.png", pair_png(base),
+                                       appearance, "native-menu")
+            popup = control("menu", "보기(V)", 100, 30, 200, 250, native_handle=4001)
+            modal_rect = {"left": 200, "top": 120, "right": 500, "bottom": 320,
+                          "width": 300, "height": 200}
+            native_modal = {"hwnd": 5001, "process_id": 4242, "hwnd_dpi": 96, "rect": modal_rect}
+            advanced = {"window": control("dialog", "DarkReNamer - 모양 설정 (미리보기)",
+                                          200, 120, 300, 200, native_handle=5001),
+                        "native_window": native_modal,
+                        "capture": add_capture(f"appearance-advanced-{phase}.png",
+                                               pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
+                                                        width=300, height=200),
+                                               appearance, "advanced-appearance", 300, 200)}
+            prompt = {"window": control("dialog", "이름 앞에 문자열 붙이기", 200, 120, 300, 200,
+                                         native_handle=5001),
+                      "native_window": native_modal,
+                      "edit": control("1004", "붙일 문자열", 230, 170, 180, 28, native_handle=5002),
+                      "default_button": control("1", "확인", 350, 260, 100, 32, native_handle=5003),
+                      "default_button_id": 1,
+                      "capture": add_capture(f"appearance-input-prompt-{phase}.png",
+                                             pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
+                                                      width=300, height=200),
+                                             appearance, "input-prompt", 300, 200)}
+            interactions.append({"phase": phase, "appearance": appearance, "buttons": buttons,
+                                 "native_menu": {"popup_hwnd": 4001, "popup": popup,
+                                                 "capture": menu_capture},
+                                 "advanced_appearance": advanced, "input_prompt": prompt,
+                                 "column_preference_sha256": "c" * 64,
+                                 "selected": {"count": 1, "name": "00-한국어-日本語.txt"},
+                                 "appearance_menu": menu_state(appearance)})
         raw["screenshots"] = captures
         raw["keyboard"]["status"] = "not_run"
         raw["accessibility"]["status"] = "not_run"
-        raw["assertions"]["scope"] = "appearance-pair-baseline-three-scenes"
+        raw["assertions"]["scope"] = "appearance-pair-main-and-interactions-v2"
         raw["assertions"]["scenario"] = {
             "environment": environment, "appearance": "light-dark-light", "process_id": 4242,
             "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0,
                 "column_preferences": {"source": "isolated-persisted-user-settings", "format_version": 1,
                                        "primary_width_dip": [900, 900, 260], "sha256": "c" * 64}},
-            "scenes": scenes,
+            "scenes": scenes, "interactions": interactions,
         }
         write_json(output / "acceptance-result.json", raw)
         observations = json.loads((output / "acceptance-observations.json").read_text())
@@ -1220,11 +1336,12 @@ class AppearancePairEvidenceTests(unittest.TestCase):
     def validate(self):
         return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
 
-    def test_pair_has_nine_bound_captures_and_distinct_verdict(self):
+    def test_pair_has_48_bound_captures_and_distinct_verdict(self):
         result = self.validate()
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "diagnostic-only")
-        self.assertEqual(set(result["raster_regions"]), set(evidence.PAIR_SCENES))
+        self.assertEqual(set(result["raster_regions"]),
+                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions"})
 
     def test_pair_preference_and_tooltip_changes_rejected(self):
         for key, value, expected in (
@@ -1247,7 +1364,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw["screenshots"].pop()
         write_json(raw_path, raw)
         self.fixture.refresh(self.run)
-        with self.assertRaisesRegex(evidence.EvidenceError, "exactly nine original captures"):
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 48 original captures"):
             self.validate()
 
     def test_pair_source_executable_and_environment_bindings_rejected(self):
@@ -1276,6 +1393,28 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.run)
         with self.assertRaisesRegex(evidence.EvidenceError, "environment binding"):
             self.validate()
+
+    def test_pair_interaction_native_state_and_cancel_settings_rejected(self):
+        for field, value, message in (
+            ("pressed", 8, "button native/UIA state"),
+            ("default_button_id", 0, "native default button"),
+            ("column_preference_sha256", "f" * 64, "interaction theme, settings"),
+        ):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                interaction = raw["assertions"]["scenario"]["interactions"][1]
+                if field == "pressed":
+                    interaction["buttons"]["pressed"]["native_button_state"] = value
+                elif field == "default_button_id":
+                    interaction["input_prompt"][field] = value
+                else:
+                    interaction[field] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
 
     def test_pair_region_visual_violation_rejected_with_matching_receipt(self):
         name = "appearance-empty-dark.png"

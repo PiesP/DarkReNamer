@@ -1062,6 +1062,59 @@ function Get-ObserverSystemVisualStyle {
         forced_colors = ($visualStyle.Flags -band 1) -ne 0
     }
 }
+function Reset-ObserverAppearanceProposals {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $reset = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
+        -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds -Label 'appearance reset proposals' -RequireEnabled -RequireWindowHandle
+    Invoke-AutomationControl -Element $reset -Label 'appearance reset proposals'
+}
+function Get-ObserverAppearanceSelection {
+    param([Parameter(Mandatory)][object] $Grid)
+    $pattern = $null
+    if (-not $Grid.element.TryGetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern, [ref]$pattern)) {
+        throw 'Appearance ListView lacks native selection state.'
+    }
+    $selected = @(([Windows.Automation.SelectionPattern]$pattern).Current.GetSelection())
+    if ($selected.Count -gt 1) { throw 'Appearance ListView has unexpected multiple selection.' }
+    [ordered]@{
+        count = $selected.Count
+        name = if ($selected.Count -eq 1) { [string]$selected[0].Current.Name } else { $null }
+    }
+}
+function Show-ObserverAppearanceProposalCell {
+    param([Parameter(Mandatory)][object] $Grid)
+    $scrollObject = $null
+    if (-not $Grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+        throw 'Appearance ListView does not expose horizontal scroll control.'
+    }
+    $scroll = [Windows.Automation.ScrollPattern]$scrollObject
+    if (-not $scroll.Current.HorizontallyScrollable) {
+        throw 'Appearance proposal fixture did not expose horizontal scrolling.'
+    }
+    $scroll.SetScrollPercent(45.0, [Windows.Automation.ScrollPattern]::NoScroll)
+    Start-Sleep -Milliseconds 100
+    $cell = $Grid.pattern.GetItem(0, 1)
+    if ($cell.Current.IsOffscreen -or $cell.Current.BoundingRectangle.Width -lt 20) {
+        throw 'Appearance proposed-name cell is not visibly exposed by horizontal scroll.'
+    }
+    $cell
+}
+function Save-ObserverAppearanceCapture {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Window,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Appearance,
+        [Parameter(Mandatory)][string] $Surface,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures)
+    $capture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+        -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf $Leaf -Label $Leaf
+    $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $capture -Appearance $Appearance -Surface $Surface))
+    $capture
+}
 function Invoke-ObserverAppearancePairScenario {
     param(
         [Parameter(Mandatory)][object] $Verified,
@@ -1113,12 +1166,36 @@ function Invoke-ObserverAppearancePairScenario {
         }
         $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
         $scenes = [ordered]@{}
-        foreach ($scene in @('empty', 'unchanged', 'overflow')) {
+        foreach ($scene in @('empty', 'unchanged', 'overflow', 'changed', 'collision', 'warning', 'selected-active', 'selected-inactive')) {
             if ($scene -eq 'unchanged') {
                 [void](Import-GuiRegressionPathList -Application $application -PathsFile $oneList -ExpectedRows 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
             }
             elseif ($scene -eq 'overflow') {
                 [void](Import-GuiRegressionPathList -Application $application -PathsFile $remainingList -ExpectedRows 60 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+            }
+            elseif ($scene -eq 'changed') {
+                Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name 'paired-change-00.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
+                [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 2 -SessionId $SessionId)
+            }
+            elseif ($scene -eq 'collision') {
+                Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+                Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name 'paired-collision.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
+                Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name 'paired-collision.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
+                [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 2 -SessionId $SessionId)
+            }
+            elseif ($scene -eq 'warning') {
+                Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+                Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name '.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
+                [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 2 -SessionId $SessionId)
+            }
+            elseif ($scene -eq 'selected-active') {
+                Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+                $scrollObject = $null
+                if (-not $grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+                    throw 'Appearance selection fixture lacks horizontal scroll control.'
+                }
+                ([Windows.Automation.ScrollPattern]$scrollObject).SetScrollPercent(0.0, [Windows.Automation.ScrollPattern]::NoScroll)
+                [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId)
             }
             $steps = [Collections.Generic.List[object]]::new()
             foreach ($step in @('light-before', 'dark', 'light-after')) {
@@ -1126,7 +1203,7 @@ function Invoke-ObserverAppearancePairScenario {
                 [void](Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $appearance)
                 Start-Sleep -Milliseconds 200
                 $count = [int]$grid.pattern.Current.RowCount
-                if ($count -ne @{'empty'=0; 'unchanged'=1; 'overflow'=60}[$scene]) { throw 'Appearance scene row count changed.' }
+                if ($count -ne @{'empty'=0; 'unchanged'=1; 'overflow'=60; 'changed'=60; 'collision'=60; 'warning'=60; 'selected-active'=60; 'selected-inactive'=60}[$scene]) { throw 'Appearance scene row count changed.' }
                 $names = [Collections.Generic.List[string]]::new()
                 for ($index = 0; $index -lt $count; $index++) {
                     $names.Add([string]$grid.pattern.GetItem($index, 0).Current.Name)
@@ -1142,6 +1219,8 @@ function Invoke-ObserverAppearancePairScenario {
                 }
                 $horizontal = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0)
                 $vertical = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1)
+                $horizontalBounds = [DarkReNamerVmAcceptanceNative]::TryReadScrollBarBounds($listHandle, 0)
+                $verticalBounds = [DarkReNamerVmAcceptanceNative]::TryReadScrollBarBounds($listHandle, 1)
                 if ($scene -eq 'overflow') {
                     foreach ($axis in 0..1) {
                         $scroll = if ($axis -eq 0) { $horizontal } else { $vertical }
@@ -1149,13 +1228,47 @@ function Invoke-ObserverAppearancePairScenario {
                             throw 'Appearance overflow fixture did not expose both scrollbars.'
                         }
                     }
+                    if ($null -eq $horizontalBounds -or $null -eq $verticalBounds -or
+                        $horizontalBounds[2] -le $horizontalBounds[0] -or $verticalBounds[3] -le $verticalBounds[1]) {
+                        throw 'Appearance overflow lacks observed native scrollbar rectangles.'
+                    }
                 }
                 $apply = Get-ObserverPublicApplyState -Application $application -SessionId $SessionId -Label 'appearance unchanged Apply'
-                if ($apply.enabled) { throw 'Unchanged appearance fixture unexpectedly enabled Apply.' }
-                $grid.element.SetFocus()
+                $expectedApply = $scene -in @('changed', 'warning')
+                if ([bool]$apply.enabled -ne $expectedApply) { throw "Appearance $scene Apply readiness differs." }
+                $proposedCell = $null
+                if ($scene -in @('changed', 'collision', 'warning')) {
+                    $proposedCell = Show-ObserverAppearanceProposalCell -Grid $grid
+                }
+                elseif ($scene -in @('selected-active', 'selected-inactive')) {
+                    $scrollObject = $null
+                    if (-not $grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+                        throw 'Appearance selected ListView lacks horizontal scroll control.'
+                    }
+                    ([Windows.Automation.ScrollPattern]$scrollObject).SetScrollPercent(0.0, [Windows.Automation.ScrollPattern]::NoScroll)
+                }
+                if ($scene -eq 'selected-inactive') {
+                    [void](Move-RailFocusToCommand -Process $application.process -ExpectedSession $SessionId -AutomationId '32773')
+                }
+                else { $grid.element.SetFocus() }
                 $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance settled list focus'
-                if ($focused.Current.AutomationId -cne '1000') { throw 'Appearance list focus did not settle.' }
+                $expectedFocus = if ($scene -eq 'selected-inactive') { '32773' } else { '1000' }
+                if ($focused.Current.AutomationId -cne $expectedFocus) { throw "Appearance $scene focus did not settle." }
                 $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
+                if (($scene -eq 'collision' -and $status.Current.Name.IndexOf('대상 경로 충돌', [StringComparison]::Ordinal) -lt 0) -or
+                    ($scene -eq 'warning' -and $status.Current.Name.IndexOf('이름 본체가 비어 있는 항목', [StringComparison]::Ordinal) -lt 0)) {
+                    throw "Appearance $scene status did not expose its semantic warning."
+                }
+                # Observe the settled viewport, after proposal exposure/selection
+                # and focus commands that can move the native scroll position.
+                $horizontal = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0)
+                $vertical = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1)
+                $horizontalBounds = [DarkReNamerVmAcceptanceNative]::TryReadScrollBarBounds($listHandle, 0)
+                $verticalBounds = [DarkReNamerVmAcceptanceNative]::TryReadScrollBarBounds($listHandle, 1)
+                $selection = Get-ObserverAppearanceSelection -Grid $grid
+                if ($scene -in @('selected-active', 'selected-inactive') -and $selection.count -ne 1) {
+                    throw "Appearance $scene lost the selected row."
+                }
                 $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
                 $state = [ordered]@{
                     overlay = $overlay
@@ -1163,11 +1276,18 @@ function Invoke-ObserverAppearancePairScenario {
                     column_preference_sha256 = $preferenceHash
                     horizontal_scroll = if ($null -eq $horizontal) { $null } else { @($horizontal) }
                     vertical_scroll = if ($null -eq $vertical) { $null } else { @($vertical) }
+                    horizontal_scrollbar_bounds = if ($null -eq $horizontalBounds) { $null } else { @($horizontalBounds) }
+                    vertical_scrollbar_bounds = if ($null -eq $verticalBounds) { $null } else { @($verticalBounds) }
                     apply_enabled = [bool]$apply.enabled; status = [string]$status.Current.Name
+                    selection = $selection
+                    selected_row_cell = if ($scene -in @('selected-active', 'selected-inactive')) { Get-ElementObservation -Element ($grid.pattern.GetItem(0, 0)) } else { $null }
+                    proposed_name = if ($null -eq $proposedCell) { $null } else { [string]$proposedCell.Current.Name }
+                    proposed_cell = if ($null -eq $proposedCell) { $null } else { Get-ElementObservation -Element $proposedCell }
                     focus_automation_id = [string]$focused.Current.AutomationId
                     appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
                     list_physical_target = Get-GuiRegressionPhysicalTarget -Element $grid.element -Application $application -SessionId $SessionId -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance unobscured list'
                     list = Get-ElementObservation -Element $grid.element
+                    native_list = Get-ObserverNativeWindowMetrics -Window $grid.element
                     window = Get-ObserverNativeWindowMetrics -Window $application.main
                 }
                 $leaf = "appearance-$scene-$step.png"
@@ -1176,6 +1296,154 @@ function Invoke-ObserverAppearancePairScenario {
                 $steps.Add([ordered]@{ phase = $step; appearance = $appearance; state = $state; capture = $capture })
             }
             $scenes[$scene] = $steps.ToArray()
+        }
+        $interactions = [Collections.Generic.List[object]]::new()
+        foreach ($step in @('light-before', 'dark', 'light-after')) {
+            $appearance = if ($step -eq 'dark') { 'dark' } else { 'light' }
+            [void](Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId `
+                -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $appearance)
+            $prefix = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds -Label 'appearance prefix button' -RequireEnabled -RequireWindowHandle
+            $applyButton = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                -ExpectedSession $SessionId -AutomationId '32771' -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds -Label 'appearance disabled Apply button' -RequireWindowHandle
+            if ($prefix.Current.IsOffscreen -or $applyButton.Current.IsOffscreen -or $applyButton.Current.IsEnabled) {
+                throw 'Appearance button-state fixture lacks visible enabled and disabled controls.'
+            }
+            $prefixTarget = Get-GuiRegressionPhysicalTarget -Element $prefix -Application $application -SessionId $SessionId `
+                -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance prefix button'
+            $applyTarget = Get-GuiRegressionPhysicalTarget -Element $applyButton -Application $application -SessionId $SessionId `
+                -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance disabled Apply button'
+            $buttons = [ordered]@{}
+            $grid.element.SetFocus()
+            [void](Assert-ObserverAppearanceNoTooltip -Application $application)
+            $buttons['normal'] = [ordered]@{
+                control = Get-ElementObservation -Element $prefix
+                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance normal button').Current.AutomationId
+                native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
+                target = $prefixTarget
+                capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
+                    -Leaf "appearance-button-normal-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+            }
+            $buttons['disabled'] = [ordered]@{
+                control = Get-ElementObservation -Element $applyButton
+                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance disabled button').Current.AutomationId
+                native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$applyButton.Current.NativeWindowHandle)
+                target = $applyTarget
+                capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
+                    -Leaf "appearance-button-disabled-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+            }
+            [DarkReNamerVmAcceptanceNative]::MoveCursor([int]$prefixTarget.x, [int]$prefixTarget.y)
+            $buttons['hover'] = [ordered]@{
+                control = Get-ElementObservation -Element $prefix
+                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance hover button').Current.AutomationId
+                native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
+                target = $prefixTarget
+                capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
+                    -Leaf "appearance-button-hover-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+            }
+            try {
+                [DarkReNamerVmAcceptanceNative]::PressLeftButton()
+                $pressedState = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
+                if (($pressedState -band 4) -eq 0) { throw 'Appearance button did not enter native pressed state.' }
+                $buttons['pressed'] = [ordered]@{
+                    control = Get-ElementObservation -Element $prefix
+                    focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance pressed button').Current.AutomationId
+                    native_button_state = $pressedState
+                    target = $prefixTarget
+                    capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
+                        -Leaf "appearance-button-pressed-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+                }
+            }
+            finally {
+                try { [void](Assert-ObserverAppearanceNoTooltip -Application $application) }
+                finally { [DarkReNamerVmAcceptanceNative]::ReleaseLeftButton() }
+            }
+            if (([DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle) -band 4) -ne 0) {
+                throw 'Appearance button stayed native-pressed after release outside its bounds.'
+            }
+            [void](Move-RailFocusToCommand -Process $application.process -ExpectedSession $SessionId -AutomationId '32773')
+            $buttons['keyboard-focus'] = [ordered]@{
+                control = Get-ElementObservation -Element $prefix
+                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance focused button').Current.AutomationId
+                native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
+                target = $prefixTarget
+                capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
+                    -Leaf "appearance-button-keyboard-focus-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+            }
+
+            Send-AcceptanceChord -Process $application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x56 -Label 'appearance View menu accelerator'
+            $popup = Wait-AcceptancePopupMenu -Process $application.process -ExpectedSession $SessionId -Label 'appearance View menu'
+            try {
+                $menuCapture = Save-AcceptanceNativeMenuScreenshot -MainWindow $application.main -Popup $popup `
+                    -Process $application.process -ExpectedSession $SessionId -Root $EvidenceRoot `
+                    -Leaf "appearance-native-menu-$step.png" -Label 'appearance native View menu'
+                $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $menuCapture -Appearance $appearance -Surface 'native-menu'))
+                $menu = [ordered]@{ popup_hwnd = $popup.ToInt64(); popup = Get-ElementObservation -Element ([Windows.Automation.AutomationElement]::FromHandle($popup)); capture = $menuCapture }
+            }
+            finally {
+                Send-AcceptanceTap -Process $application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label 'appearance View menu Escape'
+                Wait-AcceptancePopupMenuClosed -Process $application.process -Label 'appearance View menu'
+            }
+
+            [DarkReNamerVmAcceptanceNative]::SendMenuCommand([IntPtr]$application.main_handle, [uint32]0x9013)
+            $dialog = Wait-UniqueAutomationWindow -Process $application.process -ExpectedSession $SessionId `
+                -MainWindowHandle ([IntPtr]$application.main_handle) -Name 'DarkReNamer - 모양 설정 (미리보기)' `
+                -TimeoutSeconds $WaitSeconds -Label 'appearance advanced dialog'
+            $dialogHandle = [IntPtr]$dialog.Current.NativeWindowHandle
+            try {
+                $advanced = [ordered]@{
+                    window = Get-ElementObservation -Element $dialog
+                    native_window = Get-ObserverNativeWindowMetrics -Window $dialog
+                    capture = Save-ObserverAppearanceCapture -Application $application -Window $dialog -EvidenceRoot $EvidenceRoot `
+                        -Leaf "appearance-advanced-$step.png" -Appearance $appearance -Surface 'advanced-appearance' -SessionId $SessionId -Captures $Captures
+                }
+            }
+            finally {
+                Send-AcceptanceTap -Process $application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label 'appearance advanced Escape'
+                Wait-WindowClosed -Handle $dialogHandle -TimeoutSeconds $WaitSeconds -Label 'appearance advanced dialog'
+            }
+            $application.main.SetFocus()
+            [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$application.main_handle)
+
+            $promptObservations = [ordered]@{}
+            $prompt = Invoke-CurrentDpiPrefixActivation -Process $application.process -MainWindow $application.main `
+                -ExpectedSessionId $SessionId -TimeoutSeconds $WaitSeconds -Observations $promptObservations
+            $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+            try {
+                $edit = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
+                    -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix edit' -RequireWindowHandle
+                $ok = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
+                    -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix default OK' -RequireEnabled -RequireWindowHandle
+                if ($edit.Current.Name -cne '붙일 문자열' -or [DarkReNamerVmAcceptanceNative]::ReadDefaultDialogButtonId($promptHandle) -ne 1) {
+                    throw 'Appearance prefix prompt lost its label or default button.'
+                }
+                $promptState = [ordered]@{
+                    window = Get-ElementObservation -Element $prompt
+                    native_window = Get-ObserverNativeWindowMetrics -Window $prompt
+                    edit = Get-ElementObservation -Element $edit
+                    default_button = Get-ElementObservation -Element $ok
+                    default_button_id = 1
+                    capture = Save-ObserverAppearanceCapture -Application $application -Window $prompt -EvidenceRoot $EvidenceRoot `
+                        -Leaf "appearance-input-prompt-$step.png" -Appearance $appearance -Surface 'input-prompt' -SessionId $SessionId -Captures $Captures
+                }
+            }
+            finally {
+                Send-AcceptanceTap -Process $application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label 'appearance prefix prompt Cancel'
+                Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $WaitSeconds -Label 'appearance prefix prompt'
+            }
+            if ((Get-ObserverPublicApplyState -Application $application -SessionId $SessionId -Label 'appearance prompt Cancel Apply').enabled) {
+                throw 'Appearance canceled prompt enabled Apply.'
+            }
+            $preferenceHash = Assert-ObserverAppearanceColumnPreference -Path $columnPreference.path -ExpectedBytes $columnPreferenceBytes
+            $interactions.Add([ordered]@{
+                phase = $step; appearance = $appearance; buttons = $buttons
+                native_menu = $menu; advanced_appearance = $advanced; input_prompt = $promptState
+                column_preference_sha256 = $preferenceHash
+                selected = Get-ObserverAppearanceSelection -Grid $grid
+                appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
+            })
         }
         $after = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
         if (-not (Test-ObserverFixtureStateEqual -Expected $initial -Actual $after)) {
@@ -1186,8 +1454,8 @@ function Invoke-ObserverAppearancePairScenario {
         [ordered]@{
             environment = $environment; appearance = 'light-dark-light'; process_id = [int]$application.process.Id
             fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0; column_preferences = $columnPreference }
-            scenes = $scenes; normal_exit_code = $exitCode
-            limitations = @('baseline-scenes-only: changed-warning-collision, selection, input-prompt, and forced-colors not-run')
+            scenes = $scenes; interactions = $interactions.ToArray(); normal_exit_code = $exitCode
+            limitations = @('system-theme and forced-colors configurations not-run in this diagnostic')
         }
     }
     finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }

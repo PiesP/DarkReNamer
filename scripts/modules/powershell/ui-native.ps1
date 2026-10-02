@@ -143,6 +143,17 @@ public static class DarkReNamerVmAcceptanceNative {
         public int TrackPosition;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeScrollBarInfo {
+        public uint Size;
+        public Rect Bounds;
+        public int LineButtonSize;
+        public int ThumbTop;
+        public int ThumbBottom;
+        public int Reserved;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)] public uint[] States;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct MENUITEMINFO {
         public uint Size;
@@ -238,6 +249,8 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetScrollInfo(IntPtr window, int bar, ref NativeScrollInfo info);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetScrollBarInfo(IntPtr window, int objectId, ref NativeScrollBarInfo info);
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")]
@@ -845,6 +858,17 @@ public static class DarkReNamerVmAcceptanceNative {
     }
 
     public static void Click() { SendMouseButton(0x0002); SendMouseButton(0x0004); }
+    public static void PressLeftButton() { SendMouseButton(0x0002); }
+    public static void ReleaseLeftButton() { SendMouseButton(0x0004); }
+    public static int ReadDefaultDialogButtonId(IntPtr dialog) {
+        long result = SendMessageW(dialog, 0x0400, IntPtr.Zero, IntPtr.Zero).ToInt64();
+        if (((result >> 16) & 0xffff) != 0x534B) return 0;
+        return (int)(result & 0xffff);
+    }
+    public static int ReadButtonState(IntPtr button) {
+        if (button == IntPtr.Zero) throw new ArgumentException("Button handle is missing.");
+        return checked((int)SendMessageW(button, 0x00F2, IntPtr.Zero, IntPtr.Zero).ToInt64());
+    }
     public static void ReleaseAllButtons() {
         SendMouseButton(0x0004); SendMouseButton(0x0010); SendMouseButton(0x0040);
     }
@@ -911,6 +935,16 @@ public static class DarkReNamerVmAcceptanceNative {
         info.Mask = 0x17;
         if (!GetScrollInfo(window, bar, ref info)) return null;
         return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };
+    }
+
+    public static int[] TryReadScrollBarBounds(IntPtr window, int bar) {
+        NativeScrollBarInfo info = new NativeScrollBarInfo {
+            Size = (uint)Marshal.SizeOf(typeof(NativeScrollBarInfo)),
+            States = new uint[6]
+        };
+        if (!GetScrollBarInfo(window, bar == 0 ? -6 : -5, ref info)) return null;
+        return new [] { info.Bounds.Left, info.Bounds.Top, info.Bounds.Right, info.Bounds.Bottom,
+            info.ThumbTop, info.ThumbBottom, checked((int)info.States[0]) };
     }
 
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint expectedProcessId) {

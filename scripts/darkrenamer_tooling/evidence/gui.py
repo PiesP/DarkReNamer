@@ -26,8 +26,24 @@ REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
 PAIR_RUN_ID = "appearance-pair-light-dark-light"
-PAIR_SCENES = ("empty", "unchanged", "overflow")
+PAIR_SCENES = ("empty", "unchanged", "overflow", "changed", "collision", "warning",
+               "selected-active", "selected-inactive")
 PAIR_PHASES = ("light-before", "dark", "light-after")
+PAIR_BUTTON_STATES = ("normal", "disabled", "hover", "pressed", "keyboard-focus")
+PAIR_MODAL_SURFACES = {"native-menu": "native-menu", "advanced": "advanced-appearance",
+                       "input-prompt": "input-prompt"}
+PAIR_SCENE_ROWS = {"empty": 0, "unchanged": 1, **{scene: 60 for scene in PAIR_SCENES[2:]}}
+
+
+def pair_capture_specs() -> dict[str, str]:
+    return {
+        **{f"appearance-{scene}-{phase}.png": "main-workbench"
+           for scene in PAIR_SCENES for phase in PAIR_PHASES},
+        **{f"appearance-button-{state}-{phase}.png": "main-workbench"
+           for state in PAIR_BUTTON_STATES for phase in PAIR_PHASES},
+        **{f"appearance-{kind}-{phase}.png": surface
+           for kind, surface in PAIR_MODAL_SURFACES.items() for phase in PAIR_PHASES},
+    }
 
 FULL_CONTEXT_SEMANTICS = {
     "repeated_scope_exact",
@@ -1243,6 +1259,31 @@ def pair_region_luma(rgba: bytes, image_width: int, image_height: int,
     return sum(samples) / len(samples)
 
 
+def pair_count_near_color(rgba: bytes, image_width: int, image_height: int,
+                          rect: dict, rgb: tuple[int, int, int], tolerance: int = 12) -> int:
+    left, top = max(0, int(rect["left"])), max(0, int(rect["top"]))
+    right, bottom = min(image_width, int(rect["right"])), min(image_height, int(rect["bottom"]))
+    require(right - left >= 8 and bottom - top >= 8,
+            "Appearance semantic raster region is clipped or missing.")
+    count = 0
+    for row in range(top + 2, bottom - 2):
+        for column in range(left + 2, right - 2):
+            offset = (row * image_width + column) * 4
+            pixel = rgba[offset:offset + 4]
+            if pixel[3] == 255 and all(abs(pixel[i] - rgb[i]) <= tolerance for i in range(3)):
+                count += 1
+    return count
+
+
+def pair_pixel_delta(left: bytes, right: bytes, width: int, height: int, rect: dict) -> int:
+    x0, y0 = max(0, int(rect["left"])), max(0, int(rect["top"]))
+    x1, y1 = min(width, int(rect["right"])), min(height, int(rect["bottom"]))
+    require(x1 - x0 >= 8 and y1 - y0 >= 8, "Appearance interaction raster region is missing.")
+    return sum(1 for y in range(y0, y1) for x in range(x0, x1)
+               if max(abs(left[(y * width + x) * 4 + channel] -
+                          right[(y * width + x) * 4 + channel]) for channel in range(3)) >= 10)
+
+
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
                          actual: dict) -> dict:
     scenario = nested(raw, "assertions", "scenario")
@@ -1260,11 +1301,12 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
     scenes = scenario.get("scenes")
     require(isinstance(scenes, dict) and set(scenes) == set(PAIR_SCENES),
             "Appearance pair scene set is incomplete.")
-    require(isinstance(raw.get("screenshots"), list) and len(raw["screenshots"]) == 9,
-            "Appearance pair requires exactly nine original captures.")
+    expected_captures = pair_capture_specs()
+    require(isinstance(raw.get("screenshots"), list) and len(raw["screenshots"]) == len(expected_captures),
+            f"Appearance pair requires exactly {len(expected_captures)} original captures.")
     captures = {row.get("file"): row for row in raw["screenshots"] if isinstance(row, dict)}
-    require(len(captures) == 9, "Appearance pair captures are duplicated or invalid.")
-    require({name for name in collection_files if name.endswith(".png")} == set(captures),
+    require(set(captures) == set(expected_captures), "Appearance pair captures are duplicated or invalid.")
+    require({name for name in collection_files if name.endswith(".png")} == set(expected_captures),
             "Appearance pair collected PNG inventory differs from its captures.")
     diagnostics = {}
     for scene in PAIR_SCENES:
@@ -1279,9 +1321,46 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             appearance = "dark" if phase == "dark" else "light"
             require(step.get("appearance") == appearance, f"Appearance {scene} phase theme differs.")
             state = step.get("state")
-            require(isinstance(state, dict) and state.get("row_count") == {"empty": 0, "unchanged": 1, "overflow": 60}[scene] and
-                    state.get("apply_enabled") is False and state.get("focus_automation_id") == "1000",
+            require(isinstance(state, dict) and state.get("row_count") == PAIR_SCENE_ROWS[scene] and
+                    state.get("apply_enabled") is (scene in {"changed", "warning"}) and
+                    state.get("focus_automation_id") == ("32773" if scene == "selected-inactive" else "1000"),
                     f"Appearance {scene} data, Apply, or settled focus differs.")
+            selected = state.get("selection")
+            require(isinstance(selected, dict) and type(selected.get("count")) is int and
+                    selected["count"] in (0, 1) and
+                    ((selected["count"] == 0 and selected.get("name") is None) or
+                     (selected["count"] == 1 and isinstance(selected.get("name"), str) and selected["name"])),
+                    f"Appearance {scene} native selection observation is invalid.")
+            if scene in {"changed", "collision", "warning", "selected-active", "selected-inactive"}:
+                require(selected["count"] == 1, f"Appearance {scene} selected row was lost.")
+            selected_cell = state.get("selected_row_cell")
+            if scene in {"selected-active", "selected-inactive"}:
+                require(isinstance(selected_cell, dict) and selected_cell.get("offscreen") is False and
+                        isinstance(selected_cell.get("bounds"), dict),
+                        f"Appearance {scene} selected cell is missing.")
+            else:
+                require(selected_cell is None, f"Appearance {scene} unexpectedly claims a selected cell.")
+            if scene in {"collision", "warning"}:
+                expected_status = "대상 경로 충돌" if scene == "collision" else "이름 본체가 비어 있는 항목"
+                require(expected_status in state.get("status", ""),
+                        f"Appearance {scene} semantic warning is missing.")
+            proposed = state.get("proposed_cell")
+            if scene in {"changed", "collision", "warning"}:
+                require(isinstance(proposed, dict) and proposed.get("name") == state.get("proposed_name") and
+                        proposed.get("offscreen") is False and
+                        isinstance(proposed.get("bounds"), dict) and
+                        proposed["bounds"].get("width", 0) >= 20 and
+                        selected["name"] != state["current_names"][0],
+                        f"Appearance {scene} proposed-name observation is missing or selected.")
+                if scene == "collision":
+                    require(state["proposed_name"] == "paired-collision.txt", "Appearance collision proposal differs.")
+                elif scene == "warning":
+                    require(state["proposed_name"] == ".txt", "Appearance invalid proposal differs.")
+                else:
+                    require(state["proposed_name"] == "paired-change-00.txt", "Appearance changed proposal differs.")
+            else:
+                require(proposed is None and state.get("proposed_name") is None,
+                        f"Appearance {scene} unexpectedly claims a proposed cell.")
             menu = state.get("appearance_menu")
             require(isinstance(menu, dict) and menu.get("hwnd") == actual["target"]["hwnd"] and
                     menu.get("pid") == actual["target"]["process_id"] and
@@ -1303,7 +1382,9 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     "Appearance column widths differ from persisted settings.")
             invariant = {key: state.get(key) for key in (
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
-                "apply_enabled", "status", "focus_automation_id", "list_physical_target", "list", "window")}
+                "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list",
+                "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell",
+                "focus_automation_id", "list_physical_target", "list", "window")}
             physical = state.get("list_physical_target")
             require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
                     physical["hit_window"] > 0 and physical.get("root_window") == actual["target"]["hwnd"],
@@ -1320,12 +1401,19 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                             all(type(value) is int for value in scroll) and
                             scroll[1] - scroll[0] + 1 > scroll[2],
                             f"Appearance overflow lacks a native {axis} range.")
+                for axis in ("horizontal_scrollbar_bounds", "vertical_scrollbar_bounds"):
+                    bounds = state.get(axis)
+                    require(isinstance(bounds, list) and len(bounds) == 7 and
+                            all(type(value) is int for value in bounds) and
+                            bounds[0] < bounds[2] and bounds[1] < bounds[3] and
+                            bounds[6] & 0x8000 == 0,
+                            f"Appearance overflow lacks a visible native {axis} rectangle.")
             capture = step.get("capture")
             name = f"appearance-{scene}-{phase}.png"
             require(isinstance(capture, dict) and capture.get("file") == name and
                     captures[name].get("sha256") == capture.get("sha256") == collection_files[name]["sha256"] and
                     captures[name].get("appearance") == appearance and
-                    captures[name].get("surface") == "main-workbench",
+                    captures[name].get("surface") == expected_captures[name],
                     f"Appearance {scene} {phase} capture binding differs.")
             png = read_bytes(run_root / "output", Path(name), MAX_ARTIFACT_BYTES, "appearance PNG")
             width, height, rgba = decode_png(png, name)
@@ -1341,6 +1429,15 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     observed_window.get("hwnd_dpi") == actual["hwnd_dpi"] and
                     typed_equal(window, actual["target"]["window_rect"]),
                     f"Appearance {scene} window differs from independent postlaunch bounds.")
+            native_list = state.get("native_list", {})
+            native_rect = native_list.get("rect", {}) if isinstance(native_list, dict) else {}
+            require(native_list.get("hwnd") == state.get("list", {}).get("native_handle") and
+                    native_list.get("process_id") == actual["target"]["process_id"] and
+                    native_list.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                    all(type(native_rect.get(key)) is int for key in ("left", "top", "right", "bottom")) and
+                    window["left"] <= native_rect["left"] < native_rect["right"] <= window["right"] and
+                    window["top"] <= native_rect["top"] < native_rect["bottom"] <= window["bottom"],
+                    f"Appearance {scene} native ListView bounds differ.")
             bounds = state.get("list", {}).get("bounds", {})
             require(all(type(bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")),
                     f"Appearance {scene} list bounds are missing.")
@@ -1352,14 +1449,47 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                         "top": y + list_height // 2, "bottom": y + list_height // 2 + 8}
             body_luma = pair_region_luma(rgba, width, height, interior, "list interior")
             sample = {"phase": phase, "body_luma": round(body_luma, 2)}
+            if scene in {"changed", "collision", "warning"}:
+                proposed_bounds = state["proposed_cell"]["bounds"]
+                proposed_rect = {
+                    "left": proposed_bounds["x"] - window["left"],
+                    "top": proposed_bounds["y"] - window["top"],
+                    "right": proposed_bounds["x"] + proposed_bounds["width"] - window["left"],
+                    "bottom": proposed_bounds["y"] + proposed_bounds["height"] - window["top"],
+                }
+                role_rgb = {
+                    "changed": {"light": (35, 83, 151), "dark": (133, 183, 255)},
+                    "collision": {"light": (169, 22, 33), "dark": (255, 137, 145)},
+                    "warning": {"light": (142, 83, 0), "dark": (255, 194, 92)},
+                }[scene][appearance]
+                semantic_pixels = pair_count_near_color(rgba, width, height, proposed_rect, role_rgb)
+                require(semantic_pixels >= 4,
+                        f"Appearance {scene} proposed-name semantic raster violation.")
+                sample["proposed_semantic_pixels"] = semantic_pixels
             if scene == "overflow":
+                horizontal_bounds = state["horizontal_scrollbar_bounds"]
+                vertical_bounds = state["vertical_scrollbar_bounds"]
+                h = {"left": horizontal_bounds[0] - window["left"],
+                     "top": horizontal_bounds[1] - window["top"],
+                     "right": horizontal_bounds[2] - window["left"],
+                     "bottom": horizontal_bounds[3] - window["top"]}
+                v = {"left": vertical_bounds[0] - window["left"],
+                     "top": vertical_bounds[1] - window["top"],
+                     "right": vertical_bounds[2] - window["left"],
+                     "bottom": vertical_bounds[3] - window["top"]}
+                intersection_left = native_rect["right"] - window["left"] - (v["right"] - v["left"])
+                intersection_top = native_rect["bottom"] - window["top"] - (h["bottom"] - h["top"])
                 for label, region in {
-                    "horizontal_scrollbar": {"left": x + list_width // 2 - 4, "right": x + list_width // 2 + 4,
-                                             "top": y + list_height - 15, "bottom": y + list_height - 7},
-                    "vertical_scrollbar": {"left": x + list_width - 15, "right": x + list_width - 7,
-                                           "top": y + list_height // 2 - 4, "bottom": y + list_height // 2 + 4},
-                    "scrollbar_intersection": {"left": x + list_width - 15, "right": x + list_width - 7,
-                                               "top": y + list_height - 15, "bottom": y + list_height - 7},
+                    "horizontal_scrollbar": {"left": (h["left"] + h["right"]) // 2 - 4,
+                                             "right": (h["left"] + h["right"]) // 2 + 4,
+                                             "top": h["top"] + 3, "bottom": h["bottom"] - 3},
+                    "vertical_scrollbar": {"left": v["left"] + 3, "right": v["right"] - 3,
+                                           "top": (v["top"] + v["bottom"]) // 2 - 4,
+                                           "bottom": (v["top"] + v["bottom"]) // 2 + 4},
+                    "scrollbar_intersection": {"left": intersection_left + 3,
+                                               "right": intersection_left + (v["right"] - v["left"]) - 3,
+                                               "top": intersection_top + 3,
+                                               "bottom": intersection_top + (h["bottom"] - h["top"]) - 3},
                 }.items():
                     sample[label] = round(pair_region_luma(rgba, width, height, region, label), 2)
             measurements.append(sample)
@@ -1369,6 +1499,169 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     abs(measurements[0]["body_luma"] - measurements[2]["body_luma"]) <= 15,
                     f"Appearance {scene} light/dark/light interior raster violation.")
         diagnostics[scene] = measurements
+    for phase in PAIR_PHASES:
+        active_step = scenes["selected-active"][PAIR_PHASES.index(phase)]
+        inactive_step = scenes["selected-inactive"][PAIR_PHASES.index(phase)]
+        active_image = read_bytes(run_root / "output", Path(active_step["capture"]["file"]),
+                                  MAX_ARTIFACT_BYTES, "active selection PNG")
+        inactive_image = read_bytes(run_root / "output", Path(inactive_step["capture"]["file"]),
+                                    MAX_ARTIFACT_BYTES, "inactive selection PNG")
+        active_width, active_height, active_rgba = decode_png(active_image, "active selection")
+        inactive_width, inactive_height, inactive_rgba = decode_png(inactive_image, "inactive selection")
+        require((active_width, active_height) == (inactive_width, inactive_height),
+                "Appearance selection capture geometry changed.")
+        active_state = active_step["state"]
+        inactive_state = inactive_step["state"]
+        require(typed_equal(active_state["selection"], inactive_state["selection"]) and
+                typed_equal(active_state["selected_row_cell"], inactive_state["selected_row_cell"]),
+                "Appearance active/inactive selection changed native row geometry.")
+        selected_bounds = active_state["selected_row_cell"]["bounds"]
+        window = active_state["window"]["rect"]
+        selected_rect = {"left": selected_bounds["x"] - window["left"],
+                         "top": selected_bounds["y"] - window["top"],
+                         "right": selected_bounds["x"] + selected_bounds["width"] - window["left"],
+                         "bottom": selected_bounds["y"] + selected_bounds["height"] - window["top"]}
+        difference = pair_pixel_delta(active_rgba, inactive_rgba, active_width, active_height,
+                                      selected_rect)
+        require(difference >= 8, "Appearance active/inactive selection raster did not change.")
+        diagnostics.setdefault("selection_transition", []).append({"phase": phase, "changed_pixels": difference})
+
+    interactions = scenario.get("interactions")
+    require(isinstance(interactions, list) and len(interactions) == len(PAIR_PHASES) and
+            [row.get("phase") for row in interactions if isinstance(row, dict)] == list(PAIR_PHASES),
+            "Appearance paired interaction phases are incomplete.")
+
+    def capture_pixels(capture: dict, name: str, appearance: str,
+                       expected_surface: str) -> tuple[int, int, bytes]:
+        require(isinstance(capture, dict) and capture.get("file") == name and
+                captures[name].get("sha256") == capture.get("sha256") == collection_files[name]["sha256"] and
+                captures[name].get("appearance") == appearance and
+                captures[name].get("surface") == expected_surface,
+                f"Appearance interaction {name} capture binding differs.")
+        width, height, rgba = decode_png(read_bytes(run_root / "output", Path(name),
+                                               MAX_ARTIFACT_BYTES, "appearance interaction PNG"), name)
+        require(width == capture.get("width") == captures[name].get("width") and
+                height == capture.get("height") == captures[name].get("height"),
+                f"Appearance interaction {name} dimensions differ.")
+        return width, height, rgba
+
+    for interaction in interactions:
+        phase = interaction["phase"]
+        appearance = "dark" if phase == "dark" else "light"
+        require(interaction.get("appearance") == appearance and
+                interaction.get("column_preference_sha256") == preference["sha256"] and
+                interaction.get("selected") == scenes["selected-inactive"][2]["state"]["selection"],
+                "Appearance interaction theme, settings, or selection differs.")
+        menu_state = interaction.get("appearance_menu")
+        require(isinstance(menu_state, dict) and menu_state.get("hwnd") == actual["target"]["hwnd"] and
+                menu_state.get("pid") == actual["target"]["process_id"] and
+                menu_state.get("menu_checked") == [
+                    {"command_id": 0x9010, "checked": False},
+                    {"command_id": 0x9011, "checked": appearance == "light"},
+                    {"command_id": 0x9012, "checked": appearance == "dark"},
+                ], "Appearance interaction menu theme differs.")
+        buttons = interaction.get("buttons")
+        require(isinstance(buttons, dict) and set(buttons) == set(PAIR_BUTTON_STATES),
+                "Appearance button state set is incomplete.")
+        button_rasters = {}
+        prefix_bounds = None
+        for button_state in PAIR_BUTTON_STATES:
+            entry = buttons[button_state]
+            require(isinstance(entry, dict) and isinstance(entry.get("control"), dict) and
+                    isinstance(entry.get("target"), dict),
+                    f"Appearance {button_state} native/UIA button observation is missing.")
+            control, target = entry["control"], entry["target"]
+            expected_id = "32771" if button_state == "disabled" else "32773"
+            expected_focus = "32773" if button_state in {"pressed", "keyboard-focus"} else "1000"
+            require(control.get("automation_id") == expected_id and
+                    control.get("enabled") is (button_state != "disabled") and
+                    control.get("offscreen") is False and
+                    entry.get("focus_automation_id") == expected_focus and
+                    type(entry.get("native_button_state")) is int and
+                    bool(entry["native_button_state"] & 4) is (button_state == "pressed") and
+                    bool(entry["native_button_state"] & 8) is (button_state in {"pressed", "keyboard-focus"}) and
+                    target.get("root_window") == actual["target"]["hwnd"] and
+                    type(target.get("hit_window")) is int and target["hit_window"] > 0,
+                    f"Appearance {button_state} button native/UIA state differs.")
+            bounds = control.get("bounds", {})
+            window = actual["target"]["window_rect"]
+            require(all(type(bounds.get(key)) in (int, float) for key in ("x", "y", "width", "height")) and
+                    bounds["width"] >= 20 and bounds["height"] >= 16 and
+                    bounds["x"] <= target["x"] <= bounds["x"] + bounds["width"] and
+                    bounds["y"] <= target["y"] <= bounds["y"] + bounds["height"],
+                    f"Appearance {button_state} button bounds differ from its physical target.")
+            rect = {"left": bounds["x"] - window["left"], "top": bounds["y"] - window["top"],
+                    "right": bounds["x"] + bounds["width"] - window["left"],
+                    "bottom": bounds["y"] + bounds["height"] - window["top"]}
+            name = f"appearance-button-{button_state}-{phase}.png"
+            width, height, rgba = capture_pixels(entry.get("capture"), name, appearance, "main-workbench")
+            require((width, height) == (window["width"], window["height"]),
+                    f"Appearance {button_state} PNG differs from main window geometry.")
+            role_rgb = {
+                "light": {"normal": (255, 255, 255), "disabled": (235, 237, 240),
+                          "hover": (240, 244, 250), "pressed": (226, 232, 240)},
+                "dark": {"normal": (42, 45, 50), "disabled": (34, 37, 41),
+                         "hover": (52, 57, 64), "pressed": (32, 35, 40)},
+            }[appearance].get(button_state)
+            if role_rgb is not None:
+                require(pair_count_near_color(rgba, width, height, rect, role_rgb) >= 20,
+                        f"Appearance {button_state} button fill raster violation.")
+            if button_state != "disabled":
+                require(prefix_bounds is None or typed_equal(prefix_bounds, bounds),
+                        "Appearance prefix button geometry changed with interaction state.")
+                prefix_bounds = bounds
+            button_rasters[button_state] = (rgba, rect)
+        require(pair_pixel_delta(button_rasters["normal"][0], button_rasters["hover"][0],
+                                 window["width"], window["height"], button_rasters["normal"][1]) >= 20 and
+                pair_pixel_delta(button_rasters["hover"][0], button_rasters["pressed"][0],
+                                 window["width"], window["height"], button_rasters["normal"][1]) >= 20 and
+                pair_pixel_delta(button_rasters["normal"][0], button_rasters["keyboard-focus"][0],
+                                 window["width"], window["height"], button_rasters["normal"][1]) >= 8,
+                "Appearance hover, pressed, or keyboard-focus raster state did not change.")
+
+        for kind, surface in PAIR_MODAL_SURFACES.items():
+            field = {"native-menu": "native_menu", "advanced": "advanced_appearance",
+                     "input-prompt": "input_prompt"}[kind]
+            entry = interaction.get(field)
+            require(isinstance(entry, dict), f"Appearance {kind} observation is missing.")
+            name = f"appearance-{kind}-{phase}.png"
+            width, height, rgba = capture_pixels(entry.get("capture"), name, appearance, surface)
+            if kind == "native-menu":
+                popup = entry.get("popup", {})
+                require(entry.get("popup_hwnd") == popup.get("native_handle") and
+                        type(entry.get("popup_hwnd")) is int and entry["popup_hwnd"] > 0 and
+                        isinstance(popup.get("bounds"), dict) and
+                        popup["bounds"].get("width", 0) > 30 and popup["bounds"].get("height", 0) > 20,
+                        "Appearance native menu popup binding differs.")
+                popup_bounds = popup["bounds"]
+                main_window = actual["target"]["window_rect"]
+                union_width = max(main_window["right"], round(popup_bounds["x"] + popup_bounds["width"])) - min(main_window["left"], round(popup_bounds["x"]))
+                union_height = max(main_window["bottom"], round(popup_bounds["y"] + popup_bounds["height"])) - min(main_window["top"], round(popup_bounds["y"]))
+                require(abs(width - union_width) <= 2 and abs(height - union_height) <= 2,
+                        "Appearance native menu PNG differs from observed popup geometry.")
+                diagnostics.setdefault("native_menu", []).append({"phase": phase, "popup_bounds": popup_bounds})
+            else:
+                native = entry.get("native_window", {})
+                observed = entry.get("window", {})
+                rect = native.get("rect", {}) if isinstance(native, dict) else {}
+                require(native.get("hwnd") == observed.get("native_handle") and
+                        native.get("process_id") == actual["target"]["process_id"] and
+                        native.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                        rect.get("width") == width and rect.get("height") == height,
+                        f"Appearance {kind} native window or raster dimensions differ.")
+                dialog_rgb = (247, 248, 250) if appearance == "light" else (26, 28, 32)
+                require(pair_count_near_color(rgba, width, height,
+                                              {"left": 0, "top": 0, "right": width, "bottom": height},
+                                              dialog_rgb) >= 100,
+                        f"Appearance {kind} dialog surface raster violation.")
+                if kind == "input-prompt":
+                    edit = entry.get("edit", {})
+                    default = entry.get("default_button", {})
+                    require(edit.get("automation_id") == "1004" and edit.get("name") == "붙일 문자열" and
+                            default.get("automation_id") == "1" and default.get("enabled") is True and
+                            entry.get("default_button_id") == 1,
+                            "Appearance prompt label or native default button differs.")
+        diagnostics.setdefault("interactions", []).append({"phase": phase, "buttons": list(buttons)})
     return diagnostics
 
 
@@ -1433,7 +1726,7 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             typed_equal(raw.get("assertions", {}).get("scenario"), observations.get("scenario")) and
             raw.get("status") == "review_required" and raw.get("guest_cleanup") is True and
             raw.get("assertions", {}).get("overall") == "passed" and
-            raw.get("assertions", {}).get("scope") == "appearance-pair-baseline-three-scenes" and
+            raw.get("assertions", {}).get("scope") == "appearance-pair-main-and-interactions-v2" and
             nested(raw, "keyboard", "status") == "not_run" and
             nested(raw, "accessibility", "status") == "not_run" and
             nested(raw, "capture", "status") == "passed",
@@ -1483,8 +1776,7 @@ def main(repo: Path, argv=None) -> int:
             "state_invariance": "passed", "raster_regions": "passed",
             "native_scrollbar_theme": "diagnostic-only",
             "rendering_conformance": "not-assessed", "design_approval": "not-assessed",
-            "omitted_scenes": ["changed-warning-collision-preview", "selection-focus-transitions",
-                                "input-prompt", "forced-colors", "system-theme-following"],
+            "omitted_scenes": ["forced-colors", "system-theme-following"],
             "full_four_run_regression": "not-run", "release_campaign": "not-run",
         }, ensure_ascii=False, indent=2))
         return 0
