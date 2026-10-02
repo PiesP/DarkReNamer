@@ -887,7 +887,8 @@ class Fixture:
             image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245),
                              patches=((48, 124, 80, 125, divider),
                                       (55, 105, 105, 112, ink),
-                                      (55, 144, 125, 151, ink),
+                                      (52, 143, 68, 151, ink if appearance == "dark" else (160, 165, 170)),
+                                      (75, 144, 145, 151, ink),
                                       (245, 144, 315, 151, ink)))
             capture = add_capture(f"appearance-default-columns-{phase}.png", image,
                                   appearance, "main-workbench")
@@ -1878,8 +1879,24 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
         files = {row["relative_path"]: row for row in json.loads((self.run / "collection.json").read_text())["files"]}
         self.assertEqual(evidence.validate_pair_default_columns(self.run, raw, files, actual)["status"], "passed")
+        steps = raw["assertions"]["scenario"]["default_columns"]["steps"]
         self.assertEqual([step["state"]["overlay"]["dismissed_tooltip_count"]
-                          for step in raw["assertions"]["scenario"]["default_columns"]["steps"]], [0, 1, 0])
+                          for step in steps], [0, 1, 0])
+        # The dark native file icon shares the text color inside column zero.
+        # A whole-cell ink bound is wider even though the text itself is stable.
+        state = steps[0]["state"]
+        bounds = state["current_name_cell"]["bounds"]
+        window = state["window"]["rect"]
+        visible = {"left": round(bounds["x"]) - window["left"],
+                   "right": round(bounds["x"] + bounds["width"]) - window["left"],
+                   "top": round(bounds["y"]) - window["top"],
+                   "bottom": round(bounds["y"] + bounds["height"]) - window["top"]}
+        footprints = []
+        for step, ink in ((steps[0], (27, 29, 32)), (steps[1], (242, 244, 247))):
+            image = (self.run / "output" / step["capture"]["file"]).read_bytes()
+            width, height, rgba = evidence.decode_png(image, step["phase"])
+            footprints.append(evidence.pair_ink_footprint(rgba, width, height, visible, ink, "current_name_cell"))
+        self.assertGreater(footprints[0]["left"] - footprints[1]["left"], 5)
         self.assertEqual(evidence.default_primary_widths(300, 112, 96), [120, 120, 80])
         cases = (
             ("preseeded", lambda item: item["fixture"].__setitem__("settings_absent_before_launch", False), "preseeded"),
@@ -1916,10 +1933,11 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 divider = (55, 60, 67)
                 ink = (242, 244, 247)
                 header = (55, 105, 61 if label == "header" else 105, 112, ink)
-                current = (55, 144, 61 if label == "current-name" else 125, 151, ink)
+                current = (75, 144, 81 if label == "current-name" else 145, 151, ink)
                 proposed = (245, 144, 251 if label == "proposed-name" else 315, 151, ink)
                 changed_png = pair_png((36, 36, 36), patches=(
-                    (48, 124, 80, 125, divider), header, current, proposed))
+                    (48, 124, 80, 125, divider), header,
+                    (52, 143, 68, 151, ink), current, proposed))
                 (self.run / "output" / dark_name).write_bytes(changed_png)
                 changed_hash = digest(changed_png)
                 receipt = next(item for item in raw["screenshots"] if item["file"] == dark_name)

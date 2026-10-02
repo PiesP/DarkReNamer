@@ -1805,6 +1805,16 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
                        "right": min(list_rect["right"], round(bounds["x"] + bounds["width"])) - rect["left"],
                        "top": round(bounds["y"]) - rect["top"],
                        "bottom": round(bounds["y"] + bounds["height"]) - rect["top"]}
+            if field == "current_name_cell" and phase != "light-before":
+                # The native first column also paints the file icon. Its dark
+                # foreground can match the text role even when the glyphs are
+                # identical. Compare the text within the observed Light glyph
+                # span, keeping the same DPI-scaled edge tolerance and native
+                # cell bound; an icon cannot rescue erased text in that span.
+                baseline = ink_samples["light-before"][field]
+                margin = max(5, (actual["hwnd_dpi"] * 5 + 48) // 96) + 2
+                visible["left"] = max(visible["left"], baseline["left"] - margin)
+                visible["right"] = min(visible["right"], baseline["right"] + margin + 1)
             phase_ink[field] = pair_ink_footprint(rgba, width, height, visible, ink, field)
         divider = (217, 221, 227) if appearance == "light" else (55, 60, 67)
         pair_flat_region(rgba, width, height,
