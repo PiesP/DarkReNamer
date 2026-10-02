@@ -392,6 +392,19 @@ request delegates drawing without modifying caller state. Decorative separator
 slots are cleared with their owning surface brush before the centered line, avoiding stale pixels across theme changes. These changes do
 not retain callback pointers or introduce new state leases or mutation authority.
 
+The dark FileList uses the existing per-control theme association and a bounded
+postpaint fill below the last native row. It queries only its validated ListView,
+checks the native count against the leased model, and consumes synchronous local
+rectangle storage. Failed queries skip custom fill. Pure bounds exclude header,
+occupied/selected rows and non-client scrollbar chrome; no native input or
+selection rendering is replaced. System/Forced Colors skip this custom path
+and restore the default association. Theme failure retains the existing native
+fallback, with no process-wide hooks, private API ordinals or new production
+subclasses. The native blank-body regression routes real ListView custom-draw
+notifications through a test-owned parent subclass. Its boxed UI-thread context
+and brush remain live through confirmed parent destruction; failed destruction
+retains that bounded context instead of leaving dangling callback refdata.
+
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.
 Each callback acquires an active strong share before dispatch. Short `RefCell`

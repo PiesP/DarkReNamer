@@ -190,6 +190,10 @@ impl AppearanceResources {
         self.window.as_raw()
     }
 
+    pub(super) const fn workspace_brush(&self) -> HBRUSH {
+        self.workspace.as_raw()
+    }
+
     pub(super) const fn header_brush(&self) -> HBRUSH {
         self.header.as_raw()
     }
@@ -1176,10 +1180,14 @@ fn configure_native_control_theme(
     theme: ResolvedTheme,
     mut set_theme: impl FnMut(Option<&str>) -> bool,
 ) -> bool {
-    // Explorer styling also draws ListView column dividers through blank body
-    // space. Keep the file list's default style and apply its palette separately.
+    // The existing dark association themes native scrollbar chrome. ListView
+    // postpaint clears only blank body below rows so Explorer's decorative
+    // column dividers cannot extend through the empty workspace.
     let association = match (target, theme) {
-        (NativeThemeTarget::AppearanceViewport, ResolvedTheme::Dark) => Some("DarkMode_Explorer"),
+        (
+            NativeThemeTarget::FileList | NativeThemeTarget::AppearanceViewport,
+            ResolvedTheme::Dark,
+        ) => Some("DarkMode_Explorer"),
         _ => None,
     };
     if set_theme(association) {
@@ -1392,7 +1400,7 @@ mod native_control_theme_tests {
     use super::*;
 
     #[test]
-    fn file_list_always_restores_the_default_association() {
+    fn file_list_dark_association_returns_to_native_and_light_styles() {
         let mut calls = Vec::new();
         for theme in [
             ResolvedTheme::Dark,
@@ -1409,7 +1417,15 @@ mod native_control_theme_tests {
                 }
             ));
         }
-        assert_eq!(calls, [None, None, None, None]);
+        assert_eq!(
+            calls,
+            [
+                Some("DarkMode_Explorer".to_owned()),
+                None,
+                Some("DarkMode_Explorer".to_owned()),
+                None
+            ]
+        );
     }
 
     #[test]
@@ -1430,15 +1446,20 @@ mod native_control_theme_tests {
             ));
         }
         assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None, None]);
-        calls.clear();
-        assert!(!configure_native_control_theme(
+        for target in [
+            NativeThemeTarget::FileList,
             NativeThemeTarget::AppearanceViewport,
-            ResolvedTheme::Dark,
-            |name| {
-                calls.push(name.map(str::to_owned));
-                name.is_none()
-            }
-        ));
-        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+        ] {
+            calls.clear();
+            assert!(!configure_native_control_theme(
+                target,
+                ResolvedTheme::Dark,
+                |name| {
+                    calls.push(name.map(str::to_owned));
+                    name.is_none()
+                }
+            ));
+            assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+        }
     }
 }

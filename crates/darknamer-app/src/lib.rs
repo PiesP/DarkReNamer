@@ -1980,6 +1980,28 @@ pub(crate) fn decorative_separator_line(slot: LayoutRect) -> LayoutRect {
     }
 }
 
+/// Restricts blank ListView body paint to client pixels below header and rows.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_blank_list_body_rect(
+    client: LayoutRect,
+    header_bottom: i32,
+    last_row_bottom: i32,
+) -> Option<LayoutRect> {
+    let top = client
+        .y
+        .max(header_bottom)
+        .max(last_row_bottom)
+        .min(client.bottom());
+    let height = client.bottom().saturating_sub(top);
+    (client.width > 0 && height > 0).then_some(LayoutRect {
+        x: client.x,
+        y: top,
+        width: client.width,
+        height,
+    })
+}
+
 /// Derives the decorative readiness indicator inside an Apply button.
 #[cfg(any(windows, test))]
 #[must_use]
@@ -5407,6 +5429,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn blank_list_body_never_covers_header_rows_or_nonclient_scrollbars() {
+        let client = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 250,
+        };
+        for (header, last, expected_top) in [(24, 0, 24), (31, 50, 50), (48, -40, 48)] {
+            let body = calculate_blank_list_body_rect(client, header, last);
+            assert_eq!(
+                body,
+                Some(LayoutRect {
+                    x: 0,
+                    y: expected_top,
+                    width: 400,
+                    height: 250 - expected_top
+                })
+            );
+        }
+        assert_eq!(calculate_blank_list_body_rect(client, 24, 250), None);
+        assert_eq!(calculate_blank_list_body_rect(client, 24, 500), None);
+        assert_eq!(
+            calculate_blank_list_body_rect(LayoutRect { width: 0, ..client }, 24, 40),
+            None
+        );
+        assert_eq!(
+            calculate_blank_list_body_rect(
+                LayoutRect {
+                    height: 0,
+                    ..client
+                },
+                24,
+                40
+            ),
+            None
+        );
     }
 
     #[test]
