@@ -132,7 +132,7 @@
       "bundle": "tooling-formats-png.py",
       "kind": "python",
       "module": "darkrenamer_tooling.formats.png",
-      "sha256": "4e47bb02872c0a60a78ee45808273d2dcd4af5d5d8ea2b3529cf09e50d676d25",
+      "sha256": "5b267489396ad9f661e8128aeaeef0afba4fcacd2116b9e72130a0410c9a1330",
       "dependencies": [
         "package-root",
         "package-formats"
