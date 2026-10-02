@@ -909,7 +909,7 @@ class Fixture:
                 "selection": {"count": 0, "name": None},
                 "status": "변경 없음",
                 "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True,
-                            "dismissed_tooltip_count": 0},
+                            "dismissed_tooltip_count": 1 if phase == "dark" else 0},
                 "current_name_cell": {**current_cell, "name": default_name,
                                       "bounds": {"x": 45, "y": 140, "width": 187, "height": 24}},
                 "proposed_name_cell": {**current_cell, "name": default_name,
@@ -1878,6 +1878,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
         files = {row["relative_path"]: row for row in json.loads((self.run / "collection.json").read_text())["files"]}
         self.assertEqual(evidence.validate_pair_default_columns(self.run, raw, files, actual)["status"], "passed")
+        self.assertEqual([step["state"]["overlay"]["dismissed_tooltip_count"]
+                          for step in raw["assertions"]["scenario"]["default_columns"]["steps"]], [0, 1, 0])
         self.assertEqual(evidence.default_primary_widths(300, 112, 96), [120, 120, 80])
         cases = (
             ("preseeded", lambda item: item["fixture"].__setitem__("settings_absent_before_launch", False), "preseeded"),
@@ -1886,6 +1888,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             ("theme changed width", lambda item: item["steps"][1]["state"]["columns"].__setitem__(0, 188), "allocation differs"),
             ("theme changed name", lambda item: item["steps"][1]["state"].__setitem__("proposed_name", "changed"), "row, Apply"),
             ("reused process", lambda item: item.__setitem__("process_id", 4242), "reused"),
+            ("visible overlay", lambda item: item["steps"][1]["state"]["overlay"].__setitem__("visible_tooltip_count", 1), "unsettled overlay"),
         )
         for label, mutate, message in cases:
             with self.subTest(label=label):
@@ -1902,6 +1905,34 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.run)
         with self.assertRaisesRegex(evidence.EvidenceError, "preseeded"):
             self.validate()
+
+    def test_default_original_dark_text_fragments_fail_after_receipts_are_rebound(self):
+        for label in ("header", "current-name"):
+            with self.subTest(label=label):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                dark_name = "appearance-default-columns-dark.png"
+                divider = (55, 60, 67)
+                ink = (242, 244, 247)
+                header = (55, 105, 61 if label == "header" else 105, 112, ink)
+                current = (55, 144, 61 if label == "current-name" else 125, 151, ink)
+                proposed = (245, 144, 251 if label == "proposed-name" else 315, 151, ink)
+                changed_png = pair_png((36, 36, 36), patches=(
+                    (48, 124, 80, 125, divider), header, current, proposed))
+                (self.run / "output" / dark_name).write_bytes(changed_png)
+                changed_hash = digest(changed_png)
+                receipt = next(item for item in raw["screenshots"] if item["file"] == dark_name)
+                receipt["sha256"] = changed_hash
+                dark = raw["assertions"]["scenario"]["default_columns"]["steps"][1]
+                dark["capture"]["sha256"] = changed_hash
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                collection = json.loads((self.run / "collection.json").read_text())
+                self.assertEqual(next(item["sha256"] for item in collection["files"]
+                                      if item["relative_path"] == dark_name), changed_hash)
+                with self.assertRaisesRegex(evidence.EvidenceError, "text ink was clipped or changed"):
+                    self.validate()
 
     def test_pair_selection_cell_identity_and_geometry_stay_bound_across_focus(self):
         for field, expected in (("bounds", "native row geometry"),

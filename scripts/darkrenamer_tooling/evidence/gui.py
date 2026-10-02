@@ -1344,6 +1344,45 @@ def pair_count_near_color(rgba: bytes, image_width: int, image_height: int,
     return count
 
 
+def pair_ink_footprint(rgba: bytes, image_width: int, image_height: int,
+                       rect: dict, rgb: tuple[int, int, int], label: str) -> dict[str, int]:
+    """Bound the painted text within an observed native header or cell."""
+    left, top = max(0, round(rect["left"])), max(0, round(rect["top"]))
+    right, bottom = min(image_width, round(rect["right"])), min(image_height, round(rect["bottom"]))
+    require(right - left >= 8 and bottom - top >= 8,
+            f"Appearance default {label} text region is clipped or missing.")
+    xs, ys = [], []
+    for y in range(top + 2, bottom - 2):
+        for x in range(left + 2, right - 2):
+            pixel = rgba[(y * image_width + x) * 4:(y * image_width + x) * 4 + 4]
+            if pixel[3] == 255 and all(abs(pixel[channel] - rgb[channel]) <= 25 for channel in range(3)):
+                xs.append(x)
+                ys.append(y)
+    require(len(xs) >= 8, f"Appearance default {label} original text ink is missing.")
+    return {"pixels": len(xs), "left": min(xs), "right": max(xs),
+            "top": min(ys), "bottom": max(ys)}
+
+
+def require_matching_ink_span(before: dict[str, int], after: dict[str, int],
+                              dpi: int, label: str) -> None:
+    """Compare the same glyph span while allowing theme antialiasing and ellipsis."""
+    x_tolerance = max(5, (dpi * 5 + 48) // 96)
+    y_tolerance = max(3, (dpi * 3 + 48) // 96)
+    before_width = before["right"] - before["left"] + 1
+    before_height = before["bottom"] - before["top"] + 1
+    after_width = after["right"] - after["left"] + 1
+    after_height = after["bottom"] - after["top"] + 1
+    minimum_width_dip = 32 if label == "header" else 40
+    require(before_width >= (dpi * minimum_width_dip + 48) // 96 and before_height >= 7 and
+            after_width >= before_width * 0.70 and after_height >= before_height * 0.65 and
+            after["pixels"] >= before["pixels"] * 0.40 and
+            abs(after["left"] - before["left"]) <= x_tolerance and
+            abs(after["right"] - before["right"]) <= x_tolerance and
+            abs(after["top"] - before["top"]) <= y_tolerance and
+            abs(after["bottom"] - before["bottom"]) <= y_tolerance,
+            f"Appearance default {label} text ink was clipped or changed with theme.")
+
+
 def pair_pixel_delta(left: bytes, right: bytes, width: int, height: int, rect: dict) -> int:
     x0, y0 = max(0, int(rect["left"])), max(0, int(rect["top"]))
     x1, y1 = min(width, int(rect["right"])), min(height, int(rect["bottom"]))
@@ -1621,6 +1660,7 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
             "Appearance default column Light-Dark-Light phases are missing or reordered.")
     stable = None
     endpoint = {}
+    ink_samples = {}
     results = []
     for step in steps:
         phase = step["phase"]
@@ -1721,7 +1761,7 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
             "column_origin", "columns", "runtime_columns", "column_visibility", "column_order",
             "list_client_width", "list_client_bounds", "row_count", "current_names", "proposed_name", "apply_enabled",
             "horizontal_scroll", "vertical_scroll", "native_header", "native_list", "window", "list",
-            "selection", "current_name_cell", "proposed_name_cell", "target_rendering", "status", "overlay")}
+            "selection", "current_name_cell", "proposed_name_cell", "target_rendering", "status")}
         if stable is None:
             stable = invariant
         else:
@@ -1741,12 +1781,12 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
                 (rect["width"], rect["height"]),
                 "Appearance default original capture dimensions differ.")
         ink = (27, 29, 32) if appearance == "light" else (242, 244, 247)
-        header_ink = pair_count_near_color(rgba, width, height,
+        phase_ink = {}
+        phase_ink["header"] = pair_ink_footprint(rgba, width, height,
             {"left": header_rect["left"] - rect["left"] + 4,
              "right": min(header_rect["right"], header_rect["left"] + columns[0]) - rect["left"] - 4,
              "top": header_rect["top"] - rect["top"],
-             "bottom": header_rect["bottom"] - rect["top"]}, ink, tolerance=25)
-        require(header_ink >= 4, "Appearance default header label ink is missing or clipped.")
+             "bottom": header_rect["bottom"] - rect["top"]}, ink, "header label")
         for field, column in (("current_name_cell", 0), ("proposed_name_cell", 1)):
             cell = state.get(field)
             bounds = cell.get("bounds") if isinstance(cell, dict) else None
@@ -1765,8 +1805,7 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
                        "right": min(list_rect["right"], round(bounds["x"] + bounds["width"])) - rect["left"],
                        "top": round(bounds["y"]) - rect["top"],
                        "bottom": round(bounds["y"] + bounds["height"]) - rect["top"]}
-            require(pair_count_near_color(rgba, width, height, visible, ink, tolerance=25) >= 4,
-                    f"Appearance default {field} text ink is missing from its visible column.")
+            phase_ink[field] = pair_ink_footprint(rgba, width, height, visible, ink, field)
         divider = (217, 221, 227) if appearance == "light" else (55, 60, 67)
         pair_flat_region(rgba, width, height,
                          {"left": list_rect["left"] - rect["left"] + 8,
@@ -1776,8 +1815,13 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
                          (divider,), "default header/body divider")
         if phase != "dark":
             endpoint[phase] = (width, height, rgba, rect, rendering)
+        ink_samples[phase] = phase_ink
         results.append({"phase": phase, "primary_widths": columns,
                         "status_width": status_width, "list_client_width": state["list_client_width"]})
+    for label in ("header", "current_name_cell", "proposed_name_cell"):
+        for phase in ("dark", "light-after"):
+            require_matching_ink_span(ink_samples["light-before"][label], ink_samples[phase][label],
+                                      actual["hwnd_dpi"], label)
     before, after = endpoint["light-before"], endpoint["light-after"]
     require(typed_equal(before[3:], after[3:]) and
             pair_pixel_delta(before[2], after[2], before[0], before[1],
