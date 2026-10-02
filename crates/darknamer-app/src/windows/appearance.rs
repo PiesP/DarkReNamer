@@ -28,9 +28,9 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
-    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo,
-    WM_GETFONT,
+    BS_DEFPUSHBUTTON, BS_TYPEMASK, GWL_STYLE, GetMenuBarInfo, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO, MIM_APPLYTOSUBMENUS,
+    MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
 use super::*;
@@ -440,7 +440,8 @@ fn draw_owner_button_with_readiness(
         ButtonDrawState {
             disabled: draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0,
             pressed: draw.itemState & ODS_SELECTED != 0,
-            hot: draw.itemState & ODS_HOTLIGHT != 0,
+            hot: draw.itemState & ODS_HOTLIGHT != 0
+                || (rail_button && command_rail::is_rail_button_hot(draw.hwndItem)),
             focused: draw.itemState & ODS_FOCUS != 0,
             default: draw.itemState & ODS_DEFAULT != 0,
             show_keyboard_cues: draw.itemState & ODS_NOACCEL == 0,
@@ -550,7 +551,9 @@ pub(super) fn draw_custom_button(
             pressed: state & CDIS_SELECTED != 0,
             hot: state & CDIS_HOT != 0,
             focused: state & CDIS_FOCUS != 0,
-            default: state & CDIS_DEFAULT != 0,
+            // BUTTON custom draw can omit CDIS_DEFAULT while the live control
+            // still has BS_DEFPUSHBUTTON (including BM_SETSTYLE changes).
+            default: state & CDIS_DEFAULT != 0 || is_default_push_button(button),
             show_keyboard_cues: state & CDIS_SHOWKEYBOARDCUES != 0,
         },
     );
@@ -559,6 +562,13 @@ pub(super) fn draw_custom_button(
     } else {
         CDRF_DODEFAULT
     } as LRESULT)
+}
+
+fn is_default_push_button(button: HWND) -> bool {
+    // SAFETY: WM_NOTIFY identifies this live button on the UI thread. Its
+    // integral style reflects the current native default-button state.
+    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) };
+    style & BS_TYPEMASK as isize == BS_DEFPUSHBUTTON as isize
 }
 
 #[derive(Clone, Copy)]
@@ -1398,6 +1408,71 @@ pub(super) fn apply_auxiliary_dwm_title_frame(window: HWND, theme: ResolvedTheme
 #[cfg(test)]
 mod native_control_theme_tests {
     use super::*;
+
+    #[test]
+    fn custom_draw_default_cue_follows_live_button_style() -> io::Result<()> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            BM_SETSTYLE, BS_PUSHBUTTON, CreateWindowExW, DestroyWindow, WS_CHILD,
+            WS_OVERLAPPEDWINDOW,
+        };
+
+        // SAFETY: these standard classes retain no caller-owned memory; the
+        // parent owns the child until both are destroyed below.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the live test parent owns this standard BUTTON until its
+        // destruction; the class retains no caller-owned creation storage.
+        let button = unsafe {
+            CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                null(),
+                WS_CHILD | BS_DEFPUSHBUTTON as u32,
+                0,
+                0,
+                75,
+                30,
+                parent,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if button.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: parent is the test-owned window created above.
+            unsafe { DestroyWindow(parent) };
+            return Err(error);
+        }
+        assert!(is_default_push_button(button));
+        // SAFETY: BM_SETSTYLE changes the live native button type and keeps
+        // the same HWND, as happens when dialog default focus changes.
+        unsafe { SendMessageW(button, BM_SETSTYLE, BS_PUSHBUTTON as usize, 0) };
+        assert!(!is_default_push_button(button));
+        // SAFETY: the same live standard button regains default style.
+        unsafe { SendMessageW(button, BM_SETSTYLE, BS_DEFPUSHBUTTON as usize, 0) };
+        assert!(is_default_push_button(button));
+        // SAFETY: destroying the parent also destroys its child.
+        unsafe { DestroyWindow(parent) };
+        Ok(())
+    }
 
     #[test]
     fn file_list_dark_association_returns_to_native_and_light_styles() {

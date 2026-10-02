@@ -11,17 +11,23 @@ use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
 use windows_sys::Win32::Graphics::Gdi::{HFONT, InvalidateRect};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_OWNERDRAW;
+use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Controls::{
     TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
+use windows_sys::Win32::UI::Shell::{
+    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
+};
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_CENTER, BS_MULTILINE, BS_NOTIFY, BS_OWNERDRAW, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW,
     DestroyWindow, GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
-    ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE,
+    ShowWindow, WM_ENABLE, WM_MOUSEMOVE, WM_NCDESTROY, WM_SETFONT, WM_SHOWWINDOW, WS_CHILD,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -33,6 +39,91 @@ use super::{
     SeparatorSurface, calculate_command_rail_separator_layout, command_ui_spec,
     draw_owner_separator, wide,
 };
+
+const RAIL_HOVER_SUBCLASS_ID: usize = 0xD4B6;
+
+fn install_rail_hover_subclass(button: HWND) -> io::Result<()> {
+    // SAFETY: this live UI-thread child owns the scalar hover subclass until
+    // WM_NCDESTROY; partial construction destroys the child too.
+    if unsafe { SetWindowSubclass(button, Some(rail_hover_subclass), RAIL_HOVER_SUBCLASS_ID, 0) }
+        == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn is_rail_button_hot(button: HWND) -> bool {
+    let mut hot = 0;
+    // SAFETY: the caller supplies a live UI-thread button. The subclass stores
+    // only a scalar bit, so no borrowed allocation can outlive its owner.
+    let installed = unsafe {
+        GetWindowSubclass(
+            button,
+            Some(rail_hover_subclass),
+            RAIL_HOVER_SUBCLASS_ID,
+            &mut hot,
+        ) != 0
+    };
+    installed && hot != 0
+}
+
+unsafe extern "system" fn rail_hover_subclass(
+    button: HWND,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    subclass_id: usize,
+    ref_data: usize,
+) -> isize {
+    if subclass_id == RAIL_HOVER_SUBCLASS_ID {
+        match message {
+            WM_MOUSEMOVE if ref_data == 0 => {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: button,
+                    dwHoverTime: 0,
+                };
+                // SAFETY: button is the live child receiving this mouse message;
+                // tracking retains the HWND, not the stack-allocated request.
+                if unsafe { TrackMouseEvent(&mut tracking) } != 0 {
+                    // SAFETY: updating this exact installed proc/id replaces only
+                    // its scalar refdata; the child and UI thread remain live.
+                    if unsafe {
+                        SetWindowSubclass(button, Some(rail_hover_subclass), subclass_id, 1)
+                    } != 0
+                    {
+                        // SAFETY: owner drawing fills the complete child later.
+                        unsafe { InvalidateRect(button, null(), 0) };
+                    }
+                }
+            }
+            WM_MOUSELEAVE | WM_SHOWWINDOW | WM_ENABLE
+                if ref_data != 0 && (message == WM_MOUSELEAVE || wparam == 0) =>
+            {
+                // SAFETY: the child remains live during these notifications;
+                // only the scalar hot state is cleared.
+                if unsafe { SetWindowSubclass(button, Some(rail_hover_subclass), subclass_id, 0) }
+                    != 0
+                {
+                    // SAFETY: no synchronous parent paint is requested here.
+                    unsafe { InvalidateRect(button, null(), 0) };
+                }
+            }
+            WM_NCDESTROY => {
+                // SAFETY: this is the child subclass's terminal message. Remove
+                // its exact registration before forwarding native destruction.
+                unsafe { RemoveWindowSubclass(button, Some(rail_hover_subclass), subclass_id) };
+            }
+            _ => {}
+        }
+    }
+    // SAFETY: every message retains the BUTTON's native processing and the
+    // remaining common-controls subclass chain exactly once.
+    unsafe { DefSubclassProc(button, message, wparam, lparam) }
+}
 
 #[derive(Debug)]
 struct CommandButton {
@@ -142,6 +233,7 @@ impl CommandRail {
                 command,
                 window: button,
             });
+            install_rail_hover_subclass(button)?;
             self.add_tooltip(button, command_spec.tooltip_label)?;
         }
         for _ in 1..self.spec.group_count() {
@@ -485,5 +577,86 @@ fn create_tooltip(parent: HWND) -> io::Result<OwnedTooltip> {
         Err(io::Error::last_os_error())
     } else {
         Ok(OwnedTooltip(tooltip))
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // SAFETY: this test solely owns the parent and all its child HWNDs.
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn rail_button_hover_follows_mouse_leave_and_control_lifetime() -> io::Result<()> {
+        // SAFETY: the system STATIC class and module handle are process-global;
+        // TestWindow destroys this local parent on every exit path.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let parent = TestWindow(parent);
+        // SAFETY: the parent remains owned and live throughout the test; its
+        // destruction also destroys this standard BUTTON child.
+        let button = unsafe {
+            CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                null(),
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW as u32,
+                0,
+                0,
+                64,
+                40,
+                parent.0,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if button.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        install_rail_hover_subclass(button)?;
+        assert!(!is_rail_button_hot(button));
+        // SAFETY: synchronous test messages exercise the installed subclass;
+        // TrackMouseEvent posts an actual leave if the cursor is elsewhere.
+        unsafe { SendMessageW(button, WM_MOUSEMOVE, 0, 0) };
+        assert!(is_rail_button_hot(button));
+        // SAFETY: this is the documented leave notification for this child.
+        unsafe { SendMessageW(button, WM_MOUSELEAVE, 0, 0) };
+        assert!(!is_rail_button_hot(button));
+        // SAFETY: disabling a live BUTTON must clear any retained hot state.
+        unsafe {
+            SendMessageW(button, WM_MOUSEMOVE, 0, 0);
+            EnableWindow(button, 0);
+        }
+        assert!(!is_rail_button_hot(button));
+        // SAFETY: parent destruction delivers WM_NCDESTROY to the child and
+        // detaches the subclass before the test-owned HWND ceases to exist.
+        drop(parent);
+        Ok(())
     }
 }
