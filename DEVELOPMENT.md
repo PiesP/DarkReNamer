@@ -454,7 +454,7 @@ V2 permits ambient process deltas only under its established ownership and
 required-environment checks. Preserved V1 failures retain their original verdict.
 Selecting V2 cleanup here does not establish complete V2 release acceptance.
 
-The diagnostic retains 66 original guest desktop PNGs. Eight main states
+The diagnostic retains 69 original guest desktop PNGs. Eight main states
 (empty, one unchanged multilingual row, overflow, changed proposal, empty-stem
 warning, collision, active selection, and inactive selection) each run
 Light → Dark → Light in one process. Five button states (normal, disabled,
@@ -476,6 +476,35 @@ The fixture first resets the native horizontal position to its minimum, then
 uses the same final pixel delta in every phase and allows painting to settle.
 The native XOR focus rectangle cannot be scrolled safely through differing
 small deltas. The strict original Light endpoint comparison remains unchanged.
+Normalized scene composition establishes raster conformance at a controlled
+viewport; it does not prove that a theme command preserved the preceding
+viewport. The v3 diagnostic separately establishes non-minimum horizontal and
+vertical positions once in the custom-width overflow fixture. It records
+read-only native snapshots immediately before and after each Light → Dark →
+Light transition, before any proposal exposure, selection, focus repair or
+scroll normalization. Committed native positions/ranges and viewport anchors,
+row values, selected identities, column settings and geometry must remain
+unchanged. Transient scroll tracking metadata is retained separately. Bounded
+settlement only observes state; it never repairs a failed transition. Original
+partial snapshots remain in the observer output on failure. Matching later
+normalized captures cannot turn a failed preservation check into a pass.
+
+A separate clean-start session uses the same executable and display configuration
+with its own isolated `LOCALAPPDATA`. The observer verifies `ui-columns-v1` is
+absent before launch and never injects widths or changes header settings. One
+unchanged multilingual row is compared through Light → Dark → Light using
+actual automatic allocation, with persisted columns distinguished from the
+runtime-only status column. Three original `appearance-default-columns-*` PNGs
+and native state support the default-layout check; the oversized persisted-width
+scenes remain separate. Normal preference creation after startup is allowed.
+Both sessions retain the existing owned-process and settings cleanup contract.
+
+The v3 observation scope distinguishes these two guarantees from the earlier
+v2 normalized-state evidence. Historical results remain bound to their original
+source and verifier; they do not establish unnormalized preservation or clean
+startup defaults. The independent result reports transition preservation,
+normalized raster conformance and clean-default allocation separately.
+
 Main scene captures settle the cursor on the title bar and reject visible owned
 tooltips. A retained tooltip is dismissed through standard `TTM_POP` only after
 verifying its process and native class, with the dismissal count recorded; a
@@ -514,7 +543,7 @@ Text150 compares the same original Korean prompt glyphs with the baseline in
 both dimensions, with unchanged font-family inputs. The label is observed on its
 bound STATIC using bounded `WM_GETTEXT`; no foreign font pointer is read.
 
-The Forced Colors run adds three System captures after its 66 ordinary scenes.
+The Forced Colors run adds three System captures after its 69 ordinary scenes.
 It records System foreground resolution before activation, native fallback with
 selected/unselected semantic text during activation, and exact restoration of
 System state and client pixels. Source/script-bound restoration receipts precede

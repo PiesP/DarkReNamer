@@ -643,6 +643,11 @@ function Invoke-GuiRegressionAcceptance {
                 -Result $result `
                 -RawRegression $rawRegression
             if ($RegressionMode -eq 'appearance-pair') {
+                # Preserve original partial observations if a transition check
+                # fails before the scenario can return its completed result.
+                $scenarioSink = [ordered]@{}
+                $observations.scenario = $scenarioSink
+                $result.assertions.scenario = $scenarioSink
                 $scenario = Invoke-ObserverAppearancePairScenario `
                     -Verified $verified `
                     -RuntimeRoot $effectiveRuntimeRoot `
@@ -652,6 +657,7 @@ function Invoke-GuiRegressionAcceptance {
                     -SourceSha $manifestInput.source_sha `
                     -AcceptanceScriptSha256 $ExpectedScriptSha256 `
                     -HighContrast:$HighContrast `
+                    -ObservationSink $scenarioSink `
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations
             }
@@ -707,7 +713,7 @@ function Invoke-GuiRegressionAcceptance {
         $result.accessibility.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
-            $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v2'
+            $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
         }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'

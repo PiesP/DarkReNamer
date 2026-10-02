@@ -900,8 +900,10 @@ try {
             param(
                 $Verified, $RuntimeRoot, $EvidenceRoot, $SessionId,
                 $WaitSeconds, $SourceSha, $AcceptanceScriptSha256,
-                [switch] $HighContrast, $Captures, $ProcessLifecycleObservations
+                [switch] $HighContrast, $ObservationSink, $Captures, $ProcessLifecycleObservations
             )
+            $ObservationSink['source_sha'] = $SourceSha
+            if ($dispatchFailure) { throw 'fixture transition failure after original observation' }
             $SourceSha
         }
         foreach ($sourceSha in @(('a' * 40), ('b' * 40))) {
@@ -914,6 +916,8 @@ try {
                 $TimeoutSeconds = 60
                 $ExpectedScriptSha256 = 'c' * 64
                 $HighContrast = $false
+                $dispatchFailure = $false
+                $scenarioSink = [ordered]@{}
                 $captures = [Collections.Generic.List[object]]::new()
                 $processLifecycleObservations = @()
                 & $dispatch
@@ -921,6 +925,28 @@ try {
             if ($observedSourceSha -cne $sourceSha) {
                 throw 'Nested appearance-pair dispatch lost its manifest source SHA.'
             }
+        }
+        # Execute the production dispatch block, including its original sink
+        # assignments, and fail inside the observer after recording evidence.
+        $dispatchBlock = $appearanceCalls[0].Parent
+        while ($dispatchBlock -isnot [Management.Automation.Language.StatementBlockAst]) {
+            $dispatchBlock = $dispatchBlock.Parent
+        }
+        $dispatchBody = [scriptblock]::Create(($dispatchBlock.Statements.Extent.Text -join "`n"))
+        $manifestInput = [pscustomobject]@{ source_sha = 'd' * 40 }
+        $verified = $null
+        $effectiveRuntimeRoot = 'runtime'
+        $resolved = [pscustomobject]@{ output_root = 'evidence' }
+        $session = 1; $TimeoutSeconds = 60; $ExpectedScriptSha256 = 'c' * 64
+        $HighContrast = $false; $dispatchFailure = $true
+        $captures = [Collections.Generic.List[object]]::new()
+        $processLifecycleObservations = @()
+        $observations = [ordered]@{ scenario = $null }
+        $result = [ordered]@{ assertions = [ordered]@{ scenario = $null } }
+        Assert-Fails { . $dispatchBody } 'fixture transition failure after original observation'
+        if (-not [object]::ReferenceEquals($observations.scenario, $result.assertions.scenario) -or
+            $observations.scenario.source_sha -cne $manifestInput.source_sha) {
+            throw 'A failed pair dispatch must retain its original mutable observations in both output documents.'
         }
     }
     & {
@@ -3301,8 +3327,8 @@ $applicationStartCalls = @($captureAst.FindAll({
     $node -is [Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
 }, $true))
-if ($applicationStartCalls.Count -ne 6) {
-    throw 'Expected all six current-DPI and GUI diagnostic application start sites.'
+if ($applicationStartCalls.Count -ne 7) {
+    throw 'Expected all seven current-DPI and GUI diagnostic application start sites, including clean-default startup.'
 }
 foreach ($call in $applicationStartCalls) {
     $lifecycleBindings = @($call.CommandElements | Where-Object {
