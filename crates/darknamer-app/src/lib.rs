@@ -1980,6 +1980,49 @@ pub(crate) fn decorative_separator_line(slot: LayoutRect) -> LayoutRect {
     }
 }
 
+/// Splits native scrollbar geometry without changing its hit-testing or range.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_scrollbar_parts(
+    bar: LayoutRect,
+    vertical: bool,
+    arrow_length: i32,
+    thumb_start: i32,
+    thumb_end: i32,
+) -> Option<[LayoutRect; 3]> {
+    let length = if vertical { bar.height } else { bar.width };
+    if bar.width <= 0
+        || bar.height <= 0
+        || arrow_length < 0
+        || arrow_length > length / 2
+        || thumb_start < arrow_length
+        || thumb_end < thumb_start
+        || thumb_end > length.saturating_sub(arrow_length)
+    {
+        return None;
+    }
+    let part = |start: i32, end: i32| {
+        if vertical {
+            LayoutRect {
+                y: bar.y.saturating_add(start),
+                height: end - start,
+                ..bar
+            }
+        } else {
+            LayoutRect {
+                x: bar.x.saturating_add(start),
+                width: end - start,
+                ..bar
+            }
+        }
+    };
+    Some([
+        part(0, arrow_length),
+        part(thumb_start, thumb_end),
+        part(length - arrow_length, length),
+    ])
+}
+
 /// Restricts blank ListView body paint to client pixels below header and rows.
 #[cfg(any(windows, test))]
 #[must_use]
@@ -5427,6 +5470,37 @@ mod tests {
                     assert!(edge.width >= 0 && edge.height >= 0);
                     assert!(edge.right() <= width && edge.bottom() <= height);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn native_scrollbar_parts_remain_inside_the_native_rectangle() {
+        for vertical in [false, true] {
+            for dpi in [96, 120, 144, 192] {
+                let thickness = scale_dip(17, dpi);
+                let length = scale_dip(200, dpi);
+                let bar = LayoutRect {
+                    x: 7,
+                    y: 11,
+                    width: if vertical { thickness } else { length },
+                    height: if vertical { length } else { thickness },
+                };
+                let parts =
+                    calculate_scrollbar_parts(bar, vertical, thickness, thickness + 5, length / 2);
+                assert!(parts.is_some());
+                for part in parts.into_iter().flatten() {
+                    assert!(part.x >= bar.x && part.y >= bar.y);
+                    assert!(part.right() <= bar.right() && part.bottom() <= bar.bottom());
+                }
+                assert_eq!(
+                    calculate_scrollbar_parts(bar, vertical, thickness, -1, 10),
+                    None
+                );
+                assert_eq!(
+                    calculate_scrollbar_parts(bar, vertical, thickness, 10, length + 1),
+                    None
+                );
             }
         }
     }

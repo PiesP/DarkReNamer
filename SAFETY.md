@@ -752,3 +752,15 @@ procedures are retained in
 valid for interpreting their source-bound historical artifacts, including every
 failure, `not-run`, and `review_required` result. They do not define the current
 release gate and are not evidence that any current VM-Automated campaign passed.
+
+The file ListView's existing UI-thread notification subclass also paints dark
+nonclient scrollbar chrome after forwarding native processing exactly once.
+`GetScrollBarInfo` supplies the live native rectangle, arrow length, thumb and
+component states. Pure splitting rejects invalid or out-of-range geometry; a
+saved window DC excludes the entire client rectangle before bounded fills.
+The control continues to own ranges, hit-testing, dragging, wheel/keyboard input
+and accessibility. Only copied palette values cross the state lease boundary,
+with no lease retained across native scroll tracking. Failed state/DC/geometry
+queries leave native drawing intact. Native/Forced Colors resolution bypasses
+custom chrome. Stock GDI selections and clipping are restored, and every
+successfully acquired window DC is released on the UI thread.

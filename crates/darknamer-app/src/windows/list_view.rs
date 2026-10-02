@@ -1,4 +1,17 @@
 use super::*;
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
+    RestoreDC, SaveDC, SetDCBrushColor,
+};
+use windows_sys::Win32::UI::Controls::{
+    STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetScrollBarInfo, OBJID_HSCROLL, OBJID_VSCROLL, SCROLLBARINFO, WM_HSCROLL,
+    WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
+    WM_VSCROLL,
+};
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
@@ -104,7 +117,252 @@ unsafe extern "system" fn list_view_notification_subclass(
     }
     // SAFETY: every notification not owned by the header painter is forwarded
     // unchanged through the common-controls subclass chain exactly once.
-    unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    if owner_ref != 0
+        && matches!(
+            message,
+            WM_NCPAINT
+                | WM_PAINT
+                | WM_HSCROLL
+                | WM_VSCROLL
+                | WM_SIZE
+                | WM_NCMOUSEMOVE
+                | WM_NCMOUSELEAVE
+                | WM_NCLBUTTONDOWN
+                | WM_NCLBUTTONUP
+                | WM_MOUSEMOVE
+                | WM_THEMECHANGED
+        )
+    {
+        // Resolve after default processing, without retaining a lease across the
+        // native scroll tracking loop. A failed/reentrant lease keeps native paint.
+        let palette = try_app_state(owner_ref as HWND).and_then(|lease| {
+            let state = lease.state();
+            let resolved = state.resolved_appearance();
+            (state.list_window == window
+                && resolved.theme == ResolvedTheme::Dark
+                && resolved.custom_colors_enabled)
+                .then(|| semantic_palette(resolved.theme))
+                .flatten()
+        });
+        if let Some(palette) = palette {
+            paint_native_list_scrollbars(window, palette);
+        }
+    }
+    result
+}
+
+/// A synchronous window DC; never retained by the subclass or native control.
+struct ListWindowDc {
+    window: HWND,
+    dc: HDC,
+    saved: i32,
+}
+impl Drop for ListWindowDc {
+    fn drop(&mut self) {
+        // SAFETY: these values belong to this successful GetWindowDC/SaveDC pair.
+        unsafe {
+            RestoreDC(self.dc, self.saved);
+            ReleaseDC(self.window, self.dc);
+        }
+    }
+}
+
+fn paint_native_list_scrollbars(window: HWND, palette: SemanticPalette) {
+    let mut bounds = RECT::default();
+    let mut client = RECT::default();
+    let mut origin = POINT::default();
+    let mut cursor = POINT::default();
+    // SAFETY: synchronous value-only queries on the current UI-thread ListView.
+    let geometry_known = unsafe {
+        IsWindow(window) != 0
+            && GetWindowRect(window, &mut bounds) != 0
+            && GetClientRect(window, &mut client) != 0
+            && ClientToScreen(window, &mut origin) != 0
+    };
+    if !geometry_known {
+        return;
+    }
+    // SAFETY: writable local POINT storage, no retained pointer.
+    let cursor_known = unsafe { GetCursorPos(&mut cursor) } != 0;
+    // SAFETY: the live ListView owns this window DC until ReleaseDC below.
+    let dc = unsafe { GetWindowDC(window) };
+    if dc.is_null() {
+        return;
+    }
+    // SAFETY: SaveDC copies this newly acquired DC's state.
+    let saved = unsafe { SaveDC(dc) };
+    if saved == 0 {
+        // SAFETY: release the exact acquired DC even when saving fails.
+        unsafe { ReleaseDC(window, dc) };
+        return;
+    }
+    let _dc = ListWindowDc { window, dc, saved };
+    let dx = bounds.left;
+    let dy = bounds.top;
+    // Exclude every client pixel, including rows and the header. All remaining
+    // fills also use native scrollbar rectangles, never the whole window frame.
+    // SAFETY: local coordinates of the same live window DC; guard restores state.
+    if unsafe {
+        ExcludeClipRect(
+            dc,
+            origin.x - dx,
+            origin.y - dy,
+            origin.x - dx + client.right,
+            origin.y - dy + client.bottom,
+        )
+    } == 0
+    {
+        return;
+    }
+    // SAFETY: stock objects are process-owned; SaveDC restores prior selections.
+    unsafe {
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SelectObject(dc, GetStockObject(NULL_PEN));
+    }
+    let mut bars = [None, None];
+    for (index, object) in [OBJID_HSCROLL, OBJID_VSCROLL].into_iter().enumerate() {
+        let mut info = SCROLLBARINFO {
+            cbSize: size_of::<SCROLLBARINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: OBJID selects native nonclient chrome; writable local storage.
+        if unsafe { GetScrollBarInfo(window, object, &mut info) } == 0
+            || info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN) != 0
+        {
+            continue;
+        }
+        let native = info.rcScrollBar;
+        if native.left < bounds.left
+            || native.top < bounds.top
+            || native.right > bounds.right
+            || native.bottom > bounds.bottom
+        {
+            continue;
+        }
+        let bar = LayoutRect {
+            x: native.left - dx,
+            y: native.top - dy,
+            width: native.right - native.left,
+            height: native.bottom - native.top,
+        };
+        let vertical = index == 1;
+        let Some(parts) = calculate_scrollbar_parts(
+            bar,
+            vertical,
+            info.dxyLineButton,
+            info.xyThumbTop,
+            info.xyThumbBottom,
+        ) else {
+            continue;
+        };
+        paint_scrollbar_rect(dc, bar, palette.surface_window);
+        for (part_index, rect) in parts.into_iter().enumerate() {
+            let state = info.rgstate[[1, 3, 5][part_index]] | info.rgstate[0];
+            let disabled = state & windows_sys::Win32::UI::Controls::STATE_SYSTEM_UNAVAILABLE != 0;
+            let hot = cursor_known
+                && cursor.x - dx >= rect.x
+                && cursor.x - dx < rect.right()
+                && cursor.y - dy >= rect.y
+                && cursor.y - dy < rect.bottom();
+            let color = if disabled {
+                palette.control_disabled
+            } else if state & STATE_SYSTEM_PRESSED != 0 {
+                palette.control_pressed
+            } else if hot {
+                palette.control_hover
+            } else {
+                palette.control_normal
+            };
+            paint_scrollbar_rect(dc, rect, color);
+            if part_index != 1 {
+                paint_scrollbar_arrow(
+                    dc,
+                    rect,
+                    vertical,
+                    part_index == 2,
+                    if disabled {
+                        palette.text_disabled
+                    } else {
+                        palette.text_primary
+                    },
+                );
+            }
+        }
+        bars[index] = Some(bar);
+    }
+    if let [Some(horizontal), Some(vertical)] = bars {
+        let corner = LayoutRect {
+            x: vertical.x,
+            y: horizontal.y,
+            width: vertical.width,
+            height: horizontal.height,
+        };
+        paint_scrollbar_rect(dc, corner, palette.surface_window);
+    }
+}
+
+fn paint_scrollbar_rect(dc: HDC, rect: LayoutRect, color: u32) {
+    if rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    let native = RECT {
+        left: rect.x,
+        top: rect.y,
+        right: rect.right(),
+        bottom: rect.bottom(),
+    };
+    // SAFETY: synchronous guarded window DC and nonclient-bounded local rectangle.
+    unsafe {
+        SetDCBrushColor(dc, color);
+        FillRect(dc, &native, GetStockObject(DC_BRUSH));
+    }
+}
+
+fn paint_scrollbar_arrow(dc: HDC, rect: LayoutRect, vertical: bool, forward: bool, color: u32) {
+    let radius = (rect.width.min(rect.height) / 5).max(1);
+    if rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let cx = rect.x + rect.width / 2;
+    let cy = rect.y + rect.height / 2;
+    let direction = if forward { 1 } else { -1 };
+    let points = if vertical {
+        [
+            POINT {
+                x: cx - radius,
+                y: cy - direction * radius / 2,
+            },
+            POINT {
+                x: cx + radius,
+                y: cy - direction * radius / 2,
+            },
+            POINT {
+                x: cx,
+                y: cy + direction * radius,
+            },
+        ]
+    } else {
+        [
+            POINT {
+                x: cx - direction * radius / 2,
+                y: cy - radius,
+            },
+            POINT {
+                x: cx - direction * radius / 2,
+                y: cy + radius,
+            },
+            POINT {
+                x: cx + direction * radius,
+                y: cy,
+            },
+        ]
+    };
+    // SAFETY: three local points stay inside the native arrow button; DC restored.
+    unsafe {
+        SetDCBrushColor(dc, color);
+        Polygon(dc, points.as_ptr(), points.len() as i32);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
