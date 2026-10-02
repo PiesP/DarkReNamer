@@ -929,6 +929,30 @@ public static class DarkReNamerVmAcceptanceNative {
         };
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadSnapshot {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadSnapshot info);
+    [DllImport("user32.dll")]
+    private static extern int GetDlgCtrlID(IntPtr window);
+    public static long[] ReadGuiThreadSnapshot(IntPtr mainWindow, uint expectedProcessId) {
+        uint processId;
+        uint thread = GetWindowThreadProcessId(mainWindow, out processId);
+        if (thread == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("GUI thread target differs from bound application.");
+        GuiThreadSnapshot info = new GuiThreadSnapshot();
+        info.Size = (uint)Marshal.SizeOf(typeof(GuiThreadSnapshot));
+        if (!GetGUIThreadInfo(thread, ref info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (info.Focus == IntPtr.Zero || GetWindowThreadProcessId(info.Focus, out processId) == 0
+            || processId != expectedProcessId || GetAncestor(info.Focus, 2) != mainWindow)
+            throw new InvalidOperationException("Native focus is outside the bound main window.");
+        return new [] { info.Focus.ToInt64(), info.Capture.ToInt64(), (long)GetDlgCtrlID(info.Focus) };
+    }
+
     public static int[] TryReadScrollInfo(IntPtr window, int bar) {
         NativeScrollInfo info = new NativeScrollInfo();
         info.Size = (uint)Marshal.SizeOf(typeof(NativeScrollInfo));

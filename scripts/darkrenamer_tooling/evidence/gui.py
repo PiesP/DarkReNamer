@@ -1325,6 +1325,12 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     state.get("apply_enabled") is (scene in {"changed", "warning"}) and
                     state.get("focus_automation_id") == ("32773" if scene == "selected-inactive" else "1000"),
                     f"Appearance {scene} data, Apply, or settled focus differs.")
+            focus = state.get("native_focus")
+            require(isinstance(focus, list) and len(focus) == 3 and
+                    all(type(value) is int for value in focus) and focus[0] > 0 and
+                    focus[1] == 0 and str(focus[2]) == state["focus_automation_id"] and
+                    (scene == "selected-inactive" or focus[0] == state.get("list", {}).get("native_handle")),
+                    f"Appearance {scene} native focus differs from the keyboard target.")
             selected = state.get("selection")
             require(isinstance(selected, dict) and type(selected.get("count")) is int and
                     selected["count"] in (0, 1) and
@@ -1384,7 +1390,7 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
                 "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list",
                 "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell",
-                "focus_automation_id", "list_physical_target", "list", "window")}
+                "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window")}
             physical = state.get("list_physical_target")
             require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
                     physical["hit_window"] > 0 and physical.get("root_window") == actual["target"]["hwnd"],

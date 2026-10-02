@@ -1083,6 +1083,12 @@ function Get-ObserverAppearanceSelection {
         name = if ($selected.Count -eq 1) { [string]$selected[0].Current.Name } else { $null }
     }
 }
+function Get-ObserverAppearanceFocusId {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $SessionId)
+    [void](Get-FocusedAcceptanceElement -Process $Application.process -ExpectedSession $SessionId -Label 'appearance interaction focus')
+    $native = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
+    [string]$native[2]
+}
 function Show-ObserverAppearanceProposalCell {
     param([Parameter(Mandatory)][object] $Grid)
     $scrollObject = $null
@@ -1253,7 +1259,14 @@ function Invoke-ObserverAppearancePairScenario {
                 else { $grid.element.SetFocus() }
                 $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance settled list focus'
                 $expectedFocus = if ($scene -eq 'selected-inactive') { '32773' } else { '1000' }
-                if ($focused.Current.AutomationId -cne $expectedFocus) { throw "Appearance $scene focus did not settle." }
+                # UIA may report a focused ListItem after row selection. Bind
+                # keyboard focus to the native control, retaining the UIA identity.
+                $nativeFocus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$application.main_handle, [uint32]$application.process.Id)
+                if ([string]$nativeFocus[2] -cne $expectedFocus -or
+                    ($scene -ne 'selected-inactive' -and $nativeFocus[0] -ne $listHandle.ToInt64()) -or
+                    ($scene -eq 'selected-inactive' -and $nativeFocus[0] -ne $focused.Current.NativeWindowHandle)) {
+                    throw "Appearance $scene native focus did not settle: control=$($nativeFocus[2]), UIA=$($focused.Current.AutomationId)."
+                }
                 $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
                 if (($scene -eq 'collision' -and $status.Current.Name.IndexOf('대상 경로 충돌', [StringComparison]::Ordinal) -lt 0) -or
                     ($scene -eq 'warning' -and $status.Current.Name.IndexOf('이름 본체가 비어 있는 항목', [StringComparison]::Ordinal) -lt 0)) {
@@ -1283,7 +1296,9 @@ function Invoke-ObserverAppearancePairScenario {
                     selected_row_cell = if ($scene -in @('selected-active', 'selected-inactive')) { Get-ElementObservation -Element ($grid.pattern.GetItem(0, 0)) } else { $null }
                     proposed_name = if ($null -eq $proposedCell) { $null } else { [string]$proposedCell.Current.Name }
                     proposed_cell = if ($null -eq $proposedCell) { $null } else { Get-ElementObservation -Element $proposedCell }
-                    focus_automation_id = [string]$focused.Current.AutomationId
+                    focus_automation_id = [string]$nativeFocus[2]
+                    native_focus = @($nativeFocus)
+                    focused_uia = Get-ElementObservation -Element $focused
                     appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
                     list_physical_target = Get-GuiRegressionPhysicalTarget -Element $grid.element -Application $application -SessionId $SessionId -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance unobscured list'
                     list = Get-ElementObservation -Element $grid.element
@@ -1320,7 +1335,7 @@ function Invoke-ObserverAppearancePairScenario {
             [void](Assert-ObserverAppearanceNoTooltip -Application $application)
             $buttons['normal'] = [ordered]@{
                 control = Get-ElementObservation -Element $prefix
-                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance normal button').Current.AutomationId
+                focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
                 target = $prefixTarget
                 capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
@@ -1328,16 +1343,17 @@ function Invoke-ObserverAppearancePairScenario {
             }
             $buttons['disabled'] = [ordered]@{
                 control = Get-ElementObservation -Element $applyButton
-                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance disabled button').Current.AutomationId
+                focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$applyButton.Current.NativeWindowHandle)
                 target = $applyTarget
                 capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
                     -Leaf "appearance-button-disabled-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
             }
             [DarkReNamerVmAcceptanceNative]::MoveCursor([int]$prefixTarget.x, [int]$prefixTarget.y)
+            Start-Sleep -Milliseconds 150
             $buttons['hover'] = [ordered]@{
                 control = Get-ElementObservation -Element $prefix
-                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance hover button').Current.AutomationId
+                focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
                 target = $prefixTarget
                 capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
@@ -1345,11 +1361,12 @@ function Invoke-ObserverAppearancePairScenario {
             }
             try {
                 [DarkReNamerVmAcceptanceNative]::PressLeftButton()
+                Start-Sleep -Milliseconds 150
                 $pressedState = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
                 if (($pressedState -band 4) -eq 0) { throw 'Appearance button did not enter native pressed state.' }
                 $buttons['pressed'] = [ordered]@{
                     control = Get-ElementObservation -Element $prefix
-                    focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance pressed button').Current.AutomationId
+                    focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                     native_button_state = $pressedState
                     target = $prefixTarget
                     capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `
@@ -1366,7 +1383,7 @@ function Invoke-ObserverAppearancePairScenario {
             [void](Move-RailFocusToCommand -Process $application.process -ExpectedSession $SessionId -AutomationId '32773')
             $buttons['keyboard-focus'] = [ordered]@{
                 control = Get-ElementObservation -Element $prefix
-                focus_automation_id = (Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance focused button').Current.AutomationId
+                focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
                 target = $prefixTarget
                 capture = Save-ObserverAppearanceCapture -Application $application -Window $application.main -EvidenceRoot $EvidenceRoot `

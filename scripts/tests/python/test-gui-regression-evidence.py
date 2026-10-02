@@ -653,6 +653,9 @@ class Fixture:
                 "vertical_scrollbar_bounds": [623, 125, 640, 432, 0, 0, 0] if scene == "overflow" else None,
                 "apply_enabled": scene in {"changed", "warning"}, "status": status,
                 "focus_automation_id": "32773" if scene == "selected-inactive" else "1000",
+                "native_focus": [3001 if scene == "selected-inactive" else 2001, 0,
+                                 32773 if scene == "selected-inactive" else 1000],
+                "focused_uia": None,
                 "selection": {"count": 1 if selected_name else 0, "name": selected_name},
                 "selected_row_cell": current_cell if scene.startswith("selected-") else None,
                 "proposed_name": proposal_name, "proposed_cell": proposal,
@@ -1346,6 +1349,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
     def test_pair_preference_and_tooltip_changes_rejected(self):
         for key, value, expected in (
             ("column_preference_sha256", "f" * 64, "column preference changed"),
+            ("native_focus", [2001, 0, 32773], "native focus differs"),
             ("overlay", {"visible_tooltip_count": 1, "neutral_cursor": True}, "visible tooltip"),
         ):
             with self.subTest(key=key):
