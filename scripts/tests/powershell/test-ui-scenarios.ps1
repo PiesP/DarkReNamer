@@ -22,6 +22,9 @@ using System;
 using System.Collections.Generic;
 public static class DarkReNamerVmAcceptanceNative {
     public static List<string> Calls = new List<string>();
+    public static void MoveCursor(int x, int y) { Calls.Add("cursor:" + x + ":" + y); }
+    public static void PopOwnedTooltip(IntPtr window, uint processId) { Calls.Add("tooltip-pop:" + window + ":" + processId); }
+
     public static Queue<object> Snapshots = new Queue<object>();
     public static int HighContrastFlags;
     public class VisualStyle { public int Flags; public string ThemePath = "fixture-theme", ThemeColor = "NormalColor", ThemeSize = "NormalSize"; }
@@ -583,4 +586,24 @@ finally {
     $process.Dispose()
     Remove-Item -LiteralPath $root -Recurse -Force
 }
+$savedWindowReader = ${function:Get-ObserverProcessWindows}
+try {
+    $script:tooltipWindows = [Collections.Generic.Queue[object]]::new()
+    function Get-ObserverProcessWindows { param($Process); $script:tooltipWindows.Dequeue() }
+    $application = [pscustomobject]@{
+        process = [pscustomobject]@{ Id = 4242 }
+        main = [pscustomobject]@{ Current = [pscustomobject]@{ BoundingRectangle = [pscustomobject]@{ Left = 0; Top = 0; Width = 640; Height = 480 } } }
+    }
+    $tooltip = [ordered]@{ hwnd = 2001; visible = $true; class_name = 'tooltips_class32' }
+    $script:tooltipWindows.Enqueue(@($tooltip)); $script:tooltipWindows.Enqueue(@())
+    [DarkReNamerVmAcceptanceNative]::Calls.Clear()
+    $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
+    Assert-Equal $overlay.dismissed_tooltip_count 1 'Owned tooltip dismissal count'
+    Assert-Equal $overlay.visible_tooltip_count 0 'No retained tooltip overlay'
+    Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') 'cursor:320:10,tooltip-pop:2001:4242' 'Exact owned tooltip target'
+    $script:tooltipWindows.Enqueue(@($tooltip)); $script:tooltipWindows.Enqueue(@($tooltip))
+    Assert-Fails { Assert-ObserverAppearanceNoTooltip -Application $application } 'visible owned tooltip after native dismissal'
+}
+finally { Set-Item Function:Get-ObserverProcessWindows $savedWindowReader }
+
 Write-Output 'UI scenario behavior contracts passed.'

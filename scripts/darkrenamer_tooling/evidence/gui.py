@@ -1380,7 +1380,13 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     f"Appearance {scene} row names are incomplete.")
             require(state.get("column_preference_sha256") == preference["sha256"],
                     "Appearance column preference changed.")
-            require(typed_equal(state.get("overlay"), {"visible_tooltip_count": 0, "neutral_cursor": True}),
+            overlay = state.get("overlay")
+            require(isinstance(overlay, dict) and set(overlay) ==
+                    {"visible_tooltip_count", "neutral_cursor", "dismissed_tooltip_count"} and
+                    int_equals(overlay.get("visible_tooltip_count"), 0) and
+                    overlay.get("neutral_cursor") is True and
+                    type(overlay.get("dismissed_tooltip_count")) is int and
+                    0 <= overlay["dismissed_tooltip_count"] <= 3,
                     "Appearance capture has an unsettled or visible tooltip.")
             dpi = actual["hwnd_dpi"]
             expected_widths = [(width * dpi + 48) // 96 for width in preference["primary_width_dip"]]

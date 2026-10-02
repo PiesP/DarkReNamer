@@ -646,7 +646,7 @@ class Fixture:
                 "row_count": count, "current_names": names,
                 "columns": [900, 900, 260],
                 "column_preference_sha256": "c" * 64,
-                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True},
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True, "dismissed_tooltip_count": 0},
                 "horizontal_scroll": [0, 2000, 800, 0, 0] if scene == "overflow" else None,
                 "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
                 "horizontal_scrollbar_bounds": [40, 432, 620, 449, 0, 0, 0] if scene == "overflow" else None,

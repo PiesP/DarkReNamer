@@ -460,7 +460,10 @@ state binds process/window, columns, scroll ranges and rectangles, settled focus
 selection, proposed-name cells, enabled states, and unchanged file identities.
 The viewport is observed after any proposal exposure and focus settlement.
 Main scene captures settle the cursor on the title bar and reject visible owned
-tooltips; interaction captures intentionally retain their target state. Dialog
+tooltips. A retained tooltip is dismissed through standard `TTM_POP` only after
+verifying its process and native class, with the dismissal count recorded; a
+still-visible overlay rejects capture. Interaction captures intentionally retain
+their target state. Dialog
 Cancel and appearance-setting rollback are checked without applying file changes.
 
 The independent verifier checks source/EXE/environment bindings, exact capture

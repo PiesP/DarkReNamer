@@ -860,6 +860,20 @@ public static class DarkReNamerVmAcceptanceNative {
     public static void Click() { SendMouseButton(0x0002); SendMouseButton(0x0004); }
     public static void PressLeftButton() { SendMouseButton(0x0002); }
     public static void ReleaseLeftButton() { SendMouseButton(0x0004); }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+    public static void PopOwnedTooltip(IntPtr tooltip, uint expectedProcessId) {
+        uint processId;
+        StringBuilder name = new StringBuilder(64);
+        if (GetWindowThreadProcessId(tooltip, out processId) == 0 || processId != expectedProcessId
+            || GetClassName(tooltip, name, name.Capacity) == 0
+            || !String.Equals(name.ToString(), "tooltips_class32", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Tooltip dismissal target is not owned by the bound application.");
+        IntPtr result;
+        if (SendMessageTimeoutW(tooltip, 0x041C, IntPtr.Zero, IntPtr.Zero, 3, 500, out result) == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Tooltip dismissal failed or timed out.");
+    }
     public static int ReadDefaultDialogButtonId(IntPtr dialog) {
         long result = SendMessageW(dialog, 0x0400, IntPtr.Zero, IntPtr.Zero).ToInt64();
         if (((result >> 16) & 0xffff) != 0x534B) return 0;

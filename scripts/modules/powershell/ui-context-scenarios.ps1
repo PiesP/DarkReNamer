@@ -1025,8 +1025,17 @@ function Assert-ObserverAppearanceNoTooltip {
     $visible = @(Get-ObserverProcessWindows -Process $Application.process | Where-Object {
         $_.visible -and $_.class_name -ieq 'tooltips_class32'
     })
-    if ($visible.Count -ne 0) { throw 'Appearance capture has a visible owned tooltip.' }
-    [ordered]@{ visible_tooltip_count = 0; neutral_cursor = $true }
+    if ($visible.Count -gt 3) { throw 'Appearance owned tooltip inventory exceeds the bounded fixture.' }
+    $dismissed = $visible.Count
+    foreach ($tooltip in $visible) {
+        [DarkReNamerVmAcceptanceNative]::PopOwnedTooltip([IntPtr][long]$tooltip.hwnd, [uint32]$Application.process.Id)
+    }
+    if ($dismissed -gt 0) { Start-Sleep -Milliseconds 150 }
+    $remaining = @(Get-ObserverProcessWindows -Process $Application.process | Where-Object {
+        $_.visible -and $_.class_name -ieq 'tooltips_class32'
+    })
+    if ($remaining.Count -ne 0) { throw 'Appearance capture has a visible owned tooltip after native dismissal.' }
+    [ordered]@{ visible_tooltip_count = 0; neutral_cursor = $true; dismissed_tooltip_count = $dismissed }
 }
 function Get-ObserverAppearanceFixtureState {
     param([Parameter(Mandatory)][string] $Root, [Parameter(Mandatory)][string[]] $Paths)
