@@ -446,8 +446,11 @@ existing `vm-automated-v1-win11-ntfs` cleanup profile used by this diagnostic.
 
 The baseline captures empty, one unchanged multilingual row, and 60-row
 horizontal-plus-vertical overflow, each as Light → Dark → Light in one process.
-It retains nine original desktop PNGs and native/UIA state, including scroll
-ranges, menu-checked appearance, geometry, file identities, and unchanged Apply.
+The isolated fixture loads supported persisted user column widths before startup,
+so even empty and one-row scenes retain horizontal overflow. It retains nine
+original desktop PNGs and native/UIA state, including scroll ranges, settings
+hash, menu-checked appearance, geometry, file identities, and unchanged Apply.
+Each capture settles the cursor on the title bar and rejects visible owned tooltips.
 The independent verifier checks source/EXE/environment bindings, pair presence,
 state invariance, and list-interior raster regions. Scrollbar pixels are
 reported as a diagnostic measurement pending an explicit design decision.

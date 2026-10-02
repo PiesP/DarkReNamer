@@ -964,6 +964,76 @@ function Invoke-ObserverStandardScenario {
 }
 
 # A diagnostic scene retains one application process while only the app appearance changes.
+function Get-ObserverAppearanceColumnPreferenceBytes {
+    # Exact ui-columns-v1 format in preferences.rs: header, seven six-byte
+    # column records, then a little-endian FNV-1a checksum.
+    $bytes = [byte[]]::new(58)
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('DRCOLS'), $bytes, 6)
+    $bytes[8] = 1; $bytes[9] = 7
+    $widths = @(900, 900, 260, 120, 80, 120, 120)
+    for ($index = 0; $index -lt 7; $index++) {
+        $offset = 12 + 6 * $index
+        if ($index -lt 3) { $bytes[$offset] = 1; $bytes[$offset + 1] = 1 }
+        $widthBytes = [BitConverter]::GetBytes([int]$widths[$index])
+        if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($widthBytes) }
+        [Array]::Copy($widthBytes, 0, $bytes, $offset + 2, 4)
+    }
+    $hash = [uint32]2166136261
+    for ($index = 0; $index -lt 54; $index++) {
+        $hash = [uint32]((([uint64]($hash -bxor [uint32]$bytes[$index])) * [uint64]16777619) -band [uint64]4294967295)
+    }
+    $checksum = [BitConverter]::GetBytes($hash)
+    if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($checksum) }
+    [Array]::Copy($checksum, 0, $bytes, 54, 4)
+    ,$bytes
+}
+function Assert-ObserverAppearanceColumnPreference {
+    param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][byte[]] $ExpectedBytes)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -ne $ExpectedBytes.Length) { throw 'Appearance column preference changed.' }
+    $actual = [IO.File]::ReadAllBytes($item.FullName)
+    if (-not [Linq.Enumerable]::SequenceEqual[byte]($actual, $ExpectedBytes)) {
+        throw 'Appearance column preference changed.'
+    }
+    Get-LowerSha256 -Path $item.FullName
+}
+function New-ObserverAppearanceColumnPreference {
+    param([Parameter(Mandatory)][string] $RuntimeRoot)
+    $expectedLocalData = Join-Path $RuntimeRoot 'localappdata'
+    if (-not [string]::Equals([IO.Path]::GetFullPath($env:LOCALAPPDATA),
+        [IO.Path]::GetFullPath($expectedLocalData), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Appearance preference requires isolated LOCALAPPDATA.'
+    }
+    $appRoot = New-PrivateDirectory -Parent $expectedLocalData -Leaf 'DarkReNamer'
+    $path = Join-Path $appRoot 'ui-columns-v1'
+    if (Test-Path -LiteralPath $path) { throw 'Appearance column preference already exists.' }
+    $bytes = Get-ObserverAppearanceColumnPreferenceBytes
+    [IO.File]::WriteAllBytes($path, $bytes)
+    [ordered]@{
+        source = 'isolated-persisted-user-settings'; path = $path; format_version = 1
+        primary_width_dip = @(900, 900, 260)
+        sha256 = Assert-ObserverAppearanceColumnPreference -Path $path -ExpectedBytes $bytes
+    }
+}
+function Get-ObserverAppearanceColumnWidthsPx {
+    param([Parameter(Mandatory)][int] $Dpi)
+    if ($Dpi -notin @(96, 120, 144, 192)) { throw 'Unsupported appearance fixture DPI.' }
+    @(900, 900, 260) | ForEach-Object { [int][Math]::Floor(($_ * $Dpi + 48) / 96.0) }
+}
+function Assert-ObserverAppearanceNoTooltip {
+    param([Parameter(Mandatory)][object] $Application)
+    $bounds = $Application.main.Current.BoundingRectangle
+    $x = [int][Math]::Floor($bounds.Left + $bounds.Width / 2.0)
+    $y = [int][Math]::Floor($bounds.Top + [Math]::Min(10.0, $bounds.Height / 2.0))
+    [DarkReNamerVmAcceptanceNative]::MoveCursor($x, $y)
+    Start-Sleep -Milliseconds 600
+    $visible = @(Get-ObserverProcessWindows -Process $Application.process | Where-Object {
+        $_.visible -and $_.class_name -ieq 'tooltips_class32'
+    })
+    if ($visible.Count -ne 0) { throw 'Appearance capture has a visible owned tooltip.' }
+    [ordered]@{ visible_tooltip_count = 0; neutral_cursor = $true }
+}
 function Get-ObserverAppearanceFixtureState {
     param([Parameter(Mandatory)][string] $Root, [Parameter(Mandatory)][string[]] $Paths)
     $parent = Split-Path -Parent $Paths[0]
@@ -1012,6 +1082,8 @@ function Invoke-ObserverAppearancePairScenario {
     $oneList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths @($paths[0]) -Leaf 'appearance-one-utf16le.txt'
     $remainingList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths @($paths.ToArray() | Select-Object -Skip 1) -Leaf 'appearance-remaining-utf16le.txt'
     $initial = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
+    $columnPreference = New-ObserverAppearanceColumnPreference -RuntimeRoot $RuntimeRoot
+    $columnPreferenceBytes = Get-ObserverAppearanceColumnPreferenceBytes
     $application = $null
     try {
         $applicationPath = Join-Path $Verified.root $Verified.application.file
@@ -1043,12 +1115,6 @@ function Invoke-ObserverAppearancePairScenario {
             }
             elseif ($scene -eq 'overflow') {
                 [void](Import-GuiRegressionPathList -Application $application -PathsFile $remainingList -ExpectedRows 60 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
-                $listHandle = [IntPtr]$grid.element.Current.NativeWindowHandle
-                foreach ($column in 0..2) {
-                    if (-not [DarkReNamerVmAcceptanceNative]::SetListViewColumnWidth($listHandle, $column, @(900, 900, 260)[$column])) {
-                        throw 'Appearance pair could not establish deterministic overflowing column widths.'
-                    }
-                }
             }
             $steps = [Collections.Generic.List[object]]::new()
             foreach ($step in @('light-before', 'dark', 'light-after')) {
@@ -1063,6 +1129,13 @@ function Invoke-ObserverAppearancePairScenario {
                 }
                 $listHandle = [IntPtr]$grid.element.Current.NativeWindowHandle
                 $columns = @(0..2 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+                if (($columns -join ',') -cne ((Get-ObserverAppearanceColumnWidthsPx -Dpi $minimum.dpi) -join ',')) {
+                    throw 'Appearance native column widths differ from seeded user settings.'
+                }
+                $preferenceHash = Assert-ObserverAppearanceColumnPreference -Path $columnPreference.path -ExpectedBytes $columnPreferenceBytes
+                if ($preferenceHash -cne $columnPreference.sha256) {
+                    throw 'Appearance column preference digest changed.'
+                }
                 $horizontal = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0)
                 $vertical = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1)
                 if ($scene -eq 'overflow') {
@@ -1079,8 +1152,11 @@ function Invoke-ObserverAppearancePairScenario {
                 $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance settled list focus'
                 if ($focused.Current.AutomationId -cne '1000') { throw 'Appearance list focus did not settle.' }
                 $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance status' -RequireWindowHandle
+                $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
                 $state = [ordered]@{
+                    overlay = $overlay
                     row_count = $count; current_names = $names.ToArray(); columns = $columns
+                    column_preference_sha256 = $preferenceHash
                     horizontal_scroll = if ($null -eq $horizontal) { $null } else { @($horizontal) }
                     vertical_scroll = if ($null -eq $vertical) { $null } else { @($vertical) }
                     apply_enabled = [bool]$apply.enabled; status = [string]$status.Current.Name
@@ -1105,7 +1181,7 @@ function Invoke-ObserverAppearancePairScenario {
         $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         [ordered]@{
             environment = $environment; appearance = 'light-dark-light'; process_id = [int]$application.process.Id
-            fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0 }
+            fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0; column_preferences = $columnPreference }
             scenes = $scenes; normal_exit_code = $exitCode
             limitations = @('baseline-scenes-only: changed-warning-collision, selection, input-prompt, and forced-colors not-run')
         }

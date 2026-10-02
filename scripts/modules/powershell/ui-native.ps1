@@ -941,10 +941,7 @@ public static class DarkReNamerVmAcceptanceNative {
         return checked((int)SendMessageW(listView, 0x101D, new IntPtr(column), IntPtr.Zero).ToInt64());
     }
 
-    public static bool SetListViewColumnWidth(IntPtr listView, int column, int width) {
-        if (column < 0 || column > 7 || width < 40 || width > 2400) return false;
-        return SendMessageW(listView, 0x101E, new IntPtr(column), new IntPtr(width)) != IntPtr.Zero;
-    }
+
 
     public static string OsVersion() {
         RTL_OSVERSIONINFOEX value = new RTL_OSVERSIONINFOEX();

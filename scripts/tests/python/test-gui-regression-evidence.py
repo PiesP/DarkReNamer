@@ -598,7 +598,9 @@ class Fixture:
             names = [f"{index:02d}-한국어-日本語.txt" for index in range(count)]
             state = {
                 "row_count": count, "current_names": names,
-                "columns": [900, 900, 260] if scene == "overflow" else [400, 300, 200],
+                "columns": [900, 900, 260],
+                "column_preference_sha256": "c" * 64,
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True},
                 "horizontal_scroll": [0, 2000, 800, 0, 0] if scene == "overflow" else None,
                 "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
                 "apply_enabled": False, "status": "변경 없음", "focus_automation_id": "1000",
@@ -630,7 +632,9 @@ class Fixture:
         raw["assertions"]["scope"] = "appearance-pair-baseline-three-scenes"
         raw["assertions"]["scenario"] = {
             "environment": environment, "appearance": "light-dark-light", "process_id": 4242,
-            "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0},
+            "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0,
+                "column_preferences": {"source": "isolated-persisted-user-settings", "format_version": 1,
+                                       "primary_width_dip": [900, 900, 260], "sha256": "c" * 64}},
             "scenes": scenes,
         }
         write_json(output / "acceptance-result.json", raw)
@@ -1221,6 +1225,21 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "diagnostic-only")
         self.assertEqual(set(result["raster_regions"]), set(evidence.PAIR_SCENES))
+
+    def test_pair_preference_and_tooltip_changes_rejected(self):
+        for key, value, expected in (
+            ("column_preference_sha256", "f" * 64, "column preference changed"),
+            ("overlay", {"visible_tooltip_count": 1, "neutral_cursor": True}, "visible tooltip"),
+        ):
+            with self.subTest(key=key):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                raw["assertions"]["scenario"]["scenes"]["empty"][0]["state"][key] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
 
     def test_missing_pair_capture_rejected(self):
         raw_path = self.run / "output/acceptance-result.json"

@@ -87,6 +87,35 @@ $null = New-Item -ItemType Directory -Path $root
 $clipboardCases = [Collections.Generic.List[object]]::new()
 try {
     & {
+        foreach ($case in @(@(96, '900,900,260'), @(120, '1125,1125,325'), @(144, '1350,1350,390'), @(192, '1800,1800,520'))) {
+            Assert-Equal ((Get-ObserverAppearanceColumnWidthsPx -Dpi $case[0]) -join ',') $case[1] 'Scaled persisted column widths'
+        }
+        $expectedHex = '4452434f4c53000001070000010184030000010184030000010104010000000078000000000050000000000078000000000078000000fd60733e'
+        $bytes = Get-ObserverAppearanceColumnPreferenceBytes
+        Assert-Equal $bytes.Length 58 'Appearance column preference length'
+        Assert-Equal ([Convert]::ToHexString($bytes).ToLowerInvariant()) $expectedHex 'Exact supported v1 column preference bytes and checksum'
+        $isolated = Join-Path $root 'pair-settings'
+        $localData = Join-Path $isolated 'localappdata'
+        [void](New-Item -ItemType Directory -Path $localData -Force)
+        $priorLocalData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localData, 'Process')
+            $seed = New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated
+            Assert-Equal $seed.source 'isolated-persisted-user-settings' 'Appearance preference source'
+            Assert-Equal (Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes) $seed.sha256 'Unchanged seeded preference'
+            $changed = [byte[]]$bytes.Clone(); $changed[14] = 0
+            [IO.File]::WriteAllBytes($seed.path, $changed)
+            Assert-Fails { Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes } 'Appearance column preference changed'
+            $malformed = [byte[]]$bytes.Clone(); $malformed[57] = $malformed[57] -bxor 1
+            [IO.File]::WriteAllBytes($seed.path, $malformed)
+            Assert-Fails { Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes } 'Appearance column preference changed'
+            Assert-Fails { New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated } 'already exists'
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $root, 'Process')
+            Assert-Fails { New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated } 'isolated LOCALAPPDATA'
+        }
+        finally { [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $priorLocalData, 'Process') }
+    }
+    & {
         function New-PrivateDirectory {
             param($Parent, $Leaf)
             Assert-Equal $Leaf 'appearance-fixture' 'Appearance pair first fixture directory'

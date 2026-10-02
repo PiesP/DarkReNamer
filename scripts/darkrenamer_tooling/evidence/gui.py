@@ -1252,6 +1252,11 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             nested(scenario, "fixture", "disk_unchanged") is True and
             nested(scenario, "fixture", "journal_residue_count") == 0,
             "Appearance scenario identity, safe fixture, or normal exit is missing.")
+    preference = nested(scenario, "fixture", "column_preferences")
+    require(isinstance(preference, dict) and preference.get("source") == "isolated-persisted-user-settings" and
+            int_equals(preference.get("format_version"), 1) and preference.get("primary_width_dip") == [900, 900, 260] and
+            isinstance(preference.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", preference["sha256"]),
+            "Appearance persisted column fixture is missing.")
     scenes = scenario.get("scenes")
     require(isinstance(scenes, dict) and set(scenes) == set(PAIR_SCENES),
             "Appearance pair scene set is incomplete.")
@@ -1288,6 +1293,14 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             require(isinstance(state.get("current_names"), list) and len(state["current_names"]) == state["row_count"] and
                     all(isinstance(name, str) and name for name in state["current_names"]),
                     f"Appearance {scene} row names are incomplete.")
+            require(state.get("column_preference_sha256") == preference["sha256"],
+                    "Appearance column preference changed.")
+            require(typed_equal(state.get("overlay"), {"visible_tooltip_count": 0, "neutral_cursor": True}),
+                    "Appearance capture has an unsettled or visible tooltip.")
+            dpi = actual["hwnd_dpi"]
+            expected_widths = [(width * dpi + 48) // 96 for width in preference["primary_width_dip"]]
+            require(state.get("columns") == expected_widths,
+                    "Appearance column widths differ from persisted settings.")
             invariant = {key: state.get(key) for key in (
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
                 "apply_enabled", "status", "focus_automation_id", "list_physical_target", "list", "window")}
@@ -1301,8 +1314,6 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 require(typed_equal(invariant, stable),
                         f"Appearance {scene} data, geometry, selection, focus, or scroll state changed with theme.")
             if scene == "overflow":
-                require(state.get("columns") == [900, 900, 260],
-                        "Appearance overflow column widths differ from the fixture.")
                 for axis in ("horizontal_scroll", "vertical_scroll"):
                     scroll = state.get(axis)
                     require(isinstance(scroll, list) and len(scroll) == 5 and
