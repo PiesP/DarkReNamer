@@ -379,6 +379,19 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+Button and decorative separator painting uses pure bounded rectangles. Interactive
+outlines and decorative hairlines stay one physical pixel; focus/pressed insets
+use the live control DPI without changing control layout or command metadata.
+Adjacent buttons in a catalog group share one boundary owned by the preceding
+button. Separate control/divider brushes are constructed in the existing owned
+appearance resource set and remain alive through synchronous drawing; partial
+allocation failure drops the candidate set and retains the previous resources.
+Button drawing saves the borrowed DC, clips pressed text to its original item
+bounds, and restores DC attributes on every return. A failed DC save/clip
+request delegates drawing without modifying caller state. Decorative separator
+slots are cleared with their owning surface brush before the centered line, avoiding stale pixels across theme changes. These changes do
+not retain callback pointers or introduce new state leases or mutation authority.
+
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.
 Each callback acquires an active strong share before dispatch. Short `RefCell`

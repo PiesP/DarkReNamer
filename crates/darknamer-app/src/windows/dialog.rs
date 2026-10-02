@@ -1376,7 +1376,12 @@ pub(super) unsafe extern "system" fn prompt_proc(
         }
         WM_DRAWITEM => {
             let state = lease.state();
-            if draw_owner_separator(state.appearance_resources.as_ref(), state.separator, lparam) {
+            if draw_owner_separator(
+                state.appearance_resources.as_ref(),
+                state.separator,
+                SeparatorSurface::Dialog,
+                lparam,
+            ) {
                 1
             } else {
                 // SAFETY: unrecognized drawing retains default processing.
@@ -1387,8 +1392,8 @@ pub(super) unsafe extern "system" fn prompt_proc(
             let state = lease.state();
             let resources = state.appearance_resources.as_ref();
             if resources.is_some()
-                && let Some(result) = draw_custom_button(resources, state.ok, lparam)
-                    .or_else(|| draw_custom_button(resources, state.cancel, lparam))
+                && let Some(result) = draw_custom_button(resources, state.ok, state.dpi, lparam)
+                    .or_else(|| draw_custom_button(resources, state.cancel, state.dpi, lparam))
             {
                 result
             } else {

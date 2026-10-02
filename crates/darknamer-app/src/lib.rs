@@ -428,7 +428,8 @@ pub(crate) struct SemanticPalette {
     pub(crate) text_primary: u32,
     pub(crate) text_secondary: u32,
     pub(crate) text_disabled: u32,
-    pub(crate) border: u32,
+    pub(crate) control_outline: u32,
+    pub(crate) divider_subtle: u32,
     pub(crate) changed_subtle: u32,
     pub(crate) changed_standard: u32,
     pub(crate) changed_strong: u32,
@@ -458,8 +459,9 @@ const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
     control_disabled: color_ref(235, 237, 240),
     text_primary: color_ref(27, 29, 32),
     text_secondary: color_ref(95, 102, 112),
-    text_disabled: color_ref(139, 145, 154),
-    border: color_ref(177, 183, 192),
+    text_disabled: color_ref(110, 117, 127),
+    control_outline: color_ref(177, 183, 192),
+    divider_subtle: color_ref(217, 221, 227),
     changed_subtle: color_ref(67, 86, 119),
     changed_standard: color_ref(35, 83, 151),
     changed_strong: color_ref(14, 67, 143),
@@ -484,8 +486,9 @@ const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
     control_disabled: color_ref(34, 37, 41),
     text_primary: color_ref(242, 244, 247),
     text_secondary: color_ref(184, 190, 199),
-    text_disabled: color_ref(125, 131, 140),
-    border: color_ref(83, 89, 99),
+    text_disabled: color_ref(150, 157, 167),
+    control_outline: color_ref(83, 89, 99),
+    divider_subtle: color_ref(55, 60, 67),
     changed_subtle: color_ref(167, 184, 210),
     changed_standard: color_ref(133, 183, 255),
     changed_strong: color_ref(174, 208, 255),
@@ -1900,6 +1903,81 @@ pub(crate) fn calculate_command_rail_separator_layout(
         });
     }
     separators
+}
+
+/// Painting geometry leaves layout spacing in DIP and hairlines in physical pixels.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ButtonPaintGeometry {
+    pub(crate) outline: [LayoutRect; 4],
+    pub(crate) default_outline: Option<LayoutRect>,
+    pub(crate) focus: Option<LayoutRect>,
+    pub(crate) pressed_offset: i32,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_button_paint_geometry(
+    rect: LayoutRect,
+    dpi: u32,
+    shares_top_edge: bool,
+) -> ButtonPaintGeometry {
+    let width = rect.width.max(0);
+    let height = rect.height.max(0);
+    let inset = |amount: i32| {
+        let inner_width = width.saturating_sub(amount.saturating_mul(2));
+        let inner_height = height.saturating_sub(amount.saturating_mul(2));
+        (inner_width > 0 && inner_height > 0).then_some(LayoutRect {
+            x: rect.x.saturating_add(amount),
+            y: rect.y.saturating_add(amount),
+            width: inner_width,
+            height: inner_height,
+        })
+    };
+    ButtonPaintGeometry {
+        outline: [
+            LayoutRect {
+                x: rect.x,
+                y: rect.y,
+                width,
+                height: if shares_top_edge { 0 } else { height.min(1) },
+            },
+            LayoutRect {
+                x: rect.x,
+                y: rect.y,
+                width: width.min(1),
+                height,
+            },
+            LayoutRect {
+                x: rect.x,
+                y: rect.y.saturating_add(height.saturating_sub(1)),
+                width,
+                height: height.min(1),
+            },
+            LayoutRect {
+                x: rect.x.saturating_add(width.saturating_sub(1)),
+                y: rect.y,
+                width: width.min(1),
+                height,
+            },
+        ],
+        default_outline: inset(1),
+        focus: inset(scale_dip(3, dpi).max(0)),
+        pressed_offset: scale_dip(1, dpi).max(0),
+    }
+}
+
+/// Centers one physical hairline in the existing decorative separator slot.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn decorative_separator_line(slot: LayoutRect) -> LayoutRect {
+    let height = slot.height.max(0);
+    LayoutRect {
+        x: slot.x,
+        y: slot.y.saturating_add(height.saturating_sub(1) / 2),
+        width: slot.width.max(0),
+        height: height.min(1),
+    }
 }
 
 /// Derives the decorative readiness indicator inside an Apply button.
@@ -5278,6 +5356,77 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn painting_roles_keep_physical_hairlines_and_scale_focus_and_press() {
+        for dpi in [96, 120, 144, 192] {
+            let rect = LayoutRect {
+                x: 4,
+                y: 8,
+                width: scale_dip(64, dpi),
+                height: scale_dip(40, dpi),
+            };
+            let first = calculate_button_paint_geometry(rect, dpi, false);
+            let next = calculate_button_paint_geometry(rect, dpi, true);
+            assert_eq!(first.outline[0].height, 1);
+            assert_eq!(first.outline[1].width, 1);
+            assert_eq!(first.outline[2].height, 1);
+            assert_eq!(first.outline[3].width, 1);
+            assert_eq!(next.outline[0].height, 0);
+            assert_eq!(&next.outline[1..], &first.outline[1..]);
+            assert_eq!(
+                first
+                    .focus
+                    .map(|focus| (focus.x - rect.x, focus.y - rect.y)),
+                Some((scale_dip(3, dpi), scale_dip(3, dpi)))
+            );
+            assert_eq!(first.pressed_offset, scale_dip(1, dpi));
+            assert_eq!(first.default_outline.map(|inner| inner.x - rect.x), Some(1));
+            let slot = LayoutRect {
+                height: scale_dip(2, dpi),
+                ..rect
+            };
+            let line = decorative_separator_line(slot);
+            assert_eq!(line.height, 1);
+            assert!(line.y >= slot.y && line.bottom() <= slot.bottom());
+        }
+        for width in [0, 1, 2, 3] {
+            for height in [0, 1, 2, 3] {
+                let rect = LayoutRect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
+                let geometry = calculate_button_paint_geometry(rect, 192, false);
+                assert!(geometry.focus.is_none());
+                for edge in geometry.outline {
+                    assert!(edge.width >= 0 && edge.height >= 0);
+                    assert!(edge.right() <= width && edge.bottom() <= height);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decorative_dividers_are_quieter_than_controls_and_disabled_text_is_distinct() {
+        let luma = |color: u32| {
+            (color & 255) * 2126 + ((color >> 8) & 255) * 7152 + ((color >> 16) & 255) * 722
+        };
+        for palette in [PRECISION_LIGHT, GRAPHITE_DARK] {
+            let surface = luma(palette.surface_window);
+            assert!(
+                surface.abs_diff(luma(palette.control_outline))
+                    > surface.abs_diff(luma(palette.divider_subtle))
+            );
+            assert!(
+                luma(palette.text_disabled).abs_diff(luma(palette.control_disabled))
+                    > surface.abs_diff(luma(palette.control_outline))
+            );
+            assert_ne!(palette.text_disabled, palette.text_primary);
+            assert_ne!(palette.text_disabled, palette.text_secondary);
+        }
     }
 
     #[test]

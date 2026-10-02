@@ -1248,7 +1248,7 @@ fn paint_appearance_group(
     let mut frame = client;
     frame.top = frame.top.saturating_add(text_height / 2);
     // SAFETY: frame/DC/border are live and client-bounded.
-    unsafe { FrameRect(dc, &frame, style.resources.border_brush()) };
+    unsafe { FrameRect(dc, &frame, style.resources.divider_brush()) };
     let mut label_background = RECT {
         left: client.left.saturating_add(horizontal_padding),
         top: client.top,
@@ -2082,9 +2082,12 @@ unsafe extern "system" fn appearance_dialog_proc(
             // SAFETY: state_ptr is live dialog state and lparam is the
             // synchronous button custom-draw notification.
             let state = unsafe { &*state_ptr };
-            if let Some(result) =
-                draw_custom_button(state.appearance_resources.as_deref(), state.ok, lparam)
-            {
+            if let Some(result) = draw_custom_button(
+                state.appearance_resources.as_deref(),
+                state.ok,
+                state.dpi,
+                lparam,
+            ) {
                 result
             } else {
                 // SAFETY: unrelated notifications retain system handling.
@@ -2112,8 +2115,8 @@ unsafe extern "system" fn appearance_dialog_proc(
             // SAFETY: state_ptr is live and draw payload is synchronous.
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_deref();
-            if draw_owner_separator(resources, state.separator, lparam)
-                || draw_owner_button(resources, lparam)
+            if draw_owner_separator(resources, state.separator, SeparatorSurface::Dialog, lparam)
+                || draw_owner_button(resources, state.dpi, lparam)
             {
                 1
             } else {
@@ -3202,6 +3205,7 @@ mod native_tests {
         assert!(!draw_owner_separator(
             resources,
             null_mut(),
+            SeparatorSurface::Dialog,
             (&raw mut null_target) as LPARAM,
         ));
         let mut wrong_target = DRAWITEMSTRUCT {
@@ -3213,6 +3217,7 @@ mod native_tests {
         assert!(!draw_owner_separator(
             resources,
             separator,
+            SeparatorSurface::Dialog,
             (&raw mut wrong_target) as LPARAM,
         ));
         let mut null_dc = DRAWITEMSTRUCT {
@@ -3223,6 +3228,7 @@ mod native_tests {
         assert!(!draw_owner_separator(
             resources,
             separator,
+            SeparatorSurface::Dialog,
             (&raw mut null_dc) as LPARAM,
         ));
         let mut separator_draw = DRAWITEMSTRUCT {
@@ -3236,6 +3242,7 @@ mod native_tests {
         assert!(draw_owner_separator(
             resources,
             separator,
+            SeparatorSurface::Dialog,
             (&raw mut separator_draw) as LPARAM,
         ));
         drop(state_lease);
@@ -3267,6 +3274,7 @@ mod native_tests {
             draw_custom_button(
                 resources,
                 ok,
+                state_lease.state().dpi,
                 (&raw mut custom as *mut NMCUSTOMDRAW) as LPARAM,
             ),
             Some(CDRF_SKIPDEFAULT as LRESULT)

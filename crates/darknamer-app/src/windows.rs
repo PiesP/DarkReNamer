@@ -3678,7 +3678,7 @@ mod tests {
                     dpi,
                     (&raw mut draw) as LPARAM,
                 ));
-                assert_eq!(checked_pixel(dc, 1, 1), GRAPHITE_DARK.border);
+                assert_eq!(checked_pixel(dc, 1, 1), GRAPHITE_DARK.control_outline);
                 let focus_before = focus_perimeter(dc, rect);
 
                 draw.itemState = ODS_DEFAULT | ODS_FOCUS;
@@ -5436,7 +5436,7 @@ mod tests {
             assert_ne!(cancel_style & WS_TABSTOP, 0);
             assert_eq!(separator_style & SS_TYPEMASK, SS_OWNERDRAW);
 
-            assert_eq!(draw_custom_button(None, state.ok, 0), None);
+            assert_eq!(draw_custom_button(None, state.ok, state.dpi, 0), None);
             let invalid_separator = DRAWITEMSTRUCT {
                 CtlType: ODT_BUTTON,
                 hwndItem: state.separator,
@@ -5445,6 +5445,7 @@ mod tests {
             assert!(!draw_owner_separator(
                 None,
                 state.separator,
+                SeparatorSurface::Dialog,
                 (&raw const invalid_separator) as LPARAM,
             ));
             Ok(())

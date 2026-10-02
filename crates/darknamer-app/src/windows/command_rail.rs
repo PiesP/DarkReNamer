@@ -30,7 +30,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{
     APPLY, AppearanceResources, CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
-    calculate_command_rail_separator_layout, command_ui_spec, draw_owner_separator, wide,
+    SeparatorSurface, calculate_command_rail_separator_layout, command_ui_spec,
+    draw_owner_separator, wide,
 };
 
 #[derive(Debug)]
@@ -347,9 +348,9 @@ impl CommandRail {
         resources: Option<&AppearanceResources>,
         lparam: LPARAM,
     ) -> bool {
-        self.separators
-            .iter()
-            .any(|separator| draw_owner_separator(resources, *separator, lparam))
+        self.separators.iter().any(|separator| {
+            draw_owner_separator(resources, *separator, SeparatorSurface::Window, lparam)
+        })
     }
 
     pub(super) fn apply_font(&self, font: HFONT) {

@@ -476,12 +476,12 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
             }
             let bottom = to_rect(chrome.bottom_line);
             if bottom.left < bottom.right && bottom.top < bottom.bottom {
-                FillRect((*custom).hdc, &bottom, resources.border_brush());
+                FillRect((*custom).hdc, &bottom, resources.divider_brush());
             }
             for divider in chrome.item_dividers {
                 let divider = to_rect(divider);
                 if divider.left < divider.right && divider.top < divider.bottom {
-                    FillRect((*custom).hdc, &divider, resources.border_brush());
+                    FillRect((*custom).hdc, &divider, resources.divider_brush());
                 }
             }
         }
