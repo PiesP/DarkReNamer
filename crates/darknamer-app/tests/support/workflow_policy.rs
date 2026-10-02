@@ -328,10 +328,11 @@ fn profile_dispatch_inputs(
     path: &str,
     inputs: &BTreeMap<String, Input>,
     string_names: &[&str],
+    extra_count: usize,
     message: &str,
 ) -> Result<(), String> {
     require(
-        inputs.len() == string_names.len() + 1
+        inputs.len() == string_names.len() + 1 + extra_count
             && string_names.iter().all(|name| {
                 inputs.get(*name).is_some_and(|input| {
                     input.required == Some(true)
@@ -351,6 +352,29 @@ fn profile_dispatch_inputs(
             "vm-automated-v2-owned-resources",
             "vm-automated-v1-win11-ntfs",
         ],
+    )
+}
+
+fn promotion_dispatch_inputs(
+    path: &str,
+    inputs: &BTreeMap<String, Input>,
+    string_names: &[&str],
+    message: &str,
+) -> Result<(), String> {
+    profile_dispatch_inputs(path, inputs, string_names, 2, message)?;
+    input_contract(
+        path,
+        inputs.get("release_channel").ok_or(message)?,
+        "release",
+        &["release", "prerelease"],
+    )?;
+    let latest = inputs.get("make_latest").ok_or(message)?;
+    require(
+        latest.required == Some(true)
+            && latest.kind.as_deref() == Some("boolean")
+            && matches!(latest.default, Some(Scalar::Bool(false)))
+            && latest.options.is_empty(),
+        format!("{path} make_latest must be a required boolean defaulting to false"),
     )
 }
 
@@ -727,7 +751,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         "validation_run_attempt",
         "validation_run_id",
     ];
-    profile_dispatch_inputs(
+    promotion_dispatch_inputs(
         promotion_path,
         inputs,
         &names,
@@ -794,6 +818,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ("VALIDATION_RUN_ATTEMPT", "validation_run_attempt"),
         ("VALIDATION_RUN_ID", "validation_run_id"),
         ("PROFILE_ID", "profile_id"),
+        ("RELEASE_CHANNEL", "release_channel"),
+        ("MAKE_LATEST", "make_latest"),
     ] {
         env_is_bound(
             promotion_path,
@@ -843,6 +869,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         validation_path,
         validation_inputs,
         &validation_names,
+        0,
         "hosted VM validation inputs must bind candidate and private ingress identity",
     )?;
     permissions(
@@ -1272,7 +1299,7 @@ fn promotion_profile_contract_rejects_missing_or_unbound_choices() -> Result<(),
             .inputs)
     };
     let valid = |inputs: &BTreeMap<String, Input>| {
-        profile_dispatch_inputs(path, inputs, &string_names, "promotion input contract")
+        promotion_dispatch_inputs(path, inputs, &string_names, "promotion input contract")
     };
 
     assert!(valid(&fresh_inputs()?).is_ok());
@@ -1295,6 +1322,25 @@ fn promotion_profile_contract_rejects_missing_or_unbound_choices() -> Result<(),
         .ok_or("fixture is missing profile_id")?
         .default = Some(Scalar::String("vm-automated-v1-win11-ntfs".to_owned()));
     assert!(valid(&wrong_default).is_err());
+
+    let mut missing_channel = fresh_inputs()?;
+    missing_channel.remove("release_channel");
+    assert!(valid(&missing_channel).is_err());
+
+    let mut unknown_channel = fresh_inputs()?;
+    unknown_channel
+        .get_mut("release_channel")
+        .ok_or("fixture is missing release_channel")?
+        .options
+        .push(Scalar::String("nightly".to_owned()));
+    assert!(valid(&unknown_channel).is_err());
+
+    let mut wrong_latest_default = fresh_inputs()?;
+    wrong_latest_default
+        .get_mut("make_latest")
+        .ok_or("fixture is missing make_latest")?
+        .default = Some(Scalar::Bool(true));
+    assert!(valid(&wrong_latest_default).is_err());
 
     let mut weakened_identity = fresh_inputs()?;
     weakened_identity
@@ -1321,6 +1367,16 @@ fn promotion_profile_contract_rejects_missing_or_unbound_choices() -> Result<(),
         .get_mut("publish")
         .ok_or("fixture is missing publish")?;
     assert!(env_is_bound(path, job, "PROFILE_ID", "${{ inputs.profile_id }}").is_ok());
+    assert!(
+        env_is_bound(
+            path,
+            job,
+            "RELEASE_CHANNEL",
+            "${{ inputs.release_channel }}"
+        )
+        .is_ok()
+    );
+    assert!(env_is_bound(path, job, "MAKE_LATEST", "${{ inputs.make_latest }}").is_ok());
     *job.steps
         .iter_mut()
         .find_map(|step| step.env.get_mut("PROFILE_ID"))

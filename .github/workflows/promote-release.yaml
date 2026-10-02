@@ -1,4 +1,4 @@
-name: Promote portable prerelease
+name: Promote portable release
 
 on:
   workflow_dispatch:
@@ -27,6 +27,19 @@ on:
         description: Existing version tag to publish
         required: true
         type: string
+      release_channel:
+        description: Publication channel for this new release
+        required: true
+        type: choice
+        default: release
+        options:
+          - release
+          - prerelease
+      make_latest:
+        description: Explicitly mark a stable release as Latest
+        required: true
+        type: boolean
+        default: false
       ingress_release_id:
         description: Dedicated private draft ingress release ID
         required: true
@@ -65,13 +78,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: promote-prerelease-${{ inputs.release_tag }}
+  group: promote-release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   publish:
     if: github.ref == 'refs/heads/master'
-    name: prerelease/promote-candidate
+    name: release/promote-candidate
     environment:
       name: release
     runs-on: windows-2025
@@ -87,6 +100,27 @@ jobs:
           ref: master
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate release channel policy
+        shell: pwsh
+        env:
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          MAKE_LATEST: ${{ inputs.make_latest }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+        run: |
+          if ($env:RELEASE_CHANNEL -cnotin @('release', 'prerelease')) {
+            throw 'Release channel choice is invalid.'
+          }
+          if ($env:MAKE_LATEST -cnotin @('true', 'false')) {
+            throw 'MAKE_LATEST must be true or false.'
+          }
+          if ($env:RELEASE_CHANNEL -ceq 'release' -and
+              $env:PROFILE_ID -cne 'vm-automated-v2-owned-resources') {
+            throw 'Stable releases require the VM-Automated v2 profile.'
+          }
+          if ($env:RELEASE_CHANNEL -ceq 'prerelease' -and $env:MAKE_LATEST -ceq 'true') {
+            throw 'A prerelease cannot be marked Latest.'
+          }
 
       - name: Validate source and tag authority
         id: authority
@@ -354,7 +388,7 @@ jobs:
             throw 'Release tag changed after candidate validation.'
           }
 
-      - name: Publish exact unsigned VM-Automated prerelease
+      - name: Publish exact unsigned VM-Automated release
         shell: pwsh
         env:
           GH_REPO: ${{ github.repository }}
@@ -368,6 +402,8 @@ jobs:
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
           PROFILE_ID: ${{ inputs.profile_id }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          MAKE_LATEST: ${{ inputs.make_latest }}
         run: |
           $profileDisclosure = switch -CaseSensitive ($env:PROFILE_ID) {
             'vm-automated-v1-win11-ntfs' {
@@ -378,8 +414,9 @@ jobs:
             }
             default { throw 'Unknown promotion profile ID.' }
           }
+          $channelLabel = if ($env:RELEASE_CHANNEL -ceq 'release') { 'stable release' } else { 'prerelease' }
           @(
-            'VM-Automated Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
+            "VM-Automated Windows $channelLabel. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion."
             ''
             'The automated VM profile passed its authenticated hosted validation gate. Human visual/accessibility review, physical-media performance, and physical-power-loss durability are outside that automated guarantee.'
             ''
@@ -390,6 +427,7 @@ jobs:
             $profileDisclosure
             'Actual IME and Explorer drag-and-drop, comprehensive assistive-technology acceptance, VM reset and storage faults remain outside this profile.'
             "Profile ID: $env:PROFILE_ID"
+            "Release channel: $env:RELEASE_CHANNEL"
             ''
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"
@@ -400,9 +438,12 @@ jobs:
             'The executable is intentionally unsigned. Verify SHA256SUMS.txt and the original candidate attestation before use.'
           ) | Out-File -LiteralPath release-notes.md -Encoding utf8
 
+          $channelFlags = if ($env:RELEASE_CHANNEL -ceq 'prerelease') { @('--prerelease') } else { @() }
+          $latestFlag = "--latest=$env:MAKE_LATEST"
           gh release create $env:RELEASE_TAG `
             --verify-tag `
-            --prerelease `
+            $latestFlag `
+            @channelFlags `
             --title "DarkReNamer $env:RELEASE_TAG" `
             --notes-file release-notes.md `
             dist/DarkReNamer.exe `
@@ -416,4 +457,4 @@ jobs:
             dist/release-handoff.json `
             dist/release-metrics.json `
             validation-statement.json
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publication failed.' }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed.' }
