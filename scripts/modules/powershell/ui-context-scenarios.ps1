@@ -996,7 +996,7 @@ function Invoke-ObserverAppearancePairScenario {
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][Collections.Generic.List[object]] $Captures,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
     )
     $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'appearance-fixture'

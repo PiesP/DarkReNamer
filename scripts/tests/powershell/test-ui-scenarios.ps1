@@ -87,6 +87,19 @@ $null = New-Item -ItemType Directory -Path $root
 $clipboardCases = [Collections.Generic.List[object]]::new()
 try {
     & {
+        function New-PrivateDirectory {
+            param($Parent, $Leaf)
+            Assert-Equal $Leaf 'appearance-fixture' 'Appearance pair first fixture directory'
+            throw 'appearance pair entered with initially empty captures'
+        }
+        $initialCaptures = [Collections.Generic.List[object]]::new()
+        Assert-Fails {
+            Invoke-ObserverAppearancePairScenario -Verified @{} -RuntimeRoot $root `
+                -EvidenceRoot $root -SessionId 1 -WaitSeconds 2 -Captures $initialCaptures
+        } 'appearance pair entered with initially empty captures'
+        Assert-Equal $initialCaptures.Count 0 'Appearance pair empty captures before first screenshot'
+    }
+    & {
         $bindingFailure = $false
         function Assert-AutomationBinding {
             param($Element, $Process, $ExpectedSession, $Label, [switch] $RequireWindowHandle)
