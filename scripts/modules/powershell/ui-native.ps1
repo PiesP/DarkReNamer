@@ -1225,6 +1225,53 @@ public static class DarkReNamerVmAcceptanceNative {
         return checked((int)SendMessageW(listView, 0x101D, new IntPtr(column), IntPtr.Zero).ToInt64());
     }
 
+    private static void AssertBoundListView(IntPtr listView, uint expectedProcessId) {
+        uint processId;
+        StringBuilder className = new StringBuilder(128);
+        if (GetWindowThreadProcessId(listView, out processId) == 0 || processId != expectedProcessId
+            || GetClassName(listView, className, className.Capacity) == 0
+            || className.ToString() != "SysListView32")
+            throw new InvalidOperationException("Native ListView query target differs from bound application.");
+    }
+
+    public static int ReadBoundListViewTopIndex(IntPtr listView, uint expectedProcessId) {
+        AssertBoundListView(listView, expectedProcessId);
+        IntPtr result;
+        if (SendMessageTimeoutW(listView, 0x1027, IntPtr.Zero, IntPtr.Zero, 3, 500, out result) == IntPtr.Zero)
+            throw new InvalidOperationException("Bound ListView top index query timed out.");
+        return checked((int)result.ToInt64());
+    }
+
+    public static int[] ReadBoundListViewClientBounds(IntPtr listView, uint expectedProcessId) {
+        AssertBoundListView(listView, expectedProcessId);
+        Rect client;
+        Point origin = new Point();
+        if (!GetClientRect(listView, out client) || !ClientToScreen(listView, ref origin)
+            || client.Left != 0 || client.Top != 0 || client.Right <= 0 || client.Bottom <= 0)
+            throw new InvalidOperationException("Bound ListView client geometry is invalid.");
+        return new [] { origin.X, origin.Y, checked(origin.X + client.Right), checked(origin.Y + client.Bottom) };
+    }
+
+    public static int[] ReadBoundHeaderColumnOrder(IntPtr listView, uint expectedProcessId) {
+        AssertBoundListView(listView, expectedProcessId);
+        IntPtr header = ReadBoundListHeader(listView, expectedProcessId);
+        IntPtr result;
+        if (SendMessageTimeoutW(header, 0x1200, IntPtr.Zero, IntPtr.Zero, 3, 500, out result) == IntPtr.Zero
+            || result.ToInt64() != 8)
+            throw new InvalidOperationException("Bound ListView header does not have eight columns.");
+        int[] order = new int[8];
+        HashSet<int> seen = new HashSet<int>();
+        for (int position = 0; position < order.Length; position++) {
+            if (SendMessageTimeoutW(header, 0x120F, new IntPtr(position), IntPtr.Zero, 3, 500, out result) == IntPtr.Zero)
+                throw new InvalidOperationException("Bound ListView header order query timed out.");
+            int index = checked((int)result.ToInt64());
+            if (index < 0 || index >= order.Length || !seen.Add(index))
+                throw new InvalidOperationException("Bound ListView header order is invalid.");
+            order[position] = index;
+        }
+        return order;
+    }
+
 
 
     public static string OsVersion() {

@@ -147,6 +147,128 @@ try {
         finally { [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $priorLocalData, 'Process') }
     }
     & {
+        Assert-Equal ((@(Get-ObserverAppearanceDefaultPrimaryWidthsPx -ClientWidth 449 -StatusWidth 112 -Dpi 96)) -join ',') `
+            '127,126,83' 'Native clean-start default allocation'
+        Assert-Equal ((@(Get-ObserverAppearanceDefaultPrimaryWidthsPx -ClientWidth 300 -StatusWidth 112 -Dpi 96)) -join ',') `
+            '120,120,80' 'Narrow default allocation permits intentional overflow'
+        function New-TransitionTestSnapshot {
+            param([string] $Phase, [int] $Horizontal = 25, [int] $Vertical = 7)
+            [ordered]@{
+                phase = $Phase
+                appearance = if ($Phase -in @('after_dark','before_light')) { 'dark' } else { 'light' }
+                executable_sha256 = 'a' * 64; column_preference_sha256 = 'b' * 64
+                process_id = 123; main_handle = 456; list_handle = 789
+                client_bounds = [ordered]@{ left = 1; top = 2; right = 501; bottom = 402; width = 500; height = 400 }
+                list_client_bounds = @(10,20,490,390); dpi = 96; text_scale_percent = 100
+                columns = @(900,900,260,0,0,0,0,112); column_order = @(0..7)
+                row_count = 60; column_count = 8
+                current_names = @(0..59 | ForEach-Object { 'same-owned-row' })
+                row_values = @(0..59 | ForEach-Object { ,@('same-owned-row','same-owned-row','owned-path','','','','','unchanged') })
+                selection = [ordered]@{ count = 1; name = 'same-owned-row' }
+                horizontal_scroll = @(0,200,40,$Horizontal,0); vertical_scroll = @(0,100,20,$Vertical,0)
+                top_index = $Vertical; native_focus = @(789,0,1000); appearance_menu = [ordered]@{}
+                observer_read_preserved = $true
+                observer_read_native_after = [ordered]@{
+                    horizontal_scroll = @(0,200,40,$Horizontal,0)
+                    vertical_scroll = @(0,100,20,$Vertical,0); top_index = $Vertical
+                }
+            }
+        }
+        $phaseSequence = @('before_dark','after_dark','after_dark','before_light','after_light','after_light')
+        $snapshots = [Collections.Generic.Queue[object]]::new()
+        foreach ($phase in $phaseSequence) { $snapshots.Enqueue((New-TransitionTestSnapshot -Phase $phase)) }
+        $calls = [Collections.Generic.List[string]]::new()
+        $sink = [ordered]@{}
+        [void](Invoke-ObserverAppearanceTransitionPreservation `
+            -ReadSnapshot { param($phase) $calls.Add("read:$phase"); $snapshots.Dequeue() } `
+            -SetAppearance { param($appearance) $calls.Add("switch:$appearance") } `
+            -ObservationSink $sink -Fixture ([ordered]@{ source = 'owned-overflow' }))
+        $calls.Add('normalize')
+        Assert-Equal ($calls -join ',') `
+            'read:before_dark,switch:dark,read:after_dark,read:after_dark,read:before_light,switch:light,read:after_light,read:after_light,normalize' `
+            'Production preservation probe reads both transitions before caller normalization'
+        Assert-Equal $sink.transition_preservation.check.status 'passed' 'Unnormalized transition pass'
+        Assert-Equal $sink.transition_preservation.observations.Count 4 'Four retained ordered observations'
+        foreach ($axis in @('horizontal','vertical')) {
+            $snapshots = [Collections.Generic.Queue[object]]::new()
+            $snapshots.Enqueue((New-TransitionTestSnapshot -Phase 'before_dark'))
+            $changed = if ($axis -eq 'horizontal') {
+                New-TransitionTestSnapshot -Phase 'after_dark' -Horizontal 0
+            } else { New-TransitionTestSnapshot -Phase 'after_dark' -Vertical 0 }
+            $snapshots.Enqueue($changed)
+            $snapshots.Enqueue($changed)
+            $calls = [Collections.Generic.List[string]]::new()
+            $sink = [ordered]@{}
+            Assert-Fails {
+                [void](Invoke-ObserverAppearanceTransitionPreservation `
+                    -ReadSnapshot { param($phase) $calls.Add("read:$phase"); $snapshots.Dequeue() } `
+                    -SetAppearance { param($appearance) $calls.Add("switch:$appearance") } `
+                    -ObservationSink $sink -Fixture ([ordered]@{ source = 'owned-overflow' }))
+            } "nonminimum ${axis}_scroll"
+            Assert-Equal $sink.transition_preservation.check.status 'failed' "$axis reset persists in original sink"
+            Assert-Equal $sink.transition_preservation.observations.Count 2 "$axis reset retains before/after"
+            $calls.Add('normalize')
+            Assert-Equal $sink.transition_preservation.check.status 'failed' "$axis later normalization cannot rescue verdict"
+            Assert-Equal ($calls[0..3] -join ',') 'read:before_dark,switch:dark,read:after_dark,read:after_dark' `
+                "$axis failure is observed before normalization"
+        }
+        $snapshots = [Collections.Generic.Queue[object]]::new()
+        $snapshots.Enqueue((New-TransitionTestSnapshot -Phase 'before_dark'))
+        $snapshots.Enqueue((New-TransitionTestSnapshot -Phase 'before_light'))
+        $sink = [ordered]@{}
+        Assert-Fails {
+            [void](Invoke-ObserverAppearanceTransitionPreservation `
+                -ReadSnapshot { param($phase) $snapshots.Dequeue() } `
+                -SetAppearance { param($appearance) } -ObservationSink $sink `
+                -Fixture ([ordered]@{ source = 'owned-overflow' }))
+        } 'missing or reordered after_dark'
+        Assert-Equal $sink.transition_preservation.check.status 'failed' 'Reordered raw transition rejected'
+        $snapshots = [Collections.Generic.Queue[object]]::new()
+        $snapshots.Enqueue((New-TransitionTestSnapshot -Phase 'before_dark'))
+        $changed = New-TransitionTestSnapshot -Phase 'after_dark'
+        $changed.row_values[0][1] = 'unexpected-proposal'
+        $snapshots.Enqueue($changed); $snapshots.Enqueue($changed)
+        $sink = [ordered]@{}
+        Assert-Fails {
+            [void](Invoke-ObserverAppearanceTransitionPreservation `
+                -ReadSnapshot { param($phase) $snapshots.Dequeue() } `
+                -SetAppearance { param($appearance) } -ObservationSink $sink `
+                -Fixture ([ordered]@{ source = 'owned-overflow' }))
+        } 'changed a row value'
+        Assert-Equal $sink.transition_preservation.observations.Count 2 'Proposed-name mutation retains raw before/after'
+        $snapshots = [Collections.Generic.Queue[object]]::new()
+        $snapshots.Enqueue((New-TransitionTestSnapshot -Phase 'before_dark'))
+        $shifted = New-TransitionTestSnapshot -Phase 'after_dark'
+        $shifted.observer_read_preserved = $false
+        $shifted.observer_read_native_after.horizontal_scroll[3] = 0
+        $snapshots.Enqueue($shifted)
+        $sink = [ordered]@{}
+        Assert-Fails {
+            [void](Invoke-ObserverAppearanceTransitionPreservation `
+                -ReadSnapshot { param($phase) $snapshots.Dequeue() } `
+                -SetAppearance { param($appearance) } -ObservationSink $sink `
+                -Fixture ([ordered]@{ source = 'owned-overflow' }))
+        } 'UIA reads moved the native viewport'
+        Assert-Equal $sink.transition_preservation.observations.Count 2 'Observer-side scroll keeps raw observations'
+        $preseedRuntime = Join-Path $root 'preseeded-default-scene'
+        $preseedLocalData = Join-Path (Join-Path $preseedRuntime 'appearance-default-columns') 'localappdata'
+        [void](New-Item -ItemType Directory -Path (Join-Path $preseedLocalData 'DarkReNamer') -Force)
+        [IO.File]::WriteAllBytes((Join-Path (Join-Path $preseedLocalData 'DarkReNamer') 'ui-columns-v1'),
+            (Get-ObserverAppearanceColumnPreferenceBytes))
+        $sink = [ordered]@{}
+        Assert-Fails {
+            [void](Invoke-ObserverAppearanceDefaultColumnsScene `
+                -Verified @{ application = @{ sha256 = 'a' * 64 } } -RuntimeRoot $preseedRuntime `
+                -EvidenceRoot $root -PathsFile $root -RowName 'owned' -FixtureRoot $root `
+                -FixturePaths @('owned') -ExpectedFixtureState @{} -SessionId 1 -WaitSeconds 1 `
+                -ExpectedEnvironment @{} -CustomProcessId 123 `
+                -Captures ([Collections.Generic.List[object]]::new()) -ObservationSink $sink)
+        } 'Clean-start default columns were preseeded'
+        Assert-Equal $sink.default_columns.fixture.settings_absent_before_launch $false `
+            'Preseeded input cannot claim clean-start default scene'
+        Assert-Equal $sink.default_columns.check.status 'failed' 'Preseeded input failure retained'
+    }
+    & {
         function New-PrivateDirectory {
             param($Parent, $Leaf)
             Assert-Equal $Leaf 'appearance-fixture' 'Appearance pair first fixture directory'

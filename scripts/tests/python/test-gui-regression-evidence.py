@@ -836,13 +836,115 @@ class Fixture:
         raw["screenshots"] = captures
         raw["keyboard"]["status"] = "not_run"
         raw["accessibility"]["status"] = "not_run"
-        raw["assertions"]["scope"] = "appearance-pair-main-and-interactions-v2"
+        raw["assertions"]["scope"] = evidence.PAIR_SCOPE
+        transition_names = [f"{index:02d}-한국어-日本語.txt" for index in range(60)]
+        transition_samples = []
+        for phase, appearance in zip(evidence.PAIR_TRANSITION_PHASES,
+                                     ("light", "dark", "dark", "light"), strict=True):
+            transition_samples.append({
+                "phase": phase, "appearance": appearance,
+                "executable_sha256": manifest["artifacts"]["application"]["sha256"], "process_id": 4242,
+                "main_handle": 1001, "list_handle": 2001,
+                "client_bounds": environment["target_rendering"]["client"],
+                "dpi": 96, "text_scale_percent": 100,
+                "columns": [900, 900, 260, 0, 0, 0, 0, 112],
+                "column_order": list(range(8)), "column_count": 8, "row_count": 60,
+                "list_client_bounds": [40, 100, 640, 450],
+                "current_names": transition_names,
+                "row_values": [[name, name, "C:\\test", "", "", "", "", "변경 없음"]
+                               for name in transition_names],
+                "column_preference_sha256": "c" * 64,
+                "selection": {"count": 1, "name": transition_names[20]},
+                "horizontal_scroll": [0, 2000, 800, 540, 540],
+                "vertical_scroll": [0, 59, 20, 18, 18], "top_index": 18,
+                "native_focus": [2001, 0, 1000],
+                "observer_read_native_after": {"horizontal_scroll": [0, 2000, 800, 540, 540],
+                                               "vertical_scroll": [0, 59, 20, 18, 18],
+                                               "top_index": 18},
+                "observer_read_preserved": True,
+                "appearance_menu": menu_state(appearance),
+            })
+            if phase.startswith("after_"):
+                transition_samples[-1].update({
+                    "settlement": {"horizontal_scroll": [0, 2000, 800, 540, 540],
+                                   "vertical_scroll": [0, 59, 20, 18, 18], "top_index": 18},
+                    "settled": True,
+                    "command_focus_transfer": {"before_control_id": 1000, "after_control_id": 1000},
+                })
+        default_rendering = json.loads(json.dumps(environment["target_rendering"]))
+        default_rendering.update(hwnd=1010, process_id=4343)
+        default_window = {**main_window, "hwnd": 1010, "process_id": 4343}
+        default_list = {**native_list, "hwnd": 2010, "process_id": 4343}
+        default_header = {"hwnd": 2012, "process_id": 4343, "hwnd_dpi": 96,
+                          "rect": {"left": 40, "top": 100, "right": 620, "bottom": 125,
+                                   "width": 580, "height": 25}}
+        default_name = "00-한국어-日本語.txt"
+        default_steps = []
+        for phase in evidence.PAIR_PHASES:
+            appearance = "dark" if phase == "dark" else "light"
+            divider = (55, 60, 67) if appearance == "dark" else (217, 221, 227)
+            ink = (242, 244, 247) if appearance == "dark" else (27, 29, 32)
+            image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245),
+                             patches=((48, 124, 80, 125, divider),
+                                      (55, 105, 105, 112, ink),
+                                      (52, 143, 68, 151, ink if appearance == "dark" else (160, 165, 170)),
+                                      (75, 144, 145, 151, ink),
+                                      (245, 144, 315, 151, ink)))
+            capture = add_capture(f"appearance-default-columns-{phase}.png", image,
+                                  appearance, "main-workbench")
+            default_steps.append({"phase": phase, "appearance": appearance,
+                                  "capture": capture, "state": {
+                "column_origin": "clean-start-default", "columns": [187, 187, 113],
+                "runtime_columns": {"status_width_px": 112, "optional_widths": [0, 0, 0, 0]},
+                "column_visibility": [True, True, True, False, False, False, False, True],
+                "column_order": list(range(8)), "list_client_width": 600,
+                "list_client_bounds": [40, 100, 640, 450],
+                "row_count": 1, "current_names": [default_name],
+                "proposed_name": default_name, "apply_enabled": False,
+                "horizontal_scroll": [0, 600, 600, 0, 0],
+                "vertical_scroll": [0, 0, 1, 0, 0],
+                "native_header": default_header, "native_list": default_list,
+                "window": default_window,
+                "list": {"native_handle": 2010,
+                         "bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
+                "selection": {"count": 0, "name": None},
+                "status": "변경 없음",
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True,
+                            "dismissed_tooltip_count": 1 if phase == "dark" else 0},
+                "current_name_cell": {**current_cell, "name": default_name,
+                                      "bounds": {"x": 45, "y": 140, "width": 187, "height": 24}},
+                "proposed_name_cell": {**current_cell, "name": default_name,
+                                       "bounds": {"x": 232, "y": 140, "width": 187, "height": 24}},
+                "target_rendering": default_rendering,
+                "appearance_menu": {"hwnd": 1010, "pid": 4343, "menu_checked": [
+                    {"command_id": 0x9010, "checked": False},
+                    {"command_id": 0x9011, "checked": appearance == "light"},
+                    {"command_id": 0x9012, "checked": appearance == "dark"},
+                ]},
+            }})
         raw["assertions"]["scenario"] = {
             "environment": environment, "appearance": "light-dark-light", "process_id": 4242,
             "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0,
                 "column_preferences": {"source": "isolated-persisted-user-settings", "format_version": 1,
                                        "primary_width_dip": [900, 900, 260], "sha256": "c" * 64}},
             "scenes": scenes, "interactions": interactions,
+            "transition_preservation": {
+                "snapshot_order": list(evidence.PAIR_TRANSITION_PHASES),
+                "fixture": {"source": "isolated-persisted-user-settings",
+                            "column_preference_sha256": "c" * 64, "row_count": 60},
+                "observations": transition_samples,
+                "check": {"status": "passed", "reason": None},
+            },
+            "default_columns": {
+                "fixture": {"source": "clean-start-default", "settings_absent_before_launch": True,
+                            "settings_path_kind": "isolated-localappdata", "row_name": default_name,
+                            "disk_unchanged": True, "journal_residue_count": 0,
+                            "startup_columns": [187, 187, 113, 0, 0, 0, 0, 112]},
+                "process_id": 4343, "main_handle": 1010,
+                "executable_sha256": manifest["artifacts"]["application"]["sha256"],
+                "steps": default_steps, "normal_exit_code": 0,
+                "check": {"status": "passed", "reason": None},
+            },
         }
         write_json(output / "acceptance-result.json", raw)
         observations = json.loads((output / "acceptance-observations.json").read_text())
@@ -1446,6 +1548,10 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw = json.loads(raw_path.read_text())
         jobs = clean_controller_cleanup_v2()["owned_resource_evidence"]["process_job_cleanup"]
         jobs[0]["pid"] = raw["assertions"]["scenario"]["process_id"]
+        second_job = deepcopy(jobs[0])
+        second_job["pid"] = raw["assertions"]["scenario"]["default_columns"]["process_id"]
+        second_job["process_start_time_utc_ticks"] = "134041000000000005"
+        jobs.append(second_job)
         cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
         owned = cleanup["owned_resource_evidence"]
         raw["process_job_cleanup"] = owned["process_job_cleanup"]
@@ -1711,7 +1817,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
                     evidence.validate_focused_pair_results(changed)
 
-    def test_pair_has_66_bound_captures_and_distinct_verdict(self):
+    def test_pair_has_69_bound_captures_and_distinct_verdict(self):
         raw = json.loads((self.run / "output/acceptance-result.json").read_text())
         scenes = raw["assertions"]["scenario"]["scenes"]
         self.assertIs(scenes["selected-active"][0]["state"]["selected_row_cell"]["keyboard_focusable"], True)
@@ -1719,8 +1825,132 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         result = self.validate()
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "dark-tracking-and-intersection-validated")
+        self.assertEqual(result["transition_preservation"]["status"], "passed")
+        self.assertEqual(result["clean_default_columns"]["status"], "passed")
         self.assertEqual(set(result["raster_regions"]),
                          set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking", "same_glyph"})
+
+    def test_transition_rejects_raw_axis_resets_and_changed_row_values(self):
+        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
+        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
+        scenario = raw["assertions"]["scenario"]
+        self.assertEqual(evidence.validate_pair_transition(scenario, raw, actual)["status"], "passed")
+        def reset_axis(probe, index, axis):
+            sample = probe["observations"][index]
+            for receipt in (sample, sample["observer_read_native_after"], sample["settlement"]):
+                receipt[axis][3] = 0
+        cases = (
+            ("horizontal reset", lambda probe: reset_axis(probe, 1, "horizontal_scroll"), "non-minimum"),
+            ("vertical reset", lambda probe: reset_axis(probe, 3, "vertical_scroll"), "non-minimum"),
+            ("missing snapshot", lambda probe: probe["observations"].pop(), "missing or reordered"),
+            ("reordered snapshot", lambda probe: probe["observations"].reverse(), "missing or reordered"),
+            ("different process", lambda probe: probe["observations"][1].__setitem__("process_id", 9000), "scene state changed"),
+            ("changed proposed value", lambda probe: probe["observations"][1]["row_values"][0].__setitem__(1, "changed"), "scene state changed"),
+            ("changed order", lambda probe: probe["observations"][1]["column_order"].reverse(), "scene state changed"),
+            ("changed client", lambda probe: probe["observations"][1]["list_client_bounds"].__setitem__(2, 620), "scene state changed"),
+            ("missing reread", lambda probe: probe["observations"][1].pop("observer_read_native_after"), "snapshot"),
+            ("observer induced scroll", lambda probe: probe["observations"][1]["observer_read_native_after"]["horizontal_scroll"].__setitem__(3, 541), "observer changed"),
+            ("missing settlement", lambda probe: probe["observations"][1].pop("settlement"), "snapshot"),
+        )
+        for label, mutate, message in cases:
+            with self.subTest(label=label):
+                changed = deepcopy(scenario)
+                mutate(changed["transition_preservation"])
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    evidence.validate_pair_transition(changed, raw, actual)
+        old = deepcopy(scenario)
+        del old["transition_preservation"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "transition preservation"):
+            evidence.validate_pair_transition(old, raw, actual)
+
+    def test_whole_pair_rejects_raw_reset_even_with_matching_normalized_scenes(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        sample = raw["assertions"]["scenario"]["transition_preservation"]["observations"][1]
+        for receipt in (sample, sample["observer_read_native_after"], sample["settlement"]):
+            receipt["horizontal_scroll"][3] = 0
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "non-minimum committed position"):
+            self.validate()
+
+    def test_clean_default_rejects_custom_input_missing_phase_and_changed_column(self):
+        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
+        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
+        files = {row["relative_path"]: row for row in json.loads((self.run / "collection.json").read_text())["files"]}
+        self.assertEqual(evidence.validate_pair_default_columns(self.run, raw, files, actual)["status"], "passed")
+        steps = raw["assertions"]["scenario"]["default_columns"]["steps"]
+        self.assertEqual([step["state"]["overlay"]["dismissed_tooltip_count"]
+                          for step in steps], [0, 1, 0])
+        # The dark native file icon shares the text color inside column zero.
+        # A whole-cell ink bound is wider even though the text itself is stable.
+        state = steps[0]["state"]
+        bounds = state["current_name_cell"]["bounds"]
+        window = state["window"]["rect"]
+        visible = {"left": round(bounds["x"]) - window["left"],
+                   "right": round(bounds["x"] + bounds["width"]) - window["left"],
+                   "top": round(bounds["y"]) - window["top"],
+                   "bottom": round(bounds["y"] + bounds["height"]) - window["top"]}
+        footprints = []
+        for step, ink in ((steps[0], (27, 29, 32)), (steps[1], (242, 244, 247))):
+            image = (self.run / "output" / step["capture"]["file"]).read_bytes()
+            width, height, rgba = evidence.decode_png(image, step["phase"])
+            footprints.append(evidence.pair_ink_footprint(rgba, width, height, visible, ink, "current_name_cell"))
+        self.assertGreater(footprints[0]["left"] - footprints[1]["left"], 5)
+        self.assertEqual(evidence.default_primary_widths(300, 112, 96), [120, 120, 80])
+        cases = (
+            ("preseeded", lambda item: item["fixture"].__setitem__("settings_absent_before_launch", False), "preseeded"),
+            ("custom startup", lambda item: item["fixture"]["startup_columns"].__setitem__(0, 900), "clean startup columns"),
+            ("missing phase", lambda item: item["steps"].pop(), "phases are missing"),
+            ("theme changed width", lambda item: item["steps"][1]["state"]["columns"].__setitem__(0, 188), "allocation differs"),
+            ("theme changed name", lambda item: item["steps"][1]["state"].__setitem__("proposed_name", "changed"), "row, Apply"),
+            ("reused process", lambda item: item.__setitem__("process_id", 4242), "reused"),
+            ("visible overlay", lambda item: item["steps"][1]["state"]["overlay"].__setitem__("visible_tooltip_count", 1), "unsettled overlay"),
+        )
+        for label, mutate, message in cases:
+            with self.subTest(label=label):
+                changed = deepcopy(raw)
+                mutate(changed["assertions"]["scenario"]["default_columns"])
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    evidence.validate_pair_default_columns(self.run, changed, files, actual)
+
+    def test_whole_pair_rejects_preseeded_default_columns(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        raw["assertions"]["scenario"]["default_columns"]["fixture"]["settings_absent_before_launch"] = False
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "preseeded"):
+            self.validate()
+
+    def test_default_original_dark_text_fragments_fail_after_receipts_are_rebound(self):
+        for label in ("header", "current-name"):
+            with self.subTest(label=label):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                dark_name = "appearance-default-columns-dark.png"
+                divider = (55, 60, 67)
+                ink = (242, 244, 247)
+                header = (55, 105, 61 if label == "header" else 105, 112, ink)
+                current = (75, 144, 81 if label == "current-name" else 145, 151, ink)
+                proposed = (245, 144, 251 if label == "proposed-name" else 315, 151, ink)
+                changed_png = pair_png((36, 36, 36), patches=(
+                    (48, 124, 80, 125, divider), header,
+                    (52, 143, 68, 151, ink), current, proposed))
+                (self.run / "output" / dark_name).write_bytes(changed_png)
+                changed_hash = digest(changed_png)
+                receipt = next(item for item in raw["screenshots"] if item["file"] == dark_name)
+                receipt["sha256"] = changed_hash
+                dark = raw["assertions"]["scenario"]["default_columns"]["steps"][1]
+                dark["capture"]["sha256"] = changed_hash
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                collection = json.loads((self.run / "collection.json").read_text())
+                self.assertEqual(next(item["sha256"] for item in collection["files"]
+                                      if item["relative_path"] == dark_name), changed_hash)
+                with self.assertRaisesRegex(evidence.EvidenceError, "text ink was clipped or changed"):
+                    self.validate()
 
     def test_pair_selection_cell_identity_and_geometry_stay_bound_across_focus(self):
         for field, expected in (("bounds", "native row geometry"),
@@ -1765,7 +1995,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw["screenshots"].pop()
         write_json(raw_path, raw)
         self.fixture.refresh(self.run)
-        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 66 original captures"):
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 69 original captures"):
             self.validate()
 
     def test_proposal_viewport_must_match_exact_native_request(self):
