@@ -42,6 +42,9 @@ PAIR_SCROLL_STAGES = ("held", "moving", "released")
 PAIR_BUTTON_STATES = ("normal", "disabled", "hover", "pressed", "keyboard-focus")
 PAIR_MODAL_SURFACES = {"native-menu": "native-menu", "advanced": "advanced-appearance",
                        "input-prompt": "input-prompt"}
+PAIR_DEFAULT_SCENE = "default-columns"
+PAIR_SCOPE = "appearance-pair-main-and-interactions-v3"
+PAIR_TRANSITION_PHASES = ("before_dark", "after_dark", "before_light", "after_light")
 PAIR_SCENE_ROWS = {"empty": 0, "unchanged": 1, **{scene: 60 for scene in PAIR_SCENES[2:]}}
 
 
@@ -57,6 +60,7 @@ def pair_capture_specs(high_contrast: bool = False) -> dict[str, str]:
            for axis in PAIR_SCROLL_AXES for stage in PAIR_SCROLL_STAGES for phase in PAIR_PHASES},
         **{f"appearance-{kind}-{phase}.png": surface
            for kind, surface in PAIR_MODAL_SURFACES.items() for phase in PAIR_PHASES},
+        **{f"appearance-default-columns-{phase}.png": "main-workbench" for phase in PAIR_PHASES},
     }
 
 FULL_CONTEXT_SEMANTICS = {
@@ -923,9 +927,11 @@ def validate_pair_transport(run_root: Path, collection_files: dict[str, dict], n
         require(isinstance(jobs, list) and jobs and typed_equal(jobs, owned["process_job_cleanup"]) and
                 typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]),
                 "Appearance V2 cleanup does not bind the result Job and observer lifetimes.")
-        candidate_pid = nested(raw, "assertions", "scenario", "process_id")
-        require(type(candidate_pid) is int and any(job["pid"] == candidate_pid for job in jobs),
-                "Appearance V2 captured candidate is not bound to an owned process Job.")
+        scenario = nested(raw, "assertions", "scenario")
+        candidate_pids = (scenario.get("process_id"), nested(scenario, "default_columns", "process_id"))
+        require(all(type(pid) is int and any(job["pid"] == pid for job in jobs) for pid in candidate_pids) and
+                len(set(candidate_pids)) == 2,
+                "Appearance V2 captured candidates are not both bound to owned process Jobs.")
 
 
 def validate_raw_semantics(result: dict, raw: dict, mode: str, cleanup: dict,
@@ -1440,6 +1446,347 @@ def validate_pair_rendering_environment(value: object, actual: dict) -> dict:
                     for key in ("charset", "quality", "italic", "underline", "strikeout")),
                 "Appearance system font descriptor is invalid.")
     return row
+
+
+def validate_pair_transition(scenario: dict, raw: dict, actual: dict) -> dict:
+    """Check native viewport samples captured before scene composition can move it."""
+    probe = exact_keys(scenario.get("transition_preservation"),
+                       {"snapshot_order", "fixture", "observations", "check"},
+                       "appearance transition preservation")
+    require(probe["snapshot_order"] == list(PAIR_TRANSITION_PHASES),
+            "Appearance transition snapshot order differs.")
+    fixture = exact_keys(probe["fixture"],
+                         {"source", "column_preference_sha256", "row_count"},
+                         "appearance transition fixture")
+    require(fixture["source"] == "isolated-persisted-user-settings" and
+            fixture["column_preference_sha256"] == scenario["fixture"]["column_preferences"]["sha256"] and
+            int_equals(fixture["row_count"], 60),
+            "Appearance transition fixture differs from the persisted overflow fixture.")
+    samples = probe["observations"]
+    require(isinstance(samples, list) and len(samples) == 4 and
+            [sample.get("phase") for sample in samples if isinstance(sample, dict)] == list(PAIR_TRANSITION_PHASES),
+            "Appearance transition before/after observations are missing or reordered.")
+    stable_fields = ("executable_sha256", "process_id", "main_handle", "list_handle", "client_bounds",
+                     "list_client_bounds", "dpi", "text_scale_percent", "columns", "column_order",
+                     "row_count", "current_names", "row_values", "column_preference_sha256",
+                     "selection", "top_index")
+    first = samples[0]
+    require(first.get("executable_sha256") == raw["application"]["sha256"] and
+            first.get("process_id") == actual["target"]["process_id"] == scenario["process_id"] and
+            first.get("main_handle") == actual["target"]["hwnd"] and
+            type(first.get("list_handle")) is int and first["list_handle"] > 0 and
+            typed_equal(first.get("client_bounds"), scenario["environment"]["target_rendering"]["client"]) and
+            first.get("dpi") == actual["hwnd_dpi"] and
+            first.get("text_scale_percent") == actual["text_scale_percent"] and
+            isinstance(first.get("columns"), list) and len(first["columns"]) == 8 and
+            all(type(width) is int and width >= 0 for width in first["columns"]) and
+            first.get("column_order") == list(range(8)) and
+            first.get("column_preference_sha256") == fixture["column_preference_sha256"] and
+            int_equals(first.get("column_count"), 8) and
+            int_equals(first.get("row_count"), 60) and
+            isinstance(first.get("list_client_bounds"), list) and len(first["list_client_bounds"]) == 4 and
+            all(type(value) is int for value in first["list_client_bounds"]) and
+            first["list_client_bounds"][2] > first["list_client_bounds"][0] and
+            first["list_client_bounds"][3] > first["list_client_bounds"][1] and
+            first["client_bounds"]["left"] <= first["list_client_bounds"][0] < first["list_client_bounds"][2] <= first["client_bounds"]["right"] and
+            first["client_bounds"]["top"] <= first["list_client_bounds"][1] < first["list_client_bounds"][3] <= first["client_bounds"]["bottom"] and
+            isinstance(first.get("current_names"), list) and len(first["current_names"]) == 60 and
+            all(isinstance(name, str) and name for name in first["current_names"]) and
+            isinstance(first.get("row_values"), list) and len(first["row_values"]) == 60 and
+            all(isinstance(row, list) and len(row) == 8 and
+                all(isinstance(value, str) for value in row) and
+                row[0] == name for row, name in zip(first["row_values"], first["current_names"], strict=True)) and
+            isinstance(first.get("selection"), dict) and
+            type(first.get("top_index")) is int and 0 <= first["top_index"] < 60,
+            "Appearance transition identity, columns, row values, or viewport anchor is missing.")
+    for sample, expected_appearance in zip(samples, ("light", "dark", "dark", "light"), strict=True):
+        common = {"phase", "appearance", "executable_sha256", "process_id", "main_handle", "list_handle",
+                  "client_bounds", "list_client_bounds", "dpi", "text_scale_percent", "columns", "column_order",
+                  "row_count", "column_count", "current_names", "row_values", "selection", "horizontal_scroll",
+                  "column_preference_sha256",
+                  "vertical_scroll", "top_index", "native_focus", "appearance_menu",
+                  "observer_read_native_after", "observer_read_preserved"}
+        exact_keys(sample, common | ({"settlement", "settled", "command_focus_transfer"}
+                                     if sample["phase"].startswith("after_") else set()),
+                   "appearance transition snapshot")
+        require(sample.get("appearance") == expected_appearance and
+                all(typed_equal(sample.get(key), first[key]) for key in stable_fields) and
+                int_equals(sample.get("column_count"), 8) and
+                isinstance(sample.get("native_focus"), list) and len(sample["native_focus"]) == 3 and
+                all(type(value) is int for value in sample["native_focus"]),
+                "Appearance transition process, viewport anchor, or scene state changed.")
+        reread = exact_keys(sample.get("observer_read_native_after"),
+                            {"horizontal_scroll", "vertical_scroll", "top_index"},
+                            "appearance transition observer readback")
+        require(sample.get("observer_read_preserved") is True and
+                all(isinstance(reread[axis], list) and len(reread[axis]) == 5 and
+                    all(type(value) is int for value in reread[axis]) and
+                    reread[axis][:4] == sample[axis][:4]
+                    for axis in ("horizontal_scroll", "vertical_scroll")) and
+                int_equals(reread["top_index"], sample["top_index"]),
+                "Appearance observer changed the native viewport while reading row values.")
+        if sample["phase"].startswith("after_"):
+            settlement = exact_keys(sample.get("settlement"),
+                                    {"horizontal_scroll", "vertical_scroll", "top_index"},
+                                    "appearance transition settlement")
+            transfer = exact_keys(sample.get("command_focus_transfer"),
+                                  {"before_control_id", "after_control_id"},
+                                  "appearance theme command focus transfer")
+            require(sample.get("settled") is True and
+                    all(isinstance(settlement[axis], list) and len(settlement[axis]) == 5 and
+                        all(type(value) is int for value in settlement[axis]) and
+                        settlement[axis][:4] == sample[axis][:4]
+                        for axis in ("horizontal_scroll", "vertical_scroll")) and
+                    int_equals(settlement["top_index"], sample["top_index"]) and
+                    all(type(value) is int and value >= 0 for value in transfer.values()),
+                    "Appearance transition settlement or intentional focus transfer is unbound.")
+        menu = sample.get("appearance_menu")
+        require(isinstance(menu, dict) and menu.get("hwnd") == first["main_handle"] and
+                menu.get("pid") == first["process_id"] and
+                menu.get("menu_checked") == [
+                    {"command_id": 0x9010, "checked": False},
+                    {"command_id": 0x9011, "checked": expected_appearance == "light"},
+                    {"command_id": 0x9012, "checked": expected_appearance == "dark"},
+                ], "Appearance transition theme command state differs.")
+        for axis in ("horizontal_scroll", "vertical_scroll"):
+            scroll = sample.get(axis)
+            require(isinstance(scroll, list) and len(scroll) == 5 and
+                    all(type(value) is int for value in scroll) and
+                    scroll[1] >= scroll[0] and scroll[2] > 0 and
+                    scroll[1] - scroll[0] - scroll[2] + 1 > 0 and
+                    scroll[0] < scroll[3] <= scroll[1] - scroll[2] + 1,
+                    f"Appearance transition {axis} must contain a valid non-minimum committed position.")
+    for before, after in ((samples[0], samples[1]), (samples[2], samples[3])):
+        for axis in ("horizontal_scroll", "vertical_scroll"):
+            require(before[axis][:4] == after[axis][:4],
+                    f"Appearance transition changed committed {axis} before normalization.")
+    require(samples[1]["horizontal_scroll"][:4] == samples[2]["horizontal_scroll"][:4] and
+            samples[1]["vertical_scroll"][:4] == samples[2]["vertical_scroll"][:4],
+            "Appearance transition changed viewport between the two theme commands.")
+    check = exact_keys(probe["check"], {"status", "reason"}, "appearance transition observer check")
+    require(check["status"] == "passed" and check["reason"] is None,
+            "Appearance transition observer check failed.")
+    return {"status": "passed", "horizontal_position": first["horizontal_scroll"][3],
+            "vertical_position": first["vertical_scroll"][3], "top_index": first["top_index"]}
+
+
+def default_primary_widths(client_width: int, status_width: int, dpi: int) -> list[int]:
+    """Mirror the default, unresized layout arithmetic in darknamer-app/lib.rs."""
+    scale = lambda dip: (dip * dpi + 48) // 96
+    budget = max(0, client_width - status_width - max(1, scale(1)))
+    minimum = [scale(120), scale(120), scale(80)]
+    if budget < sum(minimum):
+        # The allocator keeps these minima when the client is narrower; only
+        # adaptive_primary_column_widths would squeeze them below the minimum.
+        return minimum
+    remaining = budget - sum(minimum)
+    share, extra = divmod(remaining, 5)
+    widths = [minimum[0] + share * 2, minimum[1] + share * 2, minimum[2] + share]
+    for index in (0, 1, 2, 0, 1)[:extra]:
+        widths[index] += 1
+    return widths
+
+
+def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: dict[str, dict],
+                                  actual: dict) -> dict:
+    """Validate the isolated, unseeded one-row session separately from custom widths."""
+    scenario = nested(raw, "assertions", "scenario")
+    default = exact_keys(scenario.get("default_columns"),
+                         {"fixture", "process_id", "main_handle", "executable_sha256", "steps", "normal_exit_code", "check"},
+                         "appearance clean default columns")
+    fixture = exact_keys(default["fixture"],
+                         {"source", "settings_absent_before_launch", "settings_path_kind", "row_name",
+                          "disk_unchanged", "journal_residue_count", "startup_columns"},
+                         "appearance clean default fixture")
+    row_name = fixture["row_name"]
+    require(fixture["source"] == "clean-start-default" and
+            fixture["settings_absent_before_launch"] is True and
+            fixture["settings_path_kind"] == "isolated-localappdata" and
+            isinstance(row_name, str) and 4 <= len(row_name) <= 255 and
+            any("\uac00" <= char <= "\ud7a3" for char in row_name) and
+            any("\u3040" <= char <= "\u9fff" for char in row_name) and
+            fixture["disk_unchanged"] is True and int_equals(fixture["journal_residue_count"], 0) and
+            isinstance(fixture["startup_columns"], list) and len(fixture["startup_columns"]) == 8 and
+            all(type(width) is int and width >= 0 for width in fixture["startup_columns"]) and
+            type(default["process_id"]) is int and default["process_id"] > 0 and
+            default["process_id"] != scenario["process_id"] and
+            type(default["main_handle"]) is int and default["main_handle"] > 0 and
+            default["main_handle"] != actual["target"]["hwnd"] and
+            default["executable_sha256"] == raw["application"]["sha256"] and
+            int_equals(default["normal_exit_code"], 0),
+            "Appearance default session was preseeded, reused, or unbound from the executable.")
+    steps = default["steps"]
+    require(isinstance(steps, list) and len(steps) == 3 and
+            [step.get("phase") for step in steps if isinstance(step, dict)] == list(PAIR_PHASES),
+            "Appearance default column Light-Dark-Light phases are missing or reordered.")
+    stable = None
+    endpoint = {}
+    results = []
+    for step in steps:
+        phase = step["phase"]
+        appearance = "dark" if phase == "dark" else "light"
+        require(step.get("appearance") == appearance,
+                "Appearance default column theme phase differs.")
+        state = step.get("state")
+        exact_keys(state, {"column_origin", "columns", "runtime_columns", "column_visibility", "column_order",
+                           "list_client_bounds", "list_client_width", "row_count", "current_names", "proposed_name",
+                           "current_name_cell", "proposed_name_cell", "apply_enabled", "status", "selection",
+                           "horizontal_scroll", "vertical_scroll", "target_rendering", "appearance_menu", "list",
+                           "native_list", "native_header", "window", "overlay"},
+                   "appearance clean default phase state")
+        require(isinstance(state, dict) and state.get("column_origin") == "clean-start-default" and
+                int_equals(state.get("row_count"), 1) and state.get("current_names") == [row_name] and
+                state.get("proposed_name") == row_name and state.get("apply_enabled") is False and
+                state.get("column_visibility") == [True, True, True, False, False, False, False, True] and
+                state.get("column_order") == list(range(8)),
+                "Appearance default row, Apply, visibility, or native order differs.")
+        columns = state.get("columns")
+        runtime = exact_keys(state.get("runtime_columns"),
+                             {"status_width_px", "optional_widths"}, "appearance runtime columns")
+        status_width = runtime["status_width_px"]
+        require(isinstance(columns, list) and len(columns) == 3 and
+                all(type(width) is int and width > 0 for width in columns) and
+                type(status_width) is int and status_width >= (112 * actual["hwnd_dpi"] + 48) // 96 and
+                runtime["optional_widths"] == [0, 0, 0, 0] and
+                type(state.get("list_client_width")) is int and state["list_client_width"] > 0 and
+                columns == default_primary_widths(state["list_client_width"], status_width, actual["hwnd_dpi"]),
+                "Appearance automatic default allocation differs from the native layout contract.")
+        client_bounds = state.get("list_client_bounds")
+        require(isinstance(client_bounds, list) and len(client_bounds) == 4 and
+                all(type(value) is int for value in client_bounds) and
+                client_bounds[2] - client_bounds[0] == state["list_client_width"] and
+                client_bounds[3] > client_bounds[1] and
+                fixture["startup_columns"] == columns + runtime["optional_widths"] + [status_width],
+                "Appearance default ListView client or clean startup columns differ.")
+        for axis in ("horizontal_scroll", "vertical_scroll"):
+            scroll = state.get(axis)
+            require(scroll is None or isinstance(scroll, list) and len(scroll) == 5 and
+                    all(type(value) is int for value in scroll),
+                    f"Appearance default {axis} observation is invalid.")
+        window = state.get("window")
+        require(isinstance(window, dict) and window.get("hwnd") == default["main_handle"] and
+                window.get("process_id") == default["process_id"] and
+                window.get("hwnd_dpi") == actual["hwnd_dpi"],
+                "Appearance default window identity or display DPI differs.")
+        rect = validate_rectangle(window.get("rect"), "appearance default window")
+        work = actual["work_area"]
+        require(work["left"] <= rect["left"] < rect["right"] <= work["right"] and
+                work["top"] <= rect["top"] < rect["bottom"] <= work["bottom"],
+                "Appearance default window left the bound display work area.")
+        default_actual = {**actual, "target": {"hwnd": default["main_handle"],
+                                                "process_id": default["process_id"], "window_rect": rect}}
+        rendering = validate_pair_rendering_environment(state.get("target_rendering"), default_actual)
+        native_list = state.get("native_list")
+        native_header = state.get("native_header")
+        require(isinstance(native_list, dict) and isinstance(native_header, dict) and
+                native_list.get("process_id") == default["process_id"] and
+                native_header.get("process_id") == default["process_id"] and
+                native_list.get("hwnd") == nested(state, "list", "native_handle") and
+                type(native_list.get("hwnd")) is int and native_list["hwnd"] > 0 and
+                type(native_header.get("hwnd")) is int and native_header["hwnd"] > 0 and
+                native_list.get("hwnd_dpi") == native_header.get("hwnd_dpi") == actual["hwnd_dpi"],
+                "Appearance default native list or header identity differs.")
+        list_rect = validate_rectangle(native_list.get("rect"), "appearance default list")
+        header_rect = validate_rectangle(native_header.get("rect"), "appearance default header")
+        require(rect["left"] <= list_rect["left"] < list_rect["right"] <= rect["right"] and
+                rect["top"] <= list_rect["top"] < list_rect["bottom"] <= rect["bottom"] and
+                list_rect["top"] <= header_rect["top"] < header_rect["bottom"] < list_rect["bottom"],
+                "Appearance default list or header geometry is invalid.")
+        require(list_rect["left"] <= client_bounds[0] < client_bounds[2] <= list_rect["right"] and
+                list_rect["top"] <= client_bounds[1] < client_bounds[3] <= list_rect["bottom"],
+                "Appearance default ListView client is outside its native window.")
+        selection = state.get("selection")
+        require(isinstance(selection, dict) and selection.get("count") in (0, 1) and
+                selection.get("name") in (None, row_name) and
+                (selection["name"] is None) == (selection["count"] == 0),
+                "Appearance default row selection differs.")
+        overlay = exact_keys(state.get("overlay"),
+                             {"visible_tooltip_count", "neutral_cursor", "dismissed_tooltip_count"},
+                             "appearance default overlay")
+        require(int_equals(overlay["visible_tooltip_count"], 0) and
+                overlay["neutral_cursor"] is True and
+                type(overlay["dismissed_tooltip_count"]) is int and
+                0 <= overlay["dismissed_tooltip_count"] <= 3 and
+                isinstance(state.get("status"), str),
+                "Appearance default capture has an unsettled overlay or missing status.")
+        menu = state.get("appearance_menu")
+        require(isinstance(menu, dict) and menu.get("hwnd") == default["main_handle"] and
+                menu.get("pid") == default["process_id"] and
+                menu.get("menu_checked") == [
+                    {"command_id": 0x9010, "checked": False},
+                    {"command_id": 0x9011, "checked": appearance == "light"},
+                    {"command_id": 0x9012, "checked": appearance == "dark"},
+                ], "Appearance default theme command state differs.")
+        invariant = {key: state.get(key) for key in (
+            "column_origin", "columns", "runtime_columns", "column_visibility", "column_order",
+            "list_client_width", "list_client_bounds", "row_count", "current_names", "proposed_name", "apply_enabled",
+            "horizontal_scroll", "vertical_scroll", "native_header", "native_list", "window", "list",
+            "selection", "current_name_cell", "proposed_name_cell", "target_rendering", "status", "overlay")}
+        if stable is None:
+            stable = invariant
+        else:
+            require(typed_equal(invariant, stable),
+                    "Appearance default columns, viewport, row values, or bounds changed with theme.")
+        capture = step.get("capture")
+        name = f"appearance-default-columns-{phase}.png"
+        receipts = {receipt.get("file"): receipt for receipt in raw["screenshots"]}
+        require(isinstance(capture, dict) and capture.get("file") == name and
+                capture.get("sha256") == receipts[name].get("sha256") == collection_files[name]["sha256"] and
+                receipts[name].get("appearance") == appearance and
+                receipts[name].get("surface") == "main-workbench",
+                "Appearance default original capture binding differs.")
+        width, height, rgba = decode_png(read_bytes(run_root / "output", Path(name), MAX_ARTIFACT_BYTES,
+                                                    "appearance default PNG"), name)
+        require((width, height) == (capture.get("width"), capture.get("height")) ==
+                (rect["width"], rect["height"]),
+                "Appearance default original capture dimensions differ.")
+        ink = (27, 29, 32) if appearance == "light" else (242, 244, 247)
+        header_ink = pair_count_near_color(rgba, width, height,
+            {"left": header_rect["left"] - rect["left"] + 4,
+             "right": min(header_rect["right"], header_rect["left"] + columns[0]) - rect["left"] - 4,
+             "top": header_rect["top"] - rect["top"],
+             "bottom": header_rect["bottom"] - rect["top"]}, ink, tolerance=25)
+        require(header_ink >= 4, "Appearance default header label ink is missing or clipped.")
+        for field, column in (("current_name_cell", 0), ("proposed_name_cell", 1)):
+            cell = state.get(field)
+            bounds = cell.get("bounds") if isinstance(cell, dict) else None
+            require(isinstance(cell, dict) and cell.get("name") == row_name and
+                    cell.get("offscreen") is False and isinstance(bounds, dict) and
+                    all(type(bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")) and
+                    round(bounds["width"]) == columns[column] and bounds["height"] >= 12 and
+                    list_rect["top"] < bounds["y"] < bounds["y"] + bounds["height"] <= list_rect["bottom"],
+                    f"Appearance default {field} identity or bounded cell geometry differs.")
+            if column == 1:
+                current_bounds = state["current_name_cell"]["bounds"]
+                require(round(bounds["x"] - current_bounds["x"]) == columns[0] and
+                        bounds["y"] == current_bounds["y"],
+                        "Appearance default current and proposed cells left their native columns.")
+            visible = {"left": max(list_rect["left"], round(bounds["x"])) - rect["left"],
+                       "right": min(list_rect["right"], round(bounds["x"] + bounds["width"])) - rect["left"],
+                       "top": round(bounds["y"]) - rect["top"],
+                       "bottom": round(bounds["y"] + bounds["height"]) - rect["top"]}
+            require(pair_count_near_color(rgba, width, height, visible, ink, tolerance=25) >= 4,
+                    f"Appearance default {field} text ink is missing from its visible column.")
+        divider = (217, 221, 227) if appearance == "light" else (55, 60, 67)
+        pair_flat_region(rgba, width, height,
+                         {"left": list_rect["left"] - rect["left"] + 8,
+                          "right": list_rect["left"] - rect["left"] + 40,
+                          "top": header_rect["bottom"] - rect["top"] - 1,
+                          "bottom": header_rect["bottom"] - rect["top"]},
+                         (divider,), "default header/body divider")
+        if phase != "dark":
+            endpoint[phase] = (width, height, rgba, rect, rendering)
+        results.append({"phase": phase, "primary_widths": columns,
+                        "status_width": status_width, "list_client_width": state["list_client_width"]})
+    before, after = endpoint["light-before"], endpoint["light-after"]
+    require(typed_equal(before[3:], after[3:]) and
+            pair_pixel_delta(before[2], after[2], before[0], before[1],
+                             {"left": 0, "top": 0, "right": before[0], "bottom": before[1]}) == 0,
+            "Appearance clean-default Light endpoints differ in geometry or original raster.")
+    check = exact_keys(default["check"], {"status", "reason"}, "appearance default observer check")
+    require(check["status"] == "passed" and check["reason"] is None,
+            "Appearance default observer check failed.")
+    return {"status": "passed", "settings_absent_before_launch": True, "phases": results}
 
 
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
@@ -2256,7 +2603,7 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             typed_equal(raw.get("assertions", {}).get("scenario"), observations.get("scenario")) and
             raw.get("status") == "review_required" and raw.get("guest_cleanup") is True and
             raw.get("assertions", {}).get("overall") == "passed" and
-            raw.get("assertions", {}).get("scope") == "appearance-pair-main-and-interactions-v2" and
+            raw.get("assertions", {}).get("scope") == PAIR_SCOPE and
             nested(raw, "keyboard", "status") == "not_run" and
             nested(raw, "accessibility", "status") == "not_run" and
             nested(raw, "capture", "status") == "passed",
@@ -2273,6 +2620,16 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             checked_digest(style.get("theme_path_sha256"), "appearance system theme path") and
             observations.get("scenario", {}).get("environment") == environment,
             "Appearance raw and normalized environment binding differs.")
+    expected_captures = pair_capture_specs(manifest["request"].get("high_contrast", False))
+    screenshots = raw.get("screenshots")
+    require(isinstance(screenshots, list) and len(screenshots) == len(expected_captures),
+            f"Appearance pair requires exactly {len(expected_captures)} original captures.")
+    require(all(isinstance(capture, dict) for capture in screenshots) and
+            {capture.get("file") for capture in screenshots} == set(expected_captures) and
+            {name for name in files if name.endswith(".png")} == set(expected_captures),
+            "Appearance pair original capture inventory is incomplete or duplicated.")
+    transition = validate_pair_transition(raw["assertions"]["scenario"], raw, actual)
+    default_columns = validate_pair_default_columns(run_root, raw, files, actual)
     diagnostics = validate_pair_scenes(run_root, raw, files, actual, manifest["request"].get("high_contrast", False))
     if manifest["request"]["text_scale_percent"] == 150:
         text = raw.get("text_scale", {})
@@ -2297,6 +2654,9 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
                                "artifact_sha256": {name: artifact["sha256"] for name, artifact in artifacts.items()}},
             "font_environment": {"installed_fonts": environment["installed_fonts"],
                                  "system_fonts": environment["target_rendering"]["system_font_recipe"]["fonts"]},
+            "transition_preservation": transition,
+            "clean_default_columns": default_columns,
+            "normalized_raster_conformance": "passed-for-declared-scenes",
             "raster_regions": diagnostics, "native_scrollbar_theme": "dark-tracking-and-intersection-validated"}
 
 
@@ -2355,6 +2715,9 @@ def main(repo: Path, argv=None) -> int:
             "source_sha": args.expected_source_sha, "runs": pairs,
             "configuration_set": "focused" if focused else "standalone", "same_executable": "passed",
             "state_invariance": "passed", "raster_regions": "passed",
+            "unnormalized_transition_preservation": "passed",
+            "normalized_raster_conformance": "passed-for-declared-scenes",
+            "clean_start_default_allocation": "passed",
             "native_scrollbar_theme": "dark-tracking-and-intersection-validated",
             "rendering_conformance": "passed-for-declared-scenes", "design_approval": "not-assessed",
             "omitted_scenes": ["normal OS Light/Dark transitions"] if focused else ["forced-colors", "system-theme-following"],
