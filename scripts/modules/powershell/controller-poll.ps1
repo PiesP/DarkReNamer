@@ -105,6 +105,7 @@ function Invoke-AcceptancePollFailureRescue {
         [ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
         [Parameter(Mandatory = $true)][string] $AcceptanceMode,
         [Parameter(Mandatory = $true)][string] $Appearance,
+        [Parameter(Mandatory = $true)][int] $TextScalePercent,
         [Parameter(Mandatory = $true)][bool] $HighContrast,
         [Parameter(Mandatory = $true)][string] $HostOutputRoot,
         [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
@@ -116,7 +117,8 @@ function Invoke-AcceptancePollFailureRescue {
         Stop-AcceptanceObserverTaskForRescue `
             -Session $Session -TaskName $TaskName `
             -TimeoutSeconds $TestTimeoutSeconds
-        if ($AcceptanceMode -ceq 'text-scale' -and
+        if (($AcceptanceMode -ceq 'text-scale' -or
+            ($AcceptanceMode -ceq 'appearance-pair' -and $TextScalePercent -eq 150)) -and
             (Test-AcceptanceRestoreSnapshot `
                 -Session $Session -TaskName $TaskName -Leaf 'text-scale-snapshot.json')) {
             Invoke-AcceptanceTextScaleRescue `
@@ -131,6 +133,7 @@ function Invoke-AcceptancePollFailureRescue {
                 -BundleRecords $BundleRecords `
                 -InputManifestSha256 $InputManifestSha256 `
                 -Appearance $Appearance `
+                -RegressionMode $AcceptanceMode `
                 -HostOutputRoot $HostOutputRoot `
                 -AcceptanceProfileId $AcceptanceProfileId -EngineEvidence $EngineEvidence
         }
@@ -147,6 +150,9 @@ function Invoke-AcceptancePollFailureRescue {
                 -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
                 -ObserverSha256 $ObserverSha256 `
                 -BundleRecords $BundleRecords `
+                -InputManifestSha256 $InputManifestSha256 `
+                -AcceptanceMode $AcceptanceMode `
+                -Appearance $Appearance `
                 -HostOutputRoot $HostOutputRoot `
                 -AcceptanceProfileId $AcceptanceProfileId -EngineEvidence $EngineEvidence
         }
@@ -166,19 +172,22 @@ function Invoke-AcceptanceTerminalFailureRescue {
     param(
         [Parameter(Mandatory)][object] $State,
         [Parameter(Mandatory)][string] $AcceptanceMode,
+        [Parameter(Mandatory)][int] $TextScalePercent,
         [Parameter(Mandatory)][bool] $HighContrast,
         [Parameter(Mandatory)][hashtable] $RescueParameters
     )
 
     if (-not $State.terminal) { throw 'Acceptance rescue requires a terminal task observation.' }
     if ($State.result_status -ceq 'review_required' -and $State.task_result -eq 0) { return }
-    if ($AcceptanceMode -ceq 'text-scale') {
-        Invoke-AcceptanceTextScaleRescue @RescueParameters
+    if ($AcceptanceMode -ceq 'text-scale' -or
+        ($AcceptanceMode -ceq 'appearance-pair' -and $TextScalePercent -eq 150)) {
+        $textParameters = @{} + $RescueParameters
+        $textParameters['RegressionMode'] = $AcceptanceMode
+        Invoke-AcceptanceTextScaleRescue @textParameters
     }
     if ($HighContrast) {
         $highContrastParameters = @{} + $RescueParameters
-        $highContrastParameters.Remove('InputManifestSha256')
-        $highContrastParameters.Remove('Appearance')
+        $highContrastParameters['AcceptanceMode'] = $AcceptanceMode
         Invoke-AcceptanceHighContrastRescue @highContrastParameters
     }
 }

@@ -15,8 +15,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOWFRAME, COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
     DT_HIDEPREFIX, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
     DeleteObject, DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor,
-    GetSysColorBrush, GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
-    RDW_INVALIDATE, RedrawWindow, ReleaseDC, RestoreDC, SaveDC, SelectObject, SetBkMode,
+    GetSysColorBrush, GetWindowDC, HBRUSH, HDC, IntersectClipRect, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ReleaseDC, RestoreDC, SaveDC, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
@@ -28,9 +28,9 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
-    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo,
-    WM_GETFONT,
+    BS_DEFPUSHBUTTON, BS_TYPEMASK, GWL_STYLE, GetMenuBarInfo, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO, MIM_APPLYTOSUBMENUS,
+    MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
 use super::*;
@@ -157,7 +157,8 @@ pub(super) struct AppearanceResources {
     control_pressed: OwnedSolidBrush,
     control_disabled: OwnedSolidBrush,
     apply_readiness: OwnedSolidBrush,
-    border: OwnedSolidBrush,
+    control_outline: OwnedSolidBrush,
+    divider_subtle: OwnedSolidBrush,
     palette: SemanticPalette,
 }
 
@@ -175,7 +176,8 @@ impl AppearanceResources {
             control_pressed: OwnedSolidBrush::create(palette.control_pressed)?,
             control_disabled: OwnedSolidBrush::create(palette.control_disabled)?,
             apply_readiness: OwnedSolidBrush::create(palette.apply_keyline)?,
-            border: OwnedSolidBrush::create(palette.border)?,
+            control_outline: OwnedSolidBrush::create(palette.control_outline)?,
+            divider_subtle: OwnedSolidBrush::create(palette.divider_subtle)?,
             palette,
         })
     }
@@ -186,6 +188,10 @@ impl AppearanceResources {
 
     pub(super) const fn window_brush(&self) -> HBRUSH {
         self.window.as_raw()
+    }
+
+    pub(super) const fn workspace_brush(&self) -> HBRUSH {
+        self.workspace.as_raw()
     }
 
     pub(super) const fn header_brush(&self) -> HBRUSH {
@@ -212,8 +218,8 @@ impl AppearanceResources {
         }
     }
 
-    pub(super) const fn border_brush(&self) -> HBRUSH {
-        self.border.as_raw()
+    pub(super) const fn divider_brush(&self) -> HBRUSH {
+        self.divider_subtle.as_raw()
     }
 
     pub(super) const fn control_normal_brush(&self) -> HBRUSH {
@@ -317,7 +323,7 @@ pub(super) fn erase_themed_background(
             // SAFETY: COLOR_3DSHADOW is a process-global cached system brush.
             unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
         },
-        AppearanceResources::border_brush,
+        AppearanceResources::divider_brush,
     );
     let outer = RECT {
         left: status.outer.x,
@@ -381,8 +387,12 @@ pub(super) fn erase_themed_background(
     }
 }
 
-pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam: LPARAM) -> bool {
-    draw_owner_button_with_readiness(resources, None, BASE_DPI, lparam)
+pub(super) fn draw_owner_button(
+    resources: Option<&AppearanceResources>,
+    dpi: u32,
+    lparam: LPARAM,
+) -> bool {
+    draw_owner_button_with_readiness(resources, None, dpi, false, lparam)
 }
 
 pub(super) fn draw_owner_rail_button(
@@ -391,13 +401,14 @@ pub(super) fn draw_owner_rail_button(
     dpi: u32,
     lparam: LPARAM,
 ) -> bool {
-    draw_owner_button_with_readiness(resources, apply_readiness_button, dpi, lparam)
+    draw_owner_button_with_readiness(resources, apply_readiness_button, dpi, true, lparam)
 }
 
 fn draw_owner_button_with_readiness(
     resources: Option<&AppearanceResources>,
     apply_readiness_button: Option<HWND>,
     dpi: u32,
+    rail_button: bool,
     lparam: LPARAM,
 ) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
@@ -409,32 +420,45 @@ fn draw_owner_button_with_readiness(
     if draw.CtlType != ODT_BUTTON || draw.hwndItem.is_null() || draw.hDC.is_null() {
         return false;
     }
+    let rail_spec = u16::try_from(draw.CtlID)
+        .ok()
+        .and_then(command_ui_spec)
+        .filter(|spec| rail_button && spec.rail.is_some());
     paint_button(
         resources,
         draw.hwndItem,
-        u16::try_from(draw.CtlID)
-            .ok()
-            .and_then(command_ui_spec)
-            .filter(|spec| spec.rail.is_some())
-            .map(|spec| spec.rail_label),
+        rail_spec.map(|spec| spec.rail_label),
         draw.hDC,
         draw.rcItem,
-        (apply_readiness_button == Some(draw.hwndItem)).then_some(dpi),
+        ButtonPaintContext {
+            dpi,
+            shares_top_edge: rail_spec
+                .and_then(|spec| spec.rail)
+                .is_some_and(|rail| rail.order > 0),
+            apply_readiness: apply_readiness_button == Some(draw.hwndItem),
+        },
         ButtonDrawState {
             disabled: draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0,
             pressed: draw.itemState & ODS_SELECTED != 0,
-            hot: draw.itemState & ODS_HOTLIGHT != 0,
+            hot: draw.itemState & ODS_HOTLIGHT != 0
+                || (rail_button && command_rail::is_rail_button_hot(draw.hwndItem)),
             focused: draw.itemState & ODS_FOCUS != 0,
             default: draw.itemState & ODS_DEFAULT != 0,
             show_keyboard_cues: draw.itemState & ODS_NOACCEL == 0,
         },
-    );
-    true
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SeparatorSurface {
+    Window,
+    Dialog,
 }
 
 pub(super) fn draw_owner_separator(
     resources: Option<&AppearanceResources>,
     separator: HWND,
+    surface: SeparatorSurface,
     lparam: LPARAM,
 ) -> bool {
     if separator.is_null() {
@@ -455,17 +479,43 @@ pub(super) fn draw_owner_separator(
             // retain native/Forced Colors behavior.
             unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
         },
-        AppearanceResources::border_brush,
+        AppearanceResources::divider_brush,
     );
-    // SAFETY: callback DC/rect and selected palette-or-system brush are live for
-    // this decorative synchronous fill.
-    unsafe { FillRect(draw.hDC, &draw.rcItem, brush) };
+    let background = resources.map_or_else(
+        // SAFETY: the cached system brush retains Native System/Forced Colors.
+        || unsafe { GetSysColorBrush(COLOR_BTNFACE) },
+        |resources| match surface {
+            SeparatorSurface::Window => resources.window_brush(),
+            SeparatorSurface::Dialog => resources.dialog_brush(),
+        },
+    );
+    let line = decorative_separator_line(LayoutRect {
+        x: draw.rcItem.left,
+        y: draw.rcItem.top,
+        width: draw.rcItem.right.saturating_sub(draw.rcItem.left),
+        height: draw.rcItem.bottom.saturating_sub(draw.rcItem.top),
+    });
+    let line = RECT {
+        left: line.x,
+        top: line.y,
+        right: line.right(),
+        bottom: line.bottom(),
+    };
+    // SAFETY: both brushes remain live; the centered physical hairline and
+    // background are bounded inside the existing decorative child slot.
+    unsafe {
+        FillRect(draw.hDC, &draw.rcItem, background);
+        if line.left < line.right && line.top < line.bottom {
+            FillRect(draw.hDC, &line, brush);
+        }
+    }
     true
 }
 
 pub(super) fn draw_custom_button(
     resources: Option<&AppearanceResources>,
     button: HWND,
+    dpi: u32,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     let custom = lparam as *const NMCUSTOMDRAW;
@@ -483,7 +533,7 @@ pub(super) fn draw_custom_button(
     }
     // SAFETY: all copied fields belong to the synchronous notification.
     let state = unsafe { (*custom).uItemState };
-    paint_button(
+    let painted = paint_button(
         resources,
         button,
         None,
@@ -491,17 +541,34 @@ pub(super) fn draw_custom_button(
         unsafe { (*custom).hdc },
         // SAFETY: the rectangle is copied integral callback data.
         unsafe { (*custom).rc },
-        None,
+        ButtonPaintContext {
+            dpi,
+            shares_top_edge: false,
+            apply_readiness: false,
+        },
         ButtonDrawState {
             disabled: state & CDIS_DISABLED != 0,
             pressed: state & CDIS_SELECTED != 0,
             hot: state & CDIS_HOT != 0,
             focused: state & CDIS_FOCUS != 0,
-            default: state & CDIS_DEFAULT != 0,
+            // BUTTON custom draw can omit CDIS_DEFAULT while the live control
+            // still has BS_DEFPUSHBUTTON (including BM_SETSTYLE changes).
+            default: state & CDIS_DEFAULT != 0 || is_default_push_button(button),
             show_keyboard_cues: state & CDIS_SHOWKEYBOARDCUES != 0,
         },
     );
-    Some(CDRF_SKIPDEFAULT as LRESULT)
+    Some(if painted {
+        CDRF_SKIPDEFAULT
+    } else {
+        CDRF_DODEFAULT
+    } as LRESULT)
+}
+
+fn is_default_push_button(button: HWND) -> bool {
+    // SAFETY: WM_NOTIFY identifies this live button on the UI thread. Its
+    // integral style reflects the current native default-button state.
+    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) };
+    style & BS_TYPEMASK as isize == BS_DEFPUSHBUTTON as isize
 }
 
 #[derive(Clone, Copy)]
@@ -514,15 +581,46 @@ struct ButtonDrawState {
     show_keyboard_cues: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ButtonPaintContext {
+    dpi: u32,
+    shares_top_edge: bool,
+    apply_readiness: bool,
+}
+
 fn paint_button(
     resources: Option<&AppearanceResources>,
     button: HWND,
     visible_label: Option<&str>,
     dc: HDC,
     rect: windows_sys::Win32::Foundation::RECT,
-    apply_readiness_dpi: Option<u32>,
+    context: ButtonPaintContext,
     state: ButtonDrawState,
-) {
+) -> bool {
+    let Some(_saved_dc) = SavedDcState::save(dc) else {
+        return false;
+    };
+    // SAFETY: callback DC and copied item bounds remain live. SaveDC restores
+    // this clip and all font/color attributes on every return/unwind path.
+    if unsafe { IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom) } == 0 {
+        return false;
+    }
+    let geometry = calculate_button_paint_geometry(
+        LayoutRect {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right.saturating_sub(rect.left),
+            height: rect.bottom.saturating_sub(rect.top),
+        },
+        context.dpi,
+        context.shares_top_edge,
+    );
+    let to_rect = |value: LayoutRect| RECT {
+        left: value.x,
+        top: value.y,
+        right: value.right(),
+        bottom: value.bottom(),
+    };
     let ButtonDrawState {
         disabled,
         pressed,
@@ -536,7 +634,7 @@ fn paint_button(
         let background = resources.control_brush(pressed, hot, disabled);
         (
             background,
-            resources.border.as_raw(),
+            resources.control_outline.as_raw(),
             if disabled {
                 palette.text_disabled
             } else {
@@ -564,20 +662,20 @@ fn paint_button(
     // SAFETY: callback DC and GDI objects remain live through this paint.
     unsafe {
         FillRect(dc, &rect, background);
-        FrameRect(dc, &rect, border);
+        for edge in geometry.outline {
+            if edge.width > 0 && edge.height > 0 {
+                FillRect(dc, &to_rect(edge), border);
+            }
+        }
         SetBkMode(dc, TRANSPARENT as i32);
         SetTextColor(dc, text);
     }
-    if default {
-        let mut inner = rect;
-        inner.left = inner.left.saturating_add(1);
-        inner.top = inner.top.saturating_add(1);
-        inner.right = inner.right.saturating_sub(1);
-        inner.bottom = inner.bottom.saturating_sub(1);
-        // SAFETY: inner remains inside rect and the border brush is live.
-        unsafe { FrameRect(dc, &inner, border) };
+    if default && let Some(inner) = geometry.default_outline {
+        // SAFETY: pure geometry bounds this one-pixel default cue inside rect.
+        unsafe { FrameRect(dc, &to_rect(inner), border) };
     }
-    if let (Some(resources), Some(dpi)) = (resources, apply_readiness_dpi)
+    if let (Some(resources), Some(dpi)) =
+        (resources, context.apply_readiness.then_some(context.dpi))
         && let Some(indicator) = calculate_apply_readiness_indicator_rect(
             LayoutRect {
                 x: rect.left,
@@ -624,8 +722,10 @@ fn paint_button(
             };
             let mut text_rect = rect;
             if pressed {
-                text_rect.left = text_rect.left.saturating_add(1);
-                text_rect.top = text_rect.top.saturating_add(1);
+                text_rect.left = text_rect.left.saturating_add(geometry.pressed_offset);
+                text_rect.top = text_rect.top.saturating_add(geometry.pressed_offset);
+                text_rect.right = text_rect.right.saturating_add(geometry.pressed_offset);
+                text_rect.bottom = text_rect.bottom.saturating_add(geometry.pressed_offset);
             }
             let copied_len = usize::try_from(copied).unwrap_or_default();
             let visible_units = label.get(..copied_len).unwrap_or_default();
@@ -686,15 +786,11 @@ fn paint_button(
             }
         }
     }
-    if focused {
-        let mut focus = rect;
-        focus.left = focus.left.saturating_add(3);
-        focus.top = focus.top.saturating_add(3);
-        focus.right = focus.right.saturating_sub(3);
-        focus.bottom = focus.bottom.saturating_sub(3);
-        // SAFETY: dc is live and focus remains inside the item rectangle.
-        unsafe { DrawFocusRect(dc, &focus) };
+    if focused && let Some(focus) = geometry.focus {
+        // SAFETY: dc is live and pure DIP-inset geometry stays inside rect.
+        unsafe { DrawFocusRect(dc, &to_rect(focus)) };
     }
+    true
 }
 
 pub(super) fn draw_owner_menu(
@@ -729,7 +825,7 @@ pub(super) fn draw_owner_menu(
         // brushes remain AppState-owned throughout this synchronous callback.
         unsafe {
             FillRect(draw.hDC, &draw.rcItem, resources.window_brush());
-            FillRect(draw.hDC, &line, resources.border_brush());
+            FillRect(draw.hDC, &line, resources.divider_brush());
         }
         return true;
     }
@@ -1094,10 +1190,14 @@ fn configure_native_control_theme(
     theme: ResolvedTheme,
     mut set_theme: impl FnMut(Option<&str>) -> bool,
 ) -> bool {
-    // Explorer styling also draws ListView column dividers through blank body
-    // space. Keep the file list's default style and apply its palette separately.
+    // The existing dark association themes native scrollbar chrome. ListView
+    // postpaint clears only blank body below rows so Explorer's decorative
+    // column dividers cannot extend through the empty workspace.
     let association = match (target, theme) {
-        (NativeThemeTarget::AppearanceViewport, ResolvedTheme::Dark) => Some("DarkMode_Explorer"),
+        (
+            NativeThemeTarget::FileList | NativeThemeTarget::AppearanceViewport,
+            ResolvedTheme::Dark,
+        ) => Some("DarkMode_Explorer"),
         _ => None,
     };
     if set_theme(association) {
@@ -1310,7 +1410,72 @@ mod native_control_theme_tests {
     use super::*;
 
     #[test]
-    fn file_list_always_restores_the_default_association() {
+    fn custom_draw_default_cue_follows_live_button_style() -> io::Result<()> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            BM_SETSTYLE, BS_PUSHBUTTON, CreateWindowExW, DestroyWindow, WS_CHILD,
+            WS_OVERLAPPEDWINDOW,
+        };
+
+        // SAFETY: these standard classes retain no caller-owned memory; the
+        // parent owns the child until both are destroyed below.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the live test parent owns this standard BUTTON until its
+        // destruction; the class retains no caller-owned creation storage.
+        let button = unsafe {
+            CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                null(),
+                WS_CHILD | BS_DEFPUSHBUTTON as u32,
+                0,
+                0,
+                75,
+                30,
+                parent,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if button.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: parent is the test-owned window created above.
+            unsafe { DestroyWindow(parent) };
+            return Err(error);
+        }
+        assert!(is_default_push_button(button));
+        // SAFETY: BM_SETSTYLE changes the live native button type and keeps
+        // the same HWND, as happens when dialog default focus changes.
+        unsafe { SendMessageW(button, BM_SETSTYLE, BS_PUSHBUTTON as usize, 0) };
+        assert!(!is_default_push_button(button));
+        // SAFETY: the same live standard button regains default style.
+        unsafe { SendMessageW(button, BM_SETSTYLE, BS_DEFPUSHBUTTON as usize, 0) };
+        assert!(is_default_push_button(button));
+        // SAFETY: destroying the parent also destroys its child.
+        unsafe { DestroyWindow(parent) };
+        Ok(())
+    }
+
+    #[test]
+    fn file_list_dark_association_returns_to_native_and_light_styles() {
         let mut calls = Vec::new();
         for theme in [
             ResolvedTheme::Dark,
@@ -1327,7 +1492,15 @@ mod native_control_theme_tests {
                 }
             ));
         }
-        assert_eq!(calls, [None, None, None, None]);
+        assert_eq!(
+            calls,
+            [
+                Some("DarkMode_Explorer".to_owned()),
+                None,
+                Some("DarkMode_Explorer".to_owned()),
+                None
+            ]
+        );
     }
 
     #[test]
@@ -1348,15 +1521,20 @@ mod native_control_theme_tests {
             ));
         }
         assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None, None]);
-        calls.clear();
-        assert!(!configure_native_control_theme(
+        for target in [
+            NativeThemeTarget::FileList,
             NativeThemeTarget::AppearanceViewport,
-            ResolvedTheme::Dark,
-            |name| {
-                calls.push(name.map(str::to_owned));
-                name.is_none()
-            }
-        ));
-        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+        ] {
+            calls.clear();
+            assert!(!configure_native_control_theme(
+                target,
+                ResolvedTheme::Dark,
+                |name| {
+                    calls.push(name.map(str::to_owned));
+                    name.is_none()
+                }
+            ));
+            assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+        }
     }
 }

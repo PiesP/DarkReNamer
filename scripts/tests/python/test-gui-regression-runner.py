@@ -54,6 +54,105 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_appearance_pair_selects_one_bounded_run_and_explicit_v1_profile(self):
+        pair = runner.appearance_pair_run(1366, 768, 96)
+        self.assertEqual(pair["mode"], "appearance-pair")
+        self.assertEqual(pair["run_id"], runner.APPEARANCE_PAIR_ID)
+        self.assertEqual(len(runner.RUNS), 4)
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "pair", pair,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertEqual(command[command.index("-AcceptanceMode") + 1], "appearance-pair")
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1],
+                         "vm-automated-v1-win11-ntfs")
+        self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
+
+    def test_appearance_pair_v2_pins_profile_hash_in_controller_command(self):
+        run_root = self.root / "pair"
+        (run_root / "inputs").mkdir(parents=True)
+        profile = b'{"schema":"darkrenamer-vm-automated-profile-v2"}\n'
+        (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile)
+        profile_hash = hashlib.sha256(profile).hexdigest()
+        self.write_json(run_root / "input-manifest.json", {
+            "acceptance_profile_id": runner.V2_PROFILE_ID,
+            "acceptance_profile_sha256": profile_hash,
+            "acceptance_profile": {"sha256": profile_hash},
+        })
+        pair = {**runner.appearance_pair_run(1366, 768, 96),
+                "acceptance_profile_id": runner.V2_PROFILE_ID,
+                "acceptance_profile_sha256": profile_hash}
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", run_root, pair,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1], runner.V2_PROFILE_ID)
+        self.assertEqual(command[command.index("-AcceptanceProfileSha256") + 1], profile_hash)
+        (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            with self.assertRaisesRegex(ValueError, "immutable staged manifest"):
+                runner.controller_command(
+                    self.root, self.root / "bundle", run_root, pair,
+                    {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                    {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+                )
+
+    def test_v2_profile_is_pair_only(self):
+        with self.assertRaisesRegex(ValueError, "requires --diagnostic appearance-pair"):
+            runner.main(self.root, ["--connection-profile", str(self.root / "missing.json"),
+                                    "--output-root", str(self.root / "unused"),
+                                    "--acceptance-profile-id", runner.V2_PROFILE_ID])
+
+    def test_focused_manifest_command_replays_without_desktop_overrides(self):
+        inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,
+                  "source_tree": "b" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
+                                             runner.FOCUSED_PAIR_RUNS[0], "c" * 64, {}, {})
+        command = manifest["command"]
+        self.assertEqual(command[command.index("--configuration-set") + 1], "focused")
+        self.assertNotIn("--desktop-width", command)
+        self.assertNotIn("--desktop-height", command)
+        self.assertNotIn("--desktop-dpi", command)
+
+    def test_focused_pair_configurations_reuse_one_bounded_run_shape(self):
+        runs = runner.FOCUSED_PAIR_RUNS
+        self.assertEqual(len(runs), 5)
+        self.assertEqual(len({row["run_id"] for row in runs}), 5)
+        self.assertEqual([(row["dpi"], row["text_scale_percent"], row["high_contrast"])
+                          for row in runs],
+                         [(96, 100, False), (144, 100, False), (192, 100, False),
+                          (96, 150, False), (96, 100, True)])
+        self.assertTrue(all((row["width"], row["height"]) == (1920, 1080) for row in runs))
+        self.assertEqual(runs[-1]["appearance"], "system")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "forced", runs[-1],
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertIn("-AcceptanceHighContrast", command)
+        self.assertEqual(command[command.index("-AcceptanceAppearance") + 1], "system")
+        self.assertEqual(command[command.index("-AcceptanceTextScalePercent") + 1], "100")
+
+    def test_focused_pair_manifest_records_replayable_set_selection(self):
+        run = runner.FOCUSED_PAIR_RUNS[0]
+        inputs = {"source_sha": "a" * 40, "source_tree": "b" * 40,
+                  "bundle_manifest": {"sha256": "c" * 64}, "artifacts": {}}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(
+                self.root, self.root, self.root, run, "d" * 64, {}, {},
+            )
+        self.assertEqual(manifest["command"].count("--configuration-set"), 1)
+        self.assertEqual(manifest["command"][-2:], ["--configuration-set", "focused"])
+        self.assertNotIn("--desktop-width", manifest["command"])
+        self.assertNotIn("--desktop-height", manifest["command"])
+        self.assertNotIn("--desktop-dpi", manifest["command"])
+
     def test_consumer_policies_preserve_formats_alpha_and_axis_limits(self):
         grayscale = png_bytes(1, 1, 0, b"\0\x12")
         self.assertEqual(evidence.decode_png(grayscale, "gray"), (1, 1, b"\x12\x12\x12\xff"))
@@ -229,6 +328,29 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(result["collection_sha256"], runner.digest(run_root / "collection.json"))
         self.assertEqual(result["cleanup_sha256"], runner.digest(output / "cleanup.json"))
         self.assertEqual(result["actual"]["appearance"], "light")
+
+    def test_pair_collection_requires_all_66_original_captures(self):
+        run_root = self.root / runner.APPEARANCE_PAIR_ID
+        output = run_root / "output"
+        output.mkdir(parents=True)
+        for index in range(66):
+            (output / f"capture-{index:02}.png").write_bytes(b"original-fixture")
+        self.assertEqual(len(runner.collection_document(run_root, "a" * 64, runner.APPEARANCE_PAIR_ID)["files"]), 66)
+        (output / "capture-65.png").unlink()
+        with self.assertRaisesRegex(ValueError, "exactly 66 original PNGs"):
+            runner.collection_document(run_root, "a" * 64, runner.APPEARANCE_PAIR_ID)
+
+    def test_focused_forced_colors_requires_three_additional_captures(self):
+        run_id = runner.FOCUSED_PAIR_RUNS[-1]["run_id"]
+        run_root = self.root / run_id
+        output = run_root / "output"
+        output.mkdir(parents=True)
+        for index in range(69):
+            (output / f"capture-{index:02}.png").write_bytes(b"original-fixture")
+        self.assertEqual(len(runner.collection_document(run_root, "a" * 64, run_id)["files"]), 69)
+        (output / "capture-68.png").unlink()
+        with self.assertRaisesRegex(ValueError, "exactly 69 original PNGs"):
+            runner.collection_document(run_root, "a" * 64, run_id)
 
     def test_collection_rejects_symlinked_output(self):
         run_root = self.root / "symlink"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the four source-bound DarkReNamer GUI regression cells."""
+"""Run the four fixed GUI cells or an opt-in source-bound visual diagnostic."""
 
 import sys
 
@@ -15,7 +15,7 @@ from pathlib import Path
 import stat
 import types
 
-TOOLING_MANIFEST_SHA256 = "b33fe75870b731ae5f5f5cb5dcb1242d304ed57a90cf4eaff5a0e37c2b9162ae"
+TOOLING_MANIFEST_SHA256 = "ad8430563d38660ef8a1c5f24a2186a7328897f938eb53af22cd7a1e402c04db"
 TOOLING_LOADER_SHA256 = "36092211f50cec00750827fc06412a143a0b06562f914970ed3dc194b8d601cf"
 IMPLEMENTATION_ROLE = "vm-gui"
 

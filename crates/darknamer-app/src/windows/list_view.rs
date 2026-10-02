@@ -1,4 +1,17 @@
 use super::*;
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
+    RestoreDC, SaveDC, SetDCBrushColor,
+};
+use windows_sys::Win32::UI::Controls::{
+    STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetScrollBarInfo, OBJID_HSCROLL, OBJID_VSCROLL, SCROLLBARINFO, WM_HSCROLL,
+    WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
+    WM_VSCROLL,
+};
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
@@ -104,7 +117,264 @@ unsafe extern "system" fn list_view_notification_subclass(
     }
     // SAFETY: every notification not owned by the header painter is forwarded
     // unchanged through the common-controls subclass chain exactly once.
-    unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    if owner_ref != 0
+        && matches!(
+            message,
+            WM_NCPAINT
+                | WM_PAINT
+                | WM_HSCROLL
+                | WM_VSCROLL
+                | WM_SIZE
+                | WM_NCMOUSEMOVE
+                | WM_NCMOUSELEAVE
+                | WM_NCLBUTTONDOWN
+                | WM_NCLBUTTONUP
+                | WM_MOUSEMOVE
+                | WM_THEMECHANGED
+        )
+    {
+        // Resolve after default processing, without retaining a lease across the
+        // native scroll tracking loop. A failed/reentrant lease keeps native paint.
+        let palette = try_app_state(owner_ref as HWND).and_then(|lease| {
+            let state = lease.state();
+            let resolved = state.resolved_appearance();
+            (state.list_window == window
+                && resolved.theme == ResolvedTheme::Dark
+                && resolved.custom_colors_enabled)
+                .then(|| semantic_palette(resolved.theme))
+                .flatten()
+        });
+        if let Some(palette) = palette {
+            paint_native_list_scrollbars(window, palette);
+        }
+    }
+    result
+}
+
+/// A synchronous window DC; never retained by the subclass or native control.
+struct ListWindowDc {
+    window: HWND,
+    dc: HDC,
+    saved: i32,
+}
+impl Drop for ListWindowDc {
+    fn drop(&mut self) {
+        // SAFETY: these values belong to this successful GetWindowDC/SaveDC pair.
+        unsafe {
+            RestoreDC(self.dc, self.saved);
+            ReleaseDC(self.window, self.dc);
+        }
+    }
+}
+
+fn paint_native_list_scrollbars(window: HWND, palette: SemanticPalette) {
+    let mut bounds = RECT::default();
+    let mut client = RECT::default();
+    let mut origin = POINT::default();
+    let mut cursor = POINT::default();
+    // SAFETY: synchronous value-only queries on the current UI-thread ListView.
+    let geometry_known = unsafe {
+        IsWindow(window) != 0
+            && GetWindowRect(window, &mut bounds) != 0
+            && GetClientRect(window, &mut client) != 0
+            && ClientToScreen(window, &mut origin) != 0
+    };
+    if !geometry_known {
+        return;
+    }
+    // SAFETY: writable local POINT storage, no retained pointer.
+    let cursor_known = unsafe { GetCursorPos(&mut cursor) } != 0;
+    // SAFETY: the live ListView owns this window DC until ReleaseDC below.
+    let dc = unsafe { GetWindowDC(window) };
+    if dc.is_null() {
+        return;
+    }
+    // SAFETY: SaveDC copies this newly acquired DC's state.
+    let saved = unsafe { SaveDC(dc) };
+    if saved == 0 {
+        // SAFETY: release the exact acquired DC even when saving fails.
+        unsafe { ReleaseDC(window, dc) };
+        return;
+    }
+    let _dc = ListWindowDc { window, dc, saved };
+    let dx = bounds.left;
+    let dy = bounds.top;
+    // Exclude every client pixel, including rows and the header. All remaining
+    // fills also use native scrollbar rectangles, never the whole window frame.
+    // SAFETY: local coordinates of the same live window DC; guard restores state.
+    if unsafe {
+        ExcludeClipRect(
+            dc,
+            origin.x - dx,
+            origin.y - dy,
+            origin.x - dx + client.right,
+            origin.y - dy + client.bottom,
+        )
+    } == 0
+    {
+        return;
+    }
+    // SAFETY: stock objects are process-owned; SaveDC restores prior selections.
+    unsafe {
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SelectObject(dc, GetStockObject(NULL_PEN));
+    }
+    let mut bars = [None, None];
+    for (index, object) in [OBJID_HSCROLL, OBJID_VSCROLL].into_iter().enumerate() {
+        let mut info = SCROLLBARINFO {
+            cbSize: size_of::<SCROLLBARINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: OBJID selects native nonclient chrome; writable local storage.
+        if unsafe { GetScrollBarInfo(window, object, &mut info) } == 0
+            || info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN) != 0
+        {
+            continue;
+        }
+        let native = info.rcScrollBar;
+        if native.left < bounds.left
+            || native.top < bounds.top
+            || native.right > bounds.right
+            || native.bottom > bounds.bottom
+        {
+            continue;
+        }
+        let bar = LayoutRect {
+            x: native.left - dx,
+            y: native.top - dy,
+            width: native.right - native.left,
+            height: native.bottom - native.top,
+        };
+        let vertical = index == 1;
+        let Some(parts) = calculate_scrollbar_parts(
+            bar,
+            vertical,
+            info.dxyLineButton,
+            info.xyThumbTop,
+            info.xyThumbBottom,
+        ) else {
+            continue;
+        };
+        paint_scrollbar_rect(dc, bar, palette.surface_window);
+        for (part_index, rect) in parts.into_iter().enumerate() {
+            let state = info.rgstate[[1, 3, 5][part_index]] | info.rgstate[0];
+            let disabled = state & windows_sys::Win32::UI::Controls::STATE_SYSTEM_UNAVAILABLE != 0;
+            let hot = cursor_known
+                && cursor.x - dx >= rect.x
+                && cursor.x - dx < rect.right()
+                && cursor.y - dy >= rect.y
+                && cursor.y - dy < rect.bottom();
+            // The thumb is the persistent position affordance; give it the
+            // stronger outline/foreground ramp, rather than an arrow surface.
+            let color = if part_index == 1 {
+                if disabled {
+                    palette.divider_subtle
+                } else if state & STATE_SYSTEM_PRESSED != 0 {
+                    palette.text_secondary
+                } else if hot {
+                    palette.text_disabled
+                } else {
+                    palette.control_outline
+                }
+            } else if disabled {
+                palette.control_disabled
+            } else if state & STATE_SYSTEM_PRESSED != 0 {
+                palette.control_pressed
+            } else if hot {
+                palette.control_hover
+            } else {
+                palette.control_normal
+            };
+            paint_scrollbar_rect(dc, rect, color);
+            if part_index != 1 {
+                paint_scrollbar_arrow(
+                    dc,
+                    rect,
+                    vertical,
+                    part_index == 2,
+                    if disabled {
+                        palette.text_disabled
+                    } else {
+                        palette.text_primary
+                    },
+                );
+            }
+        }
+        bars[index] = Some(bar);
+    }
+    if let [Some(horizontal), Some(vertical)] = bars {
+        let corner = LayoutRect {
+            x: vertical.x,
+            y: horizontal.y,
+            width: vertical.width,
+            height: horizontal.height,
+        };
+        paint_scrollbar_rect(dc, corner, palette.surface_window);
+    }
+}
+
+fn paint_scrollbar_rect(dc: HDC, rect: LayoutRect, color: u32) {
+    if rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    let native = RECT {
+        left: rect.x,
+        top: rect.y,
+        right: rect.right(),
+        bottom: rect.bottom(),
+    };
+    // SAFETY: synchronous guarded window DC and nonclient-bounded local rectangle.
+    unsafe {
+        SetDCBrushColor(dc, color);
+        FillRect(dc, &native, GetStockObject(DC_BRUSH));
+    }
+}
+
+fn paint_scrollbar_arrow(dc: HDC, rect: LayoutRect, vertical: bool, forward: bool, color: u32) {
+    let radius = (rect.width.min(rect.height) / 5).max(1);
+    if rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let cx = rect.x + rect.width / 2;
+    let cy = rect.y + rect.height / 2;
+    let direction = if forward { 1 } else { -1 };
+    let points = if vertical {
+        [
+            POINT {
+                x: cx - radius,
+                y: cy - direction * radius / 2,
+            },
+            POINT {
+                x: cx + radius,
+                y: cy - direction * radius / 2,
+            },
+            POINT {
+                x: cx,
+                y: cy + direction * radius,
+            },
+        ]
+    } else {
+        [
+            POINT {
+                x: cx - direction * radius / 2,
+                y: cy - radius,
+            },
+            POINT {
+                x: cx - direction * radius / 2,
+                y: cy + radius,
+            },
+            POINT {
+                x: cx + direction * radius,
+                y: cy,
+            },
+        ]
+    };
+    // SAFETY: three local points stay inside the native arrow button; DC restored.
+    unsafe {
+        SetDCBrushColor(dc, color);
+        Polygon(dc, points.as_ptr(), points.len() as i32);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -476,12 +746,12 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
             }
             let bottom = to_rect(chrome.bottom_line);
             if bottom.left < bottom.right && bottom.top < bottom.bottom {
-                FillRect((*custom).hdc, &bottom, resources.border_brush());
+                FillRect((*custom).hdc, &bottom, resources.divider_brush());
             }
             for divider in chrome.item_dividers {
                 let divider = to_rect(divider);
                 if divider.left < divider.right && divider.top < divider.bottom {
-                    FillRect((*custom).hdc, &divider, resources.border_brush());
+                    FillRect((*custom).hdc, &divider, resources.divider_brush());
                 }
             }
         }
@@ -549,6 +819,78 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
     Some(CDRF_SKIPDEFAULT as LRESULT)
 }
 
+fn paint_dark_blank_list_body(state: &AppState, dc: HDC) {
+    let Some(resources) = state.appearance_resources.as_ref() else {
+        return;
+    };
+    if state.resolved_appearance().theme != ResolvedTheme::Dark {
+        return;
+    }
+    paint_blank_list_body(
+        state.list_window,
+        dc,
+        resources.workspace_brush(),
+        state.model.len(),
+    );
+}
+
+fn paint_blank_list_body(list: HWND, dc: HDC, brush: HBRUSH, expected_rows: usize) {
+    if list.is_null() || dc.is_null() || brush.is_null() {
+        return;
+    }
+    let mut client = RECT::default();
+    // SAFETY: this is the validated app-owned notification source; the native
+    // value/rectangle queries retain no storage beyond their synchronous call.
+    if unsafe { GetClientRect(list, &mut client) } == 0 {
+        return;
+    }
+    // SAFETY: the count query has no pointer payload and state is UI-thread leased.
+    let count = unsafe { SendMessageW(list, LVM_GETITEMCOUNT, 0, 0) };
+    let Ok(count) = usize::try_from(count) else {
+        return;
+    };
+    if count != expected_rows {
+        return;
+    }
+    let header_bottom = native_list_header_height_px(list);
+    let last_row_bottom = if count == 0 {
+        header_bottom
+    } else {
+        let mut row = RECT {
+            left: LVIR_BOUNDS as i32,
+            ..RECT::default()
+        };
+        // SAFETY: count comes from the same live control, the final index is
+        // valid, and row is writable for this non-retaining native query.
+        if unsafe { SendMessageW(list, LVM_GETITEMRECT, count - 1, (&raw mut row) as LPARAM) } == 0
+        {
+            return;
+        }
+        row.bottom
+    };
+    let Some(body) = calculate_blank_list_body_rect(
+        LayoutRect {
+            x: client.left,
+            y: client.top,
+            width: client.right.saturating_sub(client.left),
+            height: client.bottom.saturating_sub(client.top),
+        },
+        header_bottom,
+        last_row_bottom,
+    ) else {
+        return;
+    };
+    let body = RECT {
+        left: body.x,
+        top: body.y,
+        right: body.right(),
+        bottom: body.bottom(),
+    };
+    // SAFETY: the callback DC and owned workspace brush stay live. Pure bounds
+    // exclude the header, every occupied row and both non-client scrollbars.
+    unsafe { FillRect(dc, &body, brush) };
+}
+
 /// Applies restrained colors only to an unselected changed proposed-name cell.
 /// Every other stage and state remains under the native ListView renderer.
 pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
@@ -570,7 +912,18 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     // the duration of this synchronous notification.
     let stage = unsafe { (*custom).nmcd.dwDrawStage };
     if stage == CDDS_PREPAINT {
-        return Some(CDRF_NOTIFYITEMDRAW as LRESULT);
+        let postpaint = if state.resolved_appearance().theme == ResolvedTheme::Dark {
+            CDRF_NOTIFYPOSTPAINT
+        } else {
+            0
+        };
+        return Some((CDRF_NOTIFYITEMDRAW | postpaint) as LRESULT);
+    }
+    if stage == CDDS_POSTPAINT {
+        // SAFETY: same validated synchronous ListView payload; only the copied
+        // live drawing handle is passed to the bounded blank-body painter.
+        paint_dark_blank_list_body(state, unsafe { (*custom).nmcd.hdc });
+        return Some(CDRF_DODEFAULT as LRESULT);
     }
     if stage == CDDS_ITEMPREPAINT {
         return Some(CDRF_NOTIFYSUBITEMDRAW as LRESULT);
@@ -1248,7 +1601,61 @@ mod native_tests {
 
     const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
 
-    fn apply_test_list_appearance(list: HWND, theme: ResolvedTheme) {
+    struct BlankBodyTestContext {
+        list: HWND,
+        resources: AppearanceResources,
+        theme: Cell<ResolvedTheme>,
+        rows: Cell<usize>,
+        postpaints: Cell<usize>,
+    }
+
+    unsafe extern "system" fn blank_body_test_parent(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        context: usize,
+    ) -> LRESULT {
+        if message == WM_NOTIFY && context != 0 && lparam != 0 {
+            // SAFETY: the test keeps this boxed context alive through confirmed
+            // parent destruction. All mutable callback observations are Cells.
+            let context = unsafe { &*(context as *const BlankBodyTestContext) };
+            // SAFETY: synchronous WM_NOTIFY carries a readable NMHDR prefix.
+            let header = unsafe { &*(lparam as *const NMHDR) };
+            if header.hwndFrom == context.list && header.code == NM_CUSTOMDRAW {
+                // SAFETY: the exact native ListView source owns this payload.
+                let custom = unsafe { &*(lparam as *const NMLVCUSTOMDRAW) };
+                if custom.nmcd.dwDrawStage == CDDS_PREPAINT
+                    && context.theme.get() == ResolvedTheme::Dark
+                {
+                    return CDRF_NOTIFYPOSTPAINT as LRESULT;
+                }
+                if custom.nmcd.dwDrawStage == CDDS_POSTPAINT
+                    && context.theme.get() == ResolvedTheme::Dark
+                {
+                    paint_blank_list_body(
+                        context.list,
+                        custom.nmcd.hdc,
+                        context.resources.workspace_brush(),
+                        context.rows.get(),
+                    );
+                    context.postpaints.set(context.postpaints.get() + 1);
+                    return CDRF_DODEFAULT as LRESULT;
+                }
+            }
+        }
+        // SAFETY: unhandled native messages are delegated exactly once.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    fn apply_test_list_appearance(
+        context: &BlankBodyTestContext,
+        list: HWND,
+        theme: ResolvedTheme,
+    ) {
+        context.theme.set(theme);
+
         apply_native_control_theme(list, NativeThemeTarget::FileList, theme);
         // SAFETY: list is the live test-owned ListView. These synchronous
         // messages copy only integral COLORREF values, matching production.
@@ -1628,6 +2035,37 @@ mod native_tests {
             unsafe { DestroyWindow(parent) };
             return Err(io::Error::last_os_error());
         }
+        let resources = match AppearanceResources::create(GRAPHITE_DARK) {
+            Ok(resources) => resources,
+            Err(error) => {
+                // SAFETY: parent owns the exact test ListView and no subclass exists yet.
+                unsafe { DestroyWindow(parent) };
+                return Err(error);
+            }
+        };
+        let context = Box::new(BlankBodyTestContext {
+            list,
+            resources,
+            theme: Cell::new(ResolvedTheme::NativeSystem),
+            rows: Cell::new(0),
+            postpaints: Cell::new(0),
+        });
+        // SAFETY: the boxed UI-thread context stays at a stable address through
+        // the confirmed parent destruction at the test's single cleanup point.
+        if unsafe {
+            SetWindowSubclass(
+                parent,
+                Some(blank_body_test_parent),
+                18,
+                (&*context as *const BlankBodyTestContext) as usize,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            // SAFETY: subclass registration failed and retains no context share.
+            unsafe { DestroyWindow(parent) };
+            return Err(error);
+        }
         let result = (|| -> io::Result<()> {
             // SAFETY: list is live and the production extended-style mask is scalar.
             unsafe {
@@ -1726,7 +2164,7 @@ mod native_tests {
             // transition so these pixel comparisons isolate style decoration
             // instead of conflating it with the production palette transition.
             let mut pixel_results = Vec::with_capacity(6);
-            apply_test_list_appearance(list, ResolvedTheme::Dark);
+            apply_test_list_appearance(&context, list, ResolvedTheme::Dark);
             pixel_results.push((
                 "empty-dark",
                 blank_list_body_mismatch_count(
@@ -1743,6 +2181,7 @@ mod native_tests {
             if !rebuild_native_rows(list, &[row.clone(), row.clone()]) {
                 return Err(io::Error::other("could not rebuild native test rows"));
             }
+            context.rows.set(2);
             // Some common-control builds do not expose a movable scroll range
             // until the report contains an item. Scroll only after adding rows.
             // SAFETY: list is live and the message carries scalar scroll data.
@@ -1812,7 +2251,7 @@ mod native_tests {
                 ("rows-dark-restored", ResolvedTheme::Dark),
                 ("rows-native-system", ResolvedTheme::NativeSystem),
             ] {
-                apply_test_list_appearance(list, theme);
+                apply_test_list_appearance(&context, list, theme);
                 pixel_results.push((label, blank_list_body_mismatch_count(list, blank_body_top)?));
                 buffer.fill(0);
                 // SAFETY: list is live and query/buffer are writable for this
@@ -1838,7 +2277,8 @@ mod native_tests {
                     "could not remove all native rows after theme transitions",
                 ));
             }
-            apply_test_list_appearance(list, ResolvedTheme::Dark);
+            context.rows.set(0);
+            apply_test_list_appearance(&context, list, ResolvedTheme::Dark);
             pixel_results.push((
                 "empty-after-remove-dark",
                 blank_list_body_mismatch_count(
@@ -1847,13 +2287,23 @@ mod native_tests {
                 )?,
             ));
             assert!(
+                context.postpaints.get() > 0,
+                "real ListView postpaint notification was not routed"
+            );
+            assert!(
                 pixel_results.iter().all(|(_, mismatches)| *mismatches == 0),
                 "native ListView blank body contains non-background pixels: {pixel_results:?}",
             );
             Ok(())
         })();
-        // SAFETY: parent owns and destroys the native ListView child exactly once.
-        unsafe { DestroyWindow(parent) };
+        // SAFETY: parent owns the exact child and its callback context remains
+        // live through all synchronous destruction messages. A failed destroy
+        // retains the bounded context/brush rather than dangling native refdata.
+        if unsafe { DestroyWindow(parent) } == 0 {
+            let _retained = Box::into_raw(context);
+            return Err(io::Error::last_os_error());
+        }
+        drop(context);
         result
     }
 

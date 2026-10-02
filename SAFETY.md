@@ -379,6 +379,32 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+Button and decorative separator painting uses pure bounded rectangles. Interactive
+outlines and decorative hairlines stay one physical pixel; focus/pressed insets
+use the live control DPI without changing control layout or command metadata.
+Adjacent buttons in a catalog group share one boundary owned by the preceding
+button. Separate control/divider brushes are constructed in the existing owned
+appearance resource set and remain alive through synchronous drawing; partial
+allocation failure drops the candidate set and retains the previous resources.
+Button drawing saves the borrowed DC, clips pressed text to its original item
+bounds, and restores DC attributes on every return. A failed DC save/clip
+request delegates drawing without modifying caller state. Decorative separator
+slots are cleared with their owning surface brush before the centered line, avoiding stale pixels across theme changes. These changes do
+not retain callback pointers or introduce new state leases or mutation authority.
+
+The dark FileList uses the existing per-control theme association and a bounded
+postpaint fill below the last native row. It queries only its validated ListView,
+checks the native count against the leased model, and consumes synchronous local
+rectangle storage. Failed queries skip custom fill. Pure bounds exclude header,
+occupied/selected rows and non-client scrollbar chrome; no native input or
+selection rendering is replaced. System/Forced Colors skip this custom path
+and restore the default association. Theme failure retains the existing native
+fallback, with no process-wide hooks, private API ordinals or new production
+subclasses. The native blank-body regression routes real ListView custom-draw
+notifications through a test-owned parent subclass. Its boxed UI-thread context
+and brush remain live through confirmed parent destruction; failed destruction
+retains that bounded context instead of leaving dangling callback refdata.
+
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.
 Each callback acquires an active strong share before dispatch. Short `RefCell`
@@ -726,3 +752,30 @@ procedures are retained in
 valid for interpreting their source-bound historical artifacts, including every
 failure, `not-run`, and `review_required` result. They do not define the current
 release gate and are not evidence that any current VM-Automated campaign passed.
+
+The file ListView's existing UI-thread notification subclass also paints dark
+nonclient scrollbar chrome after forwarding native processing exactly once.
+`GetScrollBarInfo` supplies the live native rectangle, arrow length, thumb and
+component states. Pure splitting rejects invalid or out-of-range geometry; a
+saved window DC excludes the entire client rectangle before bounded fills.
+The control continues to own ranges, hit-testing, dragging, wheel/keyboard input
+and accessibility. Only copied palette values cross the state lease boundary,
+with no lease retained across native scroll tracking. Failed state/DC/geometry
+queries leave native drawing intact. Native/Forced Colors resolution bypasses
+custom chrome. Stock GDI selections and clipping are restored, and every
+successfully acquired window DC is released on the UI thread.
+
+Command rail hover tracking uses a control-local UI-thread subclass with scalar
+reference data and the documented `TrackMouseEvent(TME_LEAVE)` contract. It
+retains no application-state or heap pointer across native processing. Native
+button input and accessibility continue through `DefSubclassProc` exactly once;
+signed client coordinates and a live stack `GetClientRect` query clear hot state
+on captured movement outside the control. Leave, capture loss/cancel, hide,
+disable, and destruction clear hot state, and `WM_NCDESTROY`
+removes the exact subclass before forwarding. Failed tracking/state updates
+retain native input processing; partial rail construction destroys its owned
+children. This callback justifies the explicit reviewed extern
+function inventory entry for `command_rail.rs`; it does not authorize other
+unsafe boundaries. Standard prompt custom drawing reads the live native
+`BS_DEFPUSHBUTTON` style on the callback's bound BUTTON to retain its default
+cue when common-control custom-draw flags omit `CDIS_DEFAULT`.

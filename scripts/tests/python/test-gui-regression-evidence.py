@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from tooling_test_paths import SCRIPT_ROOT
 import struct
@@ -14,6 +15,7 @@ import unittest
 import zlib
 
 from darkrenamer_tooling.evidence import gui as evidence
+from controller_cleanup_fixture import clean_controller_cleanup_v2
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
@@ -46,6 +48,24 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
             alpha = 0 if transparent and x == 0 and y == 0 else 255
             pixels.extend((0, 0, 0, alpha) if ink else (255, 255, 255, alpha))
 
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
+
+
+def pair_png(rgb: tuple[int, int, int], *, width: int = 800, height: int = 552,
+             patches: tuple[tuple[int, int, int, int, tuple[int, int, int]], ...] = ()) -> bytes:
+    background = bytes((*rgb, 255))
+    contrasting = b"\x00\x00\x00\xff" if rgb[0] > 128 else b"\xff\xff\xff\xff"
+    pixels = bytearray()
+    for y in range(height):
+        pixels.append(0)
+        row = bytearray(background * width)
+        if y < 8:
+            row[:32] = contrasting * 8
+        for left, top, right, bottom, color in patches:
+            if top <= y < bottom:
+                row[left * 4:right * 4] = bytes((*color, 255)) * (right - left)
+        pixels.extend(row)
     header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
@@ -536,11 +556,301 @@ class Fixture:
             "exit_code": 0,
             "assertions": {
                 "overall": "passed",
-                "semantics": {name: True for name in evidence.MODE_SEMANTICS[request["mode"]]},
+                "semantics": {name: True for name in evidence.MODE_SEMANTICS.get(request["mode"], ())},
             },
             "status": "review_required",
         }
+        if request["mode"] == evidence.PAIR_MODE:
+            result = {
+                "schema_version": 1, "diagnostic": evidence.PAIR_MODE, "run_id": run.name,
+                "input_manifest_sha256": input_hash,
+                "collection_sha256": digest((run / "collection.json").read_bytes()),
+                "cleanup_sha256": digest(cleanup_bytes), "source_sha": manifest["source_sha"],
+                "application_sha256": manifest["artifacts"]["application"]["sha256"],
+                "runner_sha256": manifest["artifacts"]["runner"]["sha256"],
+                "observer_sha256": manifest["artifacts"]["observer"]["sha256"],
+                "observer_result_sha256": digest(raw_bytes),
+                "host_platform": manifest["host_preflight"],
+                "guest_platform": json.loads((output / "platform-preflight.json").read_text())["guest_platform"],
+                "actual": {
+                    "monitor": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+                    "work_area": {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552},
+                    "target": {"hwnd": 1001, "process_id": 4242, "window_rect":
+                               {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552}},
+                    "hwnd_dpi": 96, "text_scale_percent": 100,
+                },
+                "status": "review_required", "exit_code": 0,
+            }
         write_json(output / "run-result.json", result)
+
+    def build_pair(self) -> Path:
+        run = self.build(evidence.PAIR_RUN_ID, "standard")
+        output = run / "output"
+        manifest = json.loads((run / "input-manifest.json").read_text())
+        manifest["request"]["mode"] = evidence.PAIR_MODE
+        manifest["acceptance_profile_id"] = "vm-automated-v1-win11-ntfs"
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py", "--diagnostic", evidence.PAIR_MODE]
+        write_json(run / "input-manifest.json", manifest)
+        (output / "screen.png").unlink()
+        (output / "text-raster-metrics.json").unlink()
+        raw = json.loads((output / "acceptance-result.json").read_text())
+        environment = raw["assertions"]["scenario"]["environment"]
+        environment["system_visual_style"] = {
+            "theme_path_sha256": "e" * 64, "theme_color": "NormalColor",
+            "theme_size": "NormalSize", "forced_colors": False,
+        }
+        font = {"family": "Segoe UI", "height": -12, "width": 0, "weight": 400,
+                "charset": 1, "quality": 5, "italic": 0, "underline": 0, "strikeout": 0}
+        environment["target_rendering"] = {
+            "hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
+            "awareness": {"query": "GetWindowDpiAwarenessContext+GetAwarenessFromDpiAwarenessContext+AreDpiAwarenessContextsEqual",
+                          "context": -4, "value": 2, "per_monitor_v2": True},
+            "client": {"left": 8, "top": 30, "right": 792, "bottom": 544, "width": 784, "height": 514},
+            "client_query": "GetClientRect+ClientToScreen",
+            "system_font_recipe": {"query": "SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)", "dpi": 96,
+                                   "fonts": {"MessageFont": font, "StatusFont": font},
+                                   "scope": "system LOGFONT recipe; not a dereferenced application HFONT"}}
+        environment["installed_fonts"] = {
+            "query": "System.Drawing.Text.InstalledFontCollection", "count": 100, "family_names_sha256": "a" * 64,
+            "encoding": "UTF-8 ordinal sorted names joined by LF",
+            "scope": "installed family environment; glyph fallback is observed in original rasters"}
+        captures = []
+        scenes = {}
+        def add_capture(name: str, image: bytes, appearance: str, surface: str,
+                        width: int = 800, height: int = 552) -> dict:
+            (output / name).write_bytes(image)
+            receipt = {"file": name, "sha256": digest(image), "width": width, "height": height}
+            captures.append({**receipt, "appearance": appearance, "surface": surface})
+            return receipt
+
+        def menu_state(appearance: str) -> dict:
+            return {"hwnd": 1001, "pid": 4242, "menu_checked": [
+                {"command_id": 0x9010, "checked": False},
+                {"command_id": 0x9011, "checked": appearance == "light"},
+                {"command_id": 0x9012, "checked": appearance == "dark"},
+            ]}
+
+        def control(automation_id: str, name: str, x: int, y: int, width: int,
+                    height: int, enabled: bool = True, native_handle: int = 3001) -> dict:
+            return {"automation_id": automation_id, "name": name,
+                    "control_type": "ControlType.Button", "enabled": enabled,
+                    "keyboard_focusable": True, "offscreen": False,
+                    "native_handle": native_handle,
+                    "bounds": {"x": x, "y": y, "width": width, "height": height}}
+
+        main_window = {"hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
+                       "rect": {"left": 0, "top": 0, "right": 800, "bottom": 552,
+                                "width": 800, "height": 552}}
+        native_list = {"hwnd": 2001, "process_id": 4242, "hwnd_dpi": 96,
+                       "rect": {"left": 40, "top": 100, "right": 640, "bottom": 450,
+                                "width": 600, "height": 350}}
+        current_cell = control("row-0", "00-한국어-日本語.txt", 45, 140, 160, 24,
+                               native_handle=2001)
+        proposed_cell = control("proposal-0", "", 260, 140, 900, 24,
+                                native_handle=2001)
+        proposed_cell["control_type"] = "ControlType.DataItem"
+        for scene in evidence.PAIR_SCENES:
+            count = evidence.PAIR_SCENE_ROWS[scene]
+            names = [f"{index:02d}-한국어-日本語.txt" for index in range(count)]
+            proposal_name = {"changed": "paired-change-00.txt",
+                             "collision": "paired-collision.txt",
+                             "warning": ".txt"}.get(scene)
+            proposal = {**proposed_cell, "name": proposal_name} if proposal_name else None
+            selected_name = names[0] if scene.startswith("selected-") else names[2] if proposal_name else None
+            status = {"collision": "대상 경로 충돌", "warning": "이름 본체가 비어 있는 항목",
+                      "changed": "변경 가능"}.get(scene, "변경 없음")
+            state = {
+                "target_rendering": environment["target_rendering"],
+                "row_count": count, "current_names": names,
+                "columns": [900, 900, 260],
+                "column_preference_sha256": "c" * 64,
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True, "dismissed_tooltip_count": 0},
+                "horizontal_scroll": ([0, 2000, 800, 540, 540] if proposal_name else
+                                      [0, 2000, 800, 0, 0] if scene == "overflow" else None),
+                "proposal_viewport": ({"query": "LVM_SCROLL horizontal scalar pixels after focus",
+                                      "percent": 45, "requested": 540, "observed": 540}
+                                     if proposal_name else None),
+                "vertical_scroll": [0, 59, 20, 0, 0] if scene == "overflow" else None,
+                "horizontal_scrollbar_bounds": [40, 432, 620, 449, 0, 0, 0] if scene == "overflow" else None,
+                "vertical_scrollbar_bounds": [623, 125, 640, 432, 0, 0, 0] if scene == "overflow" else None,
+                "apply_enabled": scene in {"changed", "warning"}, "status": status,
+                "focus_automation_id": "32773" if scene == "selected-inactive" else "1000",
+                "native_focus": [3001 if scene == "selected-inactive" else 2001, 0,
+                                 32773 if scene == "selected-inactive" else 1000],
+                "focused_uia": None,
+                "selection": {"count": 1 if selected_name else 0, "name": selected_name},
+                "selected_row_cell": ({**current_cell, "keyboard_focusable": scene == "selected-active"}
+                                      if scene.startswith("selected-") else None),
+                "proposed_name": proposal_name, "proposed_cell": proposal,
+                "current_name_cell": (control("current-0", names[0], 260 - 900, 140, 900, 24,
+                                               native_handle=2001) if proposal_name else None),
+                "list_physical_target": {"x": 340, "y": 275, "hit_window": 2001, "root_window": 1001},
+                "list": {"native_handle": 2001, "bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
+                "native_list": native_list, "window": main_window,
+                "native_header": {"hwnd": 2002, "process_id": 4242, "hwnd_dpi": 96,
+                                  "rect": {"left": 40, "top": 100, "right": 620, "bottom": 125, "width": 580, "height": 25}},
+            }
+            steps = []
+            for phase in evidence.PAIR_PHASES:
+                appearance = "dark" if phase == "dark" else "light"
+                state["appearance_menu"] = menu_state(appearance)
+                name = f"appearance-{scene}-{phase}.png"
+                patches = ()
+                if proposal_name:
+                    semantic_rgb = {
+                        "changed": {"light": (35, 83, 151), "dark": (133, 183, 255)},
+                        "collision": {"light": (169, 22, 33), "dark": (255, 137, 145)},
+                        "warning": {"light": (142, 83, 0), "dark": (255, 194, 92)},
+                    }[scene][appearance]
+                    patches = ((300, 148, 330, 156, semantic_rgb),)
+                elif scene.startswith("selected-"):
+                    color = ((51, 96, 160) if scene == "selected-active" else (170, 178, 189))
+                    patches = ((45, 143, 180, 161, color),)
+                if scene == "overflow" and appearance == "dark":
+                    patches += ((623, 432, 640, 450, (20, 22, 25)),)
+                divider = (55, 60, 67) if appearance == "dark" else (217, 221, 227)
+                patches += ((39, 108, 40, 442, divider), (48, 124, 80, 125, divider), (48, 450, 80, 451, divider))
+                image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245), patches=patches)
+                capture = add_capture(name, image, appearance, "main-workbench")
+                steps.append({"phase": phase, "appearance": appearance,
+                              "state": json.loads(json.dumps(state)), "capture": capture})
+            scenes[scene] = steps
+        interactions = []
+        for phase in evidence.PAIR_PHASES:
+            appearance = "dark" if phase == "dark" else "light"
+            base = (36, 36, 36) if appearance == "dark" else (245, 245, 245)
+            button_colors = {
+                "light": {"normal": (255, 255, 255), "disabled": (235, 237, 240),
+                          "hover": (240, 244, 250), "pressed": (226, 232, 240),
+                          "keyboard-focus": (255, 255, 255)},
+                "dark": {"normal": (42, 45, 50), "disabled": (34, 37, 41),
+                         "hover": (52, 57, 64), "pressed": (32, 35, 40),
+                         "keyboard-focus": (42, 45, 50)},
+            }[appearance]
+            outline = (177, 183, 192) if appearance == "light" else (83, 89, 99)
+            def outline_patches(x, y, right, bottom, shared_top=False, default=False):
+                result = ()
+                for inset in range(2 if default else 1):
+                    result += ((x + inset, y + inset, x + inset + 1, bottom - inset, outline),
+                               (right - inset - 1, y + inset, right - inset, bottom - inset, outline),
+                               (x + inset, bottom - inset - 1, right - inset, bottom - inset, outline))
+                    if not shared_top:
+                        result += ((x + inset, y + inset, right - inset, y + inset + 1, outline),)
+                return result
+            buttons = {}
+            for button_state in evidence.PAIR_BUTTON_STATES:
+                disabled = button_state == "disabled"
+                x, y = 660, 120 if disabled else 200
+                rect = (x, y, 770, y + 32, button_colors[button_state])
+                patches = (rect,)
+                patches += outline_patches(x, y, 770, y + 32, shared_top=not disabled)
+                text = ((110, 117, 127) if appearance == "light" else (150, 157, 167)) if disabled else (
+                    (27, 29, 32) if appearance == "light" else (242, 244, 247))
+                offset = 1 if button_state == "pressed" else 0
+                patches += ((704 + offset, y + 8 + offset, 726 + offset, y + 22 + offset, text),)
+                if button_state == "keyboard-focus":
+                    cue = (0, 0, 0) if appearance == "light" else (255, 255, 255)
+                    patches += ((663, 203, 767, 204, cue), (663, 228, 767, 229, cue),
+                                (663, 203, 664, 229, cue), (766, 203, 767, 229, cue))
+                name = f"appearance-button-{button_state}-{phase}.png"
+                buttons[button_state] = {
+                    "control": control("32771" if disabled else "32773",
+                                       "적용" if disabled else "이름 앞에 문자열 붙이기",
+                                       x, y, 110, 32, enabled=not disabled),
+                    "focus_automation_id": "32773" if button_state in {"pressed", "keyboard-focus"} else "1000",
+                    "native_button_state": (12 if button_state == "pressed" else
+                                            8 if button_state == "keyboard-focus" else 0),
+                    "target": {"x": 715, "y": y + 16, "hit_window": 3001, "root_window": 1001},
+                    "cursor": ([715, y + 16, 3001, 1001] if button_state in {"hover", "pressed"}
+                               else [20, 20, 1001, 1001]),
+                    "capture": add_capture(name, pair_png(base, patches=patches), appearance, "main-workbench"),
+                }
+            menu_capture = add_capture(f"appearance-native-menu-{phase}.png", pair_png(base),
+                                       appearance, "native-menu")
+            popup = control("menu", "보기(V)", 100, 30, 200, 250, native_handle=4001)
+            modal_rect = {"left": 200, "top": 120, "right": 500, "bottom": 320,
+                          "width": 300, "height": 200}
+            native_modal = {"hwnd": 5001, "process_id": 4242, "hwnd_dpi": 96, "rect": modal_rect}
+            advanced = {"window": control("dialog", "DarkReNamer - 모양 설정 (미리보기)",
+                                          200, 120, 300, 200, native_handle=5001),
+                        "native_window": native_modal,
+                        "capture": add_capture(f"appearance-advanced-{phase}.png",
+                                               pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
+                                                        width=300, height=200),
+                                               appearance, "advanced-appearance", 300, 200)}
+            prompt = {"window": control("dialog", "이름 앞에 문자열 붙이기", 200, 120, 300, 200,
+                                         native_handle=5001),
+                      "native_window": native_modal,
+                      "edit": control("1004", "붙일 문자열", 230, 170, 180, 28, native_handle=5002),
+                      "default_button": control("1", "확인", 350, 260, 100, 32, native_handle=5003),
+                      "default_button_id": 1,
+                      "default_button_query": "WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID",
+                      "same_glyph_label": {
+                          "control": {**control("1002", "붙일 문자열", 230, 150, 120, 24, native_handle=5004), "control_type": "ControlType.Text"},
+                          "native_window": {"hwnd": 5004, "process_id": 4242, "hwnd_dpi": 96,
+                                            "rect": {"left": 230, "top": 150, "right": 350, "bottom": 174, "width": 120, "height": 24}},
+                          "native_class": "Static", "text_sha256": digest("붙일 문자열".encode()),
+                          "query": "bound STATIC/WM_GETTEXT original prompt raster",
+                      },
+                      "capture": add_capture(f"appearance-input-prompt-{phase}.png",
+                                             pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
+                                                      patches=((32, 32, 90, 44, (242, 244, 247) if appearance == "dark" else (27, 29, 32)),
+                                                               (150, 140, 250, 172, button_colors['normal'])) + outline_patches(150, 140, 250, 172, default=True), width=300, height=200),
+                                             appearance, "input-prompt", 300, 200)}
+            scrollbars = {}
+            for axis in evidence.PAIR_SCROLL_AXES:
+                bar = ([40, 432, 620, 449, 17, 17, 117] if axis == "horizontal" else
+                       [623, 125, 640, 432, 17, 17, 77]) + [0] * 6
+                initial = [0, 1000, 100, 0, 0]
+                steps = []
+                for stage in evidence.PAIR_SCROLL_STAGES:
+                    observed_bar = list(bar)
+                    if stage != "held":
+                        observed_bar[5] += 50
+                        observed_bar[6] += 50
+                    patches = ()
+                    if appearance == "dark":
+                        x0, y0, x1, y1 = observed_bar[:4]
+                        thumb = ((x0 + observed_bar[5], y0, x0 + observed_bar[6], y1)
+                                 if axis == "horizontal" else
+                                 (x0, y0 + observed_bar[5], x1, y0 + observed_bar[6]))
+                        patches = ((x0, y0, x1, y1, (20, 22, 25)), (*thumb, (150, 157, 167)))
+                    steps.append({"stage": stage,
+                                  "native_gui": [2001, 0 if stage == "released" else 2001, 1000],
+                                  "components": observed_bar,
+                                  "scroll": [0, 1000, 100, 0 if stage == "held" else 100, 100],
+                                  "capture": add_capture(f"appearance-scroll-{axis}-{stage}-{phase}.png",
+                                                         pair_png(base, patches=patches), appearance, "main-workbench")})
+                scrollbars[axis] = {"list_hwnd": 2001, "initial_scroll": initial,
+                                    "restored_scroll": initial, "steps": steps,
+                                    "target": {"x": 100 if axis == "horizontal" else 630,
+                                               "y": 440 if axis == "horizontal" else 160,
+                                               "hit_window": 2001, "root_window": 1001}}
+            interactions.append({"phase": phase, "appearance": appearance, "buttons": buttons,
+                                 "native_menu": {"popup_hwnd": 4001, "popup": popup,
+                                                 "capture": menu_capture},
+                                 "advanced_appearance": advanced, "input_prompt": prompt, "scrollbars": scrollbars,
+                                 "column_preference_sha256": "c" * 64,
+                                 "selected": {"count": 1, "name": "00-한국어-日本語.txt"},
+                                 "appearance_menu": menu_state(appearance)})
+        raw["screenshots"] = captures
+        raw["keyboard"]["status"] = "not_run"
+        raw["accessibility"]["status"] = "not_run"
+        raw["assertions"]["scope"] = "appearance-pair-main-and-interactions-v2"
+        raw["assertions"]["scenario"] = {
+            "environment": environment, "appearance": "light-dark-light", "process_id": 4242,
+            "normal_exit_code": 0, "fixture": {"disk_unchanged": True, "journal_residue_count": 0,
+                "column_preferences": {"source": "isolated-persisted-user-settings", "format_version": 1,
+                                       "primary_width_dip": [900, 900, 260], "sha256": "c" * 64}},
+            "scenes": scenes, "interactions": interactions,
+        }
+        write_json(output / "acceptance-result.json", raw)
+        observations = json.loads((output / "acceptance-observations.json").read_text())
+        observations["environment"] = environment
+        observations.pop("text_raster_targets", None)
+        write_json(output / "acceptance-observations.json", observations)
+        self.refresh(run)
+        return run
 
     def reference(self, target: Path) -> dict:
         return {
@@ -1104,6 +1414,548 @@ class GuiEvidenceTests(unittest.TestCase):
             self.assertEqual(normalized["exit_code"], 0)
             with self.assertRaisesRegex(evidence.EvidenceError, "terminal exit code"):
                 self.validate(self.standard)
+
+
+class AppearancePairEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.fixture = Fixture(self.root)
+        self.run = self.fixture.build_pair()
+
+    def validate(self):
+        return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
+
+    def v2_transport(self):
+        """Bind a synthetic V2 cleanup record to the paired observer result."""
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        profile_path = self.run / "inputs" / "vm-automated-v2.json"
+        profile_path.write_bytes(profile)
+        profile_hash = digest(profile)
+        manifest["acceptance_profile_id"] = "vm-automated-v2-owned-resources"
+        manifest["acceptance_profile_sha256"] = profile_hash
+        manifest["acceptance_profile"] = {
+            "file": "inputs/vm-automated-v2.json", "bytes": len(profile), "sha256": profile_hash,
+        }
+        manifest["command"] += ["--acceptance-profile-id", "vm-automated-v2-owned-resources"]
+        write_json(manifest_path, manifest)
+        raw_path = self.run / "output" / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        jobs = clean_controller_cleanup_v2()["owned_resource_evidence"]["process_job_cleanup"]
+        jobs[0]["pid"] = raw["assertions"]["scenario"]["process_id"]
+        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        owned = cleanup["owned_resource_evidence"]
+        raw["process_job_cleanup"] = owned["process_job_cleanup"]
+        raw["observer_lifecycle"] = owned["task_execution"]["observer_lifecycle"]
+        write_json(raw_path, raw)
+        transport_path = self.run / "output" / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["raw_cleanup"] = cleanup
+        write_json(transport_path, transport)
+        self.fixture.refresh(self.run)
+        return manifest, transport, raw
+
+    def check_v2_transport(self, manifest, transport, raw):
+        transport_path = self.run / "output" / "transport.json"
+        write_json(transport_path, transport)
+        receipt = {"bytes": len(transport_path.read_bytes()),
+                   "sha256": digest(transport_path.read_bytes())}
+        evidence.validate_pair_transport(self.run, {"transport.json": receipt}, 0, manifest, raw)
+
+    def test_v2_pair_accepts_bound_owned_cleanup_with_ambient_processes(self):
+        manifest, transport, raw = self.v2_transport()
+        self.assertTrue(transport["raw_cleanup"]["unexpected_runner_processes"])
+        self.check_v2_transport(manifest, transport, raw)
+        self.assertEqual(self.validate()["status"], "passed")
+
+    def test_v2_pair_rejects_unbound_profile_artifact_and_selection(self):
+        manifest, _, _ = self.v2_transport()
+        profile_path = self.run / "inputs" / "vm-automated-v2.json"
+        manifest_path = self.run / "input-manifest.json"
+        original_profile = profile_path.read_bytes()
+        mutations = (
+            lambda value: value.pop("acceptance_profile_sha256"),
+            lambda value: value.pop("acceptance_profile"),
+            lambda value: value.__setitem__("acceptance_profile_sha256", "0" * 64),
+            lambda value: value["command"].remove("--acceptance-profile-id"),
+            lambda value: value.__setitem__("acceptance_profile_id", "unknown-profile"),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                current = deepcopy(manifest)
+                mutate(current)
+                write_json(manifest_path, current)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_input_manifest(self.run, SOURCE)
+        write_json(manifest_path, manifest)
+        profile_path.write_bytes(original_profile + b" ")
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_input_manifest(self.run, SOURCE)
+        original_document = json.loads(original_profile)
+        for field, value in (("profile_id", "unexpected-v2"), ("revision", 3)):
+            with self.subTest(profile_field=field):
+                changed = {**original_document, field: value}
+                changed_bytes = json_bytes(changed)
+                profile_path.write_bytes(changed_bytes)
+                current = deepcopy(manifest)
+                current["acceptance_profile_sha256"] = digest(changed_bytes)
+                current["acceptance_profile"] = {
+                    **current["acceptance_profile"], "bytes": len(changed_bytes),
+                    "sha256": digest(changed_bytes),
+                }
+                write_json(manifest_path, current)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_input_manifest(self.run, SOURCE)
+
+    def test_v2_pair_rejects_wrong_profile_hash_and_incomplete_owned_cleanup(self):
+        manifest, transport, raw = self.v2_transport()
+        mutations = (
+            lambda m, t, r: m.__setitem__("acceptance_profile_sha256", "0" * 64),
+            lambda m, t, r: t["raw_cleanup"].__setitem__("owned_processes_after", [3001]),
+            lambda m, t, r: t["raw_cleanup"]["owned_resource_evidence"]["process_snapshots"]["after_delete"].__setitem__("complete", False),
+            lambda m, t, r: t["raw_cleanup"]["owned_resource_evidence"]["task_snapshots"]["after_delete"].append({"name": "unexpected-task"}),
+            lambda m, t, r: r.__setitem__("process_job_cleanup", []),
+            lambda m, t, r: r.__setitem__("observer_lifecycle", {"pid": 9999}),
+            lambda m, t, r: r["assertions"]["scenario"].__setitem__("process_id", 9999),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                current_manifest, current_transport, current_raw = (deepcopy(manifest), deepcopy(transport), deepcopy(raw))
+                mutate(current_manifest, current_transport, current_raw)
+                with self.assertRaises(ValueError):
+                    self.check_v2_transport(current_manifest, current_transport, current_raw)
+
+    def test_focused_pair_rejects_mixed_acceptance_profiles(self):
+        pairs = [
+            {"run_id": run_id, "application_sha256": "a" * 64,
+             "build_identity": {"acceptance_profile_id": evidence.V2_PROFILE_ID,
+                                "acceptance_profile_sha256": "b" * 64}}
+            for run_id in evidence.PAIR_CONFIGURATIONS
+        ]
+        for key, value in (("acceptance_profile_id", evidence.V1_PROFILE_ID),
+                           ("acceptance_profile_sha256", "c" * 64)):
+            with self.subTest(key=key):
+                changed = deepcopy(pairs)
+                changed[-1]["build_identity"][key] = value
+                with self.assertRaisesRegex(evidence.EvidenceError, "same build bundle"):
+                    evidence.validate_focused_pair_results(changed)
+
+    def high_contrast_probe(self):
+        """Exercise three bound System captures without decoding the 66-scene pair."""
+        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
+        base = json.loads((self.run / "output/acceptance-result.json").read_text())
+        base_state = base["assertions"]["scenario"]["scenes"]["warning"][0]["state"]
+        colors = {"window": 0xFFFFFF, "window_text": 0x000000, "button_face": 0xF0F0F0,
+                  "button_text": 0, "highlight": 0x006080, "highlight_text": 0xFFFFFF,
+                  "gray_text": 0x808080, "hot_light": 0x808080}
+        active_colors = {**colors, "window": 0, "window_text": 0x00FFFF,
+                         "highlight_text": 0}
+        original = {"flags": 0, "scheme": "fixture-scheme", "colors": colors,
+                    "visual_style": {"path": "fixture-theme", "color": "NormalColor", "size": "NormalSize"}}
+        document = {"schema_version": 2, "source_sha": SOURCE,
+                    "acceptance_script_sha256": base["acceptance_script_sha256"],
+                    "restoration_required": False, "restoration_verified": True,
+                    "original": original, "restored": json.loads(json.dumps(original))}
+        name = "high-contrast-restore.json"
+        path = self.run / "output" / name
+        def bind_document():
+            write_json(path, document)
+            reference = {"file": name, "sha256": digest(path.read_bytes())}
+            base["high_contrast"] = {"requested": True, "restoration": "verified", "snapshot": reference}
+            base["assertions"]["scenario"]["high_contrast"]["snapshot"] = reference
+            return {name: {"sha256": reference["sha256"]}}
+
+        pixels = {}
+        def raster(selected, unselected):
+            width, height = 800, 552
+            data = bytearray(bytes((245, 245, 245, 255)) * (width * height))
+            for left, top, right, bottom, rgb in ((265, 146, 282, 154, selected),
+                                                   (325, 176, 342, 184, unselected)):
+                for y in range(top, bottom):
+                    data[(y * width + left) * 4:(y * width + right) * 4] = bytes((*rgb, 255)) * (right - left)
+            return bytes(data)
+
+        for key, phase in (("before", "before"), ("active", "forced-colors"), ("after", "after")):
+            active = key == "active"
+            state = {
+                "phase": phase, "appearance": "system", "row_count": 60,
+                "current_names": base_state["current_names"],
+                "resolution": {"query": "UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST",
+                               "foreground_argb": [255, 0, 0, 0],
+                               "resolved_theme": "native" if active else "light",
+                               "system_visual_style": {"forced_colors": active}},
+                "appearance_menu": {"hwnd": 1001, "pid": 4242, "menu_checked": [
+                    {"command_id": 0x9010, "checked": True},
+                    {"command_id": 0x9011, "checked": False},
+                    {"command_id": 0x9012, "checked": False}]},
+                "native_window": base_state["window"], "native_list": base_state["native_list"],
+                "native_focus": [2001, 0, 1000], "target_rendering": base_state["target_rendering"],
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True},
+                "selection": {"count": 1, "name": base_state["current_names"][0]},
+                "semantic_cells": {
+                    "selected": {"name": ".txt", "offscreen": False,
+                                 "bounds": {"x": 260, "y": 140, "width": 40, "height": 20}},
+                    "unselected": {"name": ".log", "offscreen": False,
+                                   "bounds": {"x": 320, "y": 170, "width": 40, "height": 20}}},
+                "proposal_viewport": base_state["proposal_viewport"],
+                "horizontal_scroll": base_state["horizontal_scroll"],
+                "vertical_scroll": base_state["vertical_scroll"],
+                "horizontal_components": [1, 2], "vertical_components": [3, 4],
+                "colors": active_colors if active else colors,
+                "capture": {"file": f"appearance-system-{phase}.png"},
+            }
+            base["assertions"]["scenario"].setdefault("high_contrast", {})[key] = state
+            pixels[state["capture"]["file"]] = raster((0, 0, 0) if active else (255, 255, 255),
+                                                       (255, 255, 0) if active else (142, 83, 0))
+        contrast = base["assertions"]["scenario"]["high_contrast"]
+        contrast.update({"snapshot": None, "restoration_verified": True,
+                         "original_enabled": False, "acceptance_enabled": True})
+        files = bind_document()
+        def capture_pixels(receipt, expected_name, appearance, surface):
+            self.assertEqual((receipt["file"], appearance, surface),
+                             (expected_name, "system", "main-workbench"))
+            return 800, 552, pixels[expected_name]
+        return base, files, actual, capture_pixels, document, bind_document, pixels
+
+    def test_high_contrast_probe_binds_original_system_restoration(self):
+        raw, files, actual, capture_pixels, _, _, _ = self.high_contrast_probe()
+        rows = evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+        self.assertEqual([row["resolved_theme"] for row in rows], ["light", "native", "light"])
+
+    def test_high_contrast_probe_rejects_wrong_snapshot_identity_and_pending_rescue(self):
+        for field, value, diagnostic in (
+            ("source_sha", "f" * 40, "scope or original state"),
+            ("acceptance_script_sha256", "f" * 64, "scope or original state"),
+            ("restoration_verified", False, "scope or original state"),
+            ("restoration_required", True, "rescue is still pending"),
+        ):
+            with self.subTest(field=field):
+                raw, files, actual, capture_pixels, document, bind_document, _ = self.high_contrast_probe()
+                document[field] = value
+                files = bind_document()
+                with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+                    evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_high_contrast_probe_rejects_unchanged_palette_and_native_selection_override(self):
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        active = raw["assertions"]["scenario"]["high_contrast"]["active"]
+        active["colors"] = raw["assertions"]["scenario"]["high_contrast"]["before"]["colors"]
+        active_pixels = bytearray(pixels["appearance-system-before.png"])
+        for y in range(176, 184):
+            active_pixels[(y * 800 + 325) * 4:(y * 800 + 342) * 4] = b"\x00\x00\x00\xff" * 17
+        pixels["appearance-system-forced-colors.png"] = bytes(active_pixels)
+        with self.assertRaisesRegex(evidence.EvidenceError, "did not bind or change"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        name = "appearance-system-forced-colors.png"
+        pixels[name] = pixels["appearance-system-before.png"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "warning or native selection color precedence"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_high_contrast_probe_rejects_system_endpoint_raster_change(self):
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        changed = bytearray(pixels["appearance-system-after.png"])
+        offset = (240 * 800 + 400) * 4
+        changed[offset:offset + 3] = b"\x00\x00\x00"
+        pixels["appearance-system-after.png"] = bytes(changed)
+        with self.assertRaisesRegex(evidence.EvidenceError, "endpoint client raster did not restore"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_focused_configuration_set_requires_five_runs_one_executable_and_same_glyph_scale(self):
+        font = {"family": "Segoe UI", "weight": 400, "charset": 1, "quality": 5,
+                "italic": 0, "underline": 0, "strikeout": 0, "height": -12}
+        environment = {"installed_fonts": {"family_names_sha256": "a" * 64},
+                       "system_fonts": {"MessageFont": font, "StatusFont": font}}
+        phases = ("light-before", "dark", "light-after")
+        pairs = []
+        for run_id in evidence.PAIR_CONFIGURATIONS:
+            enlarged = "text150" in run_id
+            pairs.append({"run_id": run_id, "application_sha256": "e" * 64,
+                          "build_identity": {"source_tree": "a" * 40, "bundle_manifest_sha256": "b" * 64,
+                                             "artifact_sha256": {"observer": "c" * 64, "application": "e" * 64}},
+                          "font_environment": deepcopy(environment),
+                          "raster_regions": {"same_glyph": [
+                              {"phase": phase, "text_sha256": "f" * 64,
+                               "width": 24 if enlarged else 20, "height": 12 if enlarged else 10}
+                              for phase in phases]}})
+        evidence.validate_focused_pair_results(pairs)
+        baseline = next(row for row in pairs if "base-" in row["run_id"])
+        text150 = next(row for row in pairs if "text150" in row["run_id"])
+        for label, mutate, diagnostic in (
+            ("missing run", lambda rows: rows.pop(), "incomplete or duplicated"),
+            ("duplicate run", lambda rows: rows[-1].update(run_id=rows[0]["run_id"]), "incomplete or duplicated"),
+            ("executable", lambda rows: rows[-1].update(application_sha256="0" * 64), "same executable"),
+            ("bundle", lambda rows: rows[-1]["build_identity"].update(bundle_manifest_sha256="0" * 64), "same build bundle"),
+            ("artifact", lambda rows: rows[-1]["build_identity"]["artifact_sha256"].update(observer="0" * 64), "same build bundle"),
+            ("tree", lambda rows: rows[-1]["build_identity"].update(source_tree="0" * 40), "same build bundle"),
+            ("installed fonts", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["font_environment"]["installed_fonts"].update(family_names_sha256="0" * 64), "font family environment"),
+            ("font identity", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["font_environment"]["system_fonts"]["MessageFont"].update(family="Other"), "font family environment"),
+            ("glyph digest", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][1].update(text_sha256="0" * 64), "same glyphs"),
+            ("width", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][0].update(width=23), "both dimensions"),
+            ("height", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][2].update(height=11), "both dimensions"),
+            ("missing phase", lambda rows: [row["raster_regions"]["same_glyph"].pop()
+             for row in rows if row["run_id"] in {baseline["run_id"], text150["run_id"]}], "phase set"),
+        ):
+            with self.subTest(label=label):
+                changed = deepcopy(pairs)
+                mutate(changed)
+                with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+                    evidence.validate_focused_pair_results(changed)
+
+    def test_pair_has_66_bound_captures_and_distinct_verdict(self):
+        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
+        scenes = raw["assertions"]["scenario"]["scenes"]
+        self.assertIs(scenes["selected-active"][0]["state"]["selected_row_cell"]["keyboard_focusable"], True)
+        self.assertIs(scenes["selected-inactive"][0]["state"]["selected_row_cell"]["keyboard_focusable"], False)
+        result = self.validate()
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["native_scrollbar_theme"], "dark-tracking-and-intersection-validated")
+        self.assertEqual(set(result["raster_regions"]),
+                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking", "same_glyph"})
+
+    def test_pair_selection_cell_identity_and_geometry_stay_bound_across_focus(self):
+        for field, expected in (("bounds", "native row geometry"),
+                                ("name", "native row geometry"),
+                                ("keyboard_focusable", "focusability is invalid")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                for step in raw["assertions"]["scenario"]["scenes"]["selected-inactive"]:
+                    cell = step["state"]["selected_row_cell"]
+                    if field == "bounds":
+                        cell["bounds"]["x"] += 1
+                    elif field == "name":
+                        cell["name"] += "-other"
+                    else:
+                        cell["keyboard_focusable"] = "false"
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
+
+    def test_pair_preference_and_tooltip_changes_rejected(self):
+        for key, value, expected in (
+            ("column_preference_sha256", "f" * 64, "column preference changed"),
+            ("native_focus", [2001, 0, 32773], "native focus differs"),
+            ("overlay", {"visible_tooltip_count": 1, "neutral_cursor": True}, "visible tooltip"),
+        ):
+            with self.subTest(key=key):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                raw["assertions"]["scenario"]["scenes"]["empty"][0]["state"][key] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
+
+    def test_missing_pair_capture_rejected(self):
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["screenshots"].pop()
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly 66 original captures"):
+            self.validate()
+
+    def test_proposal_viewport_must_match_exact_native_request(self):
+        for key in ("proposal_viewport", "horizontal_scroll"):
+            with self.subTest(key=key):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                state = raw["assertions"]["scenario"]["scenes"]["changed"][0]["state"]
+                if key == "proposal_viewport":
+                    state[key]["observed"] += 6
+                else:
+                    state[key][3] += 6
+                    state[key][4] += 6
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, "exact native pixel request"):
+                    self.validate()
+
+    def test_pair_source_executable_and_environment_bindings_rejected(self):
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["source_sha"] = "f" * 40
+        write_json(manifest_path, manifest)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "source_sha"):
+            self.validate()
+
+        self.setUp()
+        manifest_path = self.run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["application"]["sha256"] = "f" * 64
+        write_json(manifest_path, manifest)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "artifacts.application bytes"):
+            self.validate()
+
+        self.setUp()
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["assertions"]["scenario"]["environment"]["hwnd_dpi"] = 144
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "environment binding"):
+            self.validate()
+
+    def test_pair_interaction_native_state_and_cancel_settings_rejected(self):
+        for field, value, message in (
+            ("pressed", 8, "button native/UIA state"),
+            ("default_button_id", 0, "native default button"),
+            ("default_button_query", "DM_GETDEFID", "native default button"),
+            ("column_preference_sha256", "f" * 64, "interaction theme, settings"),
+        ):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                interaction = raw["assertions"]["scenario"]["interactions"][1]
+                if field == "pressed":
+                    interaction["buttons"]["pressed"]["native_button_state"] = value
+                elif field in {"default_button_id", "default_button_query"}:
+                    interaction["input_prompt"][field] = value
+                else:
+                    interaction[field] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
+
+    def test_pair_keyboard_focus_cannot_claim_mouse_hover(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        focus = raw["assertions"]["scenario"]["interactions"][1]["buttons"]["keyboard-focus"]
+        focus["cursor"] = [715, 216, 3001, 1001]
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "cursor does not match"):
+            self.validate()
+
+    def test_pair_target_client_awareness_and_font_bindings_rejected(self):
+        for field, message in (("awareness", "DPI awareness"), ("client", "client bounds"),
+                               ("font", "font descriptor")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                rendering = raw["assertions"]["scenario"]["scenes"]["empty"][1]["state"]["target_rendering"]
+                if field == "awareness":
+                    rendering["awareness"]["per_monitor_v2"] = False
+                elif field == "client":
+                    rendering["client"]["width"] += 1
+                else:
+                    rendering["system_font_recipe"]["fonts"]["MessageFont"]["height"] = 0
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
+
+    def test_pair_scroll_tracking_binding_and_restoration_rejected(self):
+        for field, message in (("capture", "native capture state"),
+                               ("geometry", "thumb geometry"),
+                               ("drag", "did not advance"),
+                               ("restore", "was not restored")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                bar = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]
+                if field == "capture":
+                    bar["steps"][0]["native_gui"][1] = 0
+                elif field == "geometry":
+                    bar["steps"][0]["components"][6] = 0
+                elif field == "drag":
+                    bar["steps"][2]["scroll"][3] = 0
+                else:
+                    bar["restored_scroll"][3] = 1
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
+
+    def test_pair_bright_dark_scrollbar_rejected_with_matching_receipts(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        step = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]["steps"][1]
+        name = step["capture"]["file"]
+        image = pair_png((36, 36, 36), patches=((40, 432, 620, 449, (255, 255, 255)),))
+        (self.run / "output" / name).write_bytes(image)
+        step["capture"]["sha256"] = digest(image)
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "scrollbar thumb palette raster violation"):
+            self.validate()
+
+    def test_pair_light_endpoint_state_loss_rejected_with_matching_receipts(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        step = raw["assertions"]["scenario"]["scenes"]["unchanged"][2]
+        name = step["capture"]["file"]
+        image = pair_png((245, 245, 245), patches=((100, 250, 200, 260, (23, 25, 28)),
+            (39, 108, 40, 442, (217, 221, 227)), (48, 124, 80, 125, (217, 221, 227)), (48, 450, 80, 451, (217, 221, 227))))
+        (self.run / "output" / name).write_bytes(image)
+        step["capture"]["sha256"] = digest(image)
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "Light endpoint client raster did not restore"):
+            self.validate()
+
+    def test_pair_region_visual_violation_rejected_with_matching_receipt(self):
+        name = "appearance-empty-dark.png"
+        image = pair_png((245, 245, 245), patches=((39, 108, 40, 442, (55, 60, 67)),
+            (48, 124, 80, 125, (55, 60, 67)), (48, 450, 80, 451, (55, 60, 67))))
+        (self.run / "output" / name).write_bytes(image)
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        raw["assertions"]["scenario"]["scenes"]["empty"][1]["capture"]["sha256"] = digest(image)
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "interior raster violation"):
+            self.validate()
+
+    def test_pair_proposal_semantic_color_cannot_leak_into_current_name(self):
+        name = "appearance-changed-dark.png"
+        image = pair_png((36, 36, 36), patches=(
+            (300, 148, 330, 156, (133, 183, 255)),
+            (100, 148, 120, 156, (133, 183, 255)),
+            (39, 108, 40, 442, (55, 60, 67)),
+            (48, 124, 80, 125, (55, 60, 67)),
+            (48, 450, 80, 451, (55, 60, 67)),
+        ))
+        (self.run / "output" / name).write_bytes(image)
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        for receipt in raw["screenshots"]:
+            if receipt["file"] == name:
+                receipt["sha256"] = digest(image)
+        raw["assertions"]["scenario"]["scenes"]["changed"][1]["capture"]["sha256"] = digest(image)
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "semantic color leaked into current-name"):
+            self.validate()
 
 
 if __name__ == "__main__":

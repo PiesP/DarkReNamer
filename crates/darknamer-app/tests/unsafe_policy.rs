@@ -95,7 +95,9 @@ const ALLOWED_BOUNDARIES: &[(&str, bool, bool)] = &[
     ("src/windows/application.rs", false, true),
     ("src/windows/clipboard.rs", false, false),
     ("src/windows/command_dispatch.rs", false, false),
-    ("src/windows/command_rail.rs", false, false),
+    // The UI-thread hover subclass retains only scalar refdata and forwards
+    // every message to the native BUTTON exactly once.
+    ("src/windows/command_rail.rs", false, true),
     ("src/windows/dialog.rs", false, true),
     ("src/windows/drag_drop.rs", true, true),
     ("src/windows/list_view.rs", true, true),

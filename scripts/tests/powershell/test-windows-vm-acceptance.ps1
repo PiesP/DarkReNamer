@@ -414,6 +414,24 @@ try {
     if ($uiSelection.kind -cne 'ui' -or -not $uiSelection.is_observer) {
         throw 'Legacy acceptance arguments must select the shared UI observer task.'
     }
+    $pairSelection = $uiSelectionArguments.Clone()
+    $pairSelection.UiMode = 'appearance-pair'
+    if ((Resolve-ControllerTaskSelection @pairSelection).kind -cne 'ui') {
+        throw 'Controlled High Contrast appearance pair was rejected.'
+    }
+    $pairSelection.UiHighContrast = $false
+    $pairSelection.UiAppearance = 'light'
+    $pairSelection.UiTextScalePercent = 150
+    $pairSelection.HasUiTextScalePercent = $true
+    if ((Resolve-ControllerTaskSelection @pairSelection).kind -cne 'ui') {
+        throw 'Text-150 appearance pair was rejected.'
+    }
+    $pairSelection.UiHighContrast = $true
+    $pairSelection.UiAppearance = 'system'
+    Assert-Fails { Resolve-ControllerTaskSelection @pairSelection } 'non-High-Contrast appearance-pair'
+    $pairSelection.UiTextScalePercent = 100
+    $pairSelection.UiAppearance = 'light'
+    Assert-Fails { Resolve-ControllerTaskSelection @pairSelection } 'system appearance'
     $recoverySelectionArguments = $selectionDefaults.Clone()
     $recoverySelectionArguments.RequestedKind = 'recovery'
     $recoverySelectionArguments.HasRecoveryOutput = $true
@@ -862,6 +880,48 @@ try {
     . ([scriptblock]::Create($mixedTreeAssignments[0].Extent.Text))
     if ($mixedTreeText -cne "first`nlast") {
         throw 'The mixed confirmation text projection must read and filter the returned tree rows.'
+    }
+    & {
+        $regressionFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-GuiRegressionAcceptance'
+        }, $true)
+        $appearanceCalls = @($regressionFunction.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Invoke-ObserverAppearancePairScenario'
+        }, $true))
+        if ($appearanceCalls.Count -ne 1) {
+            throw 'Expected one nested appearance-pair scenario dispatch.'
+        }
+        $dispatch = [scriptblock]::Create($appearanceCalls[0].Extent.Text)
+        function Invoke-ObserverAppearancePairScenario {
+            param(
+                $Verified, $RuntimeRoot, $EvidenceRoot, $SessionId,
+                $WaitSeconds, $SourceSha, $AcceptanceScriptSha256,
+                [switch] $HighContrast, $Captures, $ProcessLifecycleObservations
+            )
+            $SourceSha
+        }
+        foreach ($sourceSha in @(('a' * 40), ('b' * 40))) {
+            $observedSourceSha = & {
+                $manifestInput = [pscustomobject]@{ source_sha = $sourceSha }
+                $verified = $null
+                $effectiveRuntimeRoot = 'runtime'
+                $resolved = [pscustomobject]@{ output_root = 'evidence' }
+                $session = 1
+                $TimeoutSeconds = 60
+                $ExpectedScriptSha256 = 'c' * 64
+                $HighContrast = $false
+                $captures = [Collections.Generic.List[object]]::new()
+                $processLifecycleObservations = @()
+                & $dispatch
+            }
+            if ($observedSourceSha -cne $sourceSha) {
+                throw 'Nested appearance-pair dispatch lost its manifest source SHA.'
+            }
+        }
     }
     & {
         $regressionFunction = $acceptanceAst.Find({
@@ -2770,6 +2830,30 @@ try {
         -RegressionMode text-scale `
         -Appearance light `
         -TextScalePercent 150 `
+        -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePairInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidatePairInput.request.mode = 'appearance-pair'
+    $candidatePairInput.request.appearance = 'system'
+    $candidatePairInput.request.text_scale_percent = [long]100
+    $candidatePairInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidatePairInput.request | Add-Member -NotePropertyName high_contrast -NotePropertyValue $true
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+        -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+        -Appearance system -TextScalePercent 100 -HighContrast $true `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+            -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+            -Appearance system -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'contrast or text scale differs'
+    $candidatePairInput.request.appearance = 'light'
+    $candidatePairInput.request.high_contrast = $false
+    $candidatePairInput.request.text_scale_percent = [long]150
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+        -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+        -Appearance light -TextScalePercent 150 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     if ((Resolve-GuiRegressionLayoutVariant `
         -ManifestInput $candidateRegressionInput `
@@ -2887,6 +2971,7 @@ try {
             -RegressionMode text-scale `
             -Appearance light `
             -TextScalePercent 150 `
+            -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'immutable manifest'
     $legacyRegressionResolved = [pscustomobject]@{
@@ -3216,8 +3301,8 @@ $applicationStartCalls = @($captureAst.FindAll({
     $node -is [Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
 }, $true))
-if ($applicationStartCalls.Count -ne 5) {
-    throw 'Expected all five current-DPI and GUI regression application start sites.'
+if ($applicationStartCalls.Count -ne 6) {
+    throw 'Expected all six current-DPI and GUI diagnostic application start sites.'
 }
 foreach ($call in $applicationStartCalls) {
     $lifecycleBindings = @($call.CommandElements | Where-Object {

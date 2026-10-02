@@ -11,6 +11,7 @@
         [Parameter(Mandatory = $true)][object[]] $BundleRecords,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
         [Parameter(Mandatory = $true)][string] $Appearance,
+        [ValidateSet('text-scale', 'appearance-pair')][string] $RegressionMode = 'text-scale',
         [Parameter(Mandatory = $true)][string] $HostOutputRoot,
         [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
         [AllowNull()][object] $EngineEvidence
@@ -19,8 +20,8 @@
     $v2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
     if ($v2) { $script:DrVmV2RescueAttempts++ }
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance,$BundleRecords,$InputManifestSha256,$v2,$EngineEvidence -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance,$bundleRecords,$inputManifestHash,$v2,$preflightEngine)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance,$RegressionMode,$BundleRecords,$InputManifestSha256,$v2,$EngineEvidence -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance,$mode,$bundleRecords,$inputManifestHash,$v2,$preflightEngine)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -51,7 +52,7 @@
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'Text-scale rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
-        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode text-scale -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
+        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode ' + $mode + ' -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
         if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
         $registeredTask = Register-DrVmTask `
             -TaskName $name `
@@ -180,6 +181,9 @@ function Invoke-AcceptanceHighContrastRescue {
         [Parameter(Mandatory = $true)][int] $SuiteTimeoutSeconds,
         [Parameter(Mandatory = $true)][string] $ObserverSha256,
         [Parameter(Mandatory = $true)][object[]] $BundleRecords,
+        [ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
+        [ValidateSet('current-dpi', 'appearance-pair')][string] $AcceptanceMode = 'current-dpi',
+        [ValidateSet('system', 'light', 'dark')][string] $Appearance = 'system',
         [Parameter(Mandatory = $true)][string] $HostOutputRoot,
         [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
         [AllowNull()][object] $EngineEvidence
@@ -188,8 +192,8 @@ function Invoke-AcceptanceHighContrastRescue {
     $v2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
     if ($v2) { $script:DrVmV2RescueAttempts++ }
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$BundleRecords,$v2,$EngineEvidence -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$bundleRecords,$v2,$preflightEngine)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$AcceptanceMode,$Appearance,$InputManifestSha256,$BundleRecords,$v2,$EngineEvidence -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$mode,$appearance,$inputManifestHash,$bundleRecords,$v2,$preflightEngine)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -220,6 +224,19 @@ function Invoke-AcceptanceHighContrastRescue {
             throw 'High Contrast rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
         $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance system -HighContrast -RestoreHighContrastOnly'
+        if ($mode -ceq 'appearance-pair') {
+            if ($appearance -cne 'system' -or $inputManifestHash -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Appearance pair High Contrast rescue request is unbound.'
+            }
+            $inputManifest = Join-Path $trustedRoot 'input-manifest.json'
+            if ((Get-FileHash -LiteralPath $inputManifest -Algorithm SHA256).Hash -ine $inputManifestHash) {
+                throw 'Appearance pair High Contrast rescue manifest changed.'
+            }
+            $observerArguments += ' -RegressionMode appearance-pair -InputManifestPath "' + $inputManifest + '" -TextScalePercent 100'
+        }
+        $manifestBinding = if ($mode -ceq 'appearance-pair') {
+            @{ InputManifestPath = $inputManifest; InputManifestSha256 = $inputManifestHash }
+        } else { @{} }
         if ($v2) { $observerArguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
         $registeredTask = Register-DrVmTask `
             -TaskName $name `
@@ -231,6 +248,7 @@ function Invoke-AcceptanceHighContrastRescue {
             -ObserverSha256 $observerHash `
             -BundleSourcePath $bundle `
             -BundleRecords $bundleRecords `
+            @manifestBinding `
             -Execute $powerShell `
             -Arguments $observerArguments `
             -WorkingDirectory $root `

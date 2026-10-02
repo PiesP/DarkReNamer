@@ -143,6 +143,17 @@ public static class DarkReNamerVmAcceptanceNative {
         public int TrackPosition;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeScrollBarInfo {
+        public uint Size;
+        public Rect Bounds;
+        public int LineButtonSize;
+        public int ThumbTop;
+        public int ThumbBottom;
+        public int Reserved;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)] public uint[] States;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct MENUITEMINFO {
         public uint Size;
@@ -238,6 +249,8 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetScrollInfo(IntPtr window, int bar, ref NativeScrollInfo info);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetScrollBarInfo(IntPtr window, int objectId, ref NativeScrollBarInfo info);
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")]
@@ -823,6 +836,16 @@ public static class DarkReNamerVmAcceptanceNative {
         if (!GetCursorPos(out point)) throw new Win32Exception(Marshal.GetLastWin32Error());
         return point;
     }
+    public static long[] ReadBoundCursor(IntPtr main, uint expectedProcessId) {
+        Point point = ReadCursor();
+        IntPtr hit = WindowFromPoint(point);
+        uint processId;
+        IntPtr root = GetAncestor(hit, 2);
+        if (hit == IntPtr.Zero || root != main || GetWindowThreadProcessId(hit, out processId) == 0
+            || processId != expectedProcessId)
+            throw new InvalidOperationException("Appearance cursor is outside the bound main window.");
+        return new [] { (long)point.X, point.Y, hit.ToInt64(), root.ToInt64() };
+    }
 
     public static void MoveCursor(int x, int y) {
         if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -845,6 +868,31 @@ public static class DarkReNamerVmAcceptanceNative {
     }
 
     public static void Click() { SendMouseButton(0x0002); SendMouseButton(0x0004); }
+    public static void PressLeftButton() { SendMouseButton(0x0002); }
+    public static void ReleaseLeftButton() { SendMouseButton(0x0004); }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+    public static void PopOwnedTooltip(IntPtr tooltip, uint expectedProcessId) {
+        uint processId;
+        StringBuilder name = new StringBuilder(64);
+        if (GetWindowThreadProcessId(tooltip, out processId) == 0 || processId != expectedProcessId
+            || GetClassName(tooltip, name, name.Capacity) == 0
+            || !String.Equals(name.ToString(), "tooltips_class32", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Tooltip dismissal target is not owned by the bound application.");
+        IntPtr result;
+        if (SendMessageTimeoutW(tooltip, 0x041C, IntPtr.Zero, IntPtr.Zero, 3, 500, out result) == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Tooltip dismissal failed or timed out.");
+    }
+    public static int ReadDefaultPushButtonId(IntPtr button) {
+        long code = SendMessageW(button, 0x0087, IntPtr.Zero, IntPtr.Zero).ToInt64();
+        if ((code & 0x2010) != 0x2010 || (code & 0x0020) != 0) return 0;
+        return GetDlgCtrlID(button);
+    }
+    public static int ReadButtonState(IntPtr button) {
+        if (button == IntPtr.Zero) throw new ArgumentException("Button handle is missing.");
+        return checked((int)SendMessageW(button, 0x00F2, IntPtr.Zero, IntPtr.Zero).ToInt64());
+    }
     public static void ReleaseAllButtons() {
         SendMouseButton(0x0004); SendMouseButton(0x0010); SendMouseButton(0x0040);
     }
@@ -877,6 +925,73 @@ public static class DarkReNamerVmAcceptanceNative {
         return value;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    public struct NativeLogFont {
+        public int Height, Width, Escapement, Orientation, Weight;
+        public byte Italic, Underline, StrikeOut, CharSet, OutPrecision, ClipPrecision, Quality, PitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NativeNonClientMetrics {
+        public uint Size;
+        public int BorderWidth, ScrollWidth, ScrollHeight, CaptionWidth, CaptionHeight;
+        public NativeLogFont CaptionFont;
+        public int SmallCaptionWidth, SmallCaptionHeight;
+        public NativeLogFont SmallCaptionFont;
+        public int MenuWidth, MenuHeight;
+        public NativeLogFont MenuFont, StatusFont, MessageFont;
+        public int PaddedBorderWidth;
+    }
+    public class WindowRenderingEnvironment {
+        public long Context;
+        public int Awareness;
+        public bool PerMonitorV2;
+        public Rect Client;
+        public uint Dpi;
+        public NativeLogFont MessageFont, StatusFont;
+    }
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+    [DllImport("user32.dll")] private static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(IntPtr window, ref Point point);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfoForDpi(uint action, uint parameter,
+        ref NativeNonClientMetrics value, uint flags, uint dpi);
+    public static WindowRenderingEnvironment ReadWindowRenderingEnvironment(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Rendering environment target is outside the bound process.");
+        IntPtr context = GetWindowDpiAwarenessContext(window);
+        if (context == IntPtr.Zero) throw new InvalidOperationException("Target DPI awareness context is missing.");
+        Rect client;
+        Point origin = new Point();
+        if (!GetClientRect(window, out client) || !ClientToScreen(window, ref origin))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (client.Left != 0 || client.Top != 0 || client.Right <= 0 || client.Bottom <= 0)
+            throw new InvalidOperationException("Target client geometry is invalid.");
+        uint dpi = GetDpiForWindow(window);
+        if (dpi == 0) throw new InvalidOperationException("Target DPI is missing.");
+        NativeNonClientMetrics metrics = new NativeNonClientMetrics {
+            Size = (uint)Marshal.SizeOf(typeof(NativeNonClientMetrics))
+        };
+        if (!SystemParametersInfoForDpi(0x29, metrics.Size, ref metrics, 0, dpi))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new WindowRenderingEnvironment {
+            Context = context.ToInt64(), Awareness = GetAwarenessFromDpiAwarenessContext(context),
+            PerMonitorV2 = AreDpiAwarenessContextsEqual(context, new IntPtr(-4)), Dpi = dpi,
+            Client = new Rect { Left = origin.X, Top = origin.Y,
+                Right = checked(origin.X + client.Right), Bottom = checked(origin.Y + client.Bottom) },
+            MessageFont = metrics.MessageFont, StatusFont = metrics.StatusFont
+        };
+    }
     public static int[] ReadMonitorInfo(IntPtr window) {
         IntPtr monitor = MonitorFromWindow(window, 2);
         if (monitor == IntPtr.Zero) throw new InvalidOperationException("MonitorFromWindow returned no target monitor.");
@@ -905,12 +1020,181 @@ public static class DarkReNamerVmAcceptanceNative {
         };
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadSnapshot {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadSnapshot info);
+    [DllImport("user32.dll")]
+    private static extern int GetDlgCtrlID(IntPtr window);
+    public static long[] ReadGuiThreadSnapshot(IntPtr mainWindow, uint expectedProcessId) {
+        uint processId;
+        uint thread = GetWindowThreadProcessId(mainWindow, out processId);
+        if (thread == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("GUI thread target differs from bound application.");
+        GuiThreadSnapshot info = new GuiThreadSnapshot();
+        info.Size = (uint)Marshal.SizeOf(typeof(GuiThreadSnapshot));
+        if (!GetGUIThreadInfo(thread, ref info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (info.Focus == IntPtr.Zero || GetWindowThreadProcessId(info.Focus, out processId) == 0
+            || processId != expectedProcessId || GetAncestor(info.Focus, 2) != mainWindow)
+            throw new InvalidOperationException("Native focus is outside the bound main window.");
+        return new [] { info.Focus.ToInt64(), info.Capture.ToInt64(), (long)GetDlgCtrlID(info.Focus) };
+    }
+
     public static int[] TryReadScrollInfo(IntPtr window, int bar) {
         NativeScrollInfo info = new NativeScrollInfo();
         info.Size = (uint)Marshal.SizeOf(typeof(NativeScrollInfo));
         info.Mask = 0x17;
         if (!GetScrollInfo(window, bar, ref info)) return null;
         return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };
+    }
+
+    public static int[] SetListHorizontalViewport(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        StringBuilder className = new StringBuilder(128);
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId
+            || GetClassName(window, className, className.Capacity) == 0
+            || className.ToString() != "SysListView32")
+            throw new InvalidOperationException("Viewport target differs from bound native ListView.");
+        int[] before = TryReadScrollInfo(window, 0);
+        if (before == null || before[2] <= 0)
+            throw new InvalidOperationException("Native horizontal viewport is unavailable.");
+        long available = (long)before[1] - before[0] - before[2] + 1;
+        if (available <= 0) throw new InvalidOperationException("Native ListView has no horizontal overflow.");
+        int requested = checked((int)(before[0] + (available * 45 + 50) / 100));
+        // Normalize the path as well as its endpoint: native XOR focus chrome
+        // cannot be copied through differing small scroll deltas consistently.
+        int resetDelta = checked(before[0] - before[3]);
+        if (resetDelta != 0) {
+            IntPtr resetResult;
+            if (SendMessageTimeoutW(window, 0x1014, new IntPtr(resetDelta), IntPtr.Zero,
+                    3, 500, out resetResult) == IntPtr.Zero || resetResult == IntPtr.Zero)
+                throw new InvalidOperationException("Native ListView viewport reset failed.");
+        }
+        int[] reset = TryReadScrollInfo(window, 0);
+        if (reset == null || reset[0] != before[0] || reset[1] != before[1]
+            || reset[2] != before[2] || reset[3] != before[0] || reset[4] != before[0])
+            throw new InvalidOperationException("Native ListView viewport reset did not settle exactly.");
+        int delta = checked(requested - reset[3]);
+        if (delta != 0) {
+            IntPtr result;
+            // LVM_SCROLL uses scalar pixel deltas in report view; no remote pointer is passed.
+            if (SendMessageTimeoutW(window, 0x1014, new IntPtr(delta), IntPtr.Zero,
+                    3, 500, out result) == IntPtr.Zero || result == IntPtr.Zero)
+                throw new InvalidOperationException("Native ListView viewport request failed.");
+        }
+        int[] after = TryReadScrollInfo(window, 0);
+        if (after == null || after[0] != before[0] || after[1] != before[1]
+            || after[2] != before[2] || after[3] != requested || after[4] != requested)
+            throw new InvalidOperationException("Native ListView viewport did not settle exactly.");
+        return new [] { requested, after[3] };
+    }
+    public static IntPtr ReadBoundListHeader(IntPtr list, uint expectedProcessId) {
+        uint processId;
+        IntPtr header;
+        if (GetWindowThreadProcessId(list, out processId) == 0 || processId != expectedProcessId
+            || SendMessageTimeoutW(list, 0x101F, IntPtr.Zero, IntPtr.Zero, 3, 500, out header) == IntPtr.Zero
+            || header == IntPtr.Zero || GetAncestor(header, 1) != list
+            || GetWindowThreadProcessId(header, out processId) == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Native header is outside the bound ListView.");
+        StringBuilder className = new StringBuilder(128);
+        if (GetClassName(header, className, className.Capacity) == 0 || className.ToString() != "SysHeader32")
+            throw new InvalidOperationException("Native ListView header class differs.");
+        return header;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UiColor { public byte A, R, G, B; }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int ReadUiColor(IntPtr instance, int colorType, out UiColor color);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int QueryUiInterface(IntPtr instance, ref Guid iid, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoInitialize(uint initType);
+    [DllImport("combase.dll")]
+    private static extern void RoUninitialize();
+    [DllImport("combase.dll", CharSet = CharSet.Unicode)]
+    private static extern int WindowsCreateString(string source, uint length, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int WindowsDeleteString(IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoActivateInstance(IntPtr classId, out IntPtr instance);
+    public static byte[] ReadSystemForegroundColor() {
+        int initialized = RoInitialize(1);
+        if (initialized < 0 && initialized != unchecked((int)0x80010106))
+            Marshal.ThrowExceptionForHR(initialized);
+        IntPtr classId = IntPtr.Zero, instance = IntPtr.Zero, settings = IntPtr.Zero;
+        try {
+            const string runtimeClass = "Windows.UI.ViewManagement.UISettings";
+            int result = WindowsCreateString(runtimeClass, (uint)runtimeClass.Length, out classId);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            result = RoActivateInstance(classId, out instance);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            Guid iid = new Guid("03021be4-5254-4781-8194-5168f7d06d7b");
+            var query = (QueryUiInterface)Marshal.GetDelegateForFunctionPointer(
+                Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance)), typeof(QueryUiInterface));
+            result = query(instance, ref iid, out settings);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            // IUISettings3 inherits IInspectable; GetColorValue is its first method.
+            IntPtr method = Marshal.ReadIntPtr(Marshal.ReadIntPtr(settings), 6 * IntPtr.Size);
+            var read = (ReadUiColor)Marshal.GetDelegateForFunctionPointer(method, typeof(ReadUiColor));
+            UiColor color;
+            result = read(settings, 1, out color); // UIColorType.Foreground
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            return new [] { color.A, color.R, color.G, color.B };
+        }
+        finally {
+            if (settings != IntPtr.Zero) Marshal.Release(settings);
+            if (instance != IntPtr.Zero) Marshal.Release(instance);
+            if (classId != IntPtr.Zero) WindowsDeleteString(classId);
+            if (initialized >= 0) RoUninitialize();
+        }
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
+    public static string ReadBoundStaticText(IntPtr control, IntPtr dialog, uint expectedProcessId) {
+        uint processId;
+        StringBuilder className = new StringBuilder(128);
+        if (GetWindowThreadProcessId(control, out processId) == 0 || processId != expectedProcessId
+            || GetAncestor(control, 1) != dialog || GetDlgCtrlID(control) != 1002
+            || GetClassName(control, className, className.Capacity) == 0
+            || !String.Equals(className.ToString(), "Static", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Text target differs from bound prompt STATIC.");
+        StringBuilder text = new StringBuilder(256);
+        IntPtr result;
+        // WM_GETTEXT is below WM_USER, so Windows marshals its text buffer cross-process.
+        if (SendMessageTimeoutW(control, 0x000D, new IntPtr(text.Capacity), text, 3, 500, out result) == IntPtr.Zero
+            || result.ToInt64() <= 0 || result.ToInt64() >= text.Capacity || result.ToInt64() != text.Length)
+            throw new InvalidOperationException("Bound prompt STATIC text query failed.");
+        return text.ToString();
+    }
+
+    public static int[] TryReadScrollBarBounds(IntPtr window, int bar) {
+        NativeScrollBarInfo info = new NativeScrollBarInfo {
+            Size = (uint)Marshal.SizeOf(typeof(NativeScrollBarInfo)),
+            States = new uint[6]
+        };
+        if (!GetScrollBarInfo(window, bar == 0 ? -6 : -5, ref info)) return null;
+        return new [] { info.Bounds.Left, info.Bounds.Top, info.Bounds.Right, info.Bounds.Bottom,
+            info.ThumbTop, info.ThumbBottom, checked((int)info.States[0]) };
+    }
+
+    public static int[] ReadScrollBarComponents(IntPtr window, int bar) {
+        if (bar != 0 && bar != 1) throw new ArgumentException("Invalid scrollbar axis.");
+        NativeScrollBarInfo info = new NativeScrollBarInfo {
+            Size = (uint)Marshal.SizeOf(typeof(NativeScrollBarInfo)), States = new uint[6]
+        };
+        if (!GetScrollBarInfo(window, bar == 0 ? -6 : -5, ref info))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new [] { info.Bounds.Left, info.Bounds.Top, info.Bounds.Right, info.Bounds.Bottom,
+            info.LineButtonSize, info.ThumbTop, info.ThumbBottom,
+            checked((int)info.States[0]), checked((int)info.States[1]),
+            checked((int)info.States[2]), checked((int)info.States[3]),
+            checked((int)info.States[4]), checked((int)info.States[5]) };
     }
 
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint expectedProcessId) {
@@ -936,6 +1220,12 @@ public static class DarkReNamerVmAcceptanceNative {
     public static long ReadListViewTooltip(IntPtr listView) {
         return SendMessageW(listView, 0x104E, IntPtr.Zero, IntPtr.Zero).ToInt64();
     }
+
+    public static int ReadListViewColumnWidth(IntPtr listView, int column) {
+        return checked((int)SendMessageW(listView, 0x101D, new IntPtr(column), IntPtr.Zero).ToInt64());
+    }
+
+
 
     public static string OsVersion() {
         RTL_OSVERSIONINFOEX value = new RTL_OSVERSIONINFOEX();

@@ -262,11 +262,14 @@ class VmRunnerTests(unittest.TestCase):
                     -ObserverSha256 ('a' * 64) `
                     -BundleRecords @([pscustomobject]@{file='bundle.json';sha256=('b' * 64)}) `
                     -InputManifestSha256 ('c' * 64) `
-                    -AcceptanceMode $(if ($env:VM_RUNNER_CASE -ceq 'high-contrast') {
+                    -TextScalePercent $(if ($env:VM_RUNNER_CASE -ceq 'pair-text') { 150 } else { 100 }) `
+                    -AcceptanceMode $(if ($env:VM_RUNNER_CASE -in @('pair-text', 'pair-high-contrast')) {
+                        'appearance-pair'
+                    } elseif ($env:VM_RUNNER_CASE -ceq 'high-contrast') {
                         'current-dpi'
                     } else { 'text-scale' }) `
                     -Appearance 'system' `
-                    -HighContrast ($env:VM_RUNNER_CASE -ceq 'high-contrast') `
+                    -HighContrast ($env:VM_RUNNER_CASE -in @('high-contrast', 'pair-high-contrast')) `
                     -HostOutputRoot $output `
                     -OriginalFailure ([InvalidOperationException]::new('original-poll'))
             } catch {
@@ -282,7 +285,7 @@ class VmRunnerTests(unittest.TestCase):
         '''
         cases = {}
         for case in ('stop-failure', 'snapshot-absent', 'text-scale',
-                     'high-contrast', 'rescue-failure'):
+                     'high-contrast', 'pair-text', 'pair-high-contrast', 'rescue-failure'):
             with self.subTest(case=case):
                 completed = subprocess.run(
                     [shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
@@ -300,6 +303,10 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(cases['high-contrast']['events'],
                          ['stop', 'snapshot:high-contrast-restore.json',
                           'high-contrast-rescue'])
+        self.assertEqual(cases['pair-text']['events'],
+                         ['stop', 'snapshot:text-scale-snapshot.json', 'text-rescue'])
+        self.assertEqual(cases['pair-high-contrast']['events'],
+                         ['stop', 'snapshot:high-contrast-restore.json', 'high-contrast-rescue'])
         self.assertEqual(cases['rescue-failure']['events'],
                          ['stop', 'snapshot:text-scale-snapshot.json', 'text-rescue'])
         self.assertIn('text-rescue-failure', cases['rescue-failure']['rescue_error'])

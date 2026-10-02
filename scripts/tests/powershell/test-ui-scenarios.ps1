@@ -22,7 +22,23 @@ using System;
 using System.Collections.Generic;
 public static class DarkReNamerVmAcceptanceNative {
     public static List<string> Calls = new List<string>();
+    public static void MoveCursor(int x, int y) { Calls.Add("cursor:" + x + ":" + y); }
+    public static void PopOwnedTooltip(IntPtr window, uint processId) { Calls.Add("tooltip-pop:" + window + ":" + processId); }
+
     public static Queue<object> Snapshots = new Queue<object>();
+    public static int HighContrastFlags;
+    public static byte[] Foreground = new byte[] { 255, 0, 0, 0 };
+    public static byte[] ReadSystemForegroundColor() { return (byte[])Foreground.Clone(); }
+    public class VisualStyle {
+        public int Flags;
+        public string Scheme = "fixture-scheme", ThemePath = "fixture-theme", ThemeColor = "NormalColor", ThemeSize = "NormalSize";
+        public uint Window, WindowText = 0, ButtonFace = 240, ButtonText = 0,
+            Highlight = 128, HighlightText = 255, GrayText = 120, HotLight = 128;
+    }
+    public static VisualStyle GetHighContrastSnapshot() { return new VisualStyle { Flags = HighContrastFlags, Window = HighContrastFlags == 0 ? 0xffffffu : 0u }; }
+    public static void ApplyHighContrast(uint flags, string scheme) {
+        Calls.Add("high-contrast:" + flags); HighContrastFlags = (int)flags;
+    }
     public static uint DisabledCommand;
     public static string InputFailure = "", Cleanup = "cleared";
     public static bool IsMenuCommandChecked(IntPtr window, uint command) {
@@ -86,6 +102,115 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-scenarios-' + [gui
 $null = New-Item -ItemType Directory -Path $root
 $clipboardCases = [Collections.Generic.List[object]]::new()
 try {
+    foreach ($flags in 0,1) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $flags
+        $style = Get-ObserverSystemVisualStyle
+        Assert-Equal $style.forced_colors ($flags -eq 1) 'Observed Forced Colors flag'
+        Assert-Equal $style.theme_path_sha256 (Get-LowerTextSha256 -Value 'fixture-theme') 'Bound observed theme hash'
+        Assert-Equal $style.theme_color 'NormalColor' 'Observed theme color'
+        Assert-Equal $style.theme_size 'NormalSize' 'Observed theme size'
+    }
+    foreach ($case in @(@(0, 0, 'light'), @(0, 245, 'dark'), @(1, 0, 'native'))) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $case[0]
+        [DarkReNamerVmAcceptanceNative]::Foreground = [byte[]]@(255, $case[1], $case[1], $case[1])
+        $resolved = Get-ObserverResolvedSystemAppearance
+        Assert-Equal $resolved.resolved_theme $case[2] 'Observed foreground and Forced Colors theme precedence'
+    }
+    [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
+    & {
+        foreach ($case in @(@(96, '900,900,260'), @(120, '1125,1125,325'), @(144, '1350,1350,390'), @(192, '1800,1800,520'))) {
+            Assert-Equal ((Get-ObserverAppearanceColumnWidthsPx -Dpi $case[0]) -join ',') $case[1] 'Scaled persisted column widths'
+        }
+        $expectedHex = '4452434f4c53000001070000010184030000010184030000010104010000000078000000000050000000000078000000000078000000fd60733e'
+        $bytes = Get-ObserverAppearanceColumnPreferenceBytes
+        Assert-Equal $bytes.Length 58 'Appearance column preference length'
+        Assert-Equal ([Convert]::ToHexString($bytes).ToLowerInvariant()) $expectedHex 'Exact supported v1 column preference bytes and checksum'
+        $isolated = Join-Path $root 'pair-settings'
+        $localData = Join-Path $isolated 'localappdata'
+        [void](New-Item -ItemType Directory -Path $localData -Force)
+        $priorLocalData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localData, 'Process')
+            $seed = New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated
+            Assert-Equal $seed.source 'isolated-persisted-user-settings' 'Appearance preference source'
+            Assert-Equal (Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes) $seed.sha256 'Unchanged seeded preference'
+            $changed = [byte[]]$bytes.Clone(); $changed[14] = 0
+            [IO.File]::WriteAllBytes($seed.path, $changed)
+            Assert-Fails { Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes } 'Appearance column preference changed'
+            $malformed = [byte[]]$bytes.Clone(); $malformed[57] = $malformed[57] -bxor 1
+            [IO.File]::WriteAllBytes($seed.path, $malformed)
+            Assert-Fails { Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes } 'Appearance column preference changed'
+            Assert-Fails { New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated } 'already exists'
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $root, 'Process')
+            Assert-Fails { New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated } 'isolated LOCALAPPDATA'
+        }
+        finally { [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $priorLocalData, 'Process') }
+    }
+    & {
+        function New-PrivateDirectory {
+            param($Parent, $Leaf)
+            Assert-Equal $Leaf 'appearance-fixture' 'Appearance pair first fixture directory'
+            throw 'appearance pair entered with initially empty captures'
+        }
+        $initialCaptures = [Collections.Generic.List[object]]::new()
+        Assert-Fails {
+            Invoke-ObserverAppearancePairScenario -Verified @{} -RuntimeRoot $root `
+                -EvidenceRoot $root -SessionId 1 -WaitSeconds 2 -Captures $initialCaptures
+        } 'appearance pair entered with initially empty captures'
+        Assert-Equal $initialCaptures.Count 0 'Appearance pair empty captures before first screenshot'
+    }
+    & {
+        # Keep production High Contrast control flow intact while replacing only
+        # OS capture, appearance selection, and document I/O endpoints.
+        $probeRoot = Join-Path $root 'high-contrast-pair-probe'
+        [void](New-Item -ItemType Directory -Path $probeRoot)
+        $restorePath = Join-Path $probeRoot 'high-contrast-restore.json'
+        $sourceSha = 'a' * 40
+        $scriptSha = 'b' * 64
+        $captures = [Collections.Generic.List[object]]::new()
+        $application = [pscustomobject]@{process=$process;main_handle=101}
+        function Set-AcceptanceAppearance {
+            param($Process,$ExpectedSession,$MainWindowHandle,$Appearance)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("appearance:$Appearance")
+            [ordered]@{appearance=$Appearance}
+        }
+        function Save-ObserverAppearanceSystemCapture {
+            param($Application,$Grid,$SessionId,$EvidenceRoot,$Phase,$Captures)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("capture:$Phase")
+            if ($Phase -ceq 'forced-colors') { throw 'fixture forced-colors capture failure' }
+            [ordered]@{phase=$Phase;resolution=[ordered]@{resolved_theme='light'}}
+        }
+        function Write-JsonUtf8Bom {
+            param($Path,$Value)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("snapshot:$($Value.restoration_required)")
+            [IO.File]::WriteAllText($Path,($Value|ConvertTo-Json -Depth 16),[Text.UTF8Encoding]::new($true))
+        }
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
+        [DarkReNamerVmAcceptanceNative]::Calls.Clear()
+        Assert-Fails {
+            Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
+                -EvidenceRoot $probeRoot -SourceSha 'invalid' -AcceptanceScriptSha256 $scriptSha -Captures $captures
+        } 'requires exact source and acceptance script bindings'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls.Count) 0 'Missing source SHA rejected before appearance or session mutation'
+        Assert-Equal (Test-Path -LiteralPath $restorePath) $false 'Invalid SHA wrote no restoration document'
+
+        Assert-Fails {
+            Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
+                -EvidenceRoot $probeRoot -SourceSha $sourceSha -AcceptanceScriptSha256 $scriptSha -Captures $captures
+        } 'fixture forced-colors capture failure'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') `
+            'appearance:system,capture:before,snapshot:True,high-contrast:1,capture:forced-colors,high-contrast:0,snapshot:False' `
+            'Recovery snapshot persisted before first mutation and finally restored after active capture failure'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::HighContrastFlags) 0 'High Contrast session flags restored'
+        $restoration = [IO.File]::ReadAllText($restorePath) | ConvertFrom-Json
+        Assert-Equal $restoration.schema_version 2 'High Contrast restoration schema'
+        Assert-Equal $restoration.source_sha $sourceSha 'High Contrast source binding'
+        Assert-Equal $restoration.acceptance_script_sha256 $scriptSha 'High Contrast observer binding'
+        Assert-Equal $restoration.restoration_required $false 'High Contrast recovery no longer pending'
+        Assert-Equal $restoration.restoration_verified $true 'High Contrast exact restoration verified'
+        Assert-Equal ($restoration.original | ConvertTo-Json -Depth 8 -Compress) `
+            ($restoration.restored | ConvertTo-Json -Depth 8 -Compress) 'Original High Contrast snapshot restored exactly'
+    }
     & {
         $bindingFailure = $false
         function Assert-AutomationBinding {
@@ -530,4 +655,24 @@ finally {
     $process.Dispose()
     Remove-Item -LiteralPath $root -Recurse -Force
 }
+$savedWindowReader = ${function:Get-ObserverProcessWindows}
+try {
+    $script:tooltipWindows = [Collections.Generic.Queue[object]]::new()
+    function Get-ObserverProcessWindows { param($Process); $script:tooltipWindows.Dequeue() }
+    $application = [pscustomobject]@{
+        process = [pscustomobject]@{ Id = 4242 }
+        main = [pscustomobject]@{ Current = [pscustomobject]@{ BoundingRectangle = [pscustomobject]@{ Left = 0; Top = 0; Width = 640; Height = 480 } } }
+    }
+    $tooltip = [ordered]@{ hwnd = 2001; visible = $true; class_name = 'tooltips_class32' }
+    $script:tooltipWindows.Enqueue(@($tooltip)); $script:tooltipWindows.Enqueue(@())
+    [DarkReNamerVmAcceptanceNative]::Calls.Clear()
+    $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
+    Assert-Equal $overlay.dismissed_tooltip_count 1 'Owned tooltip dismissal count'
+    Assert-Equal $overlay.visible_tooltip_count 0 'No retained tooltip overlay'
+    Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') 'cursor:320:10,tooltip-pop:2001:4242' 'Exact owned tooltip target'
+    $script:tooltipWindows.Enqueue(@($tooltip)); $script:tooltipWindows.Enqueue(@($tooltip))
+    Assert-Fails { Assert-ObserverAppearanceNoTooltip -Application $application } 'visible owned tooltip after native dismissal'
+}
+finally { Set-Item Function:Get-ObserverProcessWindows $savedWindowReader }
+
 Write-Output 'UI scenario behavior contracts passed.'

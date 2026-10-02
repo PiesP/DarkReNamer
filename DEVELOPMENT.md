@@ -423,6 +423,126 @@ After a strict OS-delta rejection, a separately hash-bound coordinator cleanup
 proof may establish only workload-owned cleanup before the next declared
 attempt. It cannot replace the original receipt or reclassify acceptance.
 
+### Paired appearance diagnostic
+
+On a clean, committed source checkout with the prepared VM available, run the
+opt-in baseline at a supported 1366×768 desktop and 96 DPI:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic appearance-pair \
+  --desktop-width 1366 --desktop-height 768 --desktop-dpi 96 \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-appearance-pair-attempt
+```
+
+The selected managed RDP helper must support explicit display geometry. The
+observer checks the actual target monitor and window DPI before scene capture;
+the request alone is not evidence. Other bounded choices are width 800–1920,
+height 600–1080, and DPI 96, 120, 144, or 192. Each new attempt needs a new
+external output directory. The observer has a 600-second timeout and the
+collected output is capped at 120 MiB. The immutable run input records the
+existing `vm-automated-v1-win11-ntfs` cleanup profile by default. An explicit
+`--acceptance-profile-id vm-automated-v2-owned-resources` selects the existing
+V2 owned-resource cleanup contract for this diagnostic only. The launcher
+freezes the unchanged `config/vm-automated-v2.json` bytes and digest in each
+input, binds the controller arguments to them, and independently verifies the
+complete V2 cleanup inventory and the observer Job and process lifetimes.
+This option requires `--diagnostic appearance-pair`; it does not change the
+default four-run regression, either profile definition, or the release matrix.
+V2 permits ambient process deltas only under its established ownership and
+required-environment checks. Preserved V1 failures retain their original verdict.
+Selecting V2 cleanup here does not establish complete V2 release acceptance.
+
+The diagnostic retains 66 original guest desktop PNGs. Eight main states
+(empty, one unchanged multilingual row, overflow, changed proposal, empty-stem
+warning, collision, active selection, and inactive selection) each run
+Light → Dark → Light in one process. Five button states (normal, disabled,
+hover, held pressed, and keyboard focus), the native View menu, advanced
+appearance, and a cancellable prefix prompt are also paired. Button release
+outside the enabled Prefix command cancels activation; Apply is never invoked.
+The warning uses the valid leaf `.txt`, keeping its empty-stem warning distinct
+from an invalid name or collision.
+
+The isolated fixture loads supported persisted user column widths before
+startup, so empty and one-row scenes retain horizontal overflow. Native/UIA
+state binds process/window, columns, scroll ranges and rectangles, settled focus,
+selection, proposed-name cells, enabled states, and unchanged file identities.
+After proposal exposure and focus settlement, the fixture uses scalar
+`LVM_SCROLL` horizontal pixels to set the same rounded 45% native range position.
+The requested and observed pixels must match exactly; UIA percentage rounding
+does not relax viewport invariance. Other scenes only observe their viewport.
+The fixture first resets the native horizontal position to its minimum, then
+uses the same final pixel delta in every phase and allows painting to settle.
+The native XOR focus rectangle cannot be scrolled safely through differing
+small deltas. The strict original Light endpoint comparison remains unchanged.
+Main scene captures settle the cursor on the title bar and reject visible owned
+tooltips. A retained tooltip is dismissed through standard `TTM_POP` only after
+verifying its process and native class, with the dismissal count recorded; a
+still-visible overlay rejects capture. Interaction captures intentionally retain
+their target state. Dialog
+Cancel and appearance-setting rollback are checked without applying file changes.
+The custom prompt default is queried on its bound standard BUTTON through
+`WM_GETDLGCODE` and `GetDlgCtrlID`; the prompt uses `DefWindowProcW`, so a
+`DM_GETDEFID` dialog-manager response is not assumed.
+
+Both native scrollbar thumbs are pressed, moved, and released in each theme phase.
+The observer binds the hit HWND and native mouse capture to the list, records
+`SCROLLBARINFO` components and `SCROLLINFO`, verifies that dragging advances the
+viewport, and restores the initial position in `finally`. The additional 18
+original PNGs support separate dark thumb/track/intersection assertions. Flat
+regions require at least 95% of pixels within two RGB units of their declared
+role; native thumb states can select normal, hot, pressed, or disabled roles.
+The two Light endpoint client rasters must restore with no pixel differences
+of ten RGB units or more. These checks cover the declared configuration, not
+unexecuted native themes or display configurations.
+
+The pair records the target window's actual DPI-awareness context and screen-space
+client bounds separately from observer awareness. Each theme phase rechecks both
+and the system message/status `LOGFONTW` recipes at the target DPI. Installed
+font-family count and an ordinal, UTF-8 inventory digest describe the font
+environment. These recipes describe system font inputs, not a cross-process
+`HFONT` inspection; original multilingual glyph rasters remain the rendering
+evidence. No application GDI handle is dereferenced by the observer.
+
+For the fixed five-configuration check, use the same command with
+`--configuration-set focused` and omit the desktop arguments. The runner builds
+one bundle and executes 1920×1080 at 96, 144 and 192 DPI, Text150 at 96 DPI,
+and Forced Colors at 96 DPI sequentially. The independent verifier compares the
+source tree, bundle manifest and all staged artifact hashes across the five runs.
+Text150 compares the same original Korean prompt glyphs with the baseline in
+both dimensions, with unchanged font-family inputs. The label is observed on its
+bound STATIC using bounded `WM_GETTEXT`; no foreign font pointer is read.
+
+The Forced Colors run adds three System captures after its 66 ordinary scenes.
+It records System foreground resolution before activation, native fallback with
+selected/unselected semantic text during activation, and exact restoration of
+System state and client pixels. Source/script-bound restoration receipts precede
+setting mutations. Producer `finally` and existing controller terminal/timeout
+rescue paths restore the original settings, and collected receipts must verify
+restoration. Normal OS Light/Dark setting transitions are not exercised.
+
+The independent verifier checks source/EXE/environment bindings, exact capture
+inventory, state invariance, proposed-name semantic pixels without current-name
+color leakage, selection transitions, actual cursor targets, one-pixel outlines,
+default cues, quiet dividers, text ink, pressed displacement and focus perimeter.
+Dark native thumb/track/intersection palettes and the strict original Light client
+endpoint comparisons are conformance gates. A passing verdict applies to the
+declared scenes and configurations; design approval remains separate. This
+opt-in diagnostic does not complete the four fixed GUI regression runs or
+release acceptance.
+
+The painting policy keeps control outlines, default outlines, and decorative
+hairlines one physical pixel. Focus inset, pressed displacement, and existing
+separator slots/padding scale in DIP. Adjacent buttons share one outline seam;
+allocated separator slots are cleared and contain one centered hairline.
+Interactive outlines use `control_outline`; header, status, group and dialog
+separators use `divider_subtle`. Disabled labels use the distinct readable
+`text_disabled` role. Native focus rectangles and selected-row precedence are
+retained. Dark scrollbar tracks use the window surface, with a stronger thumb
+ramp from the existing outline/foreground roles; native geometry and input remain
+owned by the ListView. Native/Forced Colors disables this custom chrome.
+
 ## Historical acceptance and GUI diagnostics
 
 Standalone UI and recovery observer staging, the former formal acceptance

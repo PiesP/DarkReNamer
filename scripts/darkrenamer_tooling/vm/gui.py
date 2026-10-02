@@ -1,4 +1,4 @@
-"""Build and run the four source-bound DarkReNamer GUI regression cells."""
+"""Run four fixed GUI cells or one opt-in paired appearance diagnostic."""
 
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ from darkrenamer_tooling.contracts.tooling import staged_tooling_files
 SAFE_LEAF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
+V1_PROFILE_ID = "vm-automated-v1-win11-ntfs"
+V2_PROFILE_ID = "vm-automated-v2-owned-resources"
+V2_PROFILE_FILE = "vm-automated-v2.json"
 MAX_PNG_PIXELS = 32 * 1024 * 1024
 MAX_PNG_DECODED_BYTES = 128 * 1024 * 1024
 RUNS = (
@@ -62,6 +65,30 @@ RUNS = (
         "dpi": 144,
         "text_scale_percent": 100,
     },
+)
+APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
+
+
+def appearance_pair_run(width: int, height: int, dpi: int, *,
+                        run_id: str = APPEARANCE_PAIR_ID,
+                        text_scale_percent: int = 100,
+                        high_contrast: bool = False) -> dict:
+    return {
+        "run_id": run_id, "mode": "appearance-pair",
+        "appearance": "system" if high_contrast else "light",
+        "width": width, "height": height, "dpi": dpi,
+        "text_scale_percent": text_scale_percent, "high_contrast": high_contrast,
+    }
+
+
+FOCUSED_PAIR_RUNS = (
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-base-1920x1080-96-text100"),
+    appearance_pair_run(1920, 1080, 144, run_id="appearance-pair-fractional-1920x1080-144-text100"),
+    appearance_pair_run(1920, 1080, 192, run_id="appearance-pair-high-1920x1080-192-text100"),
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-text150-1920x1080-96-text150",
+                        text_scale_percent=150),
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-forced-colors-1920x1080-96-text100",
+                        high_contrast=True),
 )
 
 FULL_CONTEXT_SEMANTICS = {
@@ -493,7 +520,8 @@ def source_identity(repo: Path) -> tuple[str, str]:
     return source_sha, source_tree
 
 
-def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict, dict]:
+def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
+                        acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict]:
     manifest = read_json(bundle / "bundle.json")
     source_sha, source_tree = source_identity(repo)
     require(manifest.get("source_sha") == source_sha and manifest.get("source_state") == "clean",
@@ -517,6 +545,9 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
         "Cargo.lock": repo / "Cargo.lock",
         "test-windows-vm.py": scripts / "test-windows-vm.py",
     }
+    if acceptance_profile_id == V2_PROFILE_ID:
+        sources[V2_PROFILE_FILE] = ordinary_file(repo / "config" / V2_PROFILE_FILE, 1024 * 1024,
+                                                 "V2 acceptance profile")
     for name in staged_tooling_files(bundle):
         require(name not in sources, "Tooling bundle member collides with a GUI input.")
         sources[name] = bundle / name
@@ -550,6 +581,7 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
             "lockfile": rows["Cargo.lock"],
             "builder": rows["test-windows-vm.py"],
         },
+        **({"acceptance_profile": rows[V2_PROFILE_FILE]} if acceptance_profile_id == V2_PROFILE_ID else {}),
         "source_sha": source_sha,
         "source_tree": source_tree,
     }
@@ -558,7 +590,7 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path) -> tuple[dict,
 def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_sha256: str,
                    host_preflight: dict, guest_preflight: dict,
                    reference: dict | None = None) -> dict:
-    _, inputs = run_input_artifacts(repo, bundle, run_root)
+    _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
     result = {
         "schema_version": 1,
         "run_id": run["run_id"],
@@ -574,15 +606,30 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "appearance": run["appearance"],
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
+            **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+            *(["--diagnostic", "appearance-pair"] if run["mode"] == "appearance-pair" else []),
+            *(["--desktop-width", str(run["width"]),
+               "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
+              if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
+            *(["--acceptance-profile-id", V2_PROFILE_ID] if run.get("acceptance_profile_id") == V2_PROFILE_ID else []),
+            *(["--configuration-set", "focused"] if run["mode"] == "appearance-pair"
+              and run["run_id"] != APPEARANCE_PAIR_ID else []),
         ],
     }
     if reference is not None:
         result["full_context_reference"] = reference
+    if run["mode"] == "appearance-pair":
+        result["acceptance_profile_id"] = run.get("acceptance_profile_id", V1_PROFILE_ID)
+        if result["acceptance_profile_id"] == V2_PROFILE_ID:
+            require(run["acceptance_profile_sha256"] == inputs["acceptance_profile"]["sha256"],
+                    "V2 acceptance profile changed between selection and immutable staging.")
+            result["acceptance_profile"] = inputs["acceptance_profile"]
+            result["acceptance_profile_sha256"] = inputs["acceptance_profile"]["sha256"]
     return result
 
 
@@ -623,7 +670,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                        profile: dict, lease: dict) -> list[str]:
     pwsh = shutil.which("pwsh")
     require(pwsh is not None, "GUI regression transport requires PowerShell 7.4 or newer as pwsh.")
-    return [
+    command = [
         pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
         str(repo / "scripts" / "run-windows-vm-tests.ps1"),
         "-BundleRoot", str(bundle),
@@ -636,11 +683,26 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceAppearance", run["appearance"],
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
+    if run["mode"] == "appearance-pair":
+        command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
+                    "-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
+        if run.get("acceptance_profile_id") == V2_PROFILE_ID:
+            manifest = read_json(run_root / "input-manifest.json")
+            staged = ordinary_file(run_root / "inputs" / V2_PROFILE_FILE, 1024 * 1024, "Staged V2 profile")
+            require(manifest.get("acceptance_profile_id") == V2_PROFILE_ID and
+                    manifest.get("acceptance_profile_sha256") == run["acceptance_profile_sha256"] == digest(staged) and
+                    manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
+                    "V2 controller profile differs from its immutable staged manifest.")
+            command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
+        if run["high_contrast"]:
+            command += ["-AcceptanceHighContrast"]
+    return command
 
 
 def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
     output = run_root / "output"
     files = []
+    total_bytes = 0
     for path in sorted(output.rglob("*")):
         if not path.is_file() or path.name == "run-result.json":
             continue
@@ -650,7 +712,14 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
             "bytes": path.stat().st_size,
             "sha256": digest(path),
         })
+        total_bytes += path.stat().st_size
     require(files, "A GUI regression run returned no raw output.")
+    pair_ids = {APPEARANCE_PAIR_ID, *(run["run_id"] for run in FOCUSED_PAIR_RUNS)}
+    if run_id in pair_ids:
+        expected_pngs = 69 if run_id == FOCUSED_PAIR_RUNS[-1]["run_id"] else 66
+        require(total_bytes <= 120 * 1024 * 1024 and
+                sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
+                f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -739,7 +808,45 @@ def finalize_run(run_root: Path) -> None:
     write_json(collection_path, collection_document(run_root, input_sha256, manifest["run_id"]), exclusive=True)
     result_path = run_root / "output" / "run-result.json"
     require(not result_path.exists(), "Normalized run result already exists.")
-    write_json(result_path, normalize_run_result(run_root, input_sha256), exclusive=True)
+    normalized = (normalize_pair_result(run_root, input_sha256)
+                  if manifest["request"]["mode"] == "appearance-pair"
+                  else normalize_run_result(run_root, input_sha256))
+    write_json(result_path, normalized, exclusive=True)
+
+
+def normalize_pair_result(run_root: Path, input_sha256: str) -> dict:
+    manifest = read_json(run_root / "input-manifest.json")
+    output = run_root / "output"
+    observer = read_json(output / "acceptance-result.json")
+    observations = read_json(output / "acceptance-observations.json")
+    require(observer.get("observations", {}).get("sha256") == digest(output / "acceptance-observations.json")
+            and observer.get("acceptance_observations") == observations,
+            "Appearance observer result does not bind its collected observations.")
+    transport = read_json(output / "transport.json")
+    require(transport.get("observer_process") == {"state": "exited", "exit_code": 0},
+            "Appearance observer process did not exit successfully.")
+    preflight = read_json(output / "platform-preflight.json")
+    environment = observations.get("environment", {})
+    window = environment.get("main_window", {})
+    artifacts = manifest["artifacts"]
+    return {
+        "schema_version": 1, "diagnostic": "appearance-pair", "run_id": manifest["run_id"],
+        "input_manifest_sha256": input_sha256, "collection_sha256": digest(run_root / "collection.json"),
+        "cleanup_sha256": digest(output / "cleanup.json"), "source_sha": manifest["source_sha"],
+        "application_sha256": artifacts["application"]["sha256"],
+        "runner_sha256": artifacts["runner"]["sha256"],
+        "observer_sha256": artifacts["observer"]["sha256"],
+        "observer_result_sha256": digest(output / "acceptance-result.json"),
+        "host_platform": manifest["host_preflight"], "guest_platform": preflight["guest_platform"],
+        "actual": {
+            "monitor": window.get("target_monitor"), "work_area": window.get("target_work_area"),
+            "hwnd_dpi": environment.get("hwnd_dpi"),
+            "text_scale_percent": environment.get("text_scale_factor_percent"),
+            "target": {"hwnd": window.get("hwnd"), "process_id": window.get("process_id"),
+                       "window_rect": window.get("rect")},
+        },
+        "status": observer.get("status"), "exit_code": 0,
+    }
 
 
 def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: dict,
@@ -806,7 +913,9 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
     finalize_run(run_root)
 
 
-def validate_all(repo: Path, result_root: Path, output_root: Path) -> None:
+def validate_all(repo: Path, result_root: Path, output_root: Path,
+                 diagnostic: str | None = None, selected_runs: tuple[dict, ...] | None = None,
+                 configuration_set: str | None = None) -> None:
     validator = repo / "scripts" / "validate-gui-regression-evidence.py"
     ordinary_file(validator, 2 * 1024 * 1024, "GUI regression evidence validator")
     source_sha, _ = source_identity(repo)
@@ -814,9 +923,16 @@ def validate_all(repo: Path, result_root: Path, output_root: Path) -> None:
         sys.executable, "-I", str(validator), "--result-root", str(result_root),
         "--expected-source-sha", source_sha,
     ]
-    for run in RUNS:
+    runs = selected_runs if selected_runs is not None else (
+        (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else RUNS)
+    for run in runs:
         command += ["--run", run["run_id"]]
-    command += ["--require-complete-set"]
+    if diagnostic == "appearance-pair":
+        command += ["--diagnostic", "appearance-pair"]
+        if configuration_set == "focused":
+            command += ["--configuration-set", "focused"]
+    else:
+        command += ["--require-complete-set"]
     completed = subprocess.run(command, cwd=repo, check=True, capture_output=True)
     report = json.loads(completed.stdout)
     write_json(output_root / "validation-result.json", report, exclusive=True)
@@ -826,8 +942,44 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
+    parser.add_argument("--diagnostic", choices=["appearance-pair"])
+    parser.add_argument("--configuration-set", choices=["focused"])
+    parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
+    parser.add_argument("--desktop-width", type=int, default=1366)
+    parser.add_argument("--desktop-height", type=int, default=768)
+    parser.add_argument("--desktop-dpi", type=int, choices=[96, 120, 144, 192], default=96)
     args = parser.parse_args(argv)
     repo = Path(repo)
+    require(args.desktop_width in range(800, 1921) and args.desktop_height in range(600, 1081),
+            "Appearance pair desktop must be between 800x600 and 1920x1080.")
+    require(args.diagnostic or (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
+            "Desktop selection requires --diagnostic appearance-pair.")
+    require(not args.configuration_set or args.diagnostic == "appearance-pair",
+            "A configuration set requires --diagnostic appearance-pair.")
+    require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
+            "Acceptance profile selection requires --diagnostic appearance-pair.")
+    require(not args.configuration_set or
+            (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
+            "Focused configuration set does not accept desktop overrides.")
+    selected_runs = (FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
+                     (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
+                     if args.diagnostic == "appearance-pair" else RUNS)
+    if args.diagnostic == "appearance-pair":
+        selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
+        profile_digest = None
+        if selected_profile == V2_PROFILE_ID:
+            profile_file = ordinary_file(Path(repo) / "config" / V2_PROFILE_FILE, 1024 * 1024,
+                                         "V2 acceptance profile")
+            profile_document = read_json(profile_file)
+            require(profile_document.get("schema") == "darkrenamer-vm-automated-profile-v2" and
+                    profile_document.get("profile_id") == V2_PROFILE_ID and
+                    type(profile_document.get("revision")) is int and
+                    profile_document.get("revision") == 2,
+                    "V2 acceptance profile definition is unavailable.")
+            profile_digest = digest(profile_file)
+        selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
+                               **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
+                              for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
@@ -839,7 +991,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     runs_root.mkdir()
     launcher.build_bundle(repo, bundle, tooling)
     reference = None
-    for run in RUNS:
+    for run in selected_runs:
         run_root = runs_root / run["run_id"]
         run_root.mkdir()
         if run["mode"] == "tooltip":
@@ -850,11 +1002,13 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             exclusive=True,
         )
         execute_run(repo, run_root / "inputs", run_root, run, profile, launcher)
-    validate_all(repo, runs_root, root)
+    validate_all(repo, runs_root, root, args.diagnostic, selected_runs, args.configuration_set)
     print(json.dumps({
-        "status": "validated",
+        "status": "diagnostic-validated" if args.diagnostic else "validated",
         "source_sha": read_json(bundle / "bundle.json")["source_sha"],
-        "runs": [run["run_id"] for run in RUNS],
+        "runs": [run["run_id"] for run in selected_runs],
+        "diagnostic": args.diagnostic,
+        "configuration_set": args.configuration_set,
         "output_root": str(root),
     }))
     return 0
