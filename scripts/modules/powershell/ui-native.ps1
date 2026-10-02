@@ -874,10 +874,10 @@ public static class DarkReNamerVmAcceptanceNative {
         if (SendMessageTimeoutW(tooltip, 0x041C, IntPtr.Zero, IntPtr.Zero, 3, 500, out result) == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Tooltip dismissal failed or timed out.");
     }
-    public static int ReadDefaultDialogButtonId(IntPtr dialog) {
-        long result = SendMessageW(dialog, 0x0400, IntPtr.Zero, IntPtr.Zero).ToInt64();
-        if (((result >> 16) & 0xffff) != 0x534B) return 0;
-        return (int)(result & 0xffff);
+    public static int ReadDefaultPushButtonId(IntPtr button) {
+        long code = SendMessageW(button, 0x0087, IntPtr.Zero, IntPtr.Zero).ToInt64();
+        if ((code & 0x2010) != 0x2010 || (code & 0x0020) != 0) return 0;
+        return GetDlgCtrlID(button);
     }
     public static int ReadButtonState(IntPtr button) {
         if (button == IntPtr.Zero) throw new ArgumentException("Button handle is missing.");

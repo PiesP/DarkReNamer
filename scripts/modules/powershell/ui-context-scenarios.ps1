@@ -1526,15 +1526,17 @@ function Invoke-ObserverAppearancePairScenario {
                     -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix edit' -RequireWindowHandle
                 $ok = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
                     -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix default OK' -RequireEnabled -RequireWindowHandle
-                if ($edit.Current.Name -cne '붙일 문자열' -or [DarkReNamerVmAcceptanceNative]::ReadDefaultDialogButtonId($promptHandle) -ne 1) {
-                    throw 'Appearance prefix prompt lost its label or default button.'
+                $defaultId = [DarkReNamerVmAcceptanceNative]::ReadDefaultPushButtonId([IntPtr]$ok.Current.NativeWindowHandle)
+                if ($edit.Current.Name -cne '붙일 문자열' -or $defaultId -ne 1) {
+                    throw "Appearance prefix prompt lost its label or default button: label=$($edit.Current.Name), default=$defaultId."
                 }
                 $promptState = [ordered]@{
                     window = Get-ElementObservation -Element $prompt
                     native_window = Get-ObserverNativeWindowMetrics -Window $prompt
                     edit = Get-ElementObservation -Element $edit
                     default_button = Get-ElementObservation -Element $ok
-                    default_button_id = 1
+                    default_button_id = $defaultId
+                    default_button_query = 'WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID'
                     capture = Save-ObserverAppearanceCapture -Application $application -Window $prompt -EvidenceRoot $EvidenceRoot `
                         -Leaf "appearance-input-prompt-$step.png" -Appearance $appearance -Surface 'input-prompt' -SessionId $SessionId -Captures $Captures
                 }

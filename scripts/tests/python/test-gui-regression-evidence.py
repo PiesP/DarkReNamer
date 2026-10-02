@@ -734,6 +734,7 @@ class Fixture:
                       "edit": control("1004", "붙일 문자열", 230, 170, 180, 28, native_handle=5002),
                       "default_button": control("1", "확인", 350, 260, 100, 32, native_handle=5003),
                       "default_button_id": 1,
+                      "default_button_query": "WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID",
                       "capture": add_capture(f"appearance-input-prompt-{phase}.png",
                                              pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
                                                       width=300, height=200),
@@ -1424,6 +1425,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         for field, value, message in (
             ("pressed", 8, "button native/UIA state"),
             ("default_button_id", 0, "native default button"),
+            ("default_button_query", "DM_GETDEFID", "native default button"),
             ("column_preference_sha256", "f" * 64, "interaction theme, settings"),
         ):
             with self.subTest(field=field):
@@ -1433,7 +1435,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 interaction = raw["assertions"]["scenario"]["interactions"][1]
                 if field == "pressed":
                     interaction["buttons"]["pressed"]["native_button_state"] = value
-                elif field == "default_button_id":
+                elif field in {"default_button_id", "default_button_query"}:
                     interaction["input_prompt"][field] = value
                 else:
                     interaction[field] = value

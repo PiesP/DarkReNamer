@@ -1675,7 +1675,9 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     default = entry.get("default_button", {})
                     require(edit.get("automation_id") == "1004" and edit.get("name") == "붙일 문자열" and
                             default.get("automation_id") == "1" and default.get("enabled") is True and
-                            entry.get("default_button_id") == 1,
+                            entry.get("default_button_id") == 1 and
+                            entry.get("default_button_query") ==
+                            "WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID",
                             "Appearance prompt label or native default button differs.")
         scrollbars = interaction.get("scrollbars")
         require(isinstance(scrollbars, dict) and set(scrollbars) == set(PAIR_SCROLL_AXES),

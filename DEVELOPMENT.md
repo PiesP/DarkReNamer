@@ -465,6 +465,9 @@ verifying its process and native class, with the dismissal count recorded; a
 still-visible overlay rejects capture. Interaction captures intentionally retain
 their target state. Dialog
 Cancel and appearance-setting rollback are checked without applying file changes.
+The custom prompt default is queried on its bound standard BUTTON through
+`WM_GETDLGCODE` and `GetDlgCtrlID`; the prompt uses `DefWindowProcW`, so a
+`DM_GETDEFID` dialog-manager response is not assumed.
 
 Both native scrollbar thumbs are pressed, moved, and released in each theme phase.
 The observer binds the hit HWND and native mouse capture to the list, records
