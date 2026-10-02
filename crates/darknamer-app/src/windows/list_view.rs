@@ -265,7 +265,19 @@ fn paint_native_list_scrollbars(window: HWND, palette: SemanticPalette) {
                 && cursor.x - dx < rect.right()
                 && cursor.y - dy >= rect.y
                 && cursor.y - dy < rect.bottom();
-            let color = if disabled {
+            // The thumb is the persistent position affordance; give it the
+            // stronger outline/foreground ramp, rather than an arrow surface.
+            let color = if part_index == 1 {
+                if disabled {
+                    palette.divider_subtle
+                } else if state & STATE_SYSTEM_PRESSED != 0 {
+                    palette.text_secondary
+                } else if hot {
+                    palette.text_disabled
+                } else {
+                    palette.control_outline
+                }
+            } else if disabled {
                 palette.control_disabled
             } else if state & STATE_SYSTEM_PRESSED != 0 {
                 palette.control_pressed
