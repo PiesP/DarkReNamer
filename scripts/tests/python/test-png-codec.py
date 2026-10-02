@@ -1,5 +1,6 @@
 """Default offline coverage for shared PNG decoding and consumer policies."""
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import struct
@@ -107,6 +108,50 @@ class PngCodecTests(unittest.TestCase):
                     expected.extend(row[offset:offset + 3])
                     expected.append(row[offset + 3] if channels == 4 else 255)
             self.assertEqual((width, height, rgba), (2, len(rows), bytes(expected)))
+
+    def test_unfiltered_rows_remain_previous_rows_for_every_color_type(self):
+        filters = (4, 0, 2, 1, 0, 3, 4)
+        for color_type, channels in ((0, 1), (2, 3), (4, 2), (6, 4)):
+            rows = []
+            expected = bytearray()
+            for y in range(len(filters)):
+                row = bytearray()
+                for x in range(3):
+                    value = (y * 43 + x * 29) & 255
+                    pixel = {0: (value,), 2: (value, 37, 93),
+                             4: (value, 255), 6: (value, 37, 93, 255)}[color_type]
+                    row.extend(pixel)
+                    expected.extend((value, value, value, 255) if color_type in {0, 4}
+                                    else (value, 37, 93, 255))
+                rows.append(bytes(row))
+            with self.subTest(color_type=color_type):
+                image = png_bytes(3, len(rows), color_type,
+                                  encode_filtered_rows(rows, channels, filters))
+                self.assertEqual(codec.decode_png_bytes(image, policy=evidence.EVIDENCE_PNG_POLICY),
+                                 (3, len(rows), bytes(expected)))
+
+    def test_rgba_row_copy_preserves_alpha_and_rejects_any_nonopaque_pixel(self):
+        for filter_type in range(5):
+            for pixel in (0, 1, 2):
+                with self.subTest(filter=filter_type, pixel=pixel):
+                    rows = [bytes((17, 255, 93, 255)) * 3, bytearray((37, 255, 19, 255) * 3)]
+                    rows[1][pixel * 4 + 3] = 254
+                    image = png_bytes(3, 2, 6, encode_filtered_rows(rows, 4, (0, filter_type)))
+                    with self.assertRaisesRegex(codec.PngError, "non-opaque") as caught:
+                        codec.decode_png_bytes(image, policy=evidence.EVIDENCE_PNG_POLICY)
+                    self.assertEqual(caught.exception.code, "opaque")
+                    policy = replace(evidence.EVIDENCE_PNG_POLICY, require_opaque=False)
+                    self.assertEqual(codec.decode_png_bytes(image, policy=policy),
+                                     (3, 2, bytes(rows[0]) + bytes(rows[1])))
+
+    def test_unfiltered_fast_path_still_rejects_invalid_filter_and_stream(self):
+        for label, raw, code in (("filter", b"\x05\x11\x22\x33\xff", "filter"),
+                                 ("short", b"\0\x11\x22\x33", "stream"),
+                                 ("long", b"\0\x11\x22\x33\xff\0", "overflow")):
+            with self.subTest(label=label):
+                with self.assertRaises(codec.PngError) as caught:
+                    codec.decode_png_bytes(png_bytes(1, 1, 6, raw), policy=evidence.EVIDENCE_PNG_POLICY)
+                self.assertEqual(caught.exception.code, code)
 
     def test_decode_png_requires_strict_chunk_structure_and_complete_zlib_stream(self):
         filtered = b"\x00\x11\x22\x33"

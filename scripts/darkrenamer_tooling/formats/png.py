@@ -120,30 +120,36 @@ def decode_png_bytes(
         scan = bytearray(raw[cursor:cursor + stride])
         cursor += stride
         require(filter_type <= 4, "filter", "PNG uses an unsupported row filter.")
-        for index in range(stride):
-            left = scan[index - channels] if index >= channels else 0
-            above = previous[index]
-            upper_left = previous[index - channels] if index >= channels else 0
-            if filter_type == 0:
-                predictor = 0
-            elif filter_type == 1:
-                predictor = left
-            elif filter_type == 2:
-                predictor = above
-            elif filter_type == 3:
-                predictor = (left + above) // 2
-            else:
-                predictor = paeth(left, above, upper_left)
-            scan[index] = (scan[index] + predictor) & 0xff
-        for index in range(0, stride, channels):
-            pixel = scan[index:index + channels]
-            if color_type in {0, 4}:
-                color = (pixel[0], pixel[0], pixel[0], pixel[1] if color_type == 4 else 255)
-            else:
-                color = (pixel[0], pixel[1], pixel[2], pixel[3] if color_type == 6 else 255)
-            require(not policy.require_opaque or color[3] == 255,
+        if filter_type != 0:
+            for index in range(stride):
+                left = scan[index - channels] if index >= channels else 0
+                above = previous[index]
+                upper_left = previous[index - channels] if index >= channels else 0
+                if filter_type == 1:
+                    predictor = left
+                elif filter_type == 2:
+                    predictor = above
+                elif filter_type == 3:
+                    predictor = (left + above) // 2
+                else:
+                    predictor = paeth(left, above, upper_left)
+                scan[index] = (scan[index] + predictor) & 0xff
+        if color_type == 6:
+            # Reconstructed RGBA scanlines already have the output layout.
+            require(not policy.require_opaque or scan[3::4].count(255) == width,
                     "opaque", "PNG contains unsupported non-opaque pixels.")
-            rgba[rgba_offset:rgba_offset + 4] = bytes(color)
-            rgba_offset += 4
+            rgba[rgba_offset:rgba_offset + stride] = scan
+            rgba_offset += stride
+        else:
+            for index in range(0, stride, channels):
+                pixel = scan[index:index + channels]
+                if color_type in {0, 4}:
+                    color = (pixel[0], pixel[0], pixel[0], pixel[1] if color_type == 4 else 255)
+                else:
+                    color = (pixel[0], pixel[1], pixel[2], pixel[3] if color_type == 6 else 255)
+                require(not policy.require_opaque or color[3] == 255,
+                        "opaque", "PNG contains unsupported non-opaque pixels.")
+                rgba[rgba_offset:rgba_offset + 4] = bytes(color)
+                rgba_offset += 4
         previous = scan
     return width, height, bytes(rgba)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from functools import cached_property, lru_cache
 from pathlib import Path
 from tooling_test_paths import SCRIPT_ROOT
 import struct
@@ -52,6 +53,7 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
 
+@lru_cache(maxsize=64)
 def pair_png(rgb: tuple[int, int, int], *, width: int = 800, height: int = 552,
              patches: tuple[tuple[int, int, int, int, tuple[int, int, int]], ...] = ()) -> bytes:
     background = bytes((*rgb, 255))
@@ -963,16 +965,43 @@ class Fixture:
         }
 
 
-class GuiEvidenceTests(unittest.TestCase):
+class SyntheticFixtureTestCase(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.temporary = None
+        self.addCleanup(self.cleanup_fixture)
+        self.reset_fixture()
+
+    def cleanup_fixture(self):
+        if self.temporary is not None:
+            self.temporary.cleanup()
+
+    def reset_fixture(self):
+        """Replace only synthetic test data, including partially built fixtures."""
+        self.cleanup_fixture()
+        for name in ("full", "standard", "text", "tooltip", "pair_run"):
+            self.__dict__.pop(name, None)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
         self.fixture = Fixture(self.root)
-        self.full = self.fixture.build("01-full-context-light-800x600-96-text100", "full-context")
-        self.standard = self.fixture.build("02-standard-light-800x600-96-text100", "standard")
-        self.text = self.fixture.build("03-standard-light-800x600-96-text150", "text-scale")
-        self.tooltip = self.fixture.build("04-tooltip-dark-1366x768-144-text100", "tooltip", reference=self.fixture.reference(self.full))
+
+
+class GuiEvidenceTests(SyntheticFixtureTestCase):
+    @cached_property
+    def full(self):
+        return self.fixture.build("01-full-context-light-800x600-96-text100", "full-context")
+
+    @cached_property
+    def standard(self):
+        return self.fixture.build("02-standard-light-800x600-96-text100", "standard")
+
+    @cached_property
+    def text(self):
+        return self.fixture.build("03-standard-light-800x600-96-text150", "text-scale")
+
+    @cached_property
+    def tooltip(self):
+        return self.fixture.build("04-tooltip-dark-1366x768-144-text100", "tooltip",
+                                  reference=self.fixture.reference(self.full))
 
     def validate(self, run: Path):
         return evidence.validate_run(self.root, run.name, SOURCE)
@@ -1008,7 +1037,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
             self.validate(self.tooltip)
 
-        self.setUp()
+        self.reset_fixture()
         result = json.loads((self.full / "output/run-result.json").read_text())
         result["status"] = "failed"
         write_json(self.full / "output/run-result.json", result)
@@ -1027,7 +1056,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "exact source SHA"):
             self.validate(self.full)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.full / "input-manifest.json").read_text())
         app = self.full / manifest["artifacts"]["application"]["file"]
         app.write_bytes(b"another executable")
@@ -1047,12 +1076,12 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         (self.standard / "output/screen.png").write_bytes(b"changed")
         with self.assertRaisesRegex(evidence.EvidenceError, "receipt"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.standard / "input-manifest.json").read_text())
         observer = self.standard / manifest["artifacts"]["observer"]["file"]
         observer.write_bytes(b"tampered observer")
@@ -1108,7 +1137,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "cleanup.guest"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         (self.standard / "output/platform-preflight.json").unlink()
         with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
             self.validate(self.standard)
@@ -1121,7 +1150,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "Windows x86_64"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         result = json.loads((self.standard / "output/run-result.json").read_text())
         result["actual"]["monitor"]["width"] = 801
         write_json(self.standard / "output/run-result.json", result)
@@ -1135,13 +1164,13 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "must be an integer"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         raw = (self.standard / "output/run-result.json").read_text()
         (self.standard / "output/run-result.json").write_text(raw.replace('"exit_code": 0', '"exit_code": NaN'))
         with self.assertRaisesRegex(evidence.EvidenceError, "non-finite"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.standard / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["schema_version"] = True
@@ -1164,14 +1193,14 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "unsafe path"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.tooltip / "input-manifest.json").read_text())
         manifest["full_context_reference"]["run_id"] = self.tooltip.name
         write_json(self.tooltip / "input-manifest.json", manifest)
         with self.assertRaisesRegex(evidence.EvidenceError, "reference itself"):
             self.validate(self.tooltip)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.full / "input-manifest.json").read_text())
         manifest["full_context_reference"] = self.fixture.reference(self.tooltip)
         write_json(self.full / "input-manifest.json", manifest)
@@ -1186,7 +1215,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "result digest"):
             self.validate(self.tooltip)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.tooltip / "input-manifest.json").read_text())
         manifest["full_context_reference"]["input_manifest_sha256"] = "0" * 64
         write_json(self.tooltip / "input-manifest.json", manifest)
@@ -1201,7 +1230,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "collection.json"):
             self.validate(self.full)
 
-        self.setUp()
+        self.reset_fixture()
         result = json.loads((self.full / "output/run-result.json").read_text())
         result["cleanup_sha256"] = "0" * 64
         write_json(self.full / "output/run-result.json", result)
@@ -1220,7 +1249,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "ink bounds"):
             self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         metrics = json.loads((self.text / "output/text-raster-metrics.json").read_text())
         metrics["samples"][0]["text_sha256"] = "f" * 64
         metrics["samples"][0]["observed_target"]["text_sha256"] = "f" * 64
@@ -1249,7 +1278,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "Raw scenario evidence.*content_preserved"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.standard / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["assertions"]["scenario"]["journal_residue_count"] = False
@@ -1331,7 +1360,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "fixed four-cell"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.standard / "input-manifest.json").read_text())
         manifest["guest_preflight"]["product_caption"] = "Microsoft Windows 10 Pro"
         manifest["guest_preflight"]["build"] = "19045"
@@ -1340,7 +1369,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "Windows 11"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         manifest = json.loads((self.standard / "input-manifest.json").read_text())
         app = self.standard / manifest["artifacts"]["application"]["file"]
         app.write_bytes(b"different-standard-application")
@@ -1375,7 +1404,7 @@ class GuiEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.text)
         self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.text / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["assertions"]["scenario"]["confirmation"]["reachability"]["apply"]["physical_mouse_target"]["hit_window"] = 0
@@ -1384,7 +1413,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):
             self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.text / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
@@ -1394,7 +1423,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):
             self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.text / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
@@ -1404,7 +1433,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "non-finite"):
             self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         raw_path = self.text / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
@@ -1414,7 +1443,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):
             self.validate(self.text)
 
-        self.setUp()
+        self.reset_fixture()
         metrics_path = self.text / "output/text-raster-metrics.json"
         metrics = json.loads(metrics_path.read_text())
         target = metrics["samples"][0]["observed_target"]
@@ -1449,12 +1478,12 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "VM identity source"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         (self.standard / "output/platform-postlaunch.json").unlink()
         with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         post = json.loads((self.standard / "output/platform-postlaunch.json").read_text())
         post["vm_identity_sha256"] = "f" * 64
         write_json(self.standard / "output/platform-postlaunch.json", post)
@@ -1462,7 +1491,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "postlaunch VM identity differs"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         post = json.loads((self.standard / "output/platform-postlaunch.json").read_text())
         post["target"]["process_id"] = 5252
         post["identity_observation"]["target_process_id"] = 5252
@@ -1478,7 +1507,7 @@ class GuiEvidenceTests(unittest.TestCase):
 
         for field, value, error in (("status", "failed", "transport status"),
                                     ("guest_cleanup", False, "guest cleanup")):
-            self.setUp()
+            self.reset_fixture()
             transport_path = self.standard / "output/transport.json"
             transport = json.loads(transport_path.read_text())
             transport[field] = value
@@ -1487,7 +1516,7 @@ class GuiEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(evidence.EvidenceError, error):
                 self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         transport_path = self.standard / "output/transport.json"
         transport = json.loads(transport_path.read_text())
         del transport["observer_process"]
@@ -1496,7 +1525,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "observer_process"):
             self.validate(self.standard)
 
-        self.setUp()
+        self.reset_fixture()
         transport_path = self.standard / "output/transport.json"
         transport = json.loads(transport_path.read_text())
         transport["observer_process"]["state"] = "running"
@@ -1506,7 +1535,7 @@ class GuiEvidenceTests(unittest.TestCase):
             self.validate(self.standard)
 
         for exit_code in (False, 7):
-            self.setUp()
+            self.reset_fixture()
             transport_path = self.standard / "output/transport.json"
             transport = json.loads(transport_path.read_text())
             transport["observer_process"]["exit_code"] = exit_code
@@ -1518,23 +1547,20 @@ class GuiEvidenceTests(unittest.TestCase):
                 self.validate(self.standard)
 
 
-class AppearancePairEvidenceTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.fixture = Fixture(self.root)
-        self.run = self.fixture.build_pair()
+class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
+    @cached_property
+    def pair_run(self):
+        return self.fixture.build_pair()
 
     def validate(self):
-        return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
+        return evidence.validate_pair_run(self.root, self.pair_run.name, SOURCE)
 
     def v2_transport(self):
         """Bind a synthetic V2 cleanup record to the paired observer result."""
-        manifest_path = self.run / "input-manifest.json"
+        manifest_path = self.pair_run / "input-manifest.json"
         manifest = json.loads(manifest_path.read_text())
         profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
-        profile_path = self.run / "inputs" / "vm-automated-v2.json"
+        profile_path = self.pair_run / "inputs" / "vm-automated-v2.json"
         profile_path.write_bytes(profile)
         profile_hash = digest(profile)
         manifest["acceptance_profile_id"] = "vm-automated-v2-owned-resources"
@@ -1544,7 +1570,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         }
         manifest["command"] += ["--acceptance-profile-id", "vm-automated-v2-owned-resources"]
         write_json(manifest_path, manifest)
-        raw_path = self.run / "output" / "acceptance-result.json"
+        raw_path = self.pair_run / "output" / "acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         jobs = clean_controller_cleanup_v2()["owned_resource_evidence"]["process_job_cleanup"]
         jobs[0]["pid"] = raw["assertions"]["scenario"]["process_id"]
@@ -1557,19 +1583,50 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw["process_job_cleanup"] = owned["process_job_cleanup"]
         raw["observer_lifecycle"] = owned["task_execution"]["observer_lifecycle"]
         write_json(raw_path, raw)
-        transport_path = self.run / "output" / "transport.json"
+        transport_path = self.pair_run / "output" / "transport.json"
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
         write_json(transport_path, transport)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         return manifest, transport, raw
 
     def check_v2_transport(self, manifest, transport, raw):
-        transport_path = self.run / "output" / "transport.json"
+        transport_path = self.pair_run / "output" / "transport.json"
         write_json(transport_path, transport)
         receipt = {"bytes": len(transport_path.read_bytes()),
                    "sha256": digest(transport_path.read_bytes())}
-        evidence.validate_pair_transport(self.run, {"transport.json": receipt}, 0, manifest, raw)
+        evidence.validate_pair_transport(self.pair_run, {"transport.json": receipt}, 0, manifest, raw)
+
+    def test_fixture_reset_and_same_path_edits_remain_independent(self):
+        command = ["python3", "-I", str(SCRIPT), "--result-root", str(self.root),
+                   "--expected-source-sha", SOURCE, "--diagnostic", evidence.PAIR_MODE,
+                   "--run", self.pair_run.name]
+        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["status"], "passed")
+        path = self.pair_run / "output/acceptance-result.json"
+        original = path.read_bytes()
+        raw = json.loads(original)
+        raw["assertions"]["scenario"]["default_columns"]["fixture"]["settings_absent_before_launch"] = False
+        write_json(path, raw)
+        self.fixture.refresh(self.pair_run)
+        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertRegex(completed.stderr, "preseeded")
+        self.assertEqual(completed.stdout, "")
+        path.write_bytes(original)
+        self.fixture.refresh(self.pair_run)
+        self.assertEqual(self.validate()["status"], "passed")
+        old_root = self.root
+        for label in ("dark", "light", "dark"):
+            with self.subTest(reset=label):
+                image = pair_png((36, 36, 36) if label == "dark" else (245, 245, 245))
+                (self.pair_run / "output/appearance-native-menu-light-before.png").write_bytes(b"poisoned")
+                self.reset_fixture()
+                self.assertFalse(old_root.exists())
+                self.assertEqual(pair_png((36, 36, 36) if label == "dark" else (245, 245, 245)), image)
+                self.assertEqual(self.validate()["status"], "passed")
+                old_root = self.root
 
     def test_v2_pair_accepts_bound_owned_cleanup_with_ambient_processes(self):
         manifest, transport, raw = self.v2_transport()
@@ -1579,8 +1636,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
 
     def test_v2_pair_rejects_unbound_profile_artifact_and_selection(self):
         manifest, _, _ = self.v2_transport()
-        profile_path = self.run / "inputs" / "vm-automated-v2.json"
-        manifest_path = self.run / "input-manifest.json"
+        profile_path = self.pair_run / "inputs" / "vm-automated-v2.json"
+        manifest_path = self.pair_run / "input-manifest.json"
         original_profile = profile_path.read_bytes()
         mutations = (
             lambda value: value.pop("acceptance_profile_sha256"),
@@ -1595,11 +1652,11 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 mutate(current)
                 write_json(manifest_path, current)
                 with self.assertRaises(evidence.EvidenceError):
-                    evidence.validate_input_manifest(self.run, SOURCE)
+                    evidence.validate_input_manifest(self.pair_run, SOURCE)
         write_json(manifest_path, manifest)
         profile_path.write_bytes(original_profile + b" ")
         with self.assertRaises(evidence.EvidenceError):
-            evidence.validate_input_manifest(self.run, SOURCE)
+            evidence.validate_input_manifest(self.pair_run, SOURCE)
         original_document = json.loads(original_profile)
         for field, value in (("profile_id", "unexpected-v2"), ("revision", 3)):
             with self.subTest(profile_field=field):
@@ -1614,7 +1671,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 }
                 write_json(manifest_path, current)
                 with self.assertRaises(evidence.EvidenceError):
-                    evidence.validate_input_manifest(self.run, SOURCE)
+                    evidence.validate_input_manifest(self.pair_run, SOURCE)
 
     def test_v2_pair_rejects_wrong_profile_hash_and_incomplete_owned_cleanup(self):
         manifest, transport, raw = self.v2_transport()
@@ -1651,8 +1708,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
 
     def high_contrast_probe(self):
         """Exercise three bound System captures without decoding the 66-scene pair."""
-        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
-        base = json.loads((self.run / "output/acceptance-result.json").read_text())
+        actual = json.loads((self.pair_run / "output/run-result.json").read_text())["actual"]
+        base = json.loads((self.pair_run / "output/acceptance-result.json").read_text())
         base_state = base["assertions"]["scenario"]["scenes"]["warning"][0]["state"]
         colors = {"window": 0xFFFFFF, "window_text": 0x000000, "button_face": 0xF0F0F0,
                   "button_text": 0, "highlight": 0x006080, "highlight_text": 0xFFFFFF,
@@ -1666,7 +1723,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     "restoration_required": False, "restoration_verified": True,
                     "original": original, "restored": json.loads(json.dumps(original))}
         name = "high-contrast-restore.json"
-        path = self.run / "output" / name
+        path = self.pair_run / "output" / name
         def bind_document():
             write_json(path, document)
             reference = {"file": name, "sha256": digest(path.read_bytes())}
@@ -1728,7 +1785,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
 
     def test_high_contrast_probe_binds_original_system_restoration(self):
         raw, files, actual, capture_pixels, _, _, _ = self.high_contrast_probe()
-        rows = evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+        rows = evidence.validate_pair_high_contrast(self.pair_run, raw, files, actual, capture_pixels)
         self.assertEqual([row["resolved_theme"] for row in rows], ["light", "native", "light"])
 
     def test_high_contrast_probe_rejects_wrong_snapshot_identity_and_pending_rescue(self):
@@ -1743,7 +1800,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 document[field] = value
                 files = bind_document()
                 with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
-                    evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+                    evidence.validate_pair_high_contrast(self.pair_run, raw, files, actual, capture_pixels)
 
     def test_high_contrast_probe_rejects_unchanged_palette_and_native_selection_override(self):
         raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
@@ -1754,13 +1811,13 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             active_pixels[(y * 800 + 325) * 4:(y * 800 + 342) * 4] = b"\x00\x00\x00\xff" * 17
         pixels["appearance-system-forced-colors.png"] = bytes(active_pixels)
         with self.assertRaisesRegex(evidence.EvidenceError, "did not bind or change"):
-            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+            evidence.validate_pair_high_contrast(self.pair_run, raw, files, actual, capture_pixels)
 
         raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
         name = "appearance-system-forced-colors.png"
         pixels[name] = pixels["appearance-system-before.png"]
         with self.assertRaisesRegex(evidence.EvidenceError, "warning or native selection color precedence"):
-            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+            evidence.validate_pair_high_contrast(self.pair_run, raw, files, actual, capture_pixels)
 
     def test_high_contrast_probe_rejects_system_endpoint_raster_change(self):
         raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
@@ -1769,7 +1826,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         changed[offset:offset + 3] = b"\x00\x00\x00"
         pixels["appearance-system-after.png"] = bytes(changed)
         with self.assertRaisesRegex(evidence.EvidenceError, "endpoint client raster did not restore"):
-            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+            evidence.validate_pair_high_contrast(self.pair_run, raw, files, actual, capture_pixels)
 
     def test_focused_configuration_set_requires_five_runs_one_executable_and_same_glyph_scale(self):
         font = {"family": "Segoe UI", "weight": 400, "charset": 1, "quality": 5,
@@ -1818,7 +1875,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     evidence.validate_focused_pair_results(changed)
 
     def test_pair_has_69_bound_captures_and_distinct_verdict(self):
-        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
+        raw = json.loads((self.pair_run / "output/acceptance-result.json").read_text())
         scenes = raw["assertions"]["scenario"]["scenes"]
         self.assertIs(scenes["selected-active"][0]["state"]["selected_row_cell"]["keyboard_focusable"], True)
         self.assertIs(scenes["selected-inactive"][0]["state"]["selected_row_cell"]["keyboard_focusable"], False)
@@ -1831,8 +1888,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                          set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking", "same_glyph"})
 
     def test_transition_rejects_raw_axis_resets_and_changed_row_values(self):
-        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
-        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
+        raw = json.loads((self.pair_run / "output/acceptance-result.json").read_text())
+        actual = json.loads((self.pair_run / "output/run-result.json").read_text())["actual"]
         scenario = raw["assertions"]["scenario"]
         self.assertEqual(evidence.validate_pair_transition(scenario, raw, actual)["status"], "passed")
         def reset_axis(probe, index, axis):
@@ -1864,21 +1921,21 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             evidence.validate_pair_transition(old, raw, actual)
 
     def test_whole_pair_rejects_raw_reset_even_with_matching_normalized_scenes(self):
-        path = self.run / "output/acceptance-result.json"
+        path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(path.read_text())
         sample = raw["assertions"]["scenario"]["transition_preservation"]["observations"][1]
         for receipt in (sample, sample["observer_read_native_after"], sample["settlement"]):
             receipt["horizontal_scroll"][3] = 0
         write_json(path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "non-minimum committed position"):
             self.validate()
 
     def test_clean_default_rejects_custom_input_missing_phase_and_changed_column(self):
-        raw = json.loads((self.run / "output/acceptance-result.json").read_text())
-        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
-        files = {row["relative_path"]: row for row in json.loads((self.run / "collection.json").read_text())["files"]}
-        self.assertEqual(evidence.validate_pair_default_columns(self.run, raw, files, actual)["status"], "passed")
+        raw = json.loads((self.pair_run / "output/acceptance-result.json").read_text())
+        actual = json.loads((self.pair_run / "output/run-result.json").read_text())["actual"]
+        files = {row["relative_path"]: row for row in json.loads((self.pair_run / "collection.json").read_text())["files"]}
+        self.assertEqual(evidence.validate_pair_default_columns(self.pair_run, raw, files, actual)["status"], "passed")
         steps = raw["assertions"]["scenario"]["default_columns"]["steps"]
         self.assertEqual([step["state"]["overlay"]["dismissed_tooltip_count"]
                           for step in steps], [0, 1, 0])
@@ -1893,7 +1950,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                    "bottom": round(bounds["y"] + bounds["height"]) - window["top"]}
         footprints = []
         for step, ink in ((steps[0], (27, 29, 32)), (steps[1], (242, 244, 247))):
-            image = (self.run / "output" / step["capture"]["file"]).read_bytes()
+            image = (self.pair_run / "output" / step["capture"]["file"]).read_bytes()
             width, height, rgba = evidence.decode_png(image, step["phase"])
             footprints.append(evidence.pair_ink_footprint(rgba, width, height, visible, ink, "current_name_cell"))
         self.assertGreater(footprints[0]["left"] - footprints[1]["left"], 5)
@@ -1912,22 +1969,22 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 changed = deepcopy(raw)
                 mutate(changed["assertions"]["scenario"]["default_columns"])
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
-                    evidence.validate_pair_default_columns(self.run, changed, files, actual)
+                    evidence.validate_pair_default_columns(self.pair_run, changed, files, actual)
 
     def test_whole_pair_rejects_preseeded_default_columns(self):
-        path = self.run / "output/acceptance-result.json"
+        path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(path.read_text())
         raw["assertions"]["scenario"]["default_columns"]["fixture"]["settings_absent_before_launch"] = False
         write_json(path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "preseeded"):
             self.validate()
 
     def test_default_original_dark_text_fragments_fail_after_receipts_are_rebound(self):
         for label in ("header", "current-name"):
             with self.subTest(label=label):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 dark_name = "appearance-default-columns-dark.png"
                 divider = (55, 60, 67)
@@ -1938,15 +1995,15 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 changed_png = pair_png((36, 36, 36), patches=(
                     (48, 124, 80, 125, divider), header,
                     (52, 143, 68, 151, ink), current, proposed))
-                (self.run / "output" / dark_name).write_bytes(changed_png)
+                (self.pair_run / "output" / dark_name).write_bytes(changed_png)
                 changed_hash = digest(changed_png)
                 receipt = next(item for item in raw["screenshots"] if item["file"] == dark_name)
                 receipt["sha256"] = changed_hash
                 dark = raw["assertions"]["scenario"]["default_columns"]["steps"][1]
                 dark["capture"]["sha256"] = changed_hash
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
-                collection = json.loads((self.run / "collection.json").read_text())
+                self.fixture.refresh(self.pair_run)
+                collection = json.loads((self.pair_run / "collection.json").read_text())
                 self.assertEqual(next(item["sha256"] for item in collection["files"]
                                       if item["relative_path"] == dark_name), changed_hash)
                 with self.assertRaisesRegex(evidence.EvidenceError, "text ink was clipped or changed"):
@@ -1957,8 +2014,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                                 ("name", "native row geometry"),
                                 ("keyboard_focusable", "focusability is invalid")):
             with self.subTest(field=field):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 for step in raw["assertions"]["scenario"]["scenes"]["selected-inactive"]:
                     cell = step["state"]["selected_row_cell"]
@@ -1969,7 +2026,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     else:
                         cell["keyboard_focusable"] = "false"
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, expected):
                     self.validate()
 
@@ -1980,29 +2037,29 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             ("overlay", {"visible_tooltip_count": 1, "neutral_cursor": True}, "visible tooltip"),
         ):
             with self.subTest(key=key):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 raw["assertions"]["scenario"]["scenes"]["empty"][0]["state"][key] = value
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, expected):
                     self.validate()
 
     def test_missing_pair_capture_rejected(self):
-        raw_path = self.run / "output/acceptance-result.json"
+        raw_path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["screenshots"].pop()
         write_json(raw_path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "exactly 69 original captures"):
             self.validate()
 
     def test_proposal_viewport_must_match_exact_native_request(self):
         for key in ("proposal_viewport", "horizontal_scroll"):
             with self.subTest(key=key):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 state = raw["assertions"]["scenario"]["scenes"]["changed"][0]["state"]
                 if key == "proposal_viewport":
@@ -2011,34 +2068,34 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     state[key][3] += 6
                     state[key][4] += 6
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, "exact native pixel request"):
                     self.validate()
 
     def test_pair_source_executable_and_environment_bindings_rejected(self):
-        manifest_path = self.run / "input-manifest.json"
+        manifest_path = self.pair_run / "input-manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["source_sha"] = "f" * 40
         write_json(manifest_path, manifest)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "source_sha"):
             self.validate()
 
-        self.setUp()
-        manifest_path = self.run / "input-manifest.json"
+        self.reset_fixture()
+        manifest_path = self.pair_run / "input-manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"]["application"]["sha256"] = "f" * 64
         write_json(manifest_path, manifest)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "artifacts.application bytes"):
             self.validate()
 
-        self.setUp()
-        raw_path = self.run / "output/acceptance-result.json"
+        self.reset_fixture()
+        raw_path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["assertions"]["scenario"]["environment"]["hwnd_dpi"] = 144
         write_json(raw_path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "environment binding"):
             self.validate()
 
@@ -2050,8 +2107,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             ("column_preference_sha256", "f" * 64, "interaction theme, settings"),
         ):
             with self.subTest(field=field):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 interaction = raw["assertions"]["scenario"]["interactions"][1]
                 if field == "pressed":
@@ -2061,17 +2118,17 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 else:
                     interaction[field] = value
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
                     self.validate()
 
     def test_pair_keyboard_focus_cannot_claim_mouse_hover(self):
-        path = self.run / "output/acceptance-result.json"
+        path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(path.read_text())
         focus = raw["assertions"]["scenario"]["interactions"][1]["buttons"]["keyboard-focus"]
         focus["cursor"] = [715, 216, 3001, 1001]
         write_json(path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "cursor does not match"):
             self.validate()
 
@@ -2079,8 +2136,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         for field, message in (("awareness", "DPI awareness"), ("client", "client bounds"),
                                ("font", "font descriptor")):
             with self.subTest(field=field):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 rendering = raw["assertions"]["scenario"]["scenes"]["empty"][1]["state"]["target_rendering"]
                 if field == "awareness":
@@ -2090,7 +2147,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 else:
                     rendering["system_font_recipe"]["fonts"]["MessageFont"]["height"] = 0
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
                     self.validate()
 
@@ -2100,8 +2157,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                                ("drag", "did not advance"),
                                ("restore", "was not restored")):
             with self.subTest(field=field):
-                self.setUp()
-                path = self.run / "output/acceptance-result.json"
+                self.reset_fixture()
+                path = self.pair_run / "output/acceptance-result.json"
                 raw = json.loads(path.read_text())
                 bar = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]
                 if field == "capture":
@@ -2113,40 +2170,40 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 else:
                     bar["restored_scroll"][3] = 1
                 write_json(path, raw)
-                self.fixture.refresh(self.run)
+                self.fixture.refresh(self.pair_run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
                     self.validate()
 
     def test_pair_bright_dark_scrollbar_rejected_with_matching_receipts(self):
-        path = self.run / "output/acceptance-result.json"
+        path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(path.read_text())
         step = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]["steps"][1]
         name = step["capture"]["file"]
         image = pair_png((36, 36, 36), patches=((40, 432, 620, 449, (255, 255, 255)),))
-        (self.run / "output" / name).write_bytes(image)
+        (self.pair_run / "output" / name).write_bytes(image)
         step["capture"]["sha256"] = digest(image)
         for capture in raw["screenshots"]:
             if capture["file"] == name:
                 capture["sha256"] = digest(image)
         write_json(path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "scrollbar thumb palette raster violation"):
             self.validate()
 
     def test_pair_light_endpoint_state_loss_rejected_with_matching_receipts(self):
-        path = self.run / "output/acceptance-result.json"
+        path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(path.read_text())
         step = raw["assertions"]["scenario"]["scenes"]["unchanged"][2]
         name = step["capture"]["file"]
         image = pair_png((245, 245, 245), patches=((100, 250, 200, 260, (23, 25, 28)),
             (39, 108, 40, 442, (217, 221, 227)), (48, 124, 80, 125, (217, 221, 227)), (48, 450, 80, 451, (217, 221, 227))))
-        (self.run / "output" / name).write_bytes(image)
+        (self.pair_run / "output" / name).write_bytes(image)
         step["capture"]["sha256"] = digest(image)
         for capture in raw["screenshots"]:
             if capture["file"] == name:
                 capture["sha256"] = digest(image)
         write_json(path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "Light endpoint client raster did not restore"):
             self.validate()
 
@@ -2154,15 +2211,15 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         name = "appearance-empty-dark.png"
         image = pair_png((245, 245, 245), patches=((39, 108, 40, 442, (55, 60, 67)),
             (48, 124, 80, 125, (55, 60, 67)), (48, 450, 80, 451, (55, 60, 67))))
-        (self.run / "output" / name).write_bytes(image)
-        raw_path = self.run / "output/acceptance-result.json"
+        (self.pair_run / "output" / name).write_bytes(image)
+        raw_path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         for capture in raw["screenshots"]:
             if capture["file"] == name:
                 capture["sha256"] = digest(image)
         raw["assertions"]["scenario"]["scenes"]["empty"][1]["capture"]["sha256"] = digest(image)
         write_json(raw_path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "interior raster violation"):
             self.validate()
 
@@ -2175,15 +2232,15 @@ class AppearancePairEvidenceTests(unittest.TestCase):
             (48, 124, 80, 125, (55, 60, 67)),
             (48, 450, 80, 451, (55, 60, 67)),
         ))
-        (self.run / "output" / name).write_bytes(image)
-        raw_path = self.run / "output/acceptance-result.json"
+        (self.pair_run / "output" / name).write_bytes(image)
+        raw_path = self.pair_run / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         for receipt in raw["screenshots"]:
             if receipt["file"] == name:
                 receipt["sha256"] = digest(image)
         raw["assertions"]["scenario"]["scenes"]["changed"][1]["capture"]["sha256"] = digest(image)
         write_json(raw_path, raw)
-        self.fixture.refresh(self.run)
+        self.fixture.refresh(self.pair_run)
         with self.assertRaisesRegex(evidence.EvidenceError, "semantic color leaked into current-name"):
             self.validate()
 
