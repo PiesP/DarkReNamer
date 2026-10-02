@@ -695,6 +695,8 @@ class Fixture:
                 elif scene.startswith("selected-"):
                     color = ((51, 96, 160) if scene == "selected-active" else (170, 178, 189))
                     patches = ((45, 143, 180, 161, color),)
+                if scene == "overflow" and appearance == "dark":
+                    patches += ((623, 432, 640, 450, (20, 22, 25)),)
                 image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245), patches=patches)
                 capture = add_capture(name, image, appearance, "main-workbench")
                 steps.append({"phase": phase, "appearance": appearance,
@@ -766,12 +768,19 @@ class Fixture:
                     if stage != "held":
                         observed_bar[5] += 50
                         observed_bar[6] += 50
+                    patches = ()
+                    if appearance == "dark":
+                        x0, y0, x1, y1 = observed_bar[:4]
+                        thumb = ((x0 + observed_bar[5], y0, x0 + observed_bar[6], y1)
+                                 if axis == "horizontal" else
+                                 (x0, y0 + observed_bar[5], x1, y0 + observed_bar[6]))
+                        patches = ((x0, y0, x1, y1, (20, 22, 25)), (*thumb, (150, 157, 167)))
                     steps.append({"stage": stage,
                                   "native_gui": [2001, 0 if stage == "released" else 2001, 1000],
                                   "components": observed_bar,
                                   "scroll": [0, 1000, 100, 0 if stage == "held" else 100, 100],
                                   "capture": add_capture(f"appearance-scroll-{axis}-{stage}-{phase}.png",
-                                                         pair_png(base), appearance, "main-workbench")})
+                                                         pair_png(base, patches=patches), appearance, "main-workbench")})
                 scrollbars[axis] = {"list_hwnd": 2001, "initial_scroll": initial,
                                     "restored_scroll": initial, "steps": steps,
                                     "target": {"x": 100 if axis == "horizontal" else 630,
@@ -1381,7 +1390,7 @@ class AppearancePairEvidenceTests(unittest.TestCase):
     def test_pair_has_66_bound_captures_and_distinct_verdict(self):
         result = self.validate()
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["native_scrollbar_theme"], "diagnostic-only")
+        self.assertEqual(result["native_scrollbar_theme"], "dark-tracking-and-intersection-validated")
         self.assertEqual(set(result["raster_regions"]),
                          set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking"})
 
@@ -1501,6 +1510,38 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 self.fixture.refresh(self.run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
                     self.validate()
+
+    def test_pair_bright_dark_scrollbar_rejected_with_matching_receipts(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        step = raw["assertions"]["scenario"]["interactions"][1]["scrollbars"]["horizontal"]["steps"][1]
+        name = step["capture"]["file"]
+        image = pair_png((36, 36, 36), patches=((40, 432, 620, 449, (255, 255, 255)),))
+        (self.run / "output" / name).write_bytes(image)
+        step["capture"]["sha256"] = digest(image)
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "scrollbar thumb palette raster violation"):
+            self.validate()
+
+    def test_pair_light_endpoint_state_loss_rejected_with_matching_receipts(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        step = raw["assertions"]["scenario"]["scenes"]["unchanged"][2]
+        name = step["capture"]["file"]
+        image = pair_png((245, 245, 245), patches=((100, 250, 200, 260, (23, 25, 28)),))
+        (self.run / "output" / name).write_bytes(image)
+        step["capture"]["sha256"] = digest(image)
+        for capture in raw["screenshots"]:
+            if capture["file"] == name:
+                capture["sha256"] = digest(image)
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "Light endpoint client raster did not restore"):
+            self.validate()
 
     def test_pair_region_visual_violation_rejected_with_matching_receipt(self):
         name = "appearance-empty-dark.png"

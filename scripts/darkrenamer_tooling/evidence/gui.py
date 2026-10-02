@@ -1288,6 +1288,26 @@ def pair_pixel_delta(left: bytes, right: bytes, width: int, height: int, rect: d
                           right[(y * width + x) * 4 + channel]) for channel in range(3)) >= 10)
 
 
+def pair_flat_region(rgba: bytes, width: int, height: int, rect: dict,
+                     colors: tuple[tuple[int, int, int], ...], label: str) -> int:
+    x0, y0, x1, y1 = (int(rect[key]) for key in ("left", "top", "right", "bottom"))
+    require(0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height,
+            f"Appearance {label} flat region lies outside its original PNG.")
+    counts = [0] * len(colors)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            offset = (y * width + x) * 4
+            pixel = rgba[offset:offset + 4]
+            require(pixel[3] == 255, f"Appearance {label} contains transparent pixels.")
+            for index, color in enumerate(colors):
+                if all(abs(pixel[channel] - color[channel]) <= 2 for channel in range(3)):
+                    counts[index] += 1
+    matched = max(counts)
+    require(matched * 100 >= (x1 - x0) * (y1 - y0) * 95,
+            f"Appearance {label} palette raster violation.")
+    return matched
+
+
 def validate_pair_rendering_environment(value: object, actual: dict) -> dict:
     row = exact_keys(value, {"hwnd", "process_id", "hwnd_dpi", "awareness", "client", "client_query", "system_font_recipe"},
                      "appearance target rendering environment")
@@ -1368,6 +1388,7 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 f"Appearance {scene} Light-Dark-Light phases are incomplete.")
         stable = None
         measurements = []
+        endpoint_rasters = {}
         for step in steps:
             phase = step["phase"]
             appearance = "dark" if phase == "dark" else "light"
@@ -1487,6 +1508,8 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             require(width == capture.get("width") == captures[name].get("width") and
                     height == capture.get("height") == captures[name].get("height"),
                     f"Appearance {scene} PNG dimensions differ from observation.")
+            if phase != "dark":
+                endpoint_rasters[phase] = (width, height, rgba)
             observed_window = state.get("window", {})
             window = observed_window.get("rect", {}) if isinstance(observed_window, dict) else {}
             require(window.get("width") == width and window.get("height") == height,
@@ -1559,12 +1582,25 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                                                "bottom": intersection_top + (h["bottom"] - h["top"]) - 3},
                 }.items():
                     sample[label] = round(pair_region_luma(rgba, width, height, region, label), 2)
+                    if appearance == "dark" and label == "scrollbar_intersection":
+                        sample["intersection_palette_pixels"] = pair_flat_region(
+                            rgba, width, height, region, ((20, 22, 25),), "dark scrollbar intersection")
             measurements.append(sample)
         if scene in {"empty", "unchanged"}:
             require(measurements[0]["body_luma"] > 150 and measurements[1]["body_luma"] < 130 and
                     measurements[2]["body_luma"] > 150 and
                     abs(measurements[0]["body_luma"] - measurements[2]["body_luma"]) <= 15,
                     f"Appearance {scene} light/dark/light interior raster violation.")
+        before_width, before_height, before_rgba = endpoint_rasters["light-before"]
+        after_width, after_height, after_rgba = endpoint_rasters["light-after"]
+        require((before_width, before_height) == (after_width, after_height),
+                "Appearance Light endpoint raster dimensions differ.")
+        client, window = rendering["client"], actual["target"]["window_rect"]
+        endpoint_region = {edge: client[edge] - window["left" if edge in ("left", "right") else "top"]
+                           for edge in ("left", "top", "right", "bottom")}
+        endpoint_delta = pair_pixel_delta(before_rgba, after_rgba, before_width, before_height, endpoint_region)
+        require(endpoint_delta == 0, f"Appearance {scene} Light endpoint client raster did not restore.")
+        measurements[-1]["light_endpoint_changed_pixels"] = endpoint_delta
         diagnostics[scene] = measurements
     for phase in PAIR_PHASES:
         active_step = scenes["selected-active"][PAIR_PHASES.index(phase)]
@@ -1780,9 +1816,32 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                         "Appearance scrollbar capture dimensions differ.")
                 rect = {"left": bar[0] - window["left"], "top": bar[1] - window["top"],
                         "right": bar[2] - window["left"], "bottom": bar[3] - window["top"]}
+                palette_pixels = None
+                if appearance == "dark":
+                    axis_start = rect["left"] if axis == "horizontal" else rect["top"]
+                    thumb = dict(rect)
+                    thumb["left" if axis == "horizontal" else "top"] = axis_start + bar[5]
+                    thumb["right" if axis == "horizontal" else "bottom"] = axis_start + bar[6]
+                    thumb = {key: value + (2 if key in ("left", "top") else -2)
+                             for key, value in thumb.items()}
+                    thumb_colors = (((55, 60, 67),) if bar[10] & 1 else
+                                    ((83, 89, 99), (150, 157, 167), (184, 190, 199)))
+                    thumb_pixels = pair_flat_region(rgba, width, height, thumb, thumb_colors,
+                                                   f"dark {axis} {stage} scrollbar thumb")
+                    gaps = ((bar[4], bar[5]), (bar[6], length - bar[4]))
+                    start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
+                    require(end - start >= 5, "Appearance scrollbar track is too small to observe.")
+                    track = dict(rect)
+                    track["left" if axis == "horizontal" else "top"] = axis_start + start
+                    track["right" if axis == "horizontal" else "bottom"] = axis_start + end
+                    track = {key: value + (2 if key in ("left", "top") else -2)
+                             for key, value in track.items()}
+                    track_pixels = pair_flat_region(rgba, width, height, track, ((20, 22, 25),),
+                                                   f"dark {axis} {stage} scrollbar track")
+                    palette_pixels = {"thumb": thumb_pixels, "track": track_pixels}
                 diagnostics.setdefault("scrollbar_tracking", []).append({
                     "phase": phase, "axis": axis, "stage": stage, "components": bar,
-                    "scroll": scroll, "bar_luma": pair_region_luma(rgba, width, height, rect, f"{axis}-{stage}")})
+                    "scroll": scroll, "palette_pixels": palette_pixels, "bar_luma": pair_region_luma(rgba, width, height, rect, f"{axis}-{stage}")})
         diagnostics.setdefault("interactions", []).append({"phase": phase, "buttons": list(buttons)})
     return diagnostics
 
@@ -1868,7 +1927,7 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
     diagnostics = validate_pair_scenes(run_root, raw, files, actual)
     return {"run_id": run_id, "mode": PAIR_MODE, "input_manifest_sha256": input_hash,
             "result_sha256": sha256_bytes(result_bytes), "status": "passed",
-            "raster_regions": diagnostics, "native_scrollbar_theme": "diagnostic-only"}
+            "raster_regions": diagnostics, "native_scrollbar_theme": "dark-tracking-and-intersection-validated"}
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -1896,7 +1955,7 @@ def main(repo: Path, argv=None) -> int:
             "schema_version": 1, "diagnostic": PAIR_MODE, "status": "passed",
             "source_sha": args.expected_source_sha, "runs": [pair],
             "state_invariance": "passed", "raster_regions": "passed",
-            "native_scrollbar_theme": "diagnostic-only",
+            "native_scrollbar_theme": "dark-tracking-and-intersection-validated",
             "rendering_conformance": "not-assessed", "design_approval": "not-assessed",
             "omitted_scenes": ["forced-colors", "system-theme-following"],
             "full_four_run_regression": "not-run", "release_campaign": "not-run",

@@ -473,8 +473,12 @@ Both native scrollbar thumbs are pressed, moved, and released in each theme phas
 The observer binds the hit HWND and native mouse capture to the list, records
 `SCROLLBARINFO` components and `SCROLLINFO`, verifies that dragging advances the
 viewport, and restores the initial position in `finally`. The additional 18
-original PNGs and bounded bar luminance observations are diagnostic evidence;
-tracking capture alone does not establish scrollbar color conformance.
+original PNGs support separate dark thumb/track/intersection assertions. Flat
+regions require at least 95% of pixels within two RGB units of their declared
+role; native thumb states can select normal, hot, pressed, or disabled roles.
+The two Light endpoint client rasters must restore with no pixel differences
+of ten RGB units or more. These checks cover the declared configuration, not
+unexecuted native themes or display configurations.
 
 The pair records the target window's actual DPI-awareness context and screen-space
 client bounds separately from observer awareness. Each theme phase rechecks both
