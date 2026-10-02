@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from tooling_test_paths import SCRIPT_ROOT
 import struct
@@ -644,7 +645,7 @@ class Fixture:
                                 "width": 600, "height": 350}}
         current_cell = control("row-0", "00-한국어-日本語.txt", 45, 140, 160, 24,
                                native_handle=2001)
-        proposed_cell = control("proposal-0", "", 260, 140, 260, 24,
+        proposed_cell = control("proposal-0", "", 260, 140, 900, 24,
                                 native_handle=2001)
         proposed_cell["control_type"] = "ControlType.DataItem"
         for scene in evidence.PAIR_SCENES:
@@ -679,9 +680,13 @@ class Fixture:
                 "selection": {"count": 1 if selected_name else 0, "name": selected_name},
                 "selected_row_cell": current_cell if scene.startswith("selected-") else None,
                 "proposed_name": proposal_name, "proposed_cell": proposal,
+                "current_name_cell": (control("current-0", names[0], 260 - 900, 140, 900, 24,
+                                               native_handle=2001) if proposal_name else None),
                 "list_physical_target": {"x": 340, "y": 275, "hit_window": 2001, "root_window": 1001},
                 "list": {"native_handle": 2001, "bounds": {"x": 40, "y": 100, "width": 600, "height": 350}},
                 "native_list": native_list, "window": main_window,
+                "native_header": {"hwnd": 2002, "process_id": 4242, "hwnd_dpi": 96,
+                                  "rect": {"left": 40, "top": 100, "right": 620, "bottom": 125, "width": 580, "height": 25}},
             }
             steps = []
             for phase in evidence.PAIR_PHASES:
@@ -701,6 +706,8 @@ class Fixture:
                     patches = ((45, 143, 180, 161, color),)
                 if scene == "overflow" and appearance == "dark":
                     patches += ((623, 432, 640, 450, (20, 22, 25)),)
+                divider = (55, 60, 67) if appearance == "dark" else (217, 221, 227)
+                patches += ((39, 108, 40, 442, divider), (48, 124, 80, 125, divider), (48, 450, 80, 451, divider))
                 image = pair_png((36, 36, 36) if appearance == "dark" else (245, 245, 245), patches=patches)
                 capture = add_capture(name, image, appearance, "main-workbench")
                 steps.append({"phase": phase, "appearance": appearance,
@@ -718,14 +725,31 @@ class Fixture:
                          "hover": (52, 57, 64), "pressed": (32, 35, 40),
                          "keyboard-focus": (42, 45, 50)},
             }[appearance]
+            outline = (177, 183, 192) if appearance == "light" else (83, 89, 99)
+            def outline_patches(x, y, right, bottom, shared_top=False, default=False):
+                result = ()
+                for inset in range(2 if default else 1):
+                    result += ((x + inset, y + inset, x + inset + 1, bottom - inset, outline),
+                               (right - inset - 1, y + inset, right - inset, bottom - inset, outline),
+                               (x + inset, bottom - inset - 1, right - inset, bottom - inset, outline))
+                    if not shared_top:
+                        result += ((x + inset, y + inset, right - inset, y + inset + 1, outline),)
+                return result
             buttons = {}
             for button_state in evidence.PAIR_BUTTON_STATES:
                 disabled = button_state == "disabled"
                 x, y = 660, 120 if disabled else 200
                 rect = (x, y, 770, y + 32, button_colors[button_state])
                 patches = (rect,)
+                patches += outline_patches(x, y, 770, y + 32, shared_top=not disabled)
+                text = ((110, 117, 127) if appearance == "light" else (150, 157, 167)) if disabled else (
+                    (27, 29, 32) if appearance == "light" else (242, 244, 247))
+                offset = 1 if button_state == "pressed" else 0
+                patches += ((704 + offset, y + 8 + offset, 726 + offset, y + 22 + offset, text),)
                 if button_state == "keyboard-focus":
-                    patches += ((664, 204, 766, 207, (0, 0, 0) if appearance == "light" else (255, 255, 255)),)
+                    cue = (0, 0, 0) if appearance == "light" else (255, 255, 255)
+                    patches += ((663, 203, 767, 204, cue), (663, 228, 767, 229, cue),
+                                (663, 203, 664, 229, cue), (766, 203, 767, 229, cue))
                 name = f"appearance-button-{button_state}-{phase}.png"
                 buttons[button_state] = {
                     "control": control("32771" if disabled else "32773",
@@ -735,6 +759,8 @@ class Fixture:
                     "native_button_state": (12 if button_state == "pressed" else
                                             8 if button_state == "keyboard-focus" else 0),
                     "target": {"x": 715, "y": y + 16, "hit_window": 3001, "root_window": 1001},
+                    "cursor": ([715, y + 16, 3001, 1001] if button_state in {"hover", "pressed"}
+                               else [20, 20, 1001, 1001]),
                     "capture": add_capture(name, pair_png(base, patches=patches), appearance, "main-workbench"),
                 }
             menu_capture = add_capture(f"appearance-native-menu-{phase}.png", pair_png(base),
@@ -757,9 +783,17 @@ class Fixture:
                       "default_button": control("1", "확인", 350, 260, 100, 32, native_handle=5003),
                       "default_button_id": 1,
                       "default_button_query": "WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID",
+                      "same_glyph_label": {
+                          "control": {**control("1002", "붙일 문자열", 230, 150, 120, 24, native_handle=5004), "control_type": "ControlType.Text"},
+                          "native_window": {"hwnd": 5004, "process_id": 4242, "hwnd_dpi": 96,
+                                            "rect": {"left": 230, "top": 150, "right": 350, "bottom": 174, "width": 120, "height": 24}},
+                          "native_class": "Static", "text_sha256": digest("붙일 문자열".encode()),
+                          "query": "bound STATIC/WM_GETTEXT original prompt raster",
+                      },
                       "capture": add_capture(f"appearance-input-prompt-{phase}.png",
                                              pair_png((26, 28, 32) if appearance == "dark" else (247, 248, 250),
-                                                      width=300, height=200),
+                                                      patches=((32, 32, 90, 44, (242, 244, 247) if appearance == "dark" else (27, 29, 32)),
+                                                               (150, 140, 250, 172, button_colors['normal'])) + outline_patches(150, 140, 250, 172, default=True), width=300, height=200),
                                              appearance, "input-prompt", 300, 200)}
             scrollbars = {}
             for axis in evidence.PAIR_SCROLL_AXES:
@@ -1391,12 +1425,180 @@ class AppearancePairEvidenceTests(unittest.TestCase):
     def validate(self):
         return evidence.validate_pair_run(self.root, evidence.PAIR_RUN_ID, SOURCE)
 
+    def high_contrast_probe(self):
+        """Exercise three bound System captures without decoding the 66-scene pair."""
+        actual = json.loads((self.run / "output/run-result.json").read_text())["actual"]
+        base = json.loads((self.run / "output/acceptance-result.json").read_text())
+        base_state = base["assertions"]["scenario"]["scenes"]["warning"][0]["state"]
+        colors = {"window": 0xFFFFFF, "window_text": 0x000000, "button_face": 0xF0F0F0,
+                  "button_text": 0, "highlight": 0x006080, "highlight_text": 0xFFFFFF,
+                  "gray_text": 0x808080, "hot_light": 0x808080}
+        active_colors = {**colors, "window": 0, "window_text": 0x00FFFF,
+                         "highlight_text": 0}
+        original = {"flags": 0, "scheme": "fixture-scheme", "colors": colors,
+                    "visual_style": {"path": "fixture-theme", "color": "NormalColor", "size": "NormalSize"}}
+        document = {"schema_version": 2, "source_sha": SOURCE,
+                    "acceptance_script_sha256": base["acceptance_script_sha256"],
+                    "restoration_required": False, "restoration_verified": True,
+                    "original": original, "restored": json.loads(json.dumps(original))}
+        name = "high-contrast-restore.json"
+        path = self.run / "output" / name
+        def bind_document():
+            write_json(path, document)
+            reference = {"file": name, "sha256": digest(path.read_bytes())}
+            base["high_contrast"] = {"requested": True, "restoration": "verified", "snapshot": reference}
+            base["assertions"]["scenario"]["high_contrast"]["snapshot"] = reference
+            return {name: {"sha256": reference["sha256"]}}
+
+        pixels = {}
+        def raster(selected, unselected):
+            width, height = 800, 552
+            data = bytearray(bytes((245, 245, 245, 255)) * (width * height))
+            for left, top, right, bottom, rgb in ((265, 146, 282, 154, selected),
+                                                   (325, 176, 342, 184, unselected)):
+                for y in range(top, bottom):
+                    data[(y * width + left) * 4:(y * width + right) * 4] = bytes((*rgb, 255)) * (right - left)
+            return bytes(data)
+
+        for key, phase in (("before", "before"), ("active", "forced-colors"), ("after", "after")):
+            active = key == "active"
+            state = {
+                "phase": phase, "appearance": "system", "row_count": 60,
+                "current_names": base_state["current_names"],
+                "resolution": {"query": "UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST",
+                               "foreground_argb": [255, 0, 0, 0],
+                               "resolved_theme": "native" if active else "light",
+                               "system_visual_style": {"forced_colors": active}},
+                "appearance_menu": {"hwnd": 1001, "pid": 4242, "menu_checked": [
+                    {"command_id": 0x9010, "checked": True},
+                    {"command_id": 0x9011, "checked": False},
+                    {"command_id": 0x9012, "checked": False}]},
+                "native_window": base_state["window"], "native_list": base_state["native_list"],
+                "native_focus": [2001, 0, 1000], "target_rendering": base_state["target_rendering"],
+                "overlay": {"visible_tooltip_count": 0, "neutral_cursor": True},
+                "selection": {"count": 1, "name": base_state["current_names"][0]},
+                "semantic_cells": {
+                    "selected": {"name": ".txt", "offscreen": False,
+                                 "bounds": {"x": 260, "y": 140, "width": 40, "height": 20}},
+                    "unselected": {"name": ".log", "offscreen": False,
+                                   "bounds": {"x": 320, "y": 170, "width": 40, "height": 20}}},
+                "proposal_viewport": base_state["proposal_viewport"],
+                "horizontal_scroll": base_state["horizontal_scroll"],
+                "vertical_scroll": base_state["vertical_scroll"],
+                "horizontal_components": [1, 2], "vertical_components": [3, 4],
+                "colors": active_colors if active else colors,
+                "capture": {"file": f"appearance-system-{phase}.png"},
+            }
+            base["assertions"]["scenario"].setdefault("high_contrast", {})[key] = state
+            pixels[state["capture"]["file"]] = raster((0, 0, 0) if active else (255, 255, 255),
+                                                       (255, 255, 0) if active else (142, 83, 0))
+        contrast = base["assertions"]["scenario"]["high_contrast"]
+        contrast.update({"snapshot": None, "restoration_verified": True,
+                         "original_enabled": False, "acceptance_enabled": True})
+        files = bind_document()
+        def capture_pixels(receipt, expected_name, appearance, surface):
+            self.assertEqual((receipt["file"], appearance, surface),
+                             (expected_name, "system", "main-workbench"))
+            return 800, 552, pixels[expected_name]
+        return base, files, actual, capture_pixels, document, bind_document, pixels
+
+    def test_high_contrast_probe_binds_original_system_restoration(self):
+        raw, files, actual, capture_pixels, _, _, _ = self.high_contrast_probe()
+        rows = evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+        self.assertEqual([row["resolved_theme"] for row in rows], ["light", "native", "light"])
+
+    def test_high_contrast_probe_rejects_wrong_snapshot_identity_and_pending_rescue(self):
+        for field, value, diagnostic in (
+            ("source_sha", "f" * 40, "scope or original state"),
+            ("acceptance_script_sha256", "f" * 64, "scope or original state"),
+            ("restoration_verified", False, "scope or original state"),
+            ("restoration_required", True, "rescue is still pending"),
+        ):
+            with self.subTest(field=field):
+                raw, files, actual, capture_pixels, document, bind_document, _ = self.high_contrast_probe()
+                document[field] = value
+                files = bind_document()
+                with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+                    evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_high_contrast_probe_rejects_unchanged_palette_and_native_selection_override(self):
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        active = raw["assertions"]["scenario"]["high_contrast"]["active"]
+        active["colors"] = raw["assertions"]["scenario"]["high_contrast"]["before"]["colors"]
+        active_pixels = bytearray(pixels["appearance-system-before.png"])
+        for y in range(176, 184):
+            active_pixels[(y * 800 + 325) * 4:(y * 800 + 342) * 4] = b"\x00\x00\x00\xff" * 17
+        pixels["appearance-system-forced-colors.png"] = bytes(active_pixels)
+        with self.assertRaisesRegex(evidence.EvidenceError, "did not bind or change"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        name = "appearance-system-forced-colors.png"
+        pixels[name] = pixels["appearance-system-before.png"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "warning or native selection color precedence"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_high_contrast_probe_rejects_system_endpoint_raster_change(self):
+        raw, files, actual, capture_pixels, _, _, pixels = self.high_contrast_probe()
+        changed = bytearray(pixels["appearance-system-after.png"])
+        offset = (240 * 800 + 400) * 4
+        changed[offset:offset + 3] = b"\x00\x00\x00"
+        pixels["appearance-system-after.png"] = bytes(changed)
+        with self.assertRaisesRegex(evidence.EvidenceError, "endpoint client raster did not restore"):
+            evidence.validate_pair_high_contrast(self.run, raw, files, actual, capture_pixels)
+
+    def test_focused_configuration_set_requires_five_runs_one_executable_and_same_glyph_scale(self):
+        font = {"family": "Segoe UI", "weight": 400, "charset": 1, "quality": 5,
+                "italic": 0, "underline": 0, "strikeout": 0, "height": -12}
+        environment = {"installed_fonts": {"family_names_sha256": "a" * 64},
+                       "system_fonts": {"MessageFont": font, "StatusFont": font}}
+        phases = ("light-before", "dark", "light-after")
+        pairs = []
+        for run_id in evidence.PAIR_CONFIGURATIONS:
+            enlarged = "text150" in run_id
+            pairs.append({"run_id": run_id, "application_sha256": "e" * 64,
+                          "build_identity": {"source_tree": "a" * 40, "bundle_manifest_sha256": "b" * 64,
+                                             "artifact_sha256": {"observer": "c" * 64, "application": "e" * 64}},
+                          "font_environment": deepcopy(environment),
+                          "raster_regions": {"same_glyph": [
+                              {"phase": phase, "text_sha256": "f" * 64,
+                               "width": 24 if enlarged else 20, "height": 12 if enlarged else 10}
+                              for phase in phases]}})
+        evidence.validate_focused_pair_results(pairs)
+        baseline = next(row for row in pairs if "base-" in row["run_id"])
+        text150 = next(row for row in pairs if "text150" in row["run_id"])
+        for label, mutate, diagnostic in (
+            ("missing run", lambda rows: rows.pop(), "incomplete or duplicated"),
+            ("duplicate run", lambda rows: rows[-1].update(run_id=rows[0]["run_id"]), "incomplete or duplicated"),
+            ("executable", lambda rows: rows[-1].update(application_sha256="0" * 64), "same executable"),
+            ("bundle", lambda rows: rows[-1]["build_identity"].update(bundle_manifest_sha256="0" * 64), "same build bundle"),
+            ("artifact", lambda rows: rows[-1]["build_identity"]["artifact_sha256"].update(observer="0" * 64), "same build bundle"),
+            ("tree", lambda rows: rows[-1]["build_identity"].update(source_tree="0" * 40), "same build bundle"),
+            ("installed fonts", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["font_environment"]["installed_fonts"].update(family_names_sha256="0" * 64), "font family environment"),
+            ("font identity", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["font_environment"]["system_fonts"]["MessageFont"].update(family="Other"), "font family environment"),
+            ("glyph digest", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][1].update(text_sha256="0" * 64), "same glyphs"),
+            ("width", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][0].update(width=23), "both dimensions"),
+            ("height", lambda rows: next(row for row in rows if "text150" in row["run_id"])
+             ["raster_regions"]["same_glyph"][2].update(height=11), "both dimensions"),
+            ("missing phase", lambda rows: [row["raster_regions"]["same_glyph"].pop()
+             for row in rows if row["run_id"] in {baseline["run_id"], text150["run_id"]}], "phase set"),
+        ):
+            with self.subTest(label=label):
+                changed = deepcopy(pairs)
+                mutate(changed)
+                with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+                    evidence.validate_focused_pair_results(changed)
+
     def test_pair_has_66_bound_captures_and_distinct_verdict(self):
         result = self.validate()
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["native_scrollbar_theme"], "dark-tracking-and-intersection-validated")
         self.assertEqual(set(result["raster_regions"]),
-                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking"})
+                         set(evidence.PAIR_SCENES) | {"selection_transition", "native_menu", "interactions", "scrollbar_tracking", "same_glyph"})
 
     def test_pair_preference_and_tooltip_changes_rejected(self):
         for key, value, expected in (
@@ -1490,6 +1692,16 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(evidence.EvidenceError, message):
                     self.validate()
 
+    def test_pair_keyboard_focus_cannot_claim_mouse_hover(self):
+        path = self.run / "output/acceptance-result.json"
+        raw = json.loads(path.read_text())
+        focus = raw["assertions"]["scenario"]["interactions"][1]["buttons"]["keyboard-focus"]
+        focus["cursor"] = [715, 216, 3001, 1001]
+        write_json(path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "cursor does not match"):
+            self.validate()
+
     def test_pair_target_client_awareness_and_font_bindings_rejected(self):
         for field, message in (("awareness", "DPI awareness"), ("client", "client bounds"),
                                ("font", "font descriptor")):
@@ -1553,7 +1765,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         raw = json.loads(path.read_text())
         step = raw["assertions"]["scenario"]["scenes"]["unchanged"][2]
         name = step["capture"]["file"]
-        image = pair_png((245, 245, 245), patches=((100, 250, 200, 260, (23, 25, 28)),))
+        image = pair_png((245, 245, 245), patches=((100, 250, 200, 260, (23, 25, 28)),
+            (39, 108, 40, 442, (217, 221, 227)), (48, 124, 80, 125, (217, 221, 227)), (48, 450, 80, 451, (217, 221, 227))))
         (self.run / "output" / name).write_bytes(image)
         step["capture"]["sha256"] = digest(image)
         for capture in raw["screenshots"]:
@@ -1566,7 +1779,8 @@ class AppearancePairEvidenceTests(unittest.TestCase):
 
     def test_pair_region_visual_violation_rejected_with_matching_receipt(self):
         name = "appearance-empty-dark.png"
-        image = pair_png((245, 245, 245))
+        image = pair_png((245, 245, 245), patches=((39, 108, 40, 442, (55, 60, 67)),
+            (48, 124, 80, 125, (55, 60, 67)), (48, 450, 80, 451, (55, 60, 67))))
         (self.run / "output" / name).write_bytes(image)
         raw_path = self.run / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
@@ -1577,6 +1791,27 @@ class AppearancePairEvidenceTests(unittest.TestCase):
         write_json(raw_path, raw)
         self.fixture.refresh(self.run)
         with self.assertRaisesRegex(evidence.EvidenceError, "interior raster violation"):
+            self.validate()
+
+    def test_pair_proposal_semantic_color_cannot_leak_into_current_name(self):
+        name = "appearance-changed-dark.png"
+        image = pair_png((36, 36, 36), patches=(
+            (300, 148, 330, 156, (133, 183, 255)),
+            (100, 148, 120, 156, (133, 183, 255)),
+            (39, 108, 40, 442, (55, 60, 67)),
+            (48, 124, 80, 125, (55, 60, 67)),
+            (48, 450, 80, 451, (55, 60, 67)),
+        ))
+        (self.run / "output" / name).write_bytes(image)
+        raw_path = self.run / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        for receipt in raw["screenshots"]:
+            if receipt["file"] == name:
+                receipt["sha256"] = digest(image)
+        raw["assertions"]["scenario"]["scenes"]["changed"][1]["capture"]["sha256"] = digest(image)
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "semantic color leaked into current-name"):
             self.validate()
 
 

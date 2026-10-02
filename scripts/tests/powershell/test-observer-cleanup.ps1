@@ -490,14 +490,14 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     $failure = ''
     function Invoke-AcceptanceTextScaleRescue {
         param($Session, $GuestRoot, $DesktopSid, $DesktopSessionId, $TaskName, $TestTimeoutSeconds,
-            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $InputManifestSha256, $Appearance, $HostOutputRoot)
+            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $InputManifestSha256, $Appearance, $RegressionMode, $HostOutputRoot)
         $events.Add('text-scale')
         if ($failure -ceq 'text-scale') { throw 'injected text-scale rescue failure' }
         if ($InputManifestSha256 -cne ('c' * 64) -or $Appearance -cne 'system') { throw 'Text-scale rescue lost its input binding.' }
     }
     function Invoke-AcceptanceHighContrastRescue {
         param($Session, $GuestRoot, $DesktopSid, $DesktopSessionId, $TaskName, $TestTimeoutSeconds,
-            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $HostOutputRoot)
+            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $InputManifestSha256, $AcceptanceMode, $Appearance, $HostOutputRoot)
         $events.Add('high-contrast')
         if ($failure -ceq 'high-contrast') { throw 'injected high-contrast rescue failure' }
     }
@@ -513,7 +513,9 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
                 foreach ($exitCode in @(0, 1)) {
                     $events.Clear()
                     $state = [pscustomobject]@{ terminal = $true; result_status = $status; task_result = $exitCode }
-                    Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode $mode -HighContrast $hc -RescueParameters $parameters
+                    Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode $mode `
+                        -TextScalePercent $(if ($mode -ceq 'text-scale') { 150 } else { 100 }) `
+                        -HighContrast $hc -RescueParameters $parameters
                     $expected = @()
                     if ($status -cne 'review_required' -or $exitCode -ne 0) {
                         if ($mode -ceq 'text-scale') { $expected += 'text-scale' }
@@ -524,11 +526,20 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
             }
         }
     }
+    $state = [pscustomobject]@{ terminal = $true; result_status = 'failed'; task_result = 1 }
+    $events.Clear()
+    Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'appearance-pair' `
+        -TextScalePercent 150 -HighContrast $false -RescueParameters $parameters
+    if (($events -join ',') -cne 'text-scale') { throw 'Pair Text150 terminal failure missed text-scale rescue.' }
+    $events.Clear()
+    Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'appearance-pair' `
+        -TextScalePercent 100 -HighContrast $true -RescueParameters $parameters
+    if (($events -join ',') -cne 'high-contrast') { throw 'Pair Forced Colors terminal failure missed High Contrast rescue.' }
     foreach ($failure in @('text-scale', 'high-contrast')) {
         $events.Clear()
         $state = [pscustomobject]@{ terminal = $true; result_status = 'failed'; task_result = 0 }
         Assert-Fails {
-            Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -HighContrast $true -RescueParameters $parameters
+            Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -TextScalePercent 150 -HighContrast $true -RescueParameters $parameters
         } "injected $failure rescue failure"
         $expected = if ($failure -ceq 'text-scale') { 'text-scale' } else { 'text-scale,high-contrast' }
         if (($events -join ',') -cne $expected) { throw 'A failed rescue was swallowed or dispatched again.' }
@@ -536,10 +547,63 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     $state.terminal = $false
     $events.Clear()
     Assert-Fails {
-        Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -HighContrast $true -RescueParameters $parameters
+        Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -TextScalePercent 150 -HighContrast $true -RescueParameters $parameters
     } 'requires a terminal task observation'
     if ($events.Count -ne 0) { throw 'Rescue started before terminal observation.' }
     if ($parameters.Count -ne 12) { throw 'High Contrast dispatch mutated the shared rescue parameters.' }
+}
+
+& {
+    $events = [Collections.Generic.List[string]]::new()
+    $snapshotPresent = $true
+    function Stop-AcceptanceObserverTaskForRescue { param($Session,$TaskName,$TimeoutSeconds) $events.Add('stop') }
+    function Test-AcceptanceRestoreSnapshot {
+        param($Session,$TaskName,$Leaf)
+        $events.Add('snapshot:' + $Leaf)
+        $snapshotPresent
+    }
+    function Invoke-AcceptanceTextScaleRescue {
+        param($Session,$GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,
+            $SuiteTimeoutSeconds,$ObserverSha256,$BundleRecords,$InputManifestSha256,
+            $Appearance,$RegressionMode,$HostOutputRoot,$AcceptanceProfileId,$EngineEvidence)
+        if ($RegressionMode -cne 'appearance-pair' -or $InputManifestSha256 -cne ('c' * 64)) {
+            throw 'Pair text rescue lost its bound manifest.'
+        }
+        $events.Add('text-rescue')
+    }
+    function Invoke-AcceptanceHighContrastRescue {
+        param($Session,$GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,
+            $SuiteTimeoutSeconds,$ObserverSha256,$BundleRecords,$InputManifestSha256,
+            $AcceptanceMode,$Appearance,$HostOutputRoot,$AcceptanceProfileId,$EngineEvidence)
+        if ($AcceptanceMode -cne 'appearance-pair' -or $Appearance -cne 'system' -or
+            $InputManifestSha256 -cne ('c' * 64)) {
+            throw 'Pair High Contrast rescue lost its bound manifest.'
+        }
+        $events.Add('contrast-rescue')
+    }
+    $arguments = @{
+        Session = [pscustomobject]@{}; GuestRoot = 'owned'; DesktopSid = 'runner'; DesktopSessionId = 7
+        TaskName = 'owned'; TestTimeoutSeconds = 60; SuiteTimeoutSeconds = 120
+        ObserverSha256 = 'a' * 64; BundleRecords = @([pscustomobject]@{file='fixture'})
+        InputManifestSha256 = 'c' * 64; AcceptanceMode = 'appearance-pair'; Appearance = 'system'
+        TextScalePercent = 100; HighContrast = $true; HostOutputRoot = 'output'
+        OriginalFailure = [InvalidOperationException]::new('injected observer timeout')
+    }
+    Assert-Fails { Invoke-AcceptancePollFailureRescue @arguments } 'injected observer timeout'
+    if (($events -join ',') -cne 'stop,snapshot:high-contrast-restore.json,contrast-rescue') {
+        throw 'Pair timeout did not stop the observer and rescue a pending High Contrast snapshot.'
+    }
+    $events.Clear(); $snapshotPresent = $false
+    Assert-Fails { Invoke-AcceptancePollFailureRescue @arguments } 'injected observer timeout'
+    if (($events -join ',') -cne 'stop,snapshot:high-contrast-restore.json') {
+        throw 'Pair timeout attempted High Contrast rescue without a pending snapshot.'
+    }
+    $events.Clear(); $snapshotPresent = $true
+    $arguments.HighContrast = $false; $arguments.TextScalePercent = 150; $arguments.Appearance = 'light'
+    Assert-Fails { Invoke-AcceptancePollFailureRescue @arguments } 'injected observer timeout'
+    if (($events -join ',') -cne 'stop,snapshot:text-scale-snapshot.json,text-rescue') {
+        throw 'Pair Text150 timeout did not rescue its pending snapshot.'
+    }
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-observer-cleanup-' + [guid]::NewGuid().ToString('N'))
@@ -988,6 +1052,50 @@ try {
                     if ($kind -ceq 'text-scale' -and $probe.input_sha256 -cne ('c' * 64)) {
                         throw 'Text-scale rescue lost the input manifest source binding.'
                     }
+                }
+            }
+            foreach ($kind in @('text-scale', 'high-contrast')) {
+                $probe = [pscustomobject]@{
+                    registered=$false;started=$false;polls=0;copies=0;sleeps=0;clock_reads=0
+                    mode='passed';arguments='';result_leaf='';observer_path='';bundle_path='';input_sha256=''
+                }
+                $name = 'rescue-pair-' + $kind
+                $trusted = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+                $out = Join-Path $trusted 'out'
+                [void](New-Item -ItemType Directory -Path $out -Force)
+                $observer = Join-Path $trusted 'windows-vm-acceptance.ps1'
+                [IO.File]::WriteAllText($observer, 'source-bound pair observer fixture')
+                $manifest = Join-Path $trusted 'input-manifest.json'
+                [IO.File]::WriteAllText($manifest, 'source-bound pair manifest fixture')
+                $manifestHash = Get-LowerSha256 -Path $manifest
+                $snapshotLeaf = if ($kind -ceq 'text-scale') { 'text-scale-snapshot.json' } else { 'high-contrast-restore.json' }
+                [IO.File]::WriteAllText((Join-Path $out $snapshotLeaf), '{}')
+                $hostOut = Join-Path $root ('rescue-host-pair-' + $kind)
+                [void](New-Item -ItemType Directory -Path $hostOut)
+                $arguments = @{
+                    Session=$session;GuestRoot=(Join-Path $root 'rescue-guest');DesktopSid='fixture-sid'
+                    DesktopSessionId=7;TaskName=$name;TestTimeoutSeconds=60;SuiteTimeoutSeconds=120
+                    ObserverSha256=(Get-LowerSha256 -Path $observer)
+                    BundleRecords=@([pscustomobject]@{file='fixture';sha256=('a' * 64)})
+                    InputManifestSha256=$manifestHash;Appearance=$(if ($kind -ceq 'text-scale') {'light'} else {'system'})
+                    HostOutputRoot=$hostOut
+                }
+                if ($kind -ceq 'text-scale') {
+                    $arguments.RegressionMode = 'appearance-pair'
+                    Invoke-AcceptanceTextScaleRescue @arguments
+                }
+                else {
+                    $arguments.AcceptanceMode = 'appearance-pair'
+                    $arguments.InputManifestSha256 = 'c' * 64
+                    Assert-Fails { Invoke-AcceptanceHighContrastRescue @arguments } 'manifest changed'
+                    if ($probe.registered) { throw 'Unbound pair High Contrast rescue registered a task.' }
+                    $arguments.InputManifestSha256 = $manifestHash
+                    Invoke-AcceptanceHighContrastRescue @arguments
+                }
+                if ($probe.arguments -notlike '*-RegressionMode appearance-pair*' -or
+                    $probe.arguments -notlike '*-InputManifestPath*' -or
+                    $probe.input_sha256 -cne $manifestHash -or $probe.copies -ne 2) {
+                    throw 'Pair rescue lost its mode, source-bound manifest, or restored-evidence collection.'
                 }
             }
             $script:DrVmV2RescueAttempts = 0

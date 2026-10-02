@@ -1252,6 +1252,98 @@ function Invoke-ObserverAppearanceScrollProbe {
     }
     $axes
 }
+function Get-ObserverResolvedSystemAppearance {
+    Initialize-AcceptanceNative
+    $color = @([DarkReNamerVmAcceptanceNative]::ReadSystemForegroundColor())
+    $style = Get-ObserverSystemVisualStyle
+    $resolved = if ($style.forced_colors) { 'native' } elseif ($color[1] * 299 + $color[2] * 587 + $color[3] * 114 -ge 128000) { 'dark' } else { 'light' }
+    [ordered]@{ query = 'UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST'; foreground_argb = $color; resolved_theme = $resolved; system_visual_style = $style }
+}
+function Save-ObserverAppearanceSystemCapture {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $Phase,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures)
+    $scrollObject = $null
+    if (-not $Grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+        throw 'System appearance probe lacks native scroll control.'
+    }
+    ([Windows.Automation.ScrollPattern]$scrollObject).SetScrollPercent(45.0, 0.0)
+    $Grid.element.SetFocus()
+    Start-Sleep -Milliseconds 150
+    $overlay = Assert-ObserverAppearanceNoTooltip -Application $Application
+    $resolved = Get-ObserverResolvedSystemAppearance
+    $listHandle = [IntPtr]$Grid.element.Current.NativeWindowHandle
+    $viewport = [DarkReNamerVmAcceptanceNative]::SetListHorizontalViewport($listHandle, [uint32]$Application.process.Id)
+    Start-Sleep -Milliseconds 100
+    $names = @(for ($index = 0; $index -lt 60; $index++) { [string]$Grid.pattern.GetItem($index, 0).Current.Name })
+    [ordered]@{
+        phase = $Phase; appearance = 'system'; resolution = $resolved; overlay = $overlay
+        appearance_menu = Get-VmAutomatedAppearance -Window $Application.main -Process $Application.process -ExpectedSession $SessionId
+        row_count = 60; current_names = $names
+        selection = Get-ObserverAppearanceSelection -Grid $Grid
+        proposal_viewport = [ordered]@{ query = 'LVM_SCROLL horizontal scalar pixels after focus'; percent = 45; requested = $viewport[0]; observed = $viewport[1] }
+        semantic_cells = [ordered]@{
+            selected = Get-ElementObservation -Element ($Grid.pattern.GetItem(0, 1))
+            unselected = Get-ElementObservation -Element ($Grid.pattern.GetItem(1, 1))
+        }
+        native_focus = @([DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$Application.main_handle, [uint32]$Application.process.Id))
+        target_rendering = Get-ObserverAppearanceRenderingEnvironment -Application $Application
+        native_window = Get-ObserverNativeWindowMetrics -Window $Application.main
+        native_list = Get-ObserverNativeWindowMetrics -Window $Grid.element
+        horizontal_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0))
+        vertical_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1))
+        horizontal_components = @([DarkReNamerVmAcceptanceNative]::ReadScrollBarComponents($listHandle, 0))
+        vertical_components = @([DarkReNamerVmAcceptanceNative]::ReadScrollBarComponents($listHandle, 1))
+        colors = (ConvertTo-HighContrastDocumentSnapshot -Snapshot ([DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot())).colors
+        capture = Save-ObserverAppearanceCapture -Application $Application -Window $Application.main -EvidenceRoot $EvidenceRoot `
+            -Leaf "appearance-system-$Phase.png" -Appearance 'system' -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
+    }
+}
+function Invoke-ObserverAppearanceSystemProbe {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $SourceSha, [Parameter(Mandatory)][string] $AcceptanceScriptSha256,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures)
+    if ($SourceSha -cnotmatch '^[0-9a-f]{40}$' -or $AcceptanceScriptSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'High Contrast pair requires exact source and acceptance script bindings.'
+    }
+    [void](Set-AcceptanceAppearance -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -Appearance 'system')
+    $original = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+    if (($original.Flags -band 1) -ne 0) { throw 'Normal paired scenes require an initially non-Forced Colors session.' }
+    $before = Save-ObserverAppearanceSystemCapture -Application $Application -Grid $Grid -SessionId $SessionId -EvidenceRoot $EvidenceRoot -Phase 'before' -Captures $Captures
+    $restorePath = Join-Path $EvidenceRoot 'high-contrast-restore.json'
+    # Persist exact recovery scope before the first session mutation.
+    Write-JsonUtf8Bom -Path $restorePath -Value ([ordered]@{
+        schema_version = 2; source_sha = $SourceSha; acceptance_script_sha256 = $AcceptanceScriptSha256
+        restoration_required = $true; original = ConvertTo-HighContrastDocumentSnapshot -Snapshot $original
+        restoration_verified = $false; restored = $null
+    })
+    try {
+        [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(($original.Flags -bor 1) -band (-bnot 0x1000), $original.Scheme)
+        $active = Wait-HighContrastSettlement -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
+            -AcceptSnapshot { param($candidate) ($candidate.Flags -band 1) -ne 0 -and -not (Test-HighContrastColorsEqual -Expected $original -Actual $candidate) } -Label 'appearance pair High Contrast activation' -MaximumAttempts 24
+        $activeCapture = Save-ObserverAppearanceSystemCapture -Application $Application -Grid $Grid -SessionId $SessionId -EvidenceRoot $EvidenceRoot -Phase 'forced-colors' -Captures $Captures
+        if ($activeCapture.resolution.resolved_theme -cne 'native') { throw 'Forced Colors probe did not observe native fallback.' }
+    }
+    finally {
+        [DarkReNamerVmAcceptanceNative]::ApplyHighContrast($original.Flags, $original.Scheme)
+        $restored = Wait-HighContrastRestoration -Expected $original -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
+            -Label 'appearance pair High Contrast restoration' -AllowPaletteRestore -MaximumAttempts 24 -FallbackAttempts 12
+        Write-JsonUtf8Bom -Path $restorePath -Value ([ordered]@{
+            schema_version = 2; source_sha = $SourceSha; acceptance_script_sha256 = $AcceptanceScriptSha256
+            restoration_required = $false; original = ConvertTo-HighContrastDocumentSnapshot -Snapshot $original
+            restoration_verified = $true; restored = ConvertTo-HighContrastDocumentSnapshot -Snapshot $restored
+        })
+    }
+    $after = Save-ObserverAppearanceSystemCapture -Application $Application -Grid $Grid -SessionId $SessionId -EvidenceRoot $EvidenceRoot -Phase 'after' -Captures $Captures
+    [ordered]@{
+        snapshot = [ordered]@{ file = 'high-contrast-restore.json'; sha256 = Get-LowerSha256 -Path $restorePath }
+        restoration_verified = $true; original_enabled = $false; acceptance_enabled = $true
+        before = $before; active = $activeCapture; after = $after
+    }
+}
 function Invoke-ObserverAppearancePairScenario {
     param(
         [Parameter(Mandatory)][object] $Verified,
@@ -1260,7 +1352,8 @@ function Invoke-ObserverAppearancePairScenario {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
-        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [string] $SourceSha, [string] $AcceptanceScriptSha256, [switch] $HighContrast
     )
     $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'appearance-fixture'
     $parent = New-PrivateDirectory -Parent $root -Leaf '한국어-日本語-long-path-2026'
@@ -1407,6 +1500,7 @@ function Invoke-ObserverAppearancePairScenario {
                 $proposalViewport = $null
                 if ($null -ne $proposedCell) {
                     $position = [DarkReNamerVmAcceptanceNative]::SetListHorizontalViewport($listHandle, [uint32]$application.process.Id)
+                    Start-Sleep -Milliseconds 100
                     $proposalViewport = [ordered]@{ query = 'LVM_SCROLL horizontal scalar pixels after focus'; percent = 45; requested = $position[0]; observed = $position[1] }
                     $proposedCell = $grid.pattern.GetItem(0, 1)
                     $focused = Get-FocusedAcceptanceElement -Process $application.process -ExpectedSession $SessionId -Label 'appearance exact viewport focus'
@@ -1442,6 +1536,7 @@ function Invoke-ObserverAppearancePairScenario {
                     selected_row_cell = if ($scene -in @('selected-active', 'selected-inactive')) { Get-ElementObservation -Element ($grid.pattern.GetItem(0, 0)) } else { $null }
                     proposed_name = if ($null -eq $proposedCell) { $null } else { [string]$proposedCell.Current.Name }
                     proposed_cell = if ($null -eq $proposedCell) { $null } else { Get-ElementObservation -Element $proposedCell }
+                    current_name_cell = if ($null -eq $proposedCell) { $null } else { Get-ElementObservation -Element ($grid.pattern.GetItem(0, 0)) }
                     focus_automation_id = [string]$nativeFocus[2]
                     native_focus = @($nativeFocus)
                     focused_uia = Get-ElementObservation -Element $focused
@@ -1449,6 +1544,8 @@ function Invoke-ObserverAppearancePairScenario {
                     list_physical_target = Get-GuiRegressionPhysicalTarget -Element $grid.element -Application $application -SessionId $SessionId -ExpectedRoot ([IntPtr]$application.main_handle) -Label 'appearance unobscured list'
                     list = Get-ElementObservation -Element $grid.element
                     native_list = Get-ObserverNativeWindowMetrics -Window $grid.element
+                    native_header = Get-ObserverNativeWindowMetrics -Window ([Windows.Automation.AutomationElement]::FromHandle(
+                        [DarkReNamerVmAcceptanceNative]::ReadBoundListHeader($listHandle, [uint32]$application.process.Id)))
                     window = Get-ObserverNativeWindowMetrics -Window $application.main
                 }
                 $leaf = "appearance-$scene-$step.png"
@@ -1480,6 +1577,7 @@ function Invoke-ObserverAppearancePairScenario {
             $grid.element.SetFocus()
             [void](Assert-ObserverAppearanceNoTooltip -Application $application)
             $buttons['normal'] = [ordered]@{
+                cursor = @([DarkReNamerVmAcceptanceNative]::ReadBoundCursor([IntPtr]$application.main_handle, [uint32]$application.process.Id))
                 control = Get-ElementObservation -Element $prefix
                 focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
@@ -1488,6 +1586,7 @@ function Invoke-ObserverAppearancePairScenario {
                     -Leaf "appearance-button-normal-$step.png" -Appearance $appearance -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
             }
             $buttons['disabled'] = [ordered]@{
+                cursor = @([DarkReNamerVmAcceptanceNative]::ReadBoundCursor([IntPtr]$application.main_handle, [uint32]$application.process.Id))
                 control = Get-ElementObservation -Element $applyButton
                 focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$applyButton.Current.NativeWindowHandle)
@@ -1498,6 +1597,7 @@ function Invoke-ObserverAppearancePairScenario {
             [DarkReNamerVmAcceptanceNative]::MoveCursor([int]$prefixTarget.x, [int]$prefixTarget.y)
             Start-Sleep -Milliseconds 150
             $buttons['hover'] = [ordered]@{
+                cursor = @([DarkReNamerVmAcceptanceNative]::ReadBoundCursor([IntPtr]$application.main_handle, [uint32]$application.process.Id))
                 control = Get-ElementObservation -Element $prefix
                 focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
@@ -1511,6 +1611,7 @@ function Invoke-ObserverAppearancePairScenario {
                 $pressedState = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
                 if (($pressedState -band 4) -eq 0) { throw 'Appearance button did not enter native pressed state.' }
                 $buttons['pressed'] = [ordered]@{
+                    cursor = @([DarkReNamerVmAcceptanceNative]::ReadBoundCursor([IntPtr]$application.main_handle, [uint32]$application.process.Id))
                     control = Get-ElementObservation -Element $prefix
                     focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                     native_button_state = $pressedState
@@ -1528,6 +1629,7 @@ function Invoke-ObserverAppearancePairScenario {
             }
             [void](Move-RailFocusToCommand -Process $application.process -ExpectedSession $SessionId -AutomationId '32773')
             $buttons['keyboard-focus'] = [ordered]@{
+                cursor = @([DarkReNamerVmAcceptanceNative]::ReadBoundCursor([IntPtr]$application.main_handle, [uint32]$application.process.Id))
                 control = Get-ElementObservation -Element $prefix
                 focus_automation_id = Get-ObserverAppearanceFocusId -Application $application -SessionId $SessionId
                 native_button_state = [DarkReNamerVmAcceptanceNative]::ReadButtonState([IntPtr]$prefix.Current.NativeWindowHandle)
@@ -1582,7 +1684,8 @@ function Invoke-ObserverAppearancePairScenario {
                 $label = Find-UniqueAutomationElement -Root $prompt -Process $application.process -ExpectedSession $SessionId `
                     -AutomationId '1002' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds -Label 'appearance prefix native label' -RequireWindowHandle
                 $labelNative = [DarkReNamerVmAcceptanceNative]::DescribeWindow([IntPtr]$label.Current.NativeWindowHandle)
-                if ($label.Current.Name -cne '붙일 문자열' -or $labelNative[3] -ine 'Static' -or $labelNative[4] -cne '붙일 문자열' -or
+                $labelText = [DarkReNamerVmAcceptanceNative]::ReadBoundStaticText([IntPtr]$label.Current.NativeWindowHandle, $promptHandle, [uint32]$application.process.Id)
+                if ($label.Current.Name -cne '붙일 문자열' -or $labelNative[3] -ine 'Static' -or $labelText -cne '붙일 문자열' -or
                     [int]$labelNative[2] -ne $application.process.Id) {
                     throw 'Appearance prefix native label identity differs.'
                 }
@@ -1599,7 +1702,7 @@ function Invoke-ObserverAppearancePairScenario {
                         native_window = Get-ObserverNativeWindowMetrics -Window $label
                         native_class = $labelNative[3]
                         text_sha256 = Get-LowerTextSha256 -Value '붙일 문자열'
-                        query = 'bound STATIC/GetWindowTextW original prompt raster'
+                        query = 'bound STATIC/WM_GETTEXT original prompt raster'
                     }
                     default_button = Get-ElementObservation -Element $ok
                     default_button_id = $defaultId
@@ -1626,6 +1729,14 @@ function Invoke-ObserverAppearancePairScenario {
                 appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
             })
         }
+        $highContrastResult = $null
+        if ($HighContrast) {
+            Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name '.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
+            Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name '.log' -SessionId $SessionId -WaitSeconds $WaitSeconds
+            [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId)
+            $highContrastResult = Invoke-ObserverAppearanceSystemProbe -Application $application -Grid $grid -SessionId $SessionId `
+                -EvidenceRoot $EvidenceRoot -SourceSha $SourceSha -AcceptanceScriptSha256 $AcceptanceScriptSha256 -Captures $Captures
+        }
         $after = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
         if (-not (Test-ObserverFixtureStateEqual -Expected $initial -Actual $after)) {
             throw 'Appearance pair changed a fixture file, content digest, or NTFS identity.'
@@ -1636,7 +1747,8 @@ function Invoke-ObserverAppearancePairScenario {
             environment = $environment; appearance = 'light-dark-light'; process_id = [int]$application.process.Id
             fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0; column_preferences = $columnPreference }
             scenes = $scenes; interactions = $interactions.ToArray(); normal_exit_code = $exitCode
-            limitations = @('system-theme and forced-colors configurations not-run in this diagnostic')
+            high_contrast = $highContrastResult
+            limitations = if ($HighContrast) { @('normal OS Light/Dark setting transitions not-run; current System resolution and Forced Colors restoration observed') } else { @('system-theme and forced-colors configurations not-run in this diagnostic') }
         }
     }
     finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }

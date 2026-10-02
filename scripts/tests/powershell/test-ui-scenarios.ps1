@@ -27,8 +27,18 @@ public static class DarkReNamerVmAcceptanceNative {
 
     public static Queue<object> Snapshots = new Queue<object>();
     public static int HighContrastFlags;
-    public class VisualStyle { public int Flags; public string ThemePath = "fixture-theme", ThemeColor = "NormalColor", ThemeSize = "NormalSize"; }
-    public static VisualStyle GetHighContrastSnapshot() { return new VisualStyle { Flags = HighContrastFlags }; }
+    public static byte[] Foreground = new byte[] { 255, 0, 0, 0 };
+    public static byte[] ReadSystemForegroundColor() { return (byte[])Foreground.Clone(); }
+    public class VisualStyle {
+        public int Flags;
+        public string Scheme = "fixture-scheme", ThemePath = "fixture-theme", ThemeColor = "NormalColor", ThemeSize = "NormalSize";
+        public uint Window, WindowText = 0, ButtonFace = 240, ButtonText = 0,
+            Highlight = 128, HighlightText = 255, GrayText = 120, HotLight = 128;
+    }
+    public static VisualStyle GetHighContrastSnapshot() { return new VisualStyle { Flags = HighContrastFlags, Window = HighContrastFlags == 0 ? 0xffffffu : 0u }; }
+    public static void ApplyHighContrast(uint flags, string scheme) {
+        Calls.Add("high-contrast:" + flags); HighContrastFlags = (int)flags;
+    }
     public static uint DisabledCommand;
     public static string InputFailure = "", Cleanup = "cleared";
     public static bool IsMenuCommandChecked(IntPtr window, uint command) {
@@ -100,6 +110,13 @@ try {
         Assert-Equal $style.theme_color 'NormalColor' 'Observed theme color'
         Assert-Equal $style.theme_size 'NormalSize' 'Observed theme size'
     }
+    foreach ($case in @(@(0, 0, 'light'), @(0, 245, 'dark'), @(1, 0, 'native'))) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $case[0]
+        [DarkReNamerVmAcceptanceNative]::Foreground = [byte[]]@(255, $case[1], $case[1], $case[1])
+        $resolved = Get-ObserverResolvedSystemAppearance
+        Assert-Equal $resolved.resolved_theme $case[2] 'Observed foreground and Forced Colors theme precedence'
+    }
+    [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
     & {
         foreach ($case in @(@(96, '900,900,260'), @(120, '1125,1125,325'), @(144, '1350,1350,390'), @(192, '1800,1800,520'))) {
             Assert-Equal ((Get-ObserverAppearanceColumnWidthsPx -Dpi $case[0]) -join ',') $case[1] 'Scaled persisted column widths'
@@ -141,6 +158,58 @@ try {
                 -EvidenceRoot $root -SessionId 1 -WaitSeconds 2 -Captures $initialCaptures
         } 'appearance pair entered with initially empty captures'
         Assert-Equal $initialCaptures.Count 0 'Appearance pair empty captures before first screenshot'
+    }
+    & {
+        # Keep production High Contrast control flow intact while replacing only
+        # OS capture, appearance selection, and document I/O endpoints.
+        $probeRoot = Join-Path $root 'high-contrast-pair-probe'
+        [void](New-Item -ItemType Directory -Path $probeRoot)
+        $restorePath = Join-Path $probeRoot 'high-contrast-restore.json'
+        $sourceSha = 'a' * 40
+        $scriptSha = 'b' * 64
+        $captures = [Collections.Generic.List[object]]::new()
+        $application = [pscustomobject]@{process=$process;main_handle=101}
+        function Set-AcceptanceAppearance {
+            param($Process,$ExpectedSession,$MainWindowHandle,$Appearance)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("appearance:$Appearance")
+            [ordered]@{appearance=$Appearance}
+        }
+        function Save-ObserverAppearanceSystemCapture {
+            param($Application,$Grid,$SessionId,$EvidenceRoot,$Phase,$Captures)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("capture:$Phase")
+            if ($Phase -ceq 'forced-colors') { throw 'fixture forced-colors capture failure' }
+            [ordered]@{phase=$Phase;resolution=[ordered]@{resolved_theme='light'}}
+        }
+        function Write-JsonUtf8Bom {
+            param($Path,$Value)
+            [DarkReNamerVmAcceptanceNative]::Calls.Add("snapshot:$($Value.restoration_required)")
+            [IO.File]::WriteAllText($Path,($Value|ConvertTo-Json -Depth 16),[Text.UTF8Encoding]::new($true))
+        }
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
+        [DarkReNamerVmAcceptanceNative]::Calls.Clear()
+        Assert-Fails {
+            Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
+                -EvidenceRoot $probeRoot -SourceSha 'invalid' -AcceptanceScriptSha256 $scriptSha -Captures $captures
+        } 'requires exact source and acceptance script bindings'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls.Count) 0 'Missing source SHA rejected before appearance or session mutation'
+        Assert-Equal (Test-Path -LiteralPath $restorePath) $false 'Invalid SHA wrote no restoration document'
+
+        Assert-Fails {
+            Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
+                -EvidenceRoot $probeRoot -SourceSha $sourceSha -AcceptanceScriptSha256 $scriptSha -Captures $captures
+        } 'fixture forced-colors capture failure'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') `
+            'appearance:system,capture:before,snapshot:True,high-contrast:1,capture:forced-colors,high-contrast:0,snapshot:False' `
+            'Recovery snapshot persisted before first mutation and finally restored after active capture failure'
+        Assert-Equal ([DarkReNamerVmAcceptanceNative]::HighContrastFlags) 0 'High Contrast session flags restored'
+        $restoration = [IO.File]::ReadAllText($restorePath) | ConvertFrom-Json
+        Assert-Equal $restoration.schema_version 2 'High Contrast restoration schema'
+        Assert-Equal $restoration.source_sha $sourceSha 'High Contrast source binding'
+        Assert-Equal $restoration.acceptance_script_sha256 $scriptSha 'High Contrast observer binding'
+        Assert-Equal $restoration.restoration_required $false 'High Contrast recovery no longer pending'
+        Assert-Equal $restoration.restoration_verified $true 'High Contrast exact restoration verified'
+        Assert-Equal ($restoration.original | ConvertTo-Json -Depth 8 -Compress) `
+            ($restoration.restored | ConvertTo-Json -Depth 8 -Compress) 'Original High Contrast snapshot restored exactly'
     }
     & {
         $bindingFailure = $false

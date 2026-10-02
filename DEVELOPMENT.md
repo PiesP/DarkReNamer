@@ -462,6 +462,10 @@ After proposal exposure and focus settlement, the fixture uses scalar
 `LVM_SCROLL` horizontal pixels to set the same rounded 45% native range position.
 The requested and observed pixels must match exactly; UIA percentage rounding
 does not relax viewport invariance. Other scenes only observe their viewport.
+The fixture first resets the native horizontal position to its minimum, then
+uses the same final pixel delta in every phase and allows painting to settle.
+The native XOR focus rectangle cannot be scrolled safely through differing
+small deltas. The strict original Light endpoint comparison remains unchanged.
 Main scene captures settle the cursor on the title bar and reject visible owned
 tooltips. A retained tooltip is dismissed through standard `TTM_POP` only after
 verifying its process and native class, with the dismissal count recorded; a
@@ -491,13 +495,32 @@ environment. These recipes describe system font inputs, not a cross-process
 `HFONT` inspection; original multilingual glyph rasters remain the rendering
 evidence. No application GDI handle is dereferenced by the observer.
 
+For the fixed five-configuration check, use the same command with
+`--configuration-set focused` and omit the desktop arguments. The runner builds
+one bundle and executes 1920×1080 at 96, 144 and 192 DPI, Text150 at 96 DPI,
+and Forced Colors at 96 DPI sequentially. The independent verifier compares the
+source tree, bundle manifest and all staged artifact hashes across the five runs.
+Text150 compares the same original Korean prompt glyphs with the baseline in
+both dimensions, with unchanged font-family inputs. The label is observed on its
+bound STATIC using bounded `WM_GETTEXT`; no foreign font pointer is read.
+
+The Forced Colors run adds three System captures after its 66 ordinary scenes.
+It records System foreground resolution before activation, native fallback with
+selected/unselected semantic text during activation, and exact restoration of
+System state and client pixels. Source/script-bound restoration receipts precede
+setting mutations. Producer `finally` and existing controller terminal/timeout
+rescue paths restore the original settings, and collected receipts must verify
+restoration. Normal OS Light/Dark setting transitions are not exercised.
+
 The independent verifier checks source/EXE/environment bindings, exact capture
-inventory, state invariance, proposed-name semantic pixels, selection transitions,
-and button-state pixel differences. Scrollbar pixels remain a diagnostic
-measurement until the native-chrome conformance and interaction checks are
-completed. Forced Colors, system-theme following, and the DPI/text-size matrix
-are separate outstanding checks. This opt-in diagnostic does not complete the
-four fixed GUI regression runs or release acceptance.
+inventory, state invariance, proposed-name semantic pixels without current-name
+color leakage, selection transitions, actual cursor targets, one-pixel outlines,
+default cues, quiet dividers, text ink, pressed displacement and focus perimeter.
+Dark native thumb/track/intersection palettes and the strict original Light client
+endpoint comparisons are conformance gates. A passing verdict applies to the
+declared scenes and configurations; design approval remains separate. This
+opt-in diagnostic does not complete the four fixed GUI regression runs or
+release acceptance.
 
 The painting policy keeps control outlines, default outlines, and decorative
 hairlines one physical pixel. Focus inset, pressed displacement, and existing

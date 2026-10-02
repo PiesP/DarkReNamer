@@ -26,6 +26,13 @@ REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
 PAIR_RUN_ID = "appearance-pair-light-dark-light"
+PAIR_CONFIGURATIONS = {
+    "appearance-pair-base-1920x1080-96-text100": ("light", 1920, 1080, 96, 100, False),
+    "appearance-pair-fractional-1920x1080-144-text100": ("light", 1920, 1080, 144, 100, False),
+    "appearance-pair-high-1920x1080-192-text100": ("light", 1920, 1080, 192, 100, False),
+    "appearance-pair-text150-1920x1080-96-text150": ("light", 1920, 1080, 96, 150, False),
+    "appearance-pair-forced-colors-1920x1080-96-text100": ("system", 1920, 1080, 96, 100, True),
+}
 PAIR_SCENES = ("empty", "unchanged", "overflow", "changed", "collision", "warning",
                "selected-active", "selected-inactive")
 PAIR_PHASES = ("light-before", "dark", "light-after")
@@ -37,8 +44,10 @@ PAIR_MODAL_SURFACES = {"native-menu": "native-menu", "advanced": "advanced-appea
 PAIR_SCENE_ROWS = {"empty": 0, "unchanged": 1, **{scene: 60 for scene in PAIR_SCENES[2:]}}
 
 
-def pair_capture_specs() -> dict[str, str]:
+def pair_capture_specs(high_contrast: bool = False) -> dict[str, str]:
     return {
+        **({f"appearance-system-{phase}.png": "main-workbench"
+            for phase in ("before", "forced-colors", "after")} if high_contrast else {}),
         **{f"appearance-{scene}-{phase}.png": "main-workbench"
            for scene in PAIR_SCENES for phase in PAIR_PHASES},
         **{f"appearance-button-{state}-{phase}.png": "main-workbench"
@@ -325,16 +334,22 @@ def validate_guest_platform(value: object, label: str) -> dict:
 
 
 def validate_request(value: object) -> dict:
-    request = exact_keys(value, {"mode", "appearance", "desktop", "text_scale_percent"}, "request")
+    fields = {"mode", "appearance", "desktop", "text_scale_percent"}
+    if isinstance(value, dict) and value.get("mode") == PAIR_MODE and "high_contrast" in value:
+        fields.add("high_contrast")
+    request = exact_keys(value, fields, "request")
     require(request["mode"] in RUN_MODES | {PAIR_MODE}, "request.mode is invalid.")
-    require(request["appearance"] in {"light", "dark"}, "request.appearance is invalid.")
+    require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
     checked_int(desktop["width"], 800, 8192, "request.desktop.width")
     checked_int(desktop["height"], 600, 4320, "request.desktop.height")
     checked_int(desktop["dpi"], 96, 480, "request.desktop.dpi")
     text = checked_int(request["text_scale_percent"], 100, 225, "request.text_scale_percent")
     if request["mode"] == PAIR_MODE:
-        require(request["appearance"] == "light" and text == 100 and
+        high_contrast = request.get("high_contrast", False)
+        require(type(high_contrast) is bool and
+                request["appearance"] == ("system" if high_contrast else "light") and
+                text in {100, 150} and (not high_contrast or text == 100) and
                 800 <= desktop["width"] <= 1920 and 600 <= desktop["height"] <= 1080 and
                 desktop["dpi"] in {96, 120, 144, 192},
                 "Appearance pair request is outside its bounded display configurations.")
@@ -403,7 +418,13 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
     if request["mode"] == PAIR_MODE:
-        require(manifest["run_id"] == PAIR_RUN_ID and
+        run_id = manifest["run_id"]
+        desktop = request["desktop"]
+        requested = (request["appearance"], desktop["width"], desktop["height"], desktop["dpi"],
+                     request["text_scale_percent"], request.get("high_contrast", False))
+        require((run_id == PAIR_RUN_ID and request["text_scale_percent"] == 100 and
+                 request.get("high_contrast", False) is False or
+                 run_id in PAIR_CONFIGURATIONS and requested == PAIR_CONFIGURATIONS[run_id]) and
                 command[0:3] == ["python3", "-I", "scripts/run-gui-regression.py"] and
                 command.count("--diagnostic") == 1 and command.count(PAIR_MODE) == 1,
                 "Appearance pair manifest identity or command is invalid.")
@@ -1308,6 +1329,42 @@ def pair_flat_region(rgba: bytes, width: int, height: int, rect: dict,
     return matched
 
 
+def pair_button_outline(rgba: bytes, width: int, height: int, rect: dict, outline: tuple,
+                        fill: tuple, *, shares_top: bool, default: bool = False) -> None:
+    x0, y0, x1, y1 = (int(rect[key]) for key in ("left", "top", "right", "bottom"))
+    for inset in range(2 if default else 1):
+        edges = [(x0 + inset, y0 + inset, x0 + inset + 1, y1 - inset),
+                 (x1 - inset - 1, y0 + inset, x1 - inset, y1 - inset),
+                 (x0 + inset, y1 - inset - 1, x1 - inset, y1 - inset)]
+        if not shares_top:
+            edges.append((x0 + inset, y0 + inset, x1 - inset, y0 + inset + 1))
+        for left, top, right, bottom in edges:
+            pair_flat_region(rgba, width, height, dict(left=left, top=top, right=right, bottom=bottom),
+                             (outline,), "button physical outline")
+    inset = 2 if default else 1
+    # A second outline line is allowed only for the native default cue.
+    for left, top, right, bottom in ((x0 + inset + 1, y0 + inset, x1 - inset - 1, y0 + inset + 1),
+                                     (x0 + inset + 1, y1 - inset - 1, x1 - inset - 1, y1 - inset),
+                                     (x0 + inset, y0 + inset + 1, x0 + inset + 1, y1 - inset - 1),
+                                     (x1 - inset - 1, y0 + inset + 1, x1 - inset, y1 - inset - 1)):
+        pair_flat_region(rgba, width, height, dict(left=left, top=top, right=right, bottom=bottom),
+                         (fill,), "button outline thickness")
+    if shares_top:
+        pair_flat_region(rgba, width, height, dict(left=x0 + 1, top=y0, right=x1 - 1, bottom=y0 + 1),
+                         (fill,), "button shared top seam")
+
+
+def pair_button_ink(rgba: bytes, width: int, height: int, rect: dict, rgb: tuple) -> set[tuple[int, int]]:
+    x0, y0, x1, y1 = (int(rect[key]) for key in ("left", "top", "right", "bottom"))
+    require(0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height, "Appearance button ink rectangle is invalid.")
+    ink = {(x, y) for y in range(y0 + 2, y1 - 2) for x in range(x0 + 2, x1 - 2)
+           if all(abs(rgba[(y * width + x) * 4 + channel] - rgb[channel]) <= 2 for channel in range(3))}
+    require(len(ink) >= 8, "Appearance button text has no readable palette-qualified ink.")
+    require(all(x0 + 2 < x < x1 - 3 and y0 + 2 < y < y1 - 3 for x, y in ink),
+            "Appearance button text touches a clipping edge.")
+    return ink
+
+
 def validate_pair_rendering_environment(value: object, actual: dict) -> dict:
     row = exact_keys(value, {"hwnd", "process_id", "hwnd_dpi", "awareness", "client", "client_query", "system_font_recipe"},
                      "appearance target rendering environment")
@@ -1348,7 +1405,7 @@ def validate_pair_rendering_environment(value: object, actual: dict) -> dict:
 
 
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
-                         actual: dict) -> dict:
+                         actual: dict, high_contrast: bool = False) -> dict:
     scenario = nested(raw, "assertions", "scenario")
     require(isinstance(scenario, dict) and scenario.get("appearance") == "light-dark-light" and
             scenario.get("process_id") == actual["target"]["process_id"] and
@@ -1364,7 +1421,7 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
     scenes = scenario.get("scenes")
     require(isinstance(scenes, dict) and set(scenes) == set(PAIR_SCENES),
             "Appearance pair scene set is incomplete.")
-    expected_captures = pair_capture_specs()
+    expected_captures = pair_capture_specs(high_contrast)
     require(isinstance(raw.get("screenshots"), list) and len(raw["screenshots"]) == len(expected_captures),
             f"Appearance pair requires exactly {len(expected_captures)} original captures.")
     captures = {row.get("file"): row for row in raw["screenshots"] if isinstance(row, dict)}
@@ -1485,8 +1542,8 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 require(proposal_viewport is None, "Appearance non-proposal scene changed the proposal viewport.")
             invariant = {key: state.get(key) for key in (
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
-                "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list",
-                "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell",
+                "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list", "native_header",
+                "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell", "current_name_cell",
                 "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window", "target_rendering", "proposal_viewport")}
             physical = state.get("list_physical_target")
             require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
@@ -1543,6 +1600,29 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     window["left"] <= native_rect["left"] < native_rect["right"] <= window["right"] and
                     window["top"] <= native_rect["top"] < native_rect["bottom"] <= window["bottom"],
                     f"Appearance {scene} native ListView bounds differ.")
+            header = state.get("native_header", {})
+            header_rect = validate_rectangle(header.get("rect"), "appearance native header")
+            require(type(header.get("hwnd")) is int and header["hwnd"] > 0 and
+                    header.get("process_id") == actual["target"]["process_id"] and
+                    header.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                    native_rect["top"] <= header_rect["top"] < header_rect["bottom"] < native_rect["bottom"],
+                    "Appearance native header identity or vertical geometry differs.")
+            divider = (217, 221, 227) if appearance == "light" else (55, 60, 67)
+            for label, region in (
+                ("rail/list divider", {"left": native_rect["left"] - window["left"] - 1,
+                                       "right": native_rect["left"] - window["left"],
+                                       "top": native_rect["top"] - window["top"] + 8,
+                                       "bottom": native_rect["bottom"] - window["top"] - 8}),
+                ("header/body divider", {"left": native_rect["left"] - window["left"] + 8,
+                                         "right": native_rect["left"] - window["left"] + 40,
+                                         "top": header_rect["bottom"] - window["top"] - 1,
+                                         "bottom": header_rect["bottom"] - window["top"]}),
+                ("status divider", {"left": native_rect["left"] - window["left"] + 8,
+                                    "right": native_rect["left"] - window["left"] + 40,
+                                    "top": native_rect["bottom"] - window["top"],
+                                    "bottom": native_rect["bottom"] - window["top"] + 1}),
+            ):
+                pair_flat_region(rgba, width, height, region, (divider,), label)
             bounds = state.get("list", {}).get("bounds", {})
             require(all(type(bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")),
                     f"Appearance {scene} list bounds are missing.")
@@ -1557,9 +1637,9 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             if scene in {"changed", "collision", "warning"}:
                 proposed_bounds = state["proposed_cell"]["bounds"]
                 proposed_rect = {
-                    "left": proposed_bounds["x"] - window["left"],
+                    "left": max(native_rect["left"], proposed_bounds["x"]) - window["left"],
                     "top": proposed_bounds["y"] - window["top"],
-                    "right": proposed_bounds["x"] + proposed_bounds["width"] - window["left"],
+                    "right": min(native_rect["right"], proposed_bounds["x"] + proposed_bounds["width"]) - window["left"],
                     "bottom": proposed_bounds["y"] + proposed_bounds["height"] - window["top"],
                 }
                 role_rgb = {
@@ -1571,6 +1651,25 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 require(semantic_pixels >= 4,
                         f"Appearance {scene} proposed-name semantic raster violation.")
                 sample["proposed_semantic_pixels"] = semantic_pixels
+                current = state.get("current_name_cell", {})
+                require(isinstance(current, dict) and current.get("name") == state["current_names"][0] and
+                        current.get("offscreen") is False, "Appearance current-name cell identity differs.")
+                current_bounds = current.get("bounds", {})
+                require(all(type(current_bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")),
+                        "Appearance current-name cell bounds are missing.")
+                require(current_bounds["width"] == state["columns"][0] and
+                        proposed_bounds["width"] == state["columns"][1] and
+                        proposed_bounds["x"] - current_bounds["x"] == state["columns"][0] and
+                        current_bounds["y"] == proposed_bounds["y"] and current_bounds["height"] == proposed_bounds["height"],
+                        "Appearance native name cells differ from their persisted columns.")
+                current_region = {
+                    "left": max(native_rect["left"], round(current_bounds["x"])) - window["left"],
+                    "top": round(current_bounds["y"]) - window["top"],
+                    "right": min(native_rect["right"], round(current_bounds["x"] + current_bounds["width"])) - window["left"],
+                    "bottom": round(current_bounds["y"] + current_bounds["height"]) - window["top"],
+                }
+                require(pair_count_near_color(rgba, width, height, current_region, role_rgb, tolerance=8) == 0,
+                        "Appearance proposal semantic color leaked into current-name column.")
             if scene == "overflow":
                 horizontal_bounds = state["horizontal_scrollbar_bounds"]
                 vertical_bounds = state["vertical_scrollbar_bounds"]
@@ -1682,6 +1781,7 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
         require(isinstance(buttons, dict) and set(buttons) == set(PAIR_BUTTON_STATES),
                 "Appearance button state set is incomplete.")
         button_rasters = {}
+        button_ink = {}
         prefix_bounds = None
         for button_state in PAIR_BUTTON_STATES:
             entry = buttons[button_state]
@@ -1708,6 +1808,12 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     bounds["x"] <= target["x"] <= bounds["x"] + bounds["width"] and
                     bounds["y"] <= target["y"] <= bounds["y"] + bounds["height"],
                     f"Appearance {button_state} button bounds differ from its physical target.")
+            cursor = entry.get("cursor")
+            require(isinstance(cursor, list) and len(cursor) == 4 and all(type(value) is int for value in cursor) and
+                    cursor[2] > 0 and cursor[3] == actual["target"]["hwnd"], "Appearance button cursor identity differs.")
+            inside = bounds["x"] <= cursor[0] < bounds["x"] + bounds["width"] and bounds["y"] <= cursor[1] < bounds["y"] + bounds["height"]
+            require((inside and cursor[2] == control.get("native_handle")) if button_state in {"hover", "pressed"} else not inside,
+                    "Appearance button cursor does not match its declared mouse or keyboard state.")
             rect = {"left": bounds["x"] - window["left"], "top": bounds["y"] - window["top"],
                     "right": bounds["x"] + bounds["width"] - window["left"],
                     "bottom": bounds["y"] + bounds["height"] - window["top"]}
@@ -1724,6 +1830,12 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
             if role_rgb is not None:
                 require(pair_count_near_color(rgba, width, height, rect, role_rgb) >= 20,
                         f"Appearance {button_state} button fill raster violation.")
+            fill = role_rgb or ((255, 255, 255) if appearance == "light" else (42, 45, 50))
+            outline = (177, 183, 192) if appearance == "light" else (83, 89, 99)
+            pair_button_outline(rgba, width, height, rect, outline, fill, shares_top=button_state != "disabled")
+            text_rgb = ((110, 117, 127) if appearance == "light" else (150, 157, 167)) if button_state == "disabled" else (
+                (27, 29, 32) if appearance == "light" else (242, 244, 247))
+            button_ink[button_state] = pair_button_ink(rgba, width, height, rect, text_rgb)
             if button_state != "disabled":
                 require(prefix_bounds is None or typed_equal(prefix_bounds, bounds),
                         "Appearance prefix button geometry changed with interaction state.")
@@ -1736,6 +1848,22 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 pair_pixel_delta(button_rasters["normal"][0], button_rasters["keyboard-focus"][0],
                                  window["width"], window["height"], button_rasters["normal"][1]) >= 8,
                 "Appearance hover, pressed, or keyboard-focus raster state did not change.")
+        offset = (actual["hwnd_dpi"] + 48) // 96
+        translated = {(x + offset, y + offset) for x, y in button_ink["normal"]}
+        require(len(translated & button_ink["pressed"]) >= len(translated) * .85 and
+                abs(len(translated) - len(button_ink["pressed"])) <= len(translated) * .15,
+                "Appearance pressed text did not retain its one-DIP translation without clipping.")
+        normal, rect = button_rasters["normal"]
+        focused = button_rasters["keyboard-focus"][0]
+        inset = (3 * actual["hwnd_dpi"] + 48) // 96
+        x0, y0, x1, y1 = (int(rect[key]) for key in ("left", "top", "right", "bottom"))
+        cue = {(x, y) for y in range(y0, y1) for x in range(x0, x1)
+               if max(abs(normal[(y * width + x) * 4 + channel] - focused[(y * width + x) * 4 + channel])
+                      for channel in range(3)) >= 10}
+        require(len(cue) >= 8 and all(
+            x0 + inset <= x < x1 - inset and y0 + inset <= y < y1 - inset and
+            (x in {x0 + inset, x1 - inset - 1} or y in {y0 + inset, y1 - inset - 1}) for x, y in cue),
+            "Appearance keyboard-focus cue differs from its three-DIP inset.")
 
         for kind, surface in PAIR_MODAL_SURFACES.items():
             field = {"native-menu": "native_menu", "advanced": "advanced_appearance",
@@ -1781,6 +1909,51 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                             entry.get("default_button_query") ==
                             "WM_GETDLGCODE(DLGC_BUTTON|DLGC_DEFPUSHBUTTON)+GetDlgCtrlID",
                             "Appearance prompt label or native default button differs.")
+                    bounds = default.get("bounds", {})
+                    require(all(type(bounds.get(key)) in {int, float} for key in ("x", "y", "width", "height")),
+                            "Appearance default button bounds are missing.")
+                    default_rect = {"left": bounds["x"] - rect["left"], "top": bounds["y"] - rect["top"],
+                                    "right": bounds["x"] + bounds["width"] - rect["left"],
+                                    "bottom": bounds["y"] + bounds["height"] - rect["top"]}
+                    pair_button_outline(rgba, width, height, default_rect,
+                        (177, 183, 192) if appearance == "light" else (83, 89, 99),
+                        (255, 255, 255) if appearance == "light" else (42, 45, 50), shares_top=False, default=True)
+                    label = exact_keys(entry.get("same_glyph_label"),
+                                       {"control", "native_window", "native_class", "text_sha256", "query"},
+                                       "appearance same-glyph label")
+                    control = label["control"]
+                    label_window = label["native_window"]
+                    label_rect = validate_rectangle(label_window.get("rect"), "appearance label rectangle")
+                    label_bounds = exact_keys(control.get("bounds"), {"x", "y", "width", "height"}, "appearance label UIA bounds")
+                    require(label["native_class"].lower() == "static" and
+                            label["query"] == "bound STATIC/WM_GETTEXT original prompt raster" and
+                            label["text_sha256"] == sha256_bytes("붙일 문자열".encode("utf-8")) and
+                            control.get("automation_id") == "1002" and control.get("name") == "붙일 문자열" and
+                            control.get("control_type") == "ControlType.Text" and control.get("offscreen") is False and
+                            label_window.get("hwnd") == control.get("native_handle") and
+                            label_window.get("process_id") == actual["target"]["process_id"] and
+                            label_window.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                            all(type(label_bounds[key]) in {int, float} and label_bounds[key] == expected
+                                for key, expected in {"x": label_rect["left"], "y": label_rect["top"],
+                                                      "width": label_rect["width"], "height": label_rect["height"]}.items()),
+                            "Appearance same-glyph label identity differs.")
+                    x0, y0 = label_rect["left"] - rect["left"], label_rect["top"] - rect["top"]
+                    x1, y1 = x0 + label_rect["width"], y0 + label_rect["height"]
+                    require(0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height,
+                            "Appearance same-glyph label lies outside original prompt PNG.")
+                    ink = [(x, y) for y in range(y0, y1) for x in range(x0, x1)
+                           if (max(rgba[(y * width + x) * 4:(y * width + x) * 4 + 3]) < 120
+                               if appearance == "light" else
+                               min(rgba[(y * width + x) * 4:(y * width + x) * 4 + 3]) > 180)]
+                    require(len(ink) >= 8, "Appearance same-glyph label has no readable raster ink.")
+                    ink_x, ink_y = zip(*ink)
+                    require(max(ink_x) < x1 - 1 and max(ink_y) < y1 - 1,
+                            "Appearance same-glyph label touches a clipping edge.")
+                    diagnostics.setdefault("same_glyph", []).append({
+                        "phase": phase, "text_sha256": label["text_sha256"],
+                        "width": max(ink_x) - min(ink_x) + 1, "height": max(ink_y) - min(ink_y) + 1,
+                        "ink_pixels": len(ink), "control_rect": label_rect,
+                    })
         scrollbars = interaction.get("scrollbars")
         require(isinstance(scrollbars, dict) and set(scrollbars) == set(PAIR_SCROLL_AXES),
                 "Appearance scrollbar axis observations are incomplete.")
@@ -1858,11 +2031,128 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     "phase": phase, "axis": axis, "stage": stage, "components": bar,
                     "scroll": scroll, "palette_pixels": palette_pixels, "bar_luma": pair_region_luma(rgba, width, height, rect, f"{axis}-{stage}")})
         diagnostics.setdefault("interactions", []).append({"phase": phase, "buttons": list(buttons)})
+    if high_contrast:
+        diagnostics["system_and_forced_colors"] = validate_pair_high_contrast(run_root, raw, collection_files, actual, capture_pixels)
+    else:
+        require(scenario.get("high_contrast") is None, "Appearance normal pair contains an unrequested High Contrast probe.")
     return diagnostics
 
 
+def validate_pair_restoration(run_root: Path, raw: dict, files: dict, reference: object,
+                             name: str, version: int) -> dict:
+    reference = exact_keys(reference, {"file", "sha256"}, "appearance restoration reference")
+    require(reference["file"] == name and name in files and
+            reference["sha256"] == files[name]["sha256"], "Appearance restoration artifact binding differs.")
+    document, data = read_json(run_root / "output", Path(name), "appearance restoration document")
+    require(sha256_bytes(data) == reference["sha256"], "Appearance restoration document changed.")
+    document = exact_keys(document, {"schema_version", "source_sha", "acceptance_script_sha256",
+        "restoration_required", "restoration_verified", "original", "restored"}, "appearance restoration document")
+    require(int_equals(document["schema_version"], version) and
+            document["source_sha"] == raw["source_sha"] and
+            document["acceptance_script_sha256"] == raw["acceptance_script_sha256"] and
+            type(document["restoration_required"]) is bool and document["restoration_verified"] is True and
+            isinstance(document["original"], dict) and typed_equal(document["original"], document["restored"]),
+            "Appearance restoration scope or original state did not restore exactly.")
+    return document
+
+
+def validate_pair_high_contrast(run_root: Path, raw: dict, files: dict, actual: dict,
+                                capture_pixels) -> list[dict]:
+    scenario = raw["assertions"]["scenario"]
+    contrast = exact_keys(scenario.get("high_contrast"),
+        {"snapshot", "restoration_verified", "original_enabled", "acceptance_enabled", "before", "active", "after"},
+        "appearance High Contrast probe")
+    require(contrast["restoration_verified"] is True and contrast["original_enabled"] is False and
+            contrast["acceptance_enabled"] is True and
+            nested(raw, "high_contrast", "requested") is True and
+            nested(raw, "high_contrast", "restoration") == "verified" and
+            typed_equal(nested(raw, "high_contrast", "snapshot"), contrast["snapshot"]),
+            "Appearance High Contrast activation or restoration is missing.")
+    document = validate_pair_restoration(run_root, raw, files, contrast["snapshot"], "high-contrast-restore.json", 2)
+    require(document["restoration_required"] is False, "Appearance High Contrast rescue is still pending.")
+    original = exact_keys(document["original"], {"flags", "scheme", "colors", "visual_style"}, "High Contrast original")
+    require(type(original["flags"]) is int and 0 <= original["flags"] <= 0xFFFFFFFF and original["flags"] & 0x1001 == 0,
+            "Appearance original High Contrast flags are invalid.")
+    rows = []
+    rasters = {}
+    for key, phase in (("before", "before"), ("active", "forced-colors"), ("after", "after")):
+        state = contrast[key]
+        require(isinstance(state, dict) and state.get("phase") == phase and state.get("appearance") == "system" and
+                int_equals(state.get("row_count"), 60) and isinstance(state.get("current_names"), list) and
+                len(state["current_names"]) == 60 and all(isinstance(name, str) and name for name in state["current_names"]),
+                "Appearance System probe phase or fixture differs.")
+        resolution = exact_keys(state.get("resolution"), {"query", "foreground_argb", "resolved_theme", "system_visual_style"},
+                                "appearance System resolution")
+        color = resolution["foreground_argb"]
+        require(resolution["query"] == "UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST" and
+                isinstance(color, list) and len(color) == 4 and
+                all(type(value) is int and 0 <= value <= 255 for value in color) and color[0] == 255 and
+                nested(resolution, "system_visual_style", "forced_colors") is (key == "active"),
+                "Appearance System foreground or Forced Colors observation differs.")
+        theme = "native" if key == "active" else "dark" if color[1] * 299 + color[2] * 587 + color[3] * 114 >= 128000 else "light"
+        require(resolution["resolved_theme"] == theme, "Appearance System theme resolution differs from observed foreground.")
+        menu = state.get("appearance_menu", {})
+        require(menu.get("hwnd") == actual["target"]["hwnd"] and menu.get("pid") == actual["target"]["process_id"] and
+                menu.get("menu_checked") == [{"command_id": 0x9010, "checked": True},
+                    {"command_id": 0x9011, "checked": False}, {"command_id": 0x9012, "checked": False}],
+                "Appearance System menu did not remain selected.")
+        native = state.get("native_window", {})
+        rect = validate_rectangle(native.get("rect"), "appearance System window")
+        require(native.get("hwnd") == actual["target"]["hwnd"] and native.get("process_id") == actual["target"]["process_id"] and
+                native.get("hwnd_dpi") == actual["hwnd_dpi"], "Appearance System window identity changed.")
+        rendering = validate_pair_rendering_environment(state.get("target_rendering"),
+            {**actual, "target": {**actual["target"], "window_rect": rect}})
+        native_list = state.get("native_list", {})
+        list_rect = validate_rectangle(native_list.get("rect"), "appearance System ListView")
+        focus = state.get("native_focus")
+        require(native_list.get("process_id") == actual["target"]["process_id"] and
+                native_list.get("hwnd_dpi") == actual["hwnd_dpi"] and
+                typed_equal(focus, [native_list.get("hwnd"), 0, 1000]) and
+                nested(state, "overlay", "visible_tooltip_count") == 0 and nested(state, "overlay", "neutral_cursor") is True,
+                "Appearance System native focus or tooltip differs.")
+        width, height, rgba = capture_pixels(state.get("capture"), f"appearance-system-{phase}.png", "system", "main-workbench")
+        require((width, height) == (rect["width"], rect["height"]), "Appearance System PNG geometry differs.")
+        colors = exact_keys(state.get("colors"), {"window", "window_text", "button_face", "button_text", "highlight", "highlight_text", "gray_text", "hot_light"}, "appearance System colors")
+        require(all(type(value) is int and 0 <= value <= 0xFFFFFF for value in colors.values()), "Appearance System colors are invalid.")
+        rgb = lambda value: (value & 255, value >> 8 & 255, value >> 16 & 255)
+        cells = exact_keys(state.get("semantic_cells"), {"selected", "unselected"}, "appearance System semantic cells")
+        for selected, leaf in ((True, ".txt"), (False, ".log")):
+            cell = cells["selected" if selected else "unselected"]
+            require(isinstance(cell, dict) and cell.get("name") == leaf and cell.get("offscreen") is False,
+                    "Appearance System warning proposal differs.")
+            bounds = cell.get("bounds", {})
+            require(all(type(bounds.get(field)) in {int, float} for field in ("x", "y", "width", "height")), "Appearance System cell geometry is missing.")
+            region = {"left": max(list_rect["left"], round(bounds["x"])) - rect["left"],
+                      "top": round(bounds["y"]) - rect["top"],
+                      "right": min(list_rect["right"] - 20, round(bounds["x"] + bounds["width"])) - rect["left"],
+                      "bottom": round(bounds["y"] + bounds["height"]) - rect["top"]}
+            expected = rgb(colors["highlight_text"] if selected else colors["window_text"]) if theme == "native" else (
+                rgb(colors["highlight_text"]) if selected else (142, 83, 0) if theme == "light" else (255, 194, 92))
+            require(pair_count_near_color(rgba, width, height, region, expected, tolerance=8) >= 3,
+                    "Appearance System warning or native selection color precedence failed.")
+        rasters[key] = (width, height, rgba, rendering)
+        rows.append({"phase": phase, "resolved_theme": theme, "warning_and_selection_precedence": "passed"})
+    before, after = contrast["before"], contrast["after"]
+    require(typed_equal(original["colors"], before["colors"]) and
+            not typed_equal(before["colors"], contrast["active"]["colors"]),
+            "Appearance High Contrast did not bind or change the original system palette.")
+    require(all(typed_equal(before.get(field), after.get(field)) for field in
+                ("resolution", "current_names", "selection", "semantic_cells", "proposal_viewport", "native_focus", "target_rendering", "native_window", "native_list", "horizontal_scroll", "vertical_scroll", "horizontal_components", "vertical_components", "colors")) and
+            all(typed_equal(before.get(field), contrast["active"].get(field)) for field in ("current_names", "selection")),
+            "Appearance System restoration changed fixture, geometry, focus, or original theme.")
+    width, height, before_pixels, rendering = rasters["before"]
+    after_width, after_height, after_pixels, _ = rasters["after"]
+    window = before["native_window"]["rect"]
+    region = {edge: rendering["client"][edge] - window["left" if edge in ("left", "right") else "top"]
+              for edge in ("left", "top", "right", "bottom")}
+    require((width, height) == (after_width, after_height) and
+            pair_pixel_delta(before_pixels, after_pixels, width, height, region) == 0,
+            "Appearance System endpoint client raster did not restore.")
+    return rows
+
+
 def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
-    require(run_id == PAIR_RUN_ID, "Appearance pair run id is invalid.")
+    require(run_id == PAIR_RUN_ID or run_id in PAIR_CONFIGURATIONS, "Appearance pair run id is invalid.")
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(), "Appearance pair run directory is missing or unsafe.")
     manifest, input_bytes = validate_input_manifest(run_root, source_sha)
@@ -1895,7 +2185,7 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
     target = validate_target(actual.get("target"), "appearance target")
     require(typed_equal(target, postlaunch["target"]) and
             actual.get("hwnd_dpi") == manifest["request"]["desktop"]["dpi"] and
-            actual.get("text_scale_percent") == 100,
+            actual.get("text_scale_percent") == manifest["request"]["text_scale_percent"],
             "Appearance target or display differs from request and postlaunch observation.")
     monitor = validate_rectangle(actual["monitor"], "appearance monitor")
     work = validate_rectangle(actual["work_area"], "appearance work area")
@@ -1930,7 +2220,7 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
     environment = observations.get("environment")
     style = environment.get("system_visual_style") if isinstance(environment, dict) else None
     require(isinstance(environment, dict) and environment.get("hwnd_dpi") == actual["hwnd_dpi"] and
-            environment.get("text_scale_factor_percent") == 100 and
+            environment.get("text_scale_factor_percent") == manifest["request"]["text_scale_percent"] and
             environment.get("physical_screen") == monitor and
             environment.get("work_area") == actual["work_area"] and
             isinstance(style, dict) and style.get("forced_colors") is False and
@@ -1939,10 +2229,51 @@ def validate_pair_run(root: Path, run_id: str, source_sha: str) -> dict:
             checked_digest(style.get("theme_path_sha256"), "appearance system theme path") and
             observations.get("scenario", {}).get("environment") == environment,
             "Appearance raw and normalized environment binding differs.")
-    diagnostics = validate_pair_scenes(run_root, raw, files, actual)
+    diagnostics = validate_pair_scenes(run_root, raw, files, actual, manifest["request"].get("high_contrast", False))
+    if manifest["request"]["text_scale_percent"] == 150:
+        text = raw.get("text_scale", {})
+        require(all(int_equals(text.get(field), 150) for field in ("requested_percent", "registry_percent", "acceptance_percent")) and
+                text.get("restoration") == "verified", "Appearance Text150 activation or restoration is missing.")
+        restored = validate_pair_restoration(run_root, raw, files, text.get("snapshot"), "text-scale-snapshot.json", 1)
+        original = exact_keys(restored["original"], {"registry_key_existed", "registry_value_existed", "registry_value_kind", "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}, "appearance original text scale")
+        require(original["registry_key_existed"] is True and type(original["registry_value_existed"]) is bool and
+                type(original["ui_settings_raw_factor"]) in {int, float} and original["ui_settings_raw_factor"] == 1.0 and
+                int_equals(original["ui_settings_percent"], 100) and
+                ((original["registry_value_existed"] and original["registry_value_kind"] == "DWord" and
+                  type(original["registry_value"]) is int and 0 <= original["registry_value"] <= 0xFFFFFFFF) or
+                 (original["registry_value_existed"] is False and original["registry_value"] is None and original["registry_value_kind"] is None)),
+                "Appearance Text150 original setting is invalid or differs from the baseline.")
     return {"run_id": run_id, "mode": PAIR_MODE, "input_manifest_sha256": input_hash,
             "result_sha256": sha256_bytes(result_bytes), "status": "passed",
+            "application_sha256": artifacts["application"]["sha256"],
+            "build_identity": {"source_tree": manifest["source_tree"],
+                               "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+                               "artifact_sha256": {name: artifact["sha256"] for name, artifact in artifacts.items()}},
+            "font_environment": {"installed_fonts": environment["installed_fonts"],
+                                 "system_fonts": environment["target_rendering"]["system_font_recipe"]["fonts"]},
             "raster_regions": diagnostics, "native_scrollbar_theme": "dark-tracking-and-intersection-validated"}
+
+
+def validate_focused_pair_results(pairs: list[dict]) -> None:
+    require(len(pairs) == len(PAIR_CONFIGURATIONS) and {pair["run_id"] for pair in pairs} == set(PAIR_CONFIGURATIONS),
+            "Appearance focused configuration set is incomplete or duplicated.")
+    require(len({pair["application_sha256"] for pair in pairs}) == 1,
+            "Appearance focused configurations did not use the same executable.")
+    require(all(typed_equal(pair["build_identity"], pairs[0]["build_identity"]) for pair in pairs[1:]),
+            "Appearance focused configurations did not use the same build bundle.")
+    baseline = next(pair for pair in pairs if pair["run_id"] == "appearance-pair-base-1920x1080-96-text100")
+    enlarged = next(pair for pair in pairs if pair["run_id"] == "appearance-pair-text150-1920x1080-96-text150")
+    require(typed_equal(baseline["font_environment"]["installed_fonts"], enlarged["font_environment"]["installed_fonts"]) and
+            all(typed_equal(before[field], enlarged["font_environment"]["system_fonts"][role][field])
+                for role, before in baseline["font_environment"]["system_fonts"].items()
+                for field in ("family", "weight", "charset", "quality", "italic", "underline", "strikeout")),
+            "Appearance Text150 font family environment differs from baseline.")
+    require(all([sample.get("phase") for sample in pair["raster_regions"]["same_glyph"]] == list(PAIR_PHASES)
+                for pair in (baseline, enlarged)), "Appearance Text150 same-glyph phase set is incomplete.")
+    for before, after in zip(baseline["raster_regions"]["same_glyph"], enlarged["raster_regions"]["same_glyph"], strict=True):
+        require(before["phase"] == after["phase"] and before["text_sha256"] == after["text_sha256"] and
+                after["width"] > before["width"] * 1.15 and after["height"] > before["height"] * 1.15,
+                "Appearance Text150 did not enlarge both dimensions of the same glyphs.")
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -1952,6 +2283,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--diagnostic", choices=[PAIR_MODE])
+    parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
 
@@ -1963,19 +2295,27 @@ def main(repo: Path, argv=None) -> int:
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
     if args.diagnostic == PAIR_MODE:
-        require(not args.require_complete_set and args.runs == [PAIR_RUN_ID],
-                "Appearance pair is one opt-in run and cannot complete the four-cell set.")
-        pair = validate_pair_run(root, args.runs[0], args.expected_source_sha)
+        focused = args.configuration_set == "focused"
+        require(not args.require_complete_set and
+                (set(args.runs) == set(PAIR_CONFIGURATIONS) if focused else args.runs == [PAIR_RUN_ID]),
+                "Appearance pair requires its declared opt-in run set and cannot complete the four-cell set.")
+        pairs = [validate_pair_run(root, run_id, args.expected_source_sha) for run_id in args.runs]
+        require(len({pair["application_sha256"] for pair in pairs}) == 1,
+                "Appearance focused configurations did not use the same executable.")
+        if focused:
+            validate_focused_pair_results(pairs)
         print(json.dumps({
             "schema_version": 1, "diagnostic": PAIR_MODE, "status": "passed",
-            "source_sha": args.expected_source_sha, "runs": [pair],
+            "source_sha": args.expected_source_sha, "runs": pairs,
+            "configuration_set": "focused" if focused else "standalone", "same_executable": "passed",
             "state_invariance": "passed", "raster_regions": "passed",
             "native_scrollbar_theme": "dark-tracking-and-intersection-validated",
-            "rendering_conformance": "not-assessed", "design_approval": "not-assessed",
-            "omitted_scenes": ["forced-colors", "system-theme-following"],
+            "rendering_conformance": "passed-for-declared-scenes", "design_approval": "not-assessed",
+            "omitted_scenes": ["normal OS Light/Dark transitions"] if focused else ["forced-colors", "system-theme-following"],
             "full_four_run_regression": "not-run", "release_campaign": "not-run",
         }, ensure_ascii=False, indent=2))
         return 0
+    require(args.configuration_set is None, "Focused configurations require appearance-pair diagnostic mode.")
     runs = [validate_run(root, run_id, args.expected_source_sha) for run_id in args.runs]
     modes = [run["manifest"]["request"]["mode"] for run in runs]
     require(len(modes) == len(set(modes)), "Validated runs contain duplicate modes.")

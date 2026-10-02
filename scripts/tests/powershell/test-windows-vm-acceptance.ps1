@@ -414,6 +414,24 @@ try {
     if ($uiSelection.kind -cne 'ui' -or -not $uiSelection.is_observer) {
         throw 'Legacy acceptance arguments must select the shared UI observer task.'
     }
+    $pairSelection = $uiSelectionArguments.Clone()
+    $pairSelection.UiMode = 'appearance-pair'
+    if ((Resolve-ControllerTaskSelection @pairSelection).kind -cne 'ui') {
+        throw 'Controlled High Contrast appearance pair was rejected.'
+    }
+    $pairSelection.UiHighContrast = $false
+    $pairSelection.UiAppearance = 'light'
+    $pairSelection.UiTextScalePercent = 150
+    $pairSelection.HasUiTextScalePercent = $true
+    if ((Resolve-ControllerTaskSelection @pairSelection).kind -cne 'ui') {
+        throw 'Text-150 appearance pair was rejected.'
+    }
+    $pairSelection.UiHighContrast = $true
+    $pairSelection.UiAppearance = 'system'
+    Assert-Fails { Resolve-ControllerTaskSelection @pairSelection } 'non-High-Contrast appearance-pair'
+    $pairSelection.UiTextScalePercent = 100
+    $pairSelection.UiAppearance = 'light'
+    Assert-Fails { Resolve-ControllerTaskSelection @pairSelection } 'system appearance'
     $recoverySelectionArguments = $selectionDefaults.Clone()
     $recoverySelectionArguments.RequestedKind = 'recovery'
     $recoverySelectionArguments.HasRecoveryOutput = $true
@@ -2770,6 +2788,30 @@ try {
         -RegressionMode text-scale `
         -Appearance light `
         -TextScalePercent 150 `
+        -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePairInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidatePairInput.request.mode = 'appearance-pair'
+    $candidatePairInput.request.appearance = 'system'
+    $candidatePairInput.request.text_scale_percent = [long]100
+    $candidatePairInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidatePairInput.request | Add-Member -NotePropertyName high_contrast -NotePropertyValue $true
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+        -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+        -Appearance system -TextScalePercent 100 -HighContrast $true `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+            -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+            -Appearance system -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'contrast or text scale differs'
+    $candidatePairInput.request.appearance = 'light'
+    $candidatePairInput.request.high_contrast = $false
+    $candidatePairInput.request.text_scale_percent = [long]150
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePairInput `
+        -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
+        -Appearance light -TextScalePercent 150 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     if ((Resolve-GuiRegressionLayoutVariant `
         -ManifestInput $candidateRegressionInput `
@@ -2887,6 +2929,7 @@ try {
             -RegressionMode text-scale `
             -Appearance light `
             -TextScalePercent 150 `
+            -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'immutable manifest'
     $legacyRegressionResolved = [pscustomobject]@{

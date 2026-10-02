@@ -836,6 +836,16 @@ public static class DarkReNamerVmAcceptanceNative {
         if (!GetCursorPos(out point)) throw new Win32Exception(Marshal.GetLastWin32Error());
         return point;
     }
+    public static long[] ReadBoundCursor(IntPtr main, uint expectedProcessId) {
+        Point point = ReadCursor();
+        IntPtr hit = WindowFromPoint(point);
+        uint processId;
+        IntPtr root = GetAncestor(hit, 2);
+        if (hit == IntPtr.Zero || root != main || GetWindowThreadProcessId(hit, out processId) == 0
+            || processId != expectedProcessId)
+            throw new InvalidOperationException("Appearance cursor is outside the bound main window.");
+        return new [] { (long)point.X, point.Y, hit.ToInt64(), root.ToInt64() };
+    }
 
     public static void MoveCursor(int x, int y) {
         if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -1055,7 +1065,20 @@ public static class DarkReNamerVmAcceptanceNative {
         long available = (long)before[1] - before[0] - before[2] + 1;
         if (available <= 0) throw new InvalidOperationException("Native ListView has no horizontal overflow.");
         int requested = checked((int)(before[0] + (available * 45 + 50) / 100));
-        int delta = checked(requested - before[3]);
+        // Normalize the path as well as its endpoint: native XOR focus chrome
+        // cannot be copied through differing small scroll deltas consistently.
+        int resetDelta = checked(before[0] - before[3]);
+        if (resetDelta != 0) {
+            IntPtr resetResult;
+            if (SendMessageTimeoutW(window, 0x1014, new IntPtr(resetDelta), IntPtr.Zero,
+                    3, 500, out resetResult) == IntPtr.Zero || resetResult == IntPtr.Zero)
+                throw new InvalidOperationException("Native ListView viewport reset failed.");
+        }
+        int[] reset = TryReadScrollInfo(window, 0);
+        if (reset == null || reset[0] != before[0] || reset[1] != before[1]
+            || reset[2] != before[2] || reset[3] != before[0] || reset[4] != before[0])
+            throw new InvalidOperationException("Native ListView viewport reset did not settle exactly.");
+        int delta = checked(requested - reset[3]);
         if (delta != 0) {
             IntPtr result;
             // LVM_SCROLL uses scalar pixel deltas in report view; no remote pointer is passed.
@@ -1068,6 +1091,86 @@ public static class DarkReNamerVmAcceptanceNative {
             || after[2] != before[2] || after[3] != requested || after[4] != requested)
             throw new InvalidOperationException("Native ListView viewport did not settle exactly.");
         return new [] { requested, after[3] };
+    }
+    public static IntPtr ReadBoundListHeader(IntPtr list, uint expectedProcessId) {
+        uint processId;
+        IntPtr header;
+        if (GetWindowThreadProcessId(list, out processId) == 0 || processId != expectedProcessId
+            || SendMessageTimeoutW(list, 0x101F, IntPtr.Zero, IntPtr.Zero, 3, 500, out header) == IntPtr.Zero
+            || header == IntPtr.Zero || GetAncestor(header, 1) != list
+            || GetWindowThreadProcessId(header, out processId) == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Native header is outside the bound ListView.");
+        StringBuilder className = new StringBuilder(128);
+        if (GetClassName(header, className, className.Capacity) == 0 || className.ToString() != "SysHeader32")
+            throw new InvalidOperationException("Native ListView header class differs.");
+        return header;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UiColor { public byte A, R, G, B; }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int ReadUiColor(IntPtr instance, int colorType, out UiColor color);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int QueryUiInterface(IntPtr instance, ref Guid iid, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoInitialize(uint initType);
+    [DllImport("combase.dll")]
+    private static extern void RoUninitialize();
+    [DllImport("combase.dll", CharSet = CharSet.Unicode)]
+    private static extern int WindowsCreateString(string source, uint length, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int WindowsDeleteString(IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoActivateInstance(IntPtr classId, out IntPtr instance);
+    public static byte[] ReadSystemForegroundColor() {
+        int initialized = RoInitialize(1);
+        if (initialized < 0 && initialized != unchecked((int)0x80010106))
+            Marshal.ThrowExceptionForHR(initialized);
+        IntPtr classId = IntPtr.Zero, instance = IntPtr.Zero, settings = IntPtr.Zero;
+        try {
+            const string runtimeClass = "Windows.UI.ViewManagement.UISettings";
+            int result = WindowsCreateString(runtimeClass, (uint)runtimeClass.Length, out classId);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            result = RoActivateInstance(classId, out instance);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            Guid iid = new Guid("03021be4-5254-4781-8194-5168f7d06d7b");
+            var query = (QueryUiInterface)Marshal.GetDelegateForFunctionPointer(
+                Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance)), typeof(QueryUiInterface));
+            result = query(instance, ref iid, out settings);
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            // IUISettings3 inherits IInspectable; GetColorValue is its first method.
+            IntPtr method = Marshal.ReadIntPtr(Marshal.ReadIntPtr(settings), 6 * IntPtr.Size);
+            var read = (ReadUiColor)Marshal.GetDelegateForFunctionPointer(method, typeof(ReadUiColor));
+            UiColor color;
+            result = read(settings, 1, out color); // UIColorType.Foreground
+            if (result < 0) Marshal.ThrowExceptionForHR(result);
+            return new [] { color.A, color.R, color.G, color.B };
+        }
+        finally {
+            if (settings != IntPtr.Zero) Marshal.Release(settings);
+            if (instance != IntPtr.Zero) Marshal.Release(instance);
+            if (classId != IntPtr.Zero) WindowsDeleteString(classId);
+            if (initialized >= 0) RoUninitialize();
+        }
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
+    public static string ReadBoundStaticText(IntPtr control, IntPtr dialog, uint expectedProcessId) {
+        uint processId;
+        StringBuilder className = new StringBuilder(128);
+        if (GetWindowThreadProcessId(control, out processId) == 0 || processId != expectedProcessId
+            || GetAncestor(control, 1) != dialog || GetDlgCtrlID(control) != 1002
+            || GetClassName(control, className, className.Capacity) == 0
+            || !String.Equals(className.ToString(), "Static", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Text target differs from bound prompt STATIC.");
+        StringBuilder text = new StringBuilder(256);
+        IntPtr result;
+        // WM_GETTEXT is below WM_USER, so Windows marshals its text buffer cross-process.
+        if (SendMessageTimeoutW(control, 0x000D, new IntPtr(text.Capacity), text, 3, 500, out result) == IntPtr.Zero
+            || result.ToInt64() <= 0 || result.ToInt64() >= text.Capacity || result.ToInt64() != text.Length)
+            throw new InvalidOperationException("Bound prompt STATIC text query failed.");
+        return text.ToString();
     }
 
     public static int[] TryReadScrollBarBounds(IntPtr window, int bar) {

@@ -57,11 +57,16 @@
             if ($recoveryConfigured) {
                 throw 'UI tasks do not accept recovery arguments.'
             }
-            if (($UiMode -ceq 'text-scale') -ne ($UiTextScalePercent -eq 150)) {
-                throw 'Only the text-scale UI mode may request 150 percent text.'
+            if (($UiMode -ceq 'text-scale' -and $UiTextScalePercent -ne 150) -or
+                ($UiTextScalePercent -eq 150 -and
+                    ($UiMode -cnotin @('text-scale', 'appearance-pair') -or $UiHighContrast))) {
+                throw 'Only text-scale or non-High-Contrast appearance-pair may request 150 percent text.'
             }
-            if (($UiHighContrast -or $UiClipboard -or $UiCaptureNativeMenu -or
-                    $UiCaptureAdvancedAppearance) -and $UiMode -cne 'current-dpi') {
+            if ($UiHighContrast -and $UiMode -cnotin @('current-dpi', 'appearance-pair')) {
+                throw 'High Contrast UI options require current-dpi or appearance-pair mode.'
+            }
+            if (($UiClipboard -or $UiCaptureNativeMenu -or $UiCaptureAdvancedAppearance) -and
+                $UiMode -cne 'current-dpi') {
                 throw 'Current-DPI UI options require the current-dpi mode.'
             }
             if ($UiHighContrast -and $UiAppearance -cne 'system') {

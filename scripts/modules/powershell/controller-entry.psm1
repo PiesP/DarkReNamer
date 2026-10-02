@@ -756,6 +756,7 @@ function Test-DrControllerPreservedOutputCleanupAuthorization {
         [Parameter(Mandatory)][string] $OutputRoot,
         [Parameter(Mandatory)][string] $ObserverSha256,
         [string] $AcceptanceMode,
+        [int] $TextScalePercent = 100,
         [bool] $HighContrastRequested,
         [bool] $ProcessJobsClosed,
         [AllowNull()][object] $ObserverProcess,
@@ -823,7 +824,8 @@ function Test-DrControllerPreservedOutputCleanupAuthorization {
         } else { $Result.source_sha }
         foreach ($kind in @(
             $(if ($HighContrastRequested) { 'high-contrast' }),
-            $(if ($AcceptanceMode -ceq 'text-scale') { 'text-scale' })
+            $(if ($AcceptanceMode -ceq 'text-scale' -or
+                ($AcceptanceMode -ceq 'appearance-pair' -and $TextScalePercent -eq 150)) { 'text-scale' })
         )) {
             if (-not $kind) { continue }
             $snapshotLeaf = $kind + '-snapshot.json'
@@ -1214,6 +1216,13 @@ try {
             $acceptanceInput.request.appearance -cne $AcceptanceAppearance -or
             $acceptanceInput.request.text_scale_percent -ne $AcceptanceTextScalePercent) {
             throw 'Acceptance arguments differ from the immutable input manifest.'
+        }
+        if ($AcceptanceMode -ceq 'appearance-pair') {
+            $contrastRequest = $acceptanceInput.request.PSObject.Properties['high_contrast']
+            if ($null -eq $contrastRequest -or $contrastRequest.Value -isnot [bool] -or
+                $contrastRequest.Value -ne [bool]$AcceptanceHighContrast) {
+                throw 'Appearance pair High Contrast differs from the immutable input manifest.'
+            }
         }
         Assert-AcceptanceInputArtifactBinding `
             -InputDocument $acceptanceInput `
@@ -4053,6 +4062,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance
             if ($mode -cne 'current-dpi') {
                 $observerArguments += ' -RegressionMode ' + $mode + ' -InputManifestPath "' + $inputManifest + '" -TextScalePercent ' + $textScale
+                if ($mode -ceq 'appearance-pair' -and $highContrast) { $observerArguments += ' -HighContrast' }
             }
             else {
                 if ($highContrast) { $observerArguments += ' -HighContrast' }
@@ -4177,6 +4187,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -InputManifestSha256 $inputManifestSha256 `
                 -AcceptanceMode $AcceptanceMode `
                 -Appearance $AcceptanceAppearance `
+                -TextScalePercent $AcceptanceTextScalePercent `
                 -HighContrast ([bool]$AcceptanceHighContrast) `
                 -HostOutputRoot $AcceptanceOutputRoot `
                 -AcceptanceProfileId $AcceptanceProfileId `
@@ -4184,7 +4195,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -OriginalFailure $pollFailure
         }
         Invoke-AcceptanceTerminalFailureRescue -State $state `
-            -AcceptanceMode $AcceptanceMode -HighContrast ([bool]$AcceptanceHighContrast) `
+            -AcceptanceMode $AcceptanceMode -TextScalePercent $AcceptanceTextScalePercent `
+            -HighContrast ([bool]$AcceptanceHighContrast) `
             -RescueParameters @{
                 Session = $session; GuestRoot = $guestRoot; DesktopSid = $desktop.sid
                 DesktopSessionId = $desktop.session_id; TaskName = $taskName
@@ -4302,6 +4314,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $outputPreservedForCleanup = Test-DrControllerPreservedOutputCleanupAuthorization `
                 -Role ui -Result $result -Inventory $inventory -OutputRoot $AcceptanceOutputRoot `
                 -ObserverSha256 $observer.sha256 -AcceptanceMode $AcceptanceMode `
+                -TextScalePercent $AcceptanceTextScalePercent `
                 -HighContrastRequested ([bool]$AcceptanceHighContrast) `
                 -ProcessJobsClosed $processJobsClosed -ObserverProcess $observerProcess `
                 -PollFailure $pollFailure

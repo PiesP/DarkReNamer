@@ -66,11 +66,27 @@ RUNS = (
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 
 
-def appearance_pair_run(width: int, height: int, dpi: int) -> dict:
+def appearance_pair_run(width: int, height: int, dpi: int, *,
+                        run_id: str = APPEARANCE_PAIR_ID,
+                        text_scale_percent: int = 100,
+                        high_contrast: bool = False) -> dict:
     return {
-        "run_id": APPEARANCE_PAIR_ID, "mode": "appearance-pair", "appearance": "light",
-        "width": width, "height": height, "dpi": dpi, "text_scale_percent": 100,
+        "run_id": run_id, "mode": "appearance-pair",
+        "appearance": "system" if high_contrast else "light",
+        "width": width, "height": height, "dpi": dpi,
+        "text_scale_percent": text_scale_percent, "high_contrast": high_contrast,
     }
+
+
+FOCUSED_PAIR_RUNS = (
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-base-1920x1080-96-text100"),
+    appearance_pair_run(1920, 1080, 144, run_id="appearance-pair-fractional-1920x1080-144-text100"),
+    appearance_pair_run(1920, 1080, 192, run_id="appearance-pair-high-1920x1080-192-text100"),
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-text150-1920x1080-96-text150",
+                        text_scale_percent=150),
+    appearance_pair_run(1920, 1080, 96, run_id="appearance-pair-forced-colors-1920x1080-96-text100",
+                        high_contrast=True),
+)
 
 FULL_CONTEXT_SEMANTICS = {
     "repeated_scope_exact", "repeated_default_cancel",
@@ -582,6 +598,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "appearance": run["appearance"],
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
+            **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
@@ -590,6 +607,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             *(["--diagnostic", "appearance-pair", "--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" else []),
+            *(["--configuration-set", "focused"] if run["mode"] == "appearance-pair"
+              and run["run_id"] != APPEARANCE_PAIR_ID else []),
         ],
     }
     if reference is not None:
@@ -652,6 +671,8 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
     if run["mode"] == "appearance-pair":
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
                     "-AcceptanceProfileId", "vm-automated-v1-win11-ntfs"]
+        if run["high_contrast"]:
+            command += ["-AcceptanceHighContrast"]
     return command
 
 
@@ -670,10 +691,12 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         })
         total_bytes += path.stat().st_size
     require(files, "A GUI regression run returned no raw output.")
-    if run_id == APPEARANCE_PAIR_ID:
+    pair_ids = {APPEARANCE_PAIR_ID, *(run["run_id"] for run in FOCUSED_PAIR_RUNS)}
+    if run_id in pair_ids:
+        expected_pngs = 69 if run_id == FOCUSED_PAIR_RUNS[-1]["run_id"] else 66
         require(total_bytes <= 120 * 1024 * 1024 and
-                sum(row["relative_path"].endswith(".png") for row in files) == 66,
-                "Appearance pair must stay within 120 MiB and exactly 66 original PNGs.")
+                sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
+                f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -868,7 +891,8 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
 
 
 def validate_all(repo: Path, result_root: Path, output_root: Path,
-                 diagnostic: str | None = None) -> None:
+                 diagnostic: str | None = None, selected_runs: tuple[dict, ...] | None = None,
+                 configuration_set: str | None = None) -> None:
     validator = repo / "scripts" / "validate-gui-regression-evidence.py"
     ordinary_file(validator, 2 * 1024 * 1024, "GUI regression evidence validator")
     source_sha, _ = source_identity(repo)
@@ -876,11 +900,14 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
         sys.executable, "-I", str(validator), "--result-root", str(result_root),
         "--expected-source-sha", source_sha,
     ]
-    runs = (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else RUNS
+    runs = selected_runs if selected_runs is not None else (
+        (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
     if diagnostic == "appearance-pair":
         command += ["--diagnostic", "appearance-pair"]
+        if configuration_set == "focused":
+            command += ["--configuration-set", "focused"]
     else:
         command += ["--require-complete-set"]
     completed = subprocess.run(command, cwd=repo, check=True, capture_output=True)
@@ -893,6 +920,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--diagnostic", choices=["appearance-pair"])
+    parser.add_argument("--configuration-set", choices=["focused"])
     parser.add_argument("--desktop-width", type=int, default=1366)
     parser.add_argument("--desktop-height", type=int, default=768)
     parser.add_argument("--desktop-dpi", type=int, choices=[96, 120, 144, 192], default=96)
@@ -902,8 +930,14 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Appearance pair desktop must be between 800x600 and 1920x1080.")
     require(args.diagnostic or (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Desktop selection requires --diagnostic appearance-pair.")
-    selected_runs = (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),) \
-        if args.diagnostic == "appearance-pair" else RUNS
+    require(not args.configuration_set or args.diagnostic == "appearance-pair",
+            "A configuration set requires --diagnostic appearance-pair.")
+    require(not args.configuration_set or
+            (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
+            "Focused configuration set does not accept desktop overrides.")
+    selected_runs = (FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
+                     (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
+                     if args.diagnostic == "appearance-pair" else RUNS)
     root = checked_new_root(args.output_root, repo)
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
@@ -926,12 +960,13 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             exclusive=True,
         )
         execute_run(repo, run_root / "inputs", run_root, run, profile, launcher)
-    validate_all(repo, runs_root, root, args.diagnostic)
+    validate_all(repo, runs_root, root, args.diagnostic, selected_runs, args.configuration_set)
     print(json.dumps({
         "status": "diagnostic-validated" if args.diagnostic else "validated",
         "source_sha": read_json(bundle / "bundle.json")["source_sha"],
         "runs": [run["run_id"] for run in selected_runs],
         "diagnostic": args.diagnostic,
+        "configuration_set": args.configuration_set,
         "output_root": str(root),
     }))
     return 0

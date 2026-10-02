@@ -70,6 +70,26 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                          "vm-automated-v1-win11-ntfs")
         self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
 
+    def test_focused_pair_configurations_reuse_one_bounded_run_shape(self):
+        runs = runner.FOCUSED_PAIR_RUNS
+        self.assertEqual(len(runs), 5)
+        self.assertEqual(len({row["run_id"] for row in runs}), 5)
+        self.assertEqual([(row["dpi"], row["text_scale_percent"], row["high_contrast"])
+                          for row in runs],
+                         [(96, 100, False), (144, 100, False), (192, 100, False),
+                          (96, 150, False), (96, 100, True)])
+        self.assertTrue(all((row["width"], row["height"]) == (1920, 1080) for row in runs))
+        self.assertEqual(runs[-1]["appearance"], "system")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "forced", runs[-1],
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertIn("-AcceptanceHighContrast", command)
+        self.assertEqual(command[command.index("-AcceptanceAppearance") + 1], "system")
+        self.assertEqual(command[command.index("-AcceptanceTextScalePercent") + 1], "100")
+
     def test_consumer_policies_preserve_formats_alpha_and_axis_limits(self):
         grayscale = png_bytes(1, 1, 0, b"\0\x12")
         self.assertEqual(evidence.decode_png(grayscale, "gray"), (1, 1, b"\x12\x12\x12\xff"))
@@ -256,6 +276,18 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         (output / "capture-65.png").unlink()
         with self.assertRaisesRegex(ValueError, "exactly 66 original PNGs"):
             runner.collection_document(run_root, "a" * 64, runner.APPEARANCE_PAIR_ID)
+
+    def test_focused_forced_colors_requires_three_additional_captures(self):
+        run_id = runner.FOCUSED_PAIR_RUNS[-1]["run_id"]
+        run_root = self.root / run_id
+        output = run_root / "output"
+        output.mkdir(parents=True)
+        for index in range(69):
+            (output / f"capture-{index:02}.png").write_bytes(b"original-fixture")
+        self.assertEqual(len(runner.collection_document(run_root, "a" * 64, run_id)["files"]), 69)
+        (output / "capture-68.png").unlink()
+        with self.assertRaisesRegex(ValueError, "exactly 69 original PNGs"):
+            runner.collection_document(run_root, "a" * 64, run_id)
 
     def test_collection_rejects_symlinked_output(self):
         run_root = self.root / "symlink"

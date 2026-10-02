@@ -764,3 +764,18 @@ with no lease retained across native scroll tracking. Failed state/DC/geometry
 queries leave native drawing intact. Native/Forced Colors resolution bypasses
 custom chrome. Stock GDI selections and clipping are restored, and every
 successfully acquired window DC is released on the UI thread.
+
+Command rail hover tracking uses a control-local UI-thread subclass with scalar
+reference data and the documented `TrackMouseEvent(TME_LEAVE)` contract. It
+retains no application-state or heap pointer across native processing. Native
+button input and accessibility continue through `DefSubclassProc` exactly once;
+signed client coordinates and a live stack `GetClientRect` query clear hot state
+on captured movement outside the control. Leave, capture loss/cancel, hide,
+disable, and destruction clear hot state, and `WM_NCDESTROY`
+removes the exact subclass before forwarding. Failed tracking/state updates
+retain native input processing; partial rail construction destroys its owned
+children. This callback justifies the explicit reviewed extern
+function inventory entry for `command_rail.rs`; it does not authorize other
+unsafe boundaries. Standard prompt custom drawing reads the live native
+`BS_DEFPUSHBUTTON` style on the callback's bound BUTTON to retain its default
+cue when common-control custom-draw flags omit `CDIS_DEFAULT`.
