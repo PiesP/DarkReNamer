@@ -716,7 +716,7 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
     require(files, "A GUI regression run returned no raw output.")
     pair_ids = {APPEARANCE_PAIR_ID, *(run["run_id"] for run in FOCUSED_PAIR_RUNS)}
     if run_id in pair_ids:
-        expected_pngs = 69 if run_id == FOCUSED_PAIR_RUNS[-1]["run_id"] else 66
+        expected_pngs = 72 if run_id == FOCUSED_PAIR_RUNS[-1]["run_id"] else 69
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
