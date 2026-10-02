@@ -436,10 +436,10 @@ function Invoke-GuiRegressionAcceptance {
         )) {
         throw 'Regression input manifest is not the staged ordinary manifest.'
     }
-    $input = Get-Content -LiteralPath $inputItem.FullName -Raw | ConvertFrom-Json
+    $manifestInput = Get-Content -LiteralPath $inputItem.FullName -Raw | ConvertFrom-Json
     $inputHash = Get-LowerSha256 -Path $inputItem.FullName
     Assert-GuiRegressionInvocationBinding `
-        -ManifestInput $input `
+        -ManifestInput $manifestInput `
         -Verified $resolved `
         -RegressionMode $RegressionMode `
         -Appearance $Appearance `
@@ -453,7 +453,7 @@ function Invoke-GuiRegressionAcceptance {
         throw 'Regression restore-only mode differs from its requested configuration.'
     }
     if ($ValidateOnly) {
-        Write-Host "Validated GUI regression observer for source $($input.source_sha)."
+        Write-Host "Validated GUI regression observer for source $($manifestInput.source_sha)."
         return
     }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -467,7 +467,7 @@ function Invoke-GuiRegressionAcceptance {
             -Verified ([pscustomobject]@{
                 root = $resolved.root
                 output_root = $resolved.output_root
-                source_sha = $input.source_sha
+                source_sha = $manifestInput.source_sha
                 script_sha256 = $ExpectedScriptSha256
             }) `
             -SessionId $session
@@ -478,7 +478,7 @@ function Invoke-GuiRegressionAcceptance {
             -Verified ([pscustomobject]@{
                 root = $resolved.root
                 output_root = $resolved.output_root
-                source_sha = $input.source_sha
+                source_sha = $manifestInput.source_sha
                 script_sha256 = $ExpectedScriptSha256
             }) `
             -SessionId $session
@@ -503,19 +503,19 @@ function Invoke-GuiRegressionAcceptance {
         vm_identity_sha256 = Get-LowerTextSha256 -Value $guestId
     }
     Assert-GuiRegressionGuestPreflightBinding `
-        -Expected $input.guest_preflight `
+        -Expected $manifestInput.guest_preflight `
         -Actual $guest
     Write-JsonUtf8Bom `
         -Path (Join-Path $resolved.output_root 'platform-preflight.json') `
         -Value ([ordered]@{
             schema_version = 1
-            run_id = $input.run_id
+            run_id = $manifestInput.run_id
             input_manifest_sha256 = $inputHash
             phase = 'pre-launch'
-            source_sha = $input.source_sha
-            application_sha256 = $input.artifacts.application.sha256
-            runner_sha256 = $input.artifacts.runner.sha256
-            observer_sha256 = $input.artifacts.observer.sha256
+            source_sha = $manifestInput.source_sha
+            application_sha256 = $manifestInput.artifacts.application.sha256
+            runner_sha256 = $manifestInput.artifacts.runner.sha256
+            observer_sha256 = $manifestInput.artifacts.observer.sha256
             guest_platform = $guest
         })
 
@@ -529,7 +529,7 @@ function Invoke-GuiRegressionAcceptance {
         'standard'
     }
     $fullContextReference = if ($RegressionMode -eq 'tooltip') {
-        [string]$input.full_context_reference.run_id
+        [string]$manifestInput.full_context_reference.run_id
     }
     else {
         ''
@@ -538,19 +538,19 @@ function Invoke-GuiRegressionAcceptance {
         role = 'after'
         mode = $scenarioMode
         observer = $Appearance
-        expected_dpi = [int]$input.request.desktop.dpi
+        expected_dpi = [int]$manifestInput.request.desktop.dpi
         expected_text_scale_percent = $TextScalePercent
         layout_variant = Resolve-GuiRegressionLayoutVariant `
-            -ManifestInput $input `
+            -ManifestInput $manifestInput `
             -Verified $resolved `
             -RegressionMode $RegressionMode `
             -Appearance $Appearance `
             -TextScalePercent $TextScalePercent
-        requested_small_workspace = $input.request.desktop
+        requested_small_workspace = $manifestInput.request.desktop
         tooltip_regression = $RegressionMode -eq 'tooltip'
-        source_sha = $input.source_sha
-        application_sha256 = $input.artifacts.application.sha256
-        runner_sha256 = $input.artifacts.runner.sha256
+        source_sha = $manifestInput.source_sha
+        application_sha256 = $manifestInput.artifacts.application.sha256
+        runner_sha256 = $manifestInput.artifacts.runner.sha256
         full_context_reference = $fullContextReference
         fixture_variant = 'canonical'
     }
@@ -581,7 +581,7 @@ function Invoke-GuiRegressionAcceptance {
     $observations = [ordered]@{
         foreground_activation = $script:acceptanceForegroundObservations
         schema_version = 1
-        run_id = $input.run_id
+        run_id = $manifestInput.run_id
         environment = $null
         scenario = $null
     }
@@ -604,7 +604,7 @@ function Invoke-GuiRegressionAcceptance {
             $activationPath = Join-Path $resolved.output_root 'text-scale-activation.json'
             Write-JsonUtf8Bom -Path $snapshotPath -Value ([ordered]@{
                 schema_version = 1
-                source_sha = $input.source_sha
+                source_sha = $manifestInput.source_sha
                 acceptance_script_sha256 = $ExpectedScriptSha256
                 restoration_required = $true
                 original = ConvertTo-TextScaleDocumentSnapshot $textOriginal
@@ -616,7 +616,7 @@ function Invoke-GuiRegressionAcceptance {
             $textAcceptance = Wait-TextScaleSnapshot `
                 -Label '150 percent text activation' `
                 -ObservationPath $activationPath `
-                -SourceSha $input.source_sha `
+                -SourceSha $manifestInput.source_sha `
                 -ScriptSha256 $ExpectedScriptSha256 `
                 -Accept { param($value) $value.UiPercent -eq 150 }
         }
@@ -649,7 +649,7 @@ function Invoke-GuiRegressionAcceptance {
                     -EvidenceRoot $resolved.output_root `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -SourceSha $input.source_sha `
+                    -SourceSha $manifestInput.source_sha `
                     -AcceptanceScriptSha256 $ExpectedScriptSha256 `
                     -HighContrast:$HighContrast `
                     -Captures $captures `
@@ -774,7 +774,7 @@ function Invoke-GuiRegressionAcceptance {
                 }
                 Write-JsonUtf8Bom -Path $snapshotPath -Value ([ordered]@{
                     schema_version = 1
-                    source_sha = $input.source_sha
+                    source_sha = $manifestInput.source_sha
                     acceptance_script_sha256 = $ExpectedScriptSha256
                     restoration_required = $true
                     original = ConvertTo-TextScaleDocumentSnapshot $textOriginal
@@ -793,7 +793,7 @@ function Invoke-GuiRegressionAcceptance {
                     -Path (Join-Path $resolved.output_root 'text-scale-restoration.json') `
                     -Value ([ordered]@{
                         schema_version = 1
-                        run_id = $input.run_id
+                        run_id = $manifestInput.run_id
                         input_manifest_sha256 = $inputHash
                         status = 'verified'
                         original = $original

@@ -887,6 +887,48 @@ try {
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'Invoke-GuiRegressionAcceptance'
         }, $true)
+        $appearanceCalls = @($regressionFunction.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Invoke-ObserverAppearancePairScenario'
+        }, $true))
+        if ($appearanceCalls.Count -ne 1) {
+            throw 'Expected one nested appearance-pair scenario dispatch.'
+        }
+        $dispatch = [scriptblock]::Create($appearanceCalls[0].Extent.Text)
+        function Invoke-ObserverAppearancePairScenario {
+            param(
+                $Verified, $RuntimeRoot, $EvidenceRoot, $SessionId,
+                $WaitSeconds, $SourceSha, $AcceptanceScriptSha256,
+                [switch] $HighContrast, $Captures, $ProcessLifecycleObservations
+            )
+            $SourceSha
+        }
+        foreach ($sourceSha in @(('a' * 40), ('b' * 40))) {
+            $observedSourceSha = & {
+                $manifestInput = [pscustomobject]@{ source_sha = $sourceSha }
+                $verified = $null
+                $effectiveRuntimeRoot = 'runtime'
+                $resolved = [pscustomobject]@{ output_root = 'evidence' }
+                $session = 1
+                $TimeoutSeconds = 60
+                $ExpectedScriptSha256 = 'c' * 64
+                $HighContrast = $false
+                $captures = [Collections.Generic.List[object]]::new()
+                $processLifecycleObservations = @()
+                & $dispatch
+            }
+            if ($observedSourceSha -cne $sourceSha) {
+                throw 'Nested appearance-pair dispatch lost its manifest source SHA.'
+            }
+        }
+    }
+    & {
+        $regressionFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-GuiRegressionAcceptance'
+        }, $true)
         $verifiedAssignment = $regressionFunction.Find({
             param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and
