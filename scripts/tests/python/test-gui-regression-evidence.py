@@ -597,6 +597,21 @@ class Fixture:
             "theme_path_sha256": "e" * 64, "theme_color": "NormalColor",
             "theme_size": "NormalSize", "forced_colors": False,
         }
+        font = {"family": "Segoe UI", "height": -12, "width": 0, "weight": 400,
+                "charset": 1, "quality": 5, "italic": 0, "underline": 0, "strikeout": 0}
+        environment["target_rendering"] = {
+            "hwnd": 1001, "process_id": 4242, "hwnd_dpi": 96,
+            "awareness": {"query": "GetWindowDpiAwarenessContext+GetAwarenessFromDpiAwarenessContext+AreDpiAwarenessContextsEqual",
+                          "context": -4, "value": 2, "per_monitor_v2": True},
+            "client": {"left": 8, "top": 30, "right": 792, "bottom": 544, "width": 784, "height": 514},
+            "client_query": "GetClientRect+ClientToScreen",
+            "system_font_recipe": {"query": "SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)", "dpi": 96,
+                                   "fonts": {"MessageFont": font, "StatusFont": font},
+                                   "scope": "system LOGFONT recipe; not a dereferenced application HFONT"}}
+        environment["installed_fonts"] = {
+            "query": "System.Drawing.Text.InstalledFontCollection", "count": 100, "family_names_sha256": "a" * 64,
+            "encoding": "UTF-8 ordinal sorted names joined by LF",
+            "scope": "installed family environment; glyph fallback is observed in original rasters"}
         captures = []
         scenes = {}
         def add_capture(name: str, image: bytes, appearance: str, surface: str,
@@ -643,6 +658,7 @@ class Fixture:
             status = {"collision": "대상 경로 충돌", "warning": "이름 본체가 비어 있는 항목",
                       "changed": "변경 가능"}.get(scene, "변경 없음")
             state = {
+                "target_rendering": environment["target_rendering"],
                 "row_count": count, "current_names": names,
                 "columns": [900, 900, 260],
                 "column_preference_sha256": "c" * 64,
@@ -1439,6 +1455,25 @@ class AppearancePairEvidenceTests(unittest.TestCase):
                     interaction["input_prompt"][field] = value
                 else:
                     interaction[field] = value
+                write_json(path, raw)
+                self.fixture.refresh(self.run)
+                with self.assertRaisesRegex(evidence.EvidenceError, message):
+                    self.validate()
+
+    def test_pair_target_client_awareness_and_font_bindings_rejected(self):
+        for field, message in (("awareness", "DPI awareness"), ("client", "client bounds"),
+                               ("font", "font descriptor")):
+            with self.subTest(field=field):
+                self.setUp()
+                path = self.run / "output/acceptance-result.json"
+                raw = json.loads(path.read_text())
+                rendering = raw["assertions"]["scenario"]["scenes"]["empty"][1]["state"]["target_rendering"]
+                if field == "awareness":
+                    rendering["awareness"]["per_monitor_v2"] = False
+                elif field == "client":
+                    rendering["client"]["width"] += 1
+                else:
+                    rendering["system_font_recipe"]["fonts"]["MessageFont"]["height"] = 0
                 write_json(path, raw)
                 self.fixture.refresh(self.run)
                 with self.assertRaisesRegex(evidence.EvidenceError, message):

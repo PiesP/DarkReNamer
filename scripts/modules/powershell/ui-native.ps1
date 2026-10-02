@@ -915,6 +915,73 @@ public static class DarkReNamerVmAcceptanceNative {
         return value;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    public struct NativeLogFont {
+        public int Height, Width, Escapement, Orientation, Weight;
+        public byte Italic, Underline, StrikeOut, CharSet, OutPrecision, ClipPrecision, Quality, PitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NativeNonClientMetrics {
+        public uint Size;
+        public int BorderWidth, ScrollWidth, ScrollHeight, CaptionWidth, CaptionHeight;
+        public NativeLogFont CaptionFont;
+        public int SmallCaptionWidth, SmallCaptionHeight;
+        public NativeLogFont SmallCaptionFont;
+        public int MenuWidth, MenuHeight;
+        public NativeLogFont MenuFont, StatusFont, MessageFont;
+        public int PaddedBorderWidth;
+    }
+    public class WindowRenderingEnvironment {
+        public long Context;
+        public int Awareness;
+        public bool PerMonitorV2;
+        public Rect Client;
+        public uint Dpi;
+        public NativeLogFont MessageFont, StatusFont;
+    }
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+    [DllImport("user32.dll")] private static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(IntPtr window, ref Point point);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfoForDpi(uint action, uint parameter,
+        ref NativeNonClientMetrics value, uint flags, uint dpi);
+    public static WindowRenderingEnvironment ReadWindowRenderingEnvironment(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Rendering environment target is outside the bound process.");
+        IntPtr context = GetWindowDpiAwarenessContext(window);
+        if (context == IntPtr.Zero) throw new InvalidOperationException("Target DPI awareness context is missing.");
+        Rect client;
+        Point origin = new Point();
+        if (!GetClientRect(window, out client) || !ClientToScreen(window, ref origin))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (client.Left != 0 || client.Top != 0 || client.Right <= 0 || client.Bottom <= 0)
+            throw new InvalidOperationException("Target client geometry is invalid.");
+        uint dpi = GetDpiForWindow(window);
+        if (dpi == 0) throw new InvalidOperationException("Target DPI is missing.");
+        NativeNonClientMetrics metrics = new NativeNonClientMetrics {
+            Size = (uint)Marshal.SizeOf(typeof(NativeNonClientMetrics))
+        };
+        if (!SystemParametersInfoForDpi(0x29, metrics.Size, ref metrics, 0, dpi))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new WindowRenderingEnvironment {
+            Context = context.ToInt64(), Awareness = GetAwarenessFromDpiAwarenessContext(context),
+            PerMonitorV2 = AreDpiAwarenessContextsEqual(context, new IntPtr(-4)), Dpi = dpi,
+            Client = new Rect { Left = origin.X, Top = origin.Y,
+                Right = checked(origin.X + client.Right), Bottom = checked(origin.Y + client.Bottom) },
+            MessageFont = metrics.MessageFont, StatusFont = metrics.StatusFont
+        };
+    }
     public static int[] ReadMonitorInfo(IntPtr window) {
         IntPtr monitor = MonitorFromWindow(window, 2);
         if (monitor == IntPtr.Zero) throw new InvalidOperationException("MonitorFromWindow returned no target monitor.");

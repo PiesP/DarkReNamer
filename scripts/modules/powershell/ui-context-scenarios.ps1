@@ -860,6 +860,8 @@ function Invoke-ObserverStandardScenario {
         $environment = Get-ObserverEnvironmentMetadata -Application $application
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
         $environment['system_visual_style'] = Get-ObserverSystemVisualStyle
+        $environment['target_rendering'] = Get-ObserverAppearanceRenderingEnvironment -Application $application
+        $environment['installed_fonts'] = Get-ObserverAppearanceInstalledFontEnvironment
         $requested = $script:contract.requested_small_workspace
         $requestedModePrefix = '{0}x{1}@' -f $requested.width,$requested.height
         $environment['requested_small_workspace'] = [ordered]@{
@@ -1130,6 +1132,48 @@ function Save-ObserverAppearanceCapture {
     $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $capture -Appearance $Appearance -Surface $Surface))
     $capture
 }
+function Get-ObserverAppearanceRenderingEnvironment {
+    param([Parameter(Mandatory)][object] $Application)
+    $value = [DarkReNamerVmAcceptanceNative]::ReadWindowRenderingEnvironment([IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
+    $fonts = [ordered]@{}
+    foreach ($role in @('MessageFont', 'StatusFont')) {
+        $font = $value.$role
+        if ([string]::IsNullOrWhiteSpace($font.FaceName) -or $font.FaceName.Length -gt 31 -or $font.Height -eq 0) {
+            throw 'Appearance system font recipe is missing or invalid.'
+        }
+        $fonts[$role] = [ordered]@{
+            family = $font.FaceName; height = [int]$font.Height; width = [int]$font.Width
+            weight = [int]$font.Weight; charset = [int]$font.CharSet; quality = [int]$font.Quality
+            italic = [int]$font.Italic; underline = [int]$font.Underline; strikeout = [int]$font.StrikeOut
+        }
+    }
+    [ordered]@{
+        hwnd = [long]$Application.main_handle; process_id = [int]$Application.process.Id; hwnd_dpi = [int]$value.Dpi
+        awareness = [ordered]@{ query = 'GetWindowDpiAwarenessContext+GetAwarenessFromDpiAwarenessContext+AreDpiAwarenessContextsEqual'; context = $value.Context; value = $value.Awareness; per_monitor_v2 = $value.PerMonitorV2 }
+        client = [ordered]@{ left = $value.Client.Left; top = $value.Client.Top; right = $value.Client.Right; bottom = $value.Client.Bottom; width = $value.Client.Right - $value.Client.Left; height = $value.Client.Bottom - $value.Client.Top }
+        client_query = 'GetClientRect+ClientToScreen'
+        system_font_recipe = [ordered]@{ query = 'SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)'; dpi = [int]$value.Dpi; fonts = $fonts; scope = 'system LOGFONT recipe; not a dereferenced application HFONT' }
+    }
+}
+function Get-ObserverAppearanceInstalledFontEnvironment {
+    $collection = [Drawing.Text.InstalledFontCollection]::new()
+    $families = @()
+    try {
+        $families = @($collection.Families)
+        $names = [string[]]@($families | ForEach-Object { $_.Name })
+        if ($names.Count -lt 1 -or $names.Count -gt 4096) { throw 'Appearance installed font inventory is outside its bound.' }
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($names -join "`n"))
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try { $digest = -join ($hash.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
+        finally { $hash.Dispose() }
+        [ordered]@{ query = 'System.Drawing.Text.InstalledFontCollection'; count = $names.Count; family_names_sha256 = $digest; encoding = 'UTF-8 ordinal sorted names joined by LF'; scope = 'installed family environment; glyph fallback is observed in original rasters' }
+    }
+    finally {
+        if ($null -ne $families) { foreach ($family in $families) { $family.Dispose() } }
+        $collection.Dispose()
+    }
+}
 function Invoke-ObserverAppearanceScrollProbe {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
         [Parameter(Mandatory)][string] $EvidenceRoot, [Parameter(Mandatory)][string] $Phase,
@@ -1378,6 +1422,7 @@ function Invoke-ObserverAppearancePairScenario {
                 $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
                 $state = [ordered]@{
                     overlay = $overlay
+                    target_rendering = Get-ObserverAppearanceRenderingEnvironment -Application $application
                     row_count = $count; current_names = $names.ToArray(); columns = $columns
                     column_preference_sha256 = $preferenceHash
                     horizontal_scroll = if ($null -eq $horizontal) { $null } else { @($horizontal) }

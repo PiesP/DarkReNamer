@@ -246,6 +246,17 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(result["cleanup_sha256"], runner.digest(output / "cleanup.json"))
         self.assertEqual(result["actual"]["appearance"], "light")
 
+    def test_pair_collection_requires_all_66_original_captures(self):
+        run_root = self.root / runner.APPEARANCE_PAIR_ID
+        output = run_root / "output"
+        output.mkdir(parents=True)
+        for index in range(66):
+            (output / f"capture-{index:02}.png").write_bytes(b"original-fixture")
+        self.assertEqual(len(runner.collection_document(run_root, "a" * 64, runner.APPEARANCE_PAIR_ID)["files"]), 66)
+        (output / "capture-65.png").unlink()
+        with self.assertRaisesRegex(ValueError, "exactly 66 original PNGs"):
+            runner.collection_document(run_root, "a" * 64, runner.APPEARANCE_PAIR_ID)
+
     def test_collection_rejects_symlinked_output(self):
         run_root = self.root / "symlink"
         output = run_root / "output"

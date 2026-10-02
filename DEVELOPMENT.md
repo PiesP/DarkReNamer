@@ -476,6 +476,14 @@ viewport, and restores the initial position in `finally`. The additional 18
 original PNGs and bounded bar luminance observations are diagnostic evidence;
 tracking capture alone does not establish scrollbar color conformance.
 
+The pair records the target window's actual DPI-awareness context and screen-space
+client bounds separately from observer awareness. Each theme phase rechecks both
+and the system message/status `LOGFONTW` recipes at the target DPI. Installed
+font-family count and an ordinal, UTF-8 inventory digest describe the font
+environment. These recipes describe system font inputs, not a cross-process
+`HFONT` inspection; original multilingual glyph rasters remain the rendering
+evidence. No application GDI handle is dereferenced by the observer.
+
 The independent verifier checks source/EXE/environment bindings, exact capture
 inventory, state invariance, proposed-name semantic pixels, selection transitions,
 and button-state pixel differences. Scrollbar pixels remain a diagnostic

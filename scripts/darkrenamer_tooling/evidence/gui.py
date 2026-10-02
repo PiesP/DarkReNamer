@@ -1288,6 +1288,45 @@ def pair_pixel_delta(left: bytes, right: bytes, width: int, height: int, rect: d
                           right[(y * width + x) * 4 + channel]) for channel in range(3)) >= 10)
 
 
+def validate_pair_rendering_environment(value: object, actual: dict) -> dict:
+    row = exact_keys(value, {"hwnd", "process_id", "hwnd_dpi", "awareness", "client", "client_query", "system_font_recipe"},
+                     "appearance target rendering environment")
+    require(int_equals(row["hwnd"], actual["target"]["hwnd"]) and
+            int_equals(row["process_id"], actual["target"]["process_id"]) and
+            int_equals(row["hwnd_dpi"], actual["hwnd_dpi"]),
+            "Appearance rendering environment target identity differs.")
+    awareness = exact_keys(row["awareness"], {"query", "context", "value", "per_monitor_v2"},
+                           "appearance target DPI awareness")
+    require(awareness["query"] == "GetWindowDpiAwarenessContext+GetAwarenessFromDpiAwarenessContext+AreDpiAwarenessContextsEqual" and
+            type(awareness["context"]) is int and awareness["context"] != 0 and
+            int_equals(awareness["value"], 2) and awareness["per_monitor_v2"] is True,
+            "Appearance target DPI awareness is not observed Per-Monitor-V2.")
+    client = validate_rectangle(row["client"], "appearance client bounds")
+    window = actual["target"]["window_rect"]
+    require(row["client_query"] == "GetClientRect+ClientToScreen" and
+            window["left"] <= client["left"] < client["right"] <= window["right"] and
+            window["top"] <= client["top"] < client["bottom"] <= window["bottom"],
+            "Appearance observed client lies outside its bound window.")
+    recipe = exact_keys(row["system_font_recipe"], {"query", "dpi", "fonts", "scope"},
+                        "appearance system font recipe")
+    require(recipe["query"] == "SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)" and
+            int_equals(recipe["dpi"], actual["hwnd_dpi"]) and
+            recipe["scope"] == "system LOGFONT recipe; not a dereferenced application HFONT",
+            "Appearance system font recipe query or DPI differs.")
+    fonts = exact_keys(recipe["fonts"], {"MessageFont", "StatusFont"}, "appearance system font roles")
+    for role, font in fonts.items():
+        font = exact_keys(font, {"family", "height", "width", "weight", "charset", "quality", "italic", "underline", "strikeout"},
+                          f"appearance {role} descriptor")
+        require(isinstance(font["family"], str) and 1 <= len(font["family"]) <= 31 and
+                type(font["height"]) is int and 0 < abs(font["height"]) <= 512 and
+                type(font["width"]) is int and abs(font["width"]) <= 512 and
+                type(font["weight"]) is int and 0 <= font["weight"] <= 1000 and
+                all(type(font[key]) is int and 0 <= font[key] <= 255
+                    for key in ("charset", "quality", "italic", "underline", "strikeout")),
+                "Appearance system font descriptor is invalid.")
+    return row
+
+
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
                          actual: dict) -> dict:
     scenario = nested(raw, "assertions", "scenario")
@@ -1312,6 +1351,15 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
     require(set(captures) == set(expected_captures), "Appearance pair captures are duplicated or invalid.")
     require({name for name in collection_files if name.endswith(".png")} == set(expected_captures),
             "Appearance pair collected PNG inventory differs from its captures.")
+    rendering = validate_pair_rendering_environment(nested(scenario, "environment", "target_rendering"), actual)
+    installed = exact_keys(nested(scenario, "environment", "installed_fonts"),
+                           {"query", "count", "family_names_sha256", "encoding", "scope"}, "appearance installed font environment")
+    require(installed["query"] == "System.Drawing.Text.InstalledFontCollection" and
+            installed["encoding"] == "UTF-8 ordinal sorted names joined by LF" and
+            installed["scope"] == "installed family environment; glyph fallback is observed in original rasters" and
+            checked_int(installed["count"], 1, 4096, "appearance installed family count") and
+            checked_digest(installed["family_names_sha256"], "appearance installed font family digest"),
+            "Appearance installed font environment is missing.")
     diagnostics = {}
     for scene in PAIR_SCENES:
         steps = scenes[scene]
@@ -1329,6 +1377,9 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     state.get("apply_enabled") is (scene in {"changed", "warning"}) and
                     state.get("focus_automation_id") == ("32773" if scene == "selected-inactive" else "1000"),
                     f"Appearance {scene} data, Apply, or settled focus differs.")
+            observed_rendering = validate_pair_rendering_environment(state.get("target_rendering"), actual)
+            require(typed_equal(observed_rendering, rendering),
+                    "Appearance client, awareness, or font recipe changed with theme.")
             focus = state.get("native_focus")
             require(isinstance(focus, list) and len(focus) == 3 and
                     all(type(value) is int for value in focus) and focus[0] > 0 and
@@ -1400,7 +1451,7 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                 "row_count", "current_names", "columns", "horizontal_scroll", "vertical_scroll",
                 "horizontal_scrollbar_bounds", "vertical_scrollbar_bounds", "native_list",
                 "apply_enabled", "status", "selection", "selected_row_cell", "proposed_name", "proposed_cell",
-                "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window")}
+                "focus_automation_id", "native_focus", "focused_uia", "list_physical_target", "list", "window", "target_rendering")}
             physical = state.get("list_physical_target")
             require(isinstance(physical, dict) and type(physical.get("hit_window")) is int and
                     physical["hit_window"] > 0 and physical.get("root_window") == actual["target"]["hwnd"],
