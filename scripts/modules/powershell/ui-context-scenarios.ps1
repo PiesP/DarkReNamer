@@ -1015,6 +1015,370 @@ function Get-ObserverAppearanceColumnWidthsPx {
     if ($Dpi -notin @(96, 120, 144, 192)) { throw 'Unsupported appearance fixture DPI.' }
     @(900, 900, 260) | ForEach-Object { [int][Math]::Floor(($_ * $Dpi + 48) / 96.0) }
 }
+function Get-ObserverAppearanceDefaultPrimaryWidthsPx {
+    param([Parameter(Mandatory)][int] $ClientWidth,
+        [Parameter(Mandatory)][int] $StatusWidth,
+        [Parameter(Mandatory)][int] $Dpi)
+    # Mirrors allocate_primary_column_widths for untouched default settings.
+    $scale = { param([int] $dip) [int][Math]::Floor(($dip * $Dpi + 48) / 96.0) }
+    $budget = [Math]::Max(0, $ClientWidth - [Math]::Max(0, $StatusWidth) - [Math]::Max(1, (& $scale 1)))
+    $minimum = @((& $scale 120), (& $scale 120), (& $scale 80))
+    $minimumTotal = [int]($minimum[0] + $minimum[1] + $minimum[2])
+    if ($budget -lt $minimumTotal) {
+        # The production fallback keeps its minima and allows overflow.
+        return $minimum
+    }
+    $surplus = $budget - $minimumTotal
+    $share = [int][Math]::Floor($surplus / 5.0)
+    $widths = [int[]]@(($minimum[0] + 2 * $share), ($minimum[1] + 2 * $share), ($minimum[2] + $share))
+    foreach ($index in @(0, 1, 2, 0, 1) | Select-Object -First ($surplus % 5)) { $widths[$index]++ }
+    $widths
+}
+function Get-ObserverAppearanceTransitionSnapshot {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][string] $ExecutableSha256,
+        [Parameter(Mandatory)][string] $ColumnPreferencePath,
+        [Parameter(Mandatory)][byte[]] $ExpectedPreferenceBytes,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][ValidateSet('before_dark','after_dark','before_light','after_light')][string] $Phase)
+    $listHandle = [IntPtr]$Grid.element.Current.NativeWindowHandle
+    $rendering = Get-ObserverAppearanceRenderingEnvironment -Application $Application
+    # Capture the committed viewport before any UIA row lookup, which may
+    # realize an offscreen item in some providers. Reject observer side effects.
+    $horizontal = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0))
+    $vertical = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1))
+    $topIndex = [DarkReNamerVmAcceptanceNative]::ReadBoundListViewTopIndex($listHandle, [uint32]$Application.process.Id)
+    $names = [Collections.Generic.List[string]]::new()
+    $values = [Collections.Generic.List[object]]::new()
+    $rowCount = [int]$Grid.pattern.Current.RowCount
+    $columnCount = [int]$Grid.pattern.Current.ColumnCount
+    if ($rowCount -ne 60 -or $columnCount -ne 8) {
+        throw 'Transition preservation requires sixty rows and eight native columns.'
+    }
+    for ($index = 0; $index -lt $rowCount; $index++) {
+        $row = [string[]]::new($columnCount)
+        for ($column = 0; $column -lt $columnCount; $column++) {
+            $row[$column] = [string]$Grid.pattern.GetItem($index, $column).Current.Name
+        }
+        $names.Add($row[0]); $values.Add($row)
+    }
+    $textScale = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
+    if ([double]::IsNaN($textScale) -or $textScale -lt 1.0 -or $textScale -gt 2.25) {
+        throw 'Transition text scale is outside the supported range.'
+    }
+    $snapshot = [ordered]@{
+        phase = $Phase; appearance = if ($Phase -in @('after_dark','before_light')) { 'dark' } else { 'light' }
+        executable_sha256 = $ExecutableSha256
+        column_preference_sha256 = Assert-ObserverAppearanceColumnPreference -Path $ColumnPreferencePath -ExpectedBytes $ExpectedPreferenceBytes
+        process_id = [int]$Application.process.Id
+        main_handle = [long]$Application.main_handle
+        list_handle = $listHandle.ToInt64()
+        client_bounds = $rendering.client
+        list_client_bounds = @([DarkReNamerVmAcceptanceNative]::ReadBoundListViewClientBounds($listHandle, [uint32]$Application.process.Id))
+        dpi = [int]$rendering.hwnd_dpi
+        text_scale_percent = [int][Math]::Round($textScale * 100.0)
+        columns = @(0..7 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+        column_order = @([DarkReNamerVmAcceptanceNative]::ReadBoundHeaderColumnOrder($listHandle, [uint32]$Application.process.Id))
+        row_count = $rowCount; column_count = $columnCount
+        current_names = $names.ToArray(); row_values = $values.ToArray()
+        selection = Get-ObserverAppearanceSelection -Grid $Grid
+        horizontal_scroll = $horizontal
+        vertical_scroll = $vertical
+        top_index = $topIndex
+        native_focus = @([DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot([IntPtr]$Application.main_handle, [uint32]$Application.process.Id))
+        appearance_menu = Get-VmAutomatedAppearance -Window $Application.main -Process $Application.process -ExpectedSession $SessionId
+    }
+    $afterRead = [ordered]@{
+        horizontal_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0))
+        vertical_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1))
+        top_index = [DarkReNamerVmAcceptanceNative]::ReadBoundListViewTopIndex($listHandle, [uint32]$Application.process.Id)
+    }
+    $snapshot['observer_read_native_after'] = $afterRead
+    $snapshot['observer_read_preserved'] = ((@($snapshot.horizontal_scroll[0..3]) -join ',') -ceq (@($afterRead.horizontal_scroll[0..3]) -join ',') -and
+        (@($snapshot.vertical_scroll[0..3]) -join ',') -ceq (@($afterRead.vertical_scroll[0..3]) -join ',') -and
+        $snapshot.top_index -eq $afterRead.top_index)
+    $snapshot
+}
+function Assert-ObserverAppearanceTransitionEqual {
+    param([Parameter(Mandatory)][object] $Before,
+        [Parameter(Mandatory)][object] $After)
+    foreach ($axis in @('horizontal_scroll', 'vertical_scroll')) {
+        $first = @($Before.$axis); $second = @($After.$axis)
+        if ($first.Count -ne 5 -or $second.Count -ne 5 -or $first[2] -le 0 -or
+            $first[1] - $first[0] + 1 -le $first[2] -or
+            $first[3] -le $first[0] -or $first[3] -gt ($first[1] - $first[2] + 1) -or
+            (($first[0..3] -join ',') -cne ($second[0..3] -join ','))) {
+            throw "Transition preservation changed or lacked nonminimum $axis native range/position."
+        }
+    }
+    foreach ($field in @('executable_sha256','column_preference_sha256','process_id','main_handle','list_handle','dpi',
+            'text_scale_percent','row_count','column_count','top_index')) {
+        if ($Before.$field -cne $After.$field) { throw "Transition preservation changed $field." }
+    }
+    foreach ($field in @('columns','column_order','list_client_bounds','current_names')) {
+        if ((@($Before.$field) -join "`0") -cne (@($After.$field) -join "`0")) {
+            throw "Transition preservation changed $field."
+        }
+    }
+    if (@($Before.row_values).Count -ne 60 -or @($After.row_values).Count -ne 60) {
+        throw 'Transition preservation row values are incomplete.'
+    }
+    for ($row = 0; $row -lt 60; $row++) {
+        if (@($Before.row_values[$row]).Count -ne 8 -or @($After.row_values[$row]).Count -ne 8) {
+            throw 'Transition preservation row values are incomplete.'
+        }
+        for ($column = 0; $column -lt 8; $column++) {
+            if ($Before.row_values[$row][$column] -cne $After.row_values[$row][$column]) {
+                throw 'Transition preservation changed a row value.'
+            }
+        }
+    }
+    foreach ($field in @('left','top','right','bottom','width','height')) {
+        if ($Before.client_bounds.$field -ne $After.client_bounds.$field) {
+            throw 'Transition preservation changed client bounds.'
+        }
+    }
+    if ($Before.selection.count -ne $After.selection.count -or
+        $Before.selection.name -cne $After.selection.name) {
+        throw 'Transition preservation changed selected row identity.'
+    }
+}
+function Assert-ObserverAppearanceTransitionPhase {
+    param([Parameter(Mandatory)][object] $Snapshot,
+        [Parameter(Mandatory)][string] $Phase,
+        [Parameter(Mandatory)][string] $Appearance)
+    if ($Snapshot.phase -cne $Phase -or $Snapshot.appearance -cne $Appearance) {
+        throw "Transition preservation missing or reordered $Phase observation."
+    }
+    if ($Snapshot.observer_read_preserved -ne $true) {
+        throw 'Transition snapshot UIA reads moved the native viewport.'
+    }
+}
+function Invoke-ObserverAppearanceTransitionPreservation {
+    param([Parameter(Mandatory)][scriptblock] $ReadSnapshot,
+        [Parameter(Mandatory)][scriptblock] $SetAppearance,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink,
+        [Parameter(Mandatory)][object] $Fixture)
+    $probe = [ordered]@{
+        snapshot_order = @('before_dark','after_dark','before_light','after_light')
+        fixture = $Fixture
+        observations = [Collections.Generic.List[object]]::new()
+        check = [ordered]@{ status = 'pending'; reason = $null }
+    }
+    $ObservationSink['transition_preservation'] = $probe
+    try {
+        $beforeDark = & $ReadSnapshot 'before_dark'
+        $probe.observations.Add($beforeDark)
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $beforeDark -Phase 'before_dark' -Appearance 'light'
+        Assert-ObserverAppearanceTransitionEqual -Before $beforeDark -After $beforeDark
+        & $SetAppearance 'dark'
+        $afterDark = & $ReadSnapshot 'after_dark'
+        $probe.observations.Add($afterDark)
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $afterDark -Phase 'after_dark' -Appearance 'dark'
+        Start-Sleep -Milliseconds 150
+        $settledDark = & $ReadSnapshot 'after_dark'
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $settledDark -Phase 'after_dark' -Appearance 'dark'
+        $afterDark['settlement'] = [ordered]@{
+            horizontal_scroll = @($settledDark.horizontal_scroll)
+            vertical_scroll = @($settledDark.vertical_scroll)
+            top_index = $settledDark.top_index
+        }
+        Assert-ObserverAppearanceTransitionEqual -Before $afterDark -After $settledDark
+        $afterDark['settled'] = $true
+        Assert-ObserverAppearanceTransitionEqual -Before $beforeDark -After $afterDark
+        $afterDark['command_focus_transfer'] = [ordered]@{
+            before_control_id = [long]$beforeDark.native_focus[2]
+            after_control_id = [long]$afterDark.native_focus[2]
+        }
+        $beforeLight = & $ReadSnapshot 'before_light'
+        $probe.observations.Add($beforeLight)
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $beforeLight -Phase 'before_light' -Appearance 'dark'
+        Assert-ObserverAppearanceTransitionEqual -Before $afterDark -After $beforeLight
+        & $SetAppearance 'light'
+        $afterLight = & $ReadSnapshot 'after_light'
+        $probe.observations.Add($afterLight)
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $afterLight -Phase 'after_light' -Appearance 'light'
+        Start-Sleep -Milliseconds 150
+        $settledLight = & $ReadSnapshot 'after_light'
+        Assert-ObserverAppearanceTransitionPhase -Snapshot $settledLight -Phase 'after_light' -Appearance 'light'
+        $afterLight['settlement'] = [ordered]@{
+            horizontal_scroll = @($settledLight.horizontal_scroll)
+            vertical_scroll = @($settledLight.vertical_scroll)
+            top_index = $settledLight.top_index
+        }
+        Assert-ObserverAppearanceTransitionEqual -Before $afterLight -After $settledLight
+        $afterLight['settled'] = $true
+        Assert-ObserverAppearanceTransitionEqual -Before $beforeLight -After $afterLight
+        $afterLight['command_focus_transfer'] = [ordered]@{
+            before_control_id = [long]$beforeLight.native_focus[2]
+            after_control_id = [long]$afterLight.native_focus[2]
+        }
+        $probe.check.status = 'passed'
+        $probe
+    }
+    catch {
+        $probe.check.status = 'failed'; $probe.check.reason = $_.Exception.Message
+        throw
+    }
+}
+function Get-ObserverAppearanceDefaultColumnState {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $listHandle = [IntPtr]$Grid.element.Current.NativeWindowHandle
+    $candidateProcessId = [uint32]$Application.process.Id
+    $allWidths = @(0..7 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+    $order = @([DarkReNamerVmAcceptanceNative]::ReadBoundHeaderColumnOrder($listHandle, $candidateProcessId))
+    $clientBounds = @([DarkReNamerVmAcceptanceNative]::ReadBoundListViewClientBounds($listHandle, $candidateProcessId))
+    $clientWidth = $clientBounds[2] - $clientBounds[0]
+    $rendering = Get-ObserverAppearanceRenderingEnvironment -Application $Application
+    $expected = @(Get-ObserverAppearanceDefaultPrimaryWidthsPx -ClientWidth $clientWidth -StatusWidth $allWidths[7] -Dpi $rendering.hwnd_dpi)
+    if ($allWidths.Count -ne 8 -or $expected.Count -ne 3 -or
+        (($allWidths[0..2] -join ',') -cne ($expected -join ',')) -or
+        (@($allWidths[3..6] | Where-Object { $_ -ne 0 }).Count -ne 0) -or
+        $allWidths[7] -lt [int][Math]::Floor((112 * $rendering.hwnd_dpi + 48) / 96.0) -or
+        (($order -join ',') -cne '0,1,2,3,4,5,6,7')) {
+        throw 'Clean-start native columns differ from automatic default allocation.'
+    }
+    if ([int]$Grid.pattern.Current.RowCount -ne 1) { throw 'Clean-start default scene requires one unchanged row.' }
+    $current = $Grid.pattern.GetItem(0, 0)
+    $proposed = $Grid.pattern.GetItem(0, 1)
+    $currentName = [string]$current.Current.Name
+    if ($currentName -cne [string]$proposed.Current.Name) {
+        throw 'Clean-start default row unexpectedly changed its proposed name.'
+    }
+    $apply = Get-ObserverPublicApplyState -Application $Application -SessionId $SessionId -Label 'clean-start default Apply'
+    if ($apply.enabled) { throw 'Clean-start default row enables Apply without a change.' }
+    $status = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId `
+        -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds `
+        -Label 'clean-start default status' -RequireWindowHandle
+    [ordered]@{
+        column_origin = 'clean-start-default'
+        columns = @($allWidths[0..2])
+        runtime_columns = [ordered]@{ status_width_px = [int]$allWidths[7]; optional_widths = @($allWidths[3..6]) }
+        column_visibility = @(0..7 | ForEach-Object { [bool]($allWidths[$_] -gt 0) })
+        column_order = $order
+        list_client_bounds = $clientBounds; list_client_width = $clientWidth
+        row_count = 1; current_names = @($currentName); proposed_name = [string]$proposed.Current.Name
+        current_name_cell = Get-ElementObservation -Element $current
+        proposed_name_cell = Get-ElementObservation -Element $proposed
+        apply_enabled = $false; status = [string]$status.Current.Name
+        selection = Get-ObserverAppearanceSelection -Grid $Grid
+        horizontal_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 0))
+        vertical_scroll = @([DarkReNamerVmAcceptanceNative]::TryReadScrollInfo($listHandle, 1))
+        target_rendering = $rendering
+        appearance_menu = Get-VmAutomatedAppearance -Window $Application.main -Process $Application.process -ExpectedSession $SessionId
+        list = Get-ElementObservation -Element $Grid.element
+        native_list = Get-ObserverNativeWindowMetrics -Window $Grid.element
+        native_header = Get-ObserverNativeWindowMetrics -Window ([Windows.Automation.AutomationElement]::FromHandle(
+            [DarkReNamerVmAcceptanceNative]::ReadBoundListHeader($listHandle, $candidateProcessId)))
+        window = Get-ObserverNativeWindowMetrics -Window $Application.main
+    }
+}
+function Invoke-ObserverAppearanceDefaultColumnsScene {
+    param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $PathsFile,
+        [Parameter(Mandatory)][string] $RowName,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string[]] $FixturePaths,
+        [Parameter(Mandatory)][object] $ExpectedFixtureState,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][object] $ExpectedEnvironment,
+        [Parameter(Mandatory)][int] $CustomProcessId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
+    $scene = [ordered]@{
+        fixture = [ordered]@{
+            source = 'clean-start-default'; settings_path_kind = 'isolated-localappdata'
+            settings_absent_before_launch = $false; row_name = $RowName
+            disk_unchanged = $false; journal_residue_count = $null
+        }
+        process_id = $null; main_handle = $null; executable_sha256 = $Verified.application.sha256
+        steps = [Collections.Generic.List[object]]::new(); normal_exit_code = $null
+        check = [ordered]@{ status = 'pending'; reason = $null }
+    }
+    $ObservationSink['default_columns'] = $scene
+    $application = $null
+    $priorLocalAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+    try {
+        $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'appearance-default-columns'
+        $localAppData = New-PrivateDirectory -Parent $root -Leaf 'localappdata'
+        $settings = Join-Path (Join-Path $localAppData 'DarkReNamer') 'ui-columns-v1'
+        if ((Test-Path -LiteralPath $settings) -or
+            @((Get-ChildItem -LiteralPath $localAppData -Force)).Count -ne 0) {
+            throw 'Clean-start default columns were preseeded.'
+        }
+        $scene.fixture.settings_absent_before_launch = $true
+        [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
+        $applicationPath = Join-Path $Verified.root $Verified.application.file
+        if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+            throw 'Clean-start default application bytes differ from verified executable.'
+        }
+        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'clean-start default application' `
+            -ProcessLifecycleObservations $ProcessLifecycleObservations
+        $scene.process_id = [int]$application.process.Id
+        $scene.main_handle = [long]$application.main_handle
+        if ($scene.process_id -eq $CustomProcessId) { throw 'Clean-start default scene reused the custom-column process.' }
+        $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
+        $environment = Get-ObserverEnvironmentMetadata -Application $application
+        if ($environment.physical_screen.width -ne $ExpectedEnvironment.physical_screen.width -or
+            $environment.physical_screen.height -ne $ExpectedEnvironment.physical_screen.height -or
+            $environment.hwnd_dpi -ne $ExpectedEnvironment.hwnd_dpi -or
+            $environment.text_scale_factor_percent -ne $ExpectedEnvironment.text_scale_factor_percent -or
+            $minimum.dpi -ne $ExpectedEnvironment.hwnd_dpi) {
+            throw 'environment_blocked: clean-start default display, DPI, or text scale differs.'
+        }
+        $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $scene.fixture['startup_columns'] = @(0..7 | ForEach-Object {
+            [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth([IntPtr]$grid.element.Current.NativeWindowHandle, $_)
+        })
+        [void](Import-GuiRegressionPathList -Application $application -PathsFile $PathsFile -ExpectedRows 1 `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+        foreach ($step in @('light-before','dark','light-after')) {
+            $appearance = if ($step -eq 'dark') { 'dark' } else { 'light' }
+            [void](Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId `
+                -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $appearance)
+            Start-Sleep -Milliseconds 150
+            $overlay = Assert-ObserverAppearanceNoTooltip -Application $application
+            $state = Get-ObserverAppearanceDefaultColumnState -Application $application -Grid $grid `
+                -SessionId $SessionId -WaitSeconds $WaitSeconds
+            $state['overlay'] = $overlay
+            if ($state.current_names[0] -cne $RowName) { throw 'Clean-start default row differs from owned fixture.' }
+            $leaf = "appearance-default-columns-$step.png"
+            $capture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+                -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+                -Root $EvidenceRoot -Leaf $leaf -Label "appearance default columns $step"
+            $Captures.Add((Add-AcceptanceScreenshotContext -Screenshot $capture -Appearance $appearance -Surface 'main-workbench'))
+            $scene.steps.Add([ordered]@{ phase = $step; appearance = $appearance; state = $state; capture = $capture })
+        }
+        $scene.normal_exit_code = Close-AcceptanceApplication -Application $application -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds -CloseInput ordinary
+        $after = Get-ObserverAppearanceFixtureState -Root $FixtureRoot -Paths $FixturePaths
+        if (-not (Test-ObserverFixtureStateEqual -Expected $ExpectedFixtureState -Actual $after)) {
+            throw 'Clean-start default scene changed the owned fixture files.'
+        }
+        $scene.fixture.disk_unchanged = $true
+        Assert-NoJournalResidue -LocalAppData $localAppData
+        $scene.fixture.journal_residue_count = 0
+        $scene.check.status = 'passed'
+        $scene
+    }
+    catch {
+        $scene.check.status = 'failed'; $scene.check.reason = $_.Exception.Message
+        throw
+    }
+    finally {
+        try { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
+        finally { [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $priorLocalAppData, 'Process') }
+    }
+}
 function Assert-ObserverAppearanceNoTooltip {
     param([Parameter(Mandatory)][object] $Application)
     $bounds = $Application.main.Current.BoundingRectangle
@@ -1353,8 +1717,10 @@ function Invoke-ObserverAppearancePairScenario {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Collections.IDictionary] $ObservationSink,
         [string] $SourceSha, [string] $AcceptanceScriptSha256, [switch] $HighContrast
     )
+    if ($null -eq $ObservationSink) { $ObservationSink = [ordered]@{} }
     $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'appearance-fixture'
     $parent = New-PrivateDirectory -Parent $root -Leaf '한국어-日本語-long-path-2026'
     $paths = [Collections.Generic.List[string]]::new()
@@ -1398,12 +1764,34 @@ function Invoke-ObserverAppearancePairScenario {
         }
         $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
         $scenes = [ordered]@{}
+        $ObservationSink['scenes'] = $scenes
         foreach ($scene in @('empty', 'unchanged', 'overflow', 'changed', 'collision', 'warning', 'selected-active', 'selected-inactive')) {
             if ($scene -eq 'unchanged') {
                 [void](Import-GuiRegressionPathList -Application $application -PathsFile $oneList -ExpectedRows 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
             }
             elseif ($scene -eq 'overflow') {
                 [void](Import-GuiRegressionPathList -Application $application -PathsFile $remainingList -ExpectedRows 60 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+                [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId)
+                $grid.element.SetFocus()
+                $scrollObject = $null
+                if (-not $grid.element.TryGetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern, [ref]$scrollObject)) {
+                    throw 'Transition preservation fixture lacks native scroll control.'
+                }
+                $scroll = [Windows.Automation.ScrollPattern]$scrollObject
+                if (-not $scroll.Current.HorizontallyScrollable -or -not $scroll.Current.VerticallyScrollable) {
+                    throw 'Transition preservation fixture must scroll on both axes.'
+                }
+                $scroll.SetScrollPercent(45.0, 45.0)
+                Start-Sleep -Milliseconds 150
+                [void](Invoke-ObserverAppearanceTransitionPreservation `
+                    -ReadSnapshot { param($phase) Get-ObserverAppearanceTransitionSnapshot -Application $application -Grid $grid `
+                        -ExecutableSha256 $Verified.application.sha256 -ColumnPreferencePath $columnPreference.path `
+                        -ExpectedPreferenceBytes $columnPreferenceBytes -SessionId $SessionId -Phase $phase } `
+                    -SetAppearance { param($appearance) [void](Set-AcceptanceAppearance -Process $application.process `
+                        -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $appearance) } `
+                    -ObservationSink $ObservationSink `
+                    -Fixture ([ordered]@{ source = 'isolated-persisted-user-settings';
+                        column_preference_sha256 = $columnPreference.sha256; row_count = 60 }))
             }
             elseif ($scene -eq 'changed') {
                 Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name 'paired-change-00.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -1556,6 +1944,7 @@ function Invoke-ObserverAppearancePairScenario {
             $scenes[$scene] = $steps.ToArray()
         }
         $interactions = [Collections.Generic.List[object]]::new()
+        $ObservationSink['interactions'] = $interactions
         foreach ($step in @('light-before', 'dark', 'light-after')) {
             $appearance = if ($step -eq 'dark') { 'dark' } else { 'light' }
             [void](Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId `
@@ -1743,13 +2132,25 @@ function Invoke-ObserverAppearancePairScenario {
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
-        [ordered]@{
-            environment = $environment; appearance = 'light-dark-light'; process_id = [int]$application.process.Id
-            fixture = [ordered]@{ file_count = 60; disk_unchanged = $true; journal_residue_count = 0; column_preferences = $columnPreference }
-            scenes = $scenes; interactions = $interactions.ToArray(); normal_exit_code = $exitCode
-            high_contrast = $highContrastResult
-            limitations = if ($HighContrast) { @('normal OS Light/Dark setting transitions not-run; current System resolution and Forced Colors restoration observed') } else { @('system-theme and forced-colors configurations not-run in this diagnostic') }
+        $ObservationSink['environment'] = $environment
+        $ObservationSink['appearance'] = 'light-dark-light'
+        $ObservationSink['process_id'] = [int]$application.process.Id
+        $ObservationSink['fixture'] = [ordered]@{
+            file_count = 60; disk_unchanged = $true; journal_residue_count = 0; column_preferences = $columnPreference
         }
+        $ObservationSink['normal_exit_code'] = $exitCode
+        $ObservationSink['high_contrast'] = $highContrastResult
+        $ObservationSink['limitations'] = if ($HighContrast) {
+            @('normal OS Light/Dark setting transitions not-run; current System resolution and Forced Colors restoration observed')
+        } else { @('system-theme and forced-colors configurations not-run in this diagnostic') }
+        [void](Invoke-ObserverAppearanceDefaultColumnsScene -Verified $Verified -RuntimeRoot $RuntimeRoot `
+            -EvidenceRoot $EvidenceRoot -PathsFile $oneList -RowName ([IO.Path]::GetFileName($paths[0])) `
+            -FixtureRoot $root -FixturePaths $paths.ToArray() -ExpectedFixtureState $initial `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedEnvironment $environment `
+            -CustomProcessId ([int]$application.process.Id) -Captures $Captures `
+            -ProcessLifecycleObservations $ProcessLifecycleObservations -ObservationSink $ObservationSink)
+        $ObservationSink['interactions'] = $interactions.ToArray()
+        $ObservationSink
     }
     finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
 }
