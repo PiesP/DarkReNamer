@@ -23,6 +23,9 @@ using System.Collections.Generic;
 public static class DarkReNamerVmAcceptanceNative {
     public static List<string> Calls = new List<string>();
     public static Queue<object> Snapshots = new Queue<object>();
+    public static int HighContrastFlags;
+    public class VisualStyle { public int Flags; public string ThemePath = "fixture-theme", ThemeColor = "NormalColor", ThemeSize = "NormalSize"; }
+    public static VisualStyle GetHighContrastSnapshot() { return new VisualStyle { Flags = HighContrastFlags }; }
     public static uint DisabledCommand;
     public static string InputFailure = "", Cleanup = "cleared";
     public static bool IsMenuCommandChecked(IntPtr window, uint command) {
@@ -86,6 +89,14 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-scenarios-' + [gui
 $null = New-Item -ItemType Directory -Path $root
 $clipboardCases = [Collections.Generic.List[object]]::new()
 try {
+    foreach ($flags in 0,1) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $flags
+        $style = Get-ObserverSystemVisualStyle
+        Assert-Equal $style.forced_colors ($flags -eq 1) 'Observed Forced Colors flag'
+        Assert-Equal $style.theme_path_sha256 (Get-LowerTextSha256 -Value 'fixture-theme') 'Bound observed theme hash'
+        Assert-Equal $style.theme_color 'NormalColor' 'Observed theme color'
+        Assert-Equal $style.theme_size 'NormalSize' 'Observed theme size'
+    }
     & {
         foreach ($case in @(@(96, '900,900,260'), @(120, '1125,1125,325'), @(144, '1350,1350,390'), @(192, '1800,1800,520'))) {
             Assert-Equal ((Get-ObserverAppearanceColumnWidthsPx -Dpi $case[0]) -join ',') $case[1] 'Scaled persisted column widths'

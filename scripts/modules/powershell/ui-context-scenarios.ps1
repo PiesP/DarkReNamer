@@ -859,13 +859,7 @@ function Invoke-ObserverStandardScenario {
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $application
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
-        $visualStyle = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
-        $environment['system_visual_style'] = [ordered]@{
-            theme_path_sha256 = Get-LowerTextSha256 -Value $visualStyle.ThemePath
-            theme_color = $visualStyle.ThemeColor
-            theme_size = $visualStyle.ThemeSize
-            forced_colors = ($visualStyle.Flags -band 1) -ne 0
-        }
+        $environment['system_visual_style'] = Get-ObserverSystemVisualStyle
         $requested = $script:contract.requested_small_workspace
         $requestedModePrefix = '{0}x{1}@' -f $requested.width,$requested.height
         $environment['requested_small_workspace'] = [ordered]@{
@@ -1059,6 +1053,15 @@ function Get-ObserverAppearanceFixtureState {
     }
     $rows.ToArray()
 }
+function Get-ObserverSystemVisualStyle {
+    $visualStyle = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+    [ordered]@{
+        theme_path_sha256 = Get-LowerTextSha256 -Value $visualStyle.ThemePath
+        theme_color = $visualStyle.ThemeColor
+        theme_size = $visualStyle.ThemeSize
+        forced_colors = ($visualStyle.Flags -band 1) -ne 0
+    }
+}
 function Invoke-ObserverAppearancePairScenario {
     param(
         [Parameter(Mandatory)][object] $Verified,
@@ -1094,6 +1097,7 @@ function Invoke-ObserverAppearancePairScenario {
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $application
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        $environment['system_visual_style'] = Get-ObserverSystemVisualStyle
         $requested = $script:contract.requested_small_workspace
         $environment['requested_small_workspace'] = [ordered]@{
             width = [int]$requested.width; height = [int]$requested.height
