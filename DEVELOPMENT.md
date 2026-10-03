@@ -577,8 +577,16 @@ Freeze the product and harness commits, executable hashes, toolchain/profile,
 fixture contents/order, display, initial preferences and cache policy before a
 comparison. Start with two complete observations per product in a declared
 balanced order, such as baseline/candidate/candidate/baseline. Each attempt has
-a new output root and a
-600-second observer and 32 MiB output limit. The fixed workload observes 30 seconds of empty idle,
+a new output root and a 600-second observer and 32 MiB output limit. To keep
+both observations bound to the same executable bytes, first build with
+`scripts/test-windows-vm.py --prepare-only --output /absolute/private/native-bundle`.
+Read and freeze `application.sha256` from its `bundle.json`, then pass
+`--prepared-bundle-root /absolute/private/native-bundle` and
+`--expected-prepared-application-sha256` with that digest to each performance
+invocation. Prepared reuse is restricted to this diagnostic; the runner verifies
+the clean source, executable, test binaries and trusted native tooling closure
+before contacting the VM. Each attempt retains its own authenticated inputs and
+prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
 100/1,000/10,000 ordinary rows, 1,000 long paths with auxiliary columns hidden
 and visible, 300 extension classes with recurring `.txt`, one-row and full-list
 preview/reset with five representative rows including the last row, then three

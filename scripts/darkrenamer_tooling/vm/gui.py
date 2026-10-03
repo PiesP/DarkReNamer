@@ -637,6 +637,9 @@ def validate_prepared_bundle(repo: Path, bundle: Path, expected_application_sha2
     record = read_json(ordinary_file(bundle / RECORD_NAME, 2 * 1024 * 1024,
                                      "Prepared tooling record"))
     roles = tuple(row["role"] for row in record["modules"])
+    require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
+             "powershell-guest-entry"}.issubset(roles),
+            "Prepared tooling lacks the native GUI execution closure.")
     trusted = trusted_tooling_inventory(repo, manifest["source_sha"], roles)
     require(record.get("schema_version") == 1 and record.get("manifest") == trusted["manifest"] and
             {row["role"]: row for row in record["modules"]} ==

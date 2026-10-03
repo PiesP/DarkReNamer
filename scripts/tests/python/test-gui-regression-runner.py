@@ -517,6 +517,10 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                                   "size": (bundle / name).stat().st_size}
         record = {"schema_version": 1, "manifest": reference("tooling-bundle.json"),
                   "modules": [{"role": "vm-launcher", **reference("tooling-loader.py")}]}
+        for role in ("powershell-controller-entry", "powershell-ui-entry", "powershell-guest-entry"):
+            filename = role + ".psm1"
+            (bundle / filename).write_bytes(b"module")
+            record["modules"].append({"role": role, **reference(filename)})
         self.write_json(bundle / "tooling-record.json", record)
         source = "a" * 40
         manifest = {"schema_version": 1, "source_sha": source, "source_state": "clean",
@@ -531,6 +535,11 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         with mock.patch.object(runner, "source_identity", return_value=(source, "b" * 40)), \
                 mock.patch.object(runner, "trusted_tooling_inventory", return_value=trusted):
             self.assertEqual(runner.validate_prepared_bundle(repo, bundle, pin), manifest)
+            incomplete_record = {**record, "modules": record["modules"][:1]}
+            self.write_json(bundle / "tooling-record.json", incomplete_record)
+            with self.assertRaisesRegex(ValueError, "native GUI execution closure"):
+                runner.validate_prepared_bundle(repo, bundle, pin)
+            self.write_json(bundle / "tooling-record.json", record)
             with self.assertRaisesRegex(ValueError, "application pin"):
                 runner.validate_prepared_bundle(repo, bundle, "f" * 64)
             (bundle / "DarkReNamer.exe").write_bytes(b"tampered")
