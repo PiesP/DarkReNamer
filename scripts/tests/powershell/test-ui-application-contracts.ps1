@@ -497,4 +497,23 @@ finally {
     }
     if ($script:retainedCommandBindings -ne 3) { throw 'Retained commands bypassed repeated identity validation.' }
 }
+$performanceSamples = @(
+    [ordered]@{ phase='empty-idle'; sample_gap_ms=[double]0; resource_collection_ms=[double]3.25 },
+    [ordered]@{ phase='empty-idle'; sample_gap_ms=[double]201.75; resource_collection_ms=[double]4.5 },
+    [ordered]@{ phase='post'; sample_gap_ms=[double]245.125; resource_collection_ms=[double]2.75 }
+)
+$phaseSummary = @(Get-ObserverPerformancePhaseSummary -Samples $performanceSamples `
+    -PhaseOrder @('empty-idle','post','unobserved'))
+if ($phaseSummary.Count -ne 3 -or
+    $phaseSummary[0].phase -cne 'empty-idle' -or $phaseSummary[0].sample_count -ne 2 -or
+    $phaseSummary[0].max_sample_gap_ms -ne 201.75 -or
+    $phaseSummary[0].max_resource_collection_ms -ne 4.5 -or
+    $phaseSummary[1].phase -cne 'post' -or $phaseSummary[1].sample_count -ne 1 -or
+    $phaseSummary[1].max_sample_gap_ms -ne 245.125 -or
+    $phaseSummary[1].max_resource_collection_ms -ne 2.75 -or
+    $phaseSummary[2].phase -cne 'unobserved' -or $phaseSummary[2].sample_count -ne 0 -or
+    $phaseSummary[2].max_sample_gap_ms -ne 0 -or
+    $phaseSummary[2].max_resource_collection_ms -ne 0) {
+    throw 'Performance phase summary did not preserve ordered sample counts and numeric maxima.'
+}
 Write-Host 'UI application behavior contracts passed.'

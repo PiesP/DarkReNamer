@@ -1476,6 +1476,29 @@ function Read-ObserverPerformancePreviewRows {
     throw 'Performance preview did not settle for all five representative rows.'
 }
 
+function Get-ObserverPerformancePhaseSummary {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples,
+        [Parameter(Mandatory)][string[]] $PhaseOrder)
+
+    $summary = [Collections.Generic.List[object]]::new()
+    foreach ($phaseName in $PhaseOrder) {
+        $count = 0
+        $maxGapMs = [double]0
+        $maxCollectionMs = [double]0
+        foreach ($sample in $Samples) {
+            if ($sample['phase'] -cne $phaseName) { continue }
+            $count++
+            $gapMs = [double]$sample['sample_gap_ms']
+            $collectionMs = [double]$sample['resource_collection_ms']
+            if ($gapMs -gt $maxGapMs) { $maxGapMs = $gapMs }
+            if ($collectionMs -gt $maxCollectionMs) { $maxCollectionMs = $collectionMs }
+        }
+        $summary.Add([ordered]@{ phase=$phaseName; sample_count=$count;
+            max_sample_gap_ms=$maxGapMs; max_resource_collection_ms=$maxCollectionMs })
+    }
+    $summary.ToArray()
+}
+
 function Invoke-ObserverPerformanceSampleScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -1775,13 +1798,8 @@ function Invoke-ObserverPerformanceSampleScenario {
         })
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
             'single-row','full-preview') + @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3','post')
-        $ObservationSink['phase_summary'] = @($phaseOrder | ForEach-Object {
-            $phaseName = $_
-            $phaseSamples = @($ObservationSink['samples'] | Where-Object { $_.phase -ceq $phaseName })
-            [ordered]@{ phase=$phaseName; sample_count=$phaseSamples.Count;
-                max_sample_gap_ms=[double]$(if ($phaseSamples.Count) { ($phaseSamples | Measure-Object -Property sample_gap_ms -Maximum).Maximum } else { 0 });
-                max_resource_collection_ms=[double]$(if ($phaseSamples.Count) { ($phaseSamples | Measure-Object -Property resource_collection_ms -Maximum).Maximum } else { 0 }) }
-        })
+        $ObservationSink['phase_summary'] = @(Get-ObserverPerformancePhaseSummary `
+            -Samples $ObservationSink['samples'] -PhaseOrder $phaseOrder)
         $ObservationSink['wakeups'] = [ordered]@{ status='not_run'; reason='no-supported-process-wakeup-counter' }
         $ObservationSink['disk_unchanged'] = $false
         foreach ($group in @(
