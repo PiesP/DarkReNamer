@@ -6,7 +6,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION;
 use windows_sys::Win32::UI::Controls::{
-    I_IMAGENONE, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
+    I_IMAGENONE, LVM_GETTOPINDEX, LVM_SCROLL, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN,
+    STATE_SYSTEM_PRESSED,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetScrollBarInfo, OBJID_HSCROLL, OBJID_VSCROLL, SCROLLBARINFO, WM_HSCROLL,
@@ -1111,12 +1112,14 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let (selected, focused) = {
+    let (selected, focused, top) = {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
         (
             selected_indices(state.list_window),
             focused_index(state.list_window),
+            // SAFETY: scalar query against the live owned ListView.
+            unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) },
         )
     };
     // A stale native count or any partial write takes the authoritative rebuild
@@ -1168,9 +1171,98 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
-        select_rows_with_focus(state.list_window, &selected, focused);
+        restore_refresh_selection(state.list_window, &selected, focused, state.model.len());
+        restore_refresh_top_row(state.list_window, top, state.model.len());
     }
     update_primary_column_widths(state);
+}
+
+fn restore_refresh_selection(
+    window: HWND,
+    selected: &[usize],
+    focused: Option<usize>,
+    rows: usize,
+) {
+    // Restore state without ENSUREVISIBLE: a selected row may be outside the
+    // user's current viewport, and a focused row need not be selected.
+    for row in selected.iter().copied().filter(|row| *row < rows) {
+        let mut item = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            state: LVIS_SELECTED,
+            ..LVITEMW::default()
+        };
+        // SAFETY: window is live, row is in range, and item remains writable
+        // for the synchronous message; no model reference is retained.
+        unsafe {
+            SendMessageW(
+                window,
+                LVM_SETITEMSTATE,
+                row,
+                (&mut item as *mut LVITEMW) as isize,
+            )
+        };
+    }
+    let mut item = LVITEMW {
+        stateMask: LVIS_FOCUSED,
+        ..LVITEMW::default()
+    };
+    // SAFETY: the live ListView accepts -1 to clear focused state on all items;
+    // item remains writable until the synchronous message returns.
+    unsafe {
+        SendMessageW(
+            window,
+            LVM_SETITEMSTATE,
+            usize::MAX,
+            (&mut item as *mut LVITEMW) as isize,
+        )
+    };
+    if let Some(row) = focused.filter(|row| *row < rows) {
+        item.state = LVIS_FOCUSED;
+        // SAFETY: row is in range in the same live ListView and item is live
+        // writable storage throughout the synchronous call.
+        unsafe {
+            SendMessageW(
+                window,
+                LVM_SETITEMSTATE,
+                row,
+                (&mut item as *mut LVITEMW) as isize,
+            )
+        };
+    }
+}
+
+fn restore_refresh_top_row(window: HWND, top: isize, rows: usize) {
+    if rows == 0 {
+        return;
+    }
+    let target = top.max(0).min((rows - 1) as isize);
+    // SAFETY: scalar query against the live owned ListView.
+    let current = unsafe { SendMessageW(window, LVM_GETTOPINDEX, 0, 0) };
+    if current == target {
+        return;
+    }
+    let mut rect = RECT {
+        left: LVIR_BOUNDS as i32,
+        ..RECT::default()
+    };
+    // SAFETY: row zero exists and rect is writable RECT storage for the
+    // synchronous ListView query. The requested bounds selector is initialized.
+    if unsafe {
+        SendMessageW(
+            window,
+            LVM_GETITEMRECT,
+            0,
+            (&mut rect as *mut RECT) as isize,
+        )
+    } != 0
+    {
+        let height = rect.bottom.saturating_sub(rect.top);
+        if height > 0 {
+            // SAFETY: the live report ListView accepts scalar pixel deltas;
+            // no state or row buffer is passed to the synchronous scroll.
+            unsafe { SendMessageW(window, LVM_SCROLL, 0, (target - current) * height as isize) };
+        }
+    }
 }
 
 pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
@@ -1965,8 +2057,7 @@ mod native_tests {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR,
-        LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        LVM_GETITEMW, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_APP, WM_NULL,
@@ -2579,6 +2670,9 @@ mod native_tests {
             select_rows_with_focus(state.list_window, &[80, 81], Some(81));
             assert_eq!(selected_indices(state.list_window), vec![80, 81]);
             assert_eq!(focused_index(state.list_window), Some(81));
+            // SAFETY: row 20 exists in the live test-owned ListView. Scroll
+            // away from the selected rows to exercise viewport preservation.
+            unsafe { SendMessageW(state.list_window, LVM_ENSUREVISIBLE, 20, 0) };
             // SAFETY: this scalar query addresses the live test-owned ListView.
             let top = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
             assert!(top > 0, "fixture must exercise a nonzero viewport");
@@ -2587,7 +2681,41 @@ mod native_tests {
             assert_eq!(focused_index(state.list_window), Some(81));
             // SAFETY: scalar query against the same live ListView after refresh.
             let after = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
-            assert!(after > 0);
+            assert_eq!(after, top);
+            let mut focus = LVITEMW {
+                stateMask: LVIS_FOCUSED,
+                state: LVIS_FOCUSED,
+                ..LVITEMW::default()
+            };
+            // SAFETY: row 79 exists and focus is writable storage for this
+            // synchronous state update against the live test-owned ListView.
+            unsafe {
+                SendMessageW(
+                    state.list_window,
+                    LVM_SETITEMSTATE,
+                    79,
+                    (&mut focus as *mut LVITEMW) as isize,
+                );
+            }
+            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
+            assert_eq!(focused_index(state.list_window), Some(79));
+            // SAFETY: scalar viewport query against the live owned ListView.
+            let before_rebuild = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
+            assert_eq!(before_rebuild, top);
+            assert_streamed_refresh(state, "regression-unselected-focus");
+            assert_eq!(focused_index(state.list_window), Some(79));
+            state.mark_preview_sync_failed();
+            let recovered = measure_refresh(
+                state,
+                "regression-rebuilt-unselected-focus",
+                refresh_all_rows,
+            );
+            assert_eq!(recovered.full_rebuilds, 1);
+            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
+            assert_eq!(focused_index(state.list_window), Some(79));
+            // SAFETY: scalar viewport query against the live rebuilt ListView.
+            let rebuilt_top = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
+            assert_eq!(rebuilt_top, top);
             assert!(apply_native_control_theme(
                 state.list_window,
                 NativeThemeTarget::FileList,
