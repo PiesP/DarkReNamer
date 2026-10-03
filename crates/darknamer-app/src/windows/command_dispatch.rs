@@ -1337,16 +1337,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 .is_some()
             {
                 match write_legacy_text_to_target(target, &text) {
-                    Ok(crate::rename::windows_native::TextExportOutcome::Committed) => {}
-                    Ok(
-                        crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(
-                            error,
-                        ),
-                    ) => message(
-                        window,
-                        &text_export_cleanup_warning_korean(&error),
-                        TEXT_EXPORT_CLEANUP_WARNING_TITLE,
-                    ),
+                    Ok(()) => {}
                     Err(error) => message(
                         window,
                         &format!("파일을 저장하지 못했습니다: {error}"),

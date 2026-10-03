@@ -4395,7 +4395,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         "이름 저장",
         menu(MenuGroup::File, 2, 1),
         "변경 후 이름 목록 저장...",
-        "모든 항목의 변경 후 이름을 텍스트 파일로 저장합니다.",
+        "모든 항목의 변경 후 이름을 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
         None,
         Rows,
         Filesystem,
@@ -4423,7 +4423,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         "경로 저장",
         menu(MenuGroup::File, 3, 1),
         "현재 경로 목록 저장...",
-        "모든 항목의 현재 실제 경로를 텍스트 파일로 저장합니다.",
+        "모든 항목의 현재 실제 경로를 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
         legacy(
             LegacyVirtualKey::Character(b'X' as u16),
             LegacyShortcutModifiers::ControlShift,

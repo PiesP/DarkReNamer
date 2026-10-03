@@ -6,7 +6,7 @@ use ::windows::Win32::System::Ole::IOleWindow;
 use ::windows::Win32::System::Variant::{VARENUM, VT_CLSID, VT_UI8};
 use ::windows::Win32::UI::Shell::PropertiesSystem::{GPS_DEFAULT, IPropertyStore};
 use ::windows::Win32::UI::Shell::{
-    Common::COMDLG_FILTERSPEC, FDEOR_DEFAULT, FDESVR_DEFAULT, FOS_ALLOWMULTISELECT,
+    Common::COMDLG_FILTERSPEC, FDEOR_DEFAULT, FDEOR_REFUSE, FDESVR_DEFAULT, FOS_ALLOWMULTISELECT,
     FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_OVERWRITEPROMPT,
     FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileDialog,
     IFileDialogEvents, IFileDialogEvents_Impl, IFileOpenDialog, IFileSaveDialog, IShellItem,
@@ -2195,7 +2195,7 @@ impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
         _dialog: ::windows::core::Ref<IFileDialog>,
         _item: ::windows::core::Ref<IShellItem>,
     ) -> ::windows::core::Result<::windows::Win32::UI::Shell::FDE_OVERWRITE_RESPONSE> {
-        Ok(FDEOR_DEFAULT)
+        Ok(FDEOR_REFUSE)
     }
 }
 
@@ -2298,13 +2298,17 @@ fn complete_secure_dialog<T>(
 fn secure_text_save_dialog_options(
     defaults: ::windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS,
 ) -> ::windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS {
-    defaults | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_OVERWRITEPROMPT
+    (defaults & !FOS_OVERWRITEPROMPT) | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
 }
 
 fn report_text_save_target_error(owner: HWND, error: &io::Error) {
-    let text = wide(&format!(
-        "선택한 저장 위치를 안전하게 고정하지 못했습니다. 다른 위치를 선택해 주세요.\n{error}"
-    ));
+    let text = wide(&if error.kind() == io::ErrorKind::AlreadyExists {
+        "기존 파일은 덮어쓰지 않습니다. 사용하지 않는 새 파일 이름을 선택해 주세요.".to_owned()
+    } else {
+        format!(
+            "선택한 저장 위치를 안전하게 고정하지 못했습니다. 다른 위치를 선택해 주세요.\n{error}"
+        )
+    });
     let title = wide("DarkReNamer - 저장 위치 확인");
     // SAFETY: both strings remain NUL-terminated for the synchronous call and
     // owner is the live parent window for this modal file dialog.
@@ -3264,13 +3268,13 @@ mod tests {
     fn secure_save_dialog_keeps_default_read_only_protection() {
         use ::windows::Win32::UI::Shell::FOS_NOREADONLYRETURN;
 
-        let options = secure_text_save_dialog_options(FOS_NOREADONLYRETURN);
+        let options = secure_text_save_dialog_options(FOS_NOREADONLYRETURN | FOS_OVERWRITEPROMPT);
 
         assert!(options.contains(FOS_NOREADONLYRETURN));
         assert!(options.contains(FOS_FORCEFILESYSTEM));
         assert!(options.contains(FOS_PATHMUSTEXIST));
         assert!(options.contains(FOS_NOCHANGEDIR));
-        assert!(options.contains(FOS_OVERWRITEPROMPT));
+        assert!(!options.contains(FOS_OVERWRITEPROMPT));
     }
 
     #[test]

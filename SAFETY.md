@@ -62,33 +62,25 @@ and unvalidated for v0.1. That limitation belongs to the release evidence
 contract and the runtime boundary: DarkReNamer queries the filesystem from the
 retained final directory handle and fails closed unless it reports NTFS.
 
-Save Names and Save Paths treat the selected destination as untrusted. While
-the save dialog is open, the application reads the current shell folder's NTFS
-volume GUID and file reference number, opens that directory by ID, and verifies
-that it matches a no-reparse handle chain for the selected path. It retains the
-folder and every ancestor without delete sharing. At acceptance, it reads the
-selected item's parent volume GUID and file reference number and checks them
-against the retained folder. If the selected leaf exposes exact volume GUID
-and file reference properties, it opens the leaf immediately, compares those
-properties with a native metadata handle, and retains a no-delete guard
-through session revalidation. An existing leaf without an exact identity is
-rejected. The export is written and flushed to a unique sibling file before
-the selected leaf is checked again. Existing reparse points and files with
-more than one hard link are rejected before commit. Existing files are
-replaced atomically with `ReplaceFileW`, which preserves supported file
-metadata and leaves hard-link aliases attached to the prior file contents. The
-selected file identity and link count are checked after staging. Since Windows
-permits a same-user rename while the retained leaf handle is open, the final
-path is reopened and checked against the selected identity immediately before
-`ReplaceFileW`; that name-based call still has a narrow same-user race after
-the recheck. A failed replacement's last-error is captured into an owned error
-immediately after the native return, before releasing the retained target entry.
-Only that saved code selects the existing identity-checked, no-replace backup
-restoration for error 1177; handle cleanup cannot change the recovery decision.
-A successful replacement ignores stale last-error and retains the existing
-committed-with-cleanup-warning outcome. A missing leaf is committed with an
-exclusive, handle-relative no-replace rename, so a later occupant is never
-overwritten.
+Save Names and Save Paths create new files only. Existing destinations,
+including hard links, directories and reparse points, are never overwritten;
+the user must choose an unused file name. While the save dialog is open, the
+application binds the selected folder's shell volume/file identity to a retained
+no-reparse local NTFS directory chain. Every ancestor remains open without
+delete sharing. Session and revision revalidation still precede writing.
+
+Export bytes are written, flushed and synchronized to a uniquely named sibling
+opened exclusively. The same staging handle remains open with no sharing through
+the final handle-relative no-replace rename. The final native operation refuses
+any later occupant, including one introduced immediately before commit; it does
+not reopen a target name for replacement. The stage inherits the selected
+folder's new-file permissions, which are also the intended new destination's
+permissions. An intentionally shared new export is not given an existing private
+file's DACL. Failure cleanup deletes only the retained owned staging handle and
+never reopens a possibly substituted temporary name. A cleanup failure reports
+that temporary evidence may remain. There is no existing-file replacement,
+metadata merge, replacement backup, or target-release interval in this path.
+
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 Text imports use one bounded result handoff and perform open, opened-handle

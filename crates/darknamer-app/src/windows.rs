@@ -153,8 +153,7 @@ use safe_runtime::{
 #[cfg(test)]
 use text_io::write_legacy_text;
 use text_io::{
-    TEXT_EXPORT_CLEANUP_WARNING_TITLE, compare_windows, legacy_path, path_wide, read_legacy_text,
-    text_export_cleanup_warning_korean, wide, write_legacy_text_to_target,
+    compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text_to_target,
 };
 #[cfg(test)]
 use windows_sys::Win32::Foundation::E_NOINTERFACE;
@@ -2606,172 +2605,44 @@ mod tests {
         let expected = LegacyText::from("첫째.txt\r\n둘째.txt\r\n");
         write_legacy_text(&path, &expected)?;
         let shorter = LegacyText::from("이름.txt\r\n");
-        write_legacy_text(&path, &shorter)?;
+        let second = directory.path().join("shorter.txt");
+        write_legacy_text(&second, &shorter)?;
         let bytes = fs::read(&path)?;
         assert!(bytes.starts_with(&[0xFF, 0xFE]));
-        assert_eq!(read_legacy_text(&path)?, shorter);
+        assert_eq!(read_legacy_text(&path)?, expected);
+        assert_eq!(read_legacy_text(&second)?, shorter);
         Ok(())
     }
 
     #[test]
-    fn text_export_rejects_hard_linked_destination_without_truncating_either_name()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let original = directory.path().join("original.txt");
-        let destination = directory.path().join("names.txt");
-        let sentinel = b"keep both hard-link names intact";
-        fs::write(&original, sentinel)?;
-        fs::hard_link(&original, &destination)?;
-
-        let Err(error) = write_legacy_text(&destination, &LegacyText::from("replacement")) else {
-            return Err(io::Error::other("multiply-linked destination was accepted").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&original)?, sentinel);
-        assert_eq!(fs::read(&destination)?, sentinel);
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_text_export_target_rejects_a_hard_link_added_before_write()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let alias = directory.path().join("alias.txt");
-        let sentinel = b"both names stay unchanged";
-        fs::write(&destination, sentinel)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        fs::hard_link(&destination, &alias)?;
-        let Err(error) =
-            crate::rename::windows_native::write_text_export_target(target, b"replacement")
-        else {
-            return Err(io::Error::other("a late hard link was not detected").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&destination)?, sentinel);
-        assert_eq!(fs::read(&alias)?, sentinel);
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_atomic_replace_keeps_a_late_hard_link_on_original_contents()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let original = b"original contents stay with the alias";
-        fs::write(&destination, original)?;
-        let alias = directory.path().join("alias.txt");
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        crate::rename::windows_native::write_text_export_target_with_before_replace(
-            target,
-            b"accepted output",
-            || fs::hard_link(&destination, &alias).map(|_| ()),
-        )?;
-
-        assert_eq!(fs::read(&destination)?, b"accepted output");
-        assert_eq!(fs::read(&alias)?, original);
-        assert!(!directory.path().read_dir()?.any(|entry| {
-            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("backup"))
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_reports_committed_content_when_backup_cleanup_fails()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let original = b"original contents remain in the backup";
-        fs::write(&destination, original)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-        let mut backup_guard = None;
-
-        let outcome =
-            crate::rename::windows_native::write_text_export_target_with_before_backup_cleanup(
-                target,
-                b"accepted output",
-                |backup_path| {
-                    backup_guard = Some(
-                        std::fs::OpenOptions::new()
-                            .read(true)
-                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                            .open(backup_path)?,
-                    );
-                    Ok(())
-                },
-            )?;
-
-        let crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(warning) =
-            outcome
-        else {
-            return Err(io::Error::other("cleanup failure was not reported as committed").into());
-        };
-        assert_eq!(warning.raw_os_error(), Some(32));
-        assert_eq!(fs::read(&destination)?, b"accepted output");
-        let retained_backups = directory
-            .path()
-            .read_dir()?
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with(".darkrenamer-text-export-backup-") && name.ends_with(".tmp")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(retained_backups.len(), 1);
-        assert_eq!(fs::read(retained_backups[0].path())?, original);
-        assert!(!directory.path().read_dir()?.any(|entry| {
-            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("stage"))
-        }));
-        drop(backup_guard);
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_cleanup_warning_says_the_file_was_saved() {
-        let warning = io::Error::new(io::ErrorKind::PermissionDenied, "backup is in use");
-        let message = text_io::text_export_cleanup_warning_korean(&warning);
-
-        assert!(message.starts_with("파일은 저장했습니다."));
-        assert!(message.contains("임시 백업"));
-        assert!(message.contains(".darkrenamer-text-export-backup-"));
-        assert!(!message.contains("파일을 저장하지 못했습니다"));
-        assert_eq!(
-            text_io::TEXT_EXPORT_CLEANUP_WARNING_TITLE,
-            "DarkReNamer - 저장 후 정리 필요"
-        );
-    }
-
-    #[test]
-    fn text_export_replace_preserves_existing_named_streams()
+    fn text_export_rejects_existing_file_without_changing_contents_or_streams()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("names.txt");
         let stream = std::path::PathBuf::from(format!("{}:metadata", destination.display()));
-        fs::write(&destination, b"old content")?;
+        let alias = directory.path().join("alias.txt");
+        fs::write(&destination, b"original contents")?;
         fs::write(&stream, b"preserved stream")?;
-
-        write_legacy_text(&destination, &LegacyText::from("new output"))?;
-
+        fs::hard_link(&destination, &alias)?;
+        let identity =
+            crate::rename::windows_native::file_identity(&fs::File::open(&destination)?)?;
+        let error = write_legacy_text(&destination, &LegacyText::from("new output"))
+            .err()
+            .ok_or_else(|| io::Error::other("existing export target was overwritten"))?;
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&destination)?, b"original contents");
+        assert_eq!(fs::read(&alias)?, b"original contents");
         assert_eq!(fs::read(&stream)?, b"preserved stream");
         assert_eq!(
-            read_legacy_text(&destination)?,
-            LegacyText::from("new output")
+            crate::rename::windows_native::file_identity(&fs::File::open(&destination)?)?,
+            identity
         );
+        assert_eq!(directory.path().read_dir()?.count(), 2);
         Ok(())
     }
 
     #[test]
-    fn text_export_accepts_existing_targets_with_full_paths_over_64_units()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn text_export_accepts_new_targets_with_long_paths() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let mut parent = directory.path().to_path_buf();
         for index in 0..8 {
@@ -2779,46 +2650,12 @@ mod tests {
         }
         fs::create_dir_all(&parent)?;
         let destination = parent.join("names.txt");
-        fs::write(&destination, b"old")?;
         assert!(destination.to_string_lossy().encode_utf16().count() > 64);
-
         write_legacy_text(&destination, &LegacyText::from("long path output"))?;
-
         assert_eq!(
             read_legacy_text(&destination)?,
             LegacyText::from("long path output")
         );
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_text_export_target_rejects_a_replaced_existing_leaf()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let replacement = directory.path().join("replacement.txt");
-        let original = b"original";
-        let replacement_occupant = b"replacement occupant";
-        fs::write(&destination, original)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        let Err(error) =
-            crate::rename::windows_native::write_text_export_target_with_before_replace(
-                target,
-                b"accepted output",
-                || {
-                    fs::rename(&destination, &replacement)?;
-                    fs::write(&destination, replacement_occupant)
-                },
-            )
-        else {
-            return Err(io::Error::other("a replaced destination was accepted").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&destination)?, replacement_occupant);
-        assert_eq!(fs::read(&replacement)?, original);
-        assert_eq!(directory.path().read_dir()?.count(), 2);
         Ok(())
     }
 
@@ -2830,12 +2667,91 @@ mod tests {
         let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
         let sentinel = b"later occupant remains intact";
         fs::write(&destination, sentinel)?;
-
         assert!(
             crate::rename::windows_native::write_text_export_target(target, b"replacement")
                 .is_err()
         );
         assert_eq!(fs::read(&destination)?, sentinel);
+        assert_eq!(directory.path().read_dir()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_final_commit_rejects_late_occupant_and_preserves_its_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let alias = directory.path().join("alias.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let result = crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"accepted output",
+            || {
+                fs::write(&destination, b"final-boundary occupant")?;
+                fs::hard_link(&destination, &alias)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination)?, b"final-boundary occupant");
+        assert_eq!(fs::read(&alias)?, b"final-boundary occupant");
+        assert_eq!(directory.path().read_dir()?.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_stage_remains_exclusive_until_final_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"complete output",
+            || {
+                let entries = directory
+                    .path()
+                    .read_dir()?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(entries.len(), 1);
+                let stage = entries[0].path();
+                let read = fs::File::open(&stage)
+                    .err()
+                    .ok_or_else(|| io::Error::other("exclusive staging bytes were readable"))?;
+                assert_eq!(read.raw_os_error(), Some(32));
+                let write = fs::OpenOptions::new()
+                    .write(true)
+                    .open(&stage)
+                    .err()
+                    .ok_or_else(|| io::Error::other("exclusive staging bytes were writable"))?;
+                assert_eq!(write.raw_os_error(), Some(32));
+                assert!(fs::rename(&stage, directory.path().join("substitute.txt")).is_err());
+                Ok(())
+            },
+        )?;
+        assert_eq!(fs::read(&destination)?, b"complete output");
+        assert_eq!(directory.path().read_dir()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_failed_final_hook_cleans_only_its_owned_stage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let sentinel = directory.path().join("sentinel.txt");
+        fs::write(&sentinel, b"unrelated contents")?;
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let error = crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"never published",
+            || Err(io::Error::from_raw_os_error(5)),
+        )
+        .err()
+        .ok_or_else(|| io::Error::other("injected commit failure was ignored"))?;
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&sentinel)?, b"unrelated contents");
+        assert_eq!(directory.path().read_dir()?.count(), 1);
         Ok(())
     }
 
