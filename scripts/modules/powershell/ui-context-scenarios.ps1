@@ -1719,7 +1719,17 @@ function Invoke-ObserverPerformanceSampleScenario {
         return $ObservationSink
     }
     finally {
-        if ($null -ne $sampler) { try { [void]$sampler.Stop() } catch {} }
+        if ($null -ne $sampler) {
+            try {
+                $ObservationSink['partial_samples'] = @($sampler.Stop() | ForEach-Object {
+                    [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
+                        private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
+                        threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
+                        ui_response_ms=$_.UiResponseMs; ui_responsive=$_.UiResponsive }
+                })
+            }
+            catch { $ObservationSink['partial_sampling_error'] = $_.Exception.Message }
+        }
         if ($null -ne $application) {
             Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
         }

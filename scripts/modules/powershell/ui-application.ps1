@@ -278,7 +278,14 @@ function Import-GuiRegressionPathList {
     [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
     Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
         -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
-    [Windows.Forms.SendKeys]::SendWait('^+v')
+    $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+    while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+        [IntPtr]$Application.main_handle, [uint32]0x801D)) {
+        if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
+        Start-Sleep -Milliseconds 100
+    }
+    Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
+        -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
     $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
         -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
         -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
