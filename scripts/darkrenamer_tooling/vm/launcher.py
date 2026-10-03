@@ -66,6 +66,9 @@ REFRESH_PROFILE_COUNTERS = (
     'full_rebuilds', 'extra_staged_rows_peak',
     'logical_staged_payload_bytes_peak',
 )
+REFRESH_PROFILE_FALLBACK_COUNTERS = (
+    'fallback_staged_rows_peak', 'fallback_logical_staged_payload_bytes_peak',
+)
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -1608,6 +1611,18 @@ def verify_refresh_profile_records(output, order):
             raise ValueError('Refresh diagnostic emitted malformed JSON.') from error
         if not isinstance(record, dict) or record.get('kind') != 'refresh-stages-test-build':
             continue
+        # Baseline receipts predate the separately attributed exceptional buffer.
+        # New receipts must supply the complete pair, with bounded scalar values.
+        if any(key in record for key in REFRESH_PROFILE_FALLBACK_COUNTERS):
+            if (any(type(record.get(key)) is not int or record[key] < 0
+                    for key in REFRESH_PROFILE_FALLBACK_COUNTERS) or
+                    type(record.get('rows')) is not int or
+                    record['fallback_staged_rows_peak'] > record['rows'] or
+                    (record['fallback_staged_rows_peak'] == 0) !=
+                    (record['fallback_logical_staged_payload_bytes_peak'] == 0) or
+                    (record['fallback_staged_rows_peak'] > 0 and
+                     record.get('full_rebuilds', 0) == 0)):
+                raise ValueError('Refresh diagnostic fallback counters are invalid.')
         if (not isinstance(record.get('scenario'), str) or
                 any(type(record.get(key)) is not int or record[key] < 0
                     for key in REFRESH_PROFILE_COUNTERS) or
