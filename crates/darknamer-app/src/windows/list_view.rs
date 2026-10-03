@@ -1631,12 +1631,15 @@ mod native_tests {
             I_IMAGENONE
         );
         let same_class = LegacyListItem::new("two.txt", false, 0, 0, 0);
+        let mut queries = 0;
         assert_eq!(
             cached_file_icon_index(&mut cache, &same_class, |_, _| {
-                panic!("a cached failure must not issue another shell query")
+                queries += 1;
+                (1, 42)
             }),
             I_IMAGENONE
         );
+        assert_eq!(queries, 0);
     }
 
     #[test]
@@ -1650,12 +1653,15 @@ mod native_tests {
         }
         let mut cache = HashMap::new();
         assert_eq!(cached_file_icon_index(&mut cache, &item, |_, _| (1, 0)), 0);
+        let mut queries = 0;
         assert_eq!(
             cached_file_icon_index(&mut cache, &item, |_, _| {
-                panic!("a validated cache hit must not issue another shell query")
+                queries += 1;
+                (1, 42)
             }),
             0
         );
+        assert_eq!(queries, 0);
     }
 
     struct BlankBodyTestContext {
