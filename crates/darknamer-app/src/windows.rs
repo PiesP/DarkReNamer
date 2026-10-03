@@ -1822,9 +1822,28 @@ mod tests {
     fn create_startup_journal_directory(
         local_app_data: &Path,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let journal = local_app_data.join("DarkReNamer").join("journal");
-        fs::create_dir_all(&journal)?;
-        Ok(journal)
+        let root = JournalRoot::open_private(local_app_data)?;
+        Ok(root.path().to_path_buf())
+    }
+
+    fn create_startup_journal_file(
+        local_app_data: &Path,
+        leaf: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let root = JournalRoot::open_private(local_app_data)?;
+        let journal = if leaf == ACTIVE_JOURNAL_LEAF {
+            FileJournal::create_new(&root, leaf)?
+        } else if leaf == CANDIDATE_JOURNAL_LEAF {
+            FileJournal::create_candidate(&root, leaf, ACTIVE_JOURNAL_LEAF)?
+        } else {
+            return Err(io::Error::other("unexpected startup journal fixture leaf").into());
+        };
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        drop(root);
+        fs::write(&path, bytes)?;
+        Ok(path)
     }
 
     #[test]
@@ -2221,10 +2240,9 @@ mod tests {
             ))
             .into());
         }
-        let journal_directory = create_startup_journal_directory(&local_app_data)?;
         let data = local_app_data.join("data");
         let graph = CrashGraph::parse(&env::var("DARKRENAMER_TEST_GRAPH")?)?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(&local_app_data)?;
         let mut journal =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
         if env::var_os("DARKRENAMER_TEST_FAILURE_ROLLBACK").is_some() {
@@ -2827,10 +2845,8 @@ mod tests {
     fn corrupt_active_journal_starts_recovery_locked_with_retained_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
         let corrupt = vec![0_u8; 24];
-        fs::write(&active, &corrupt)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &corrupt)?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 
@@ -2872,8 +2888,6 @@ mod tests {
     fn terminal_active_journal_with_torn_payload_stays_locked_retained_and_undeleted()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
         let mut bytes = crate::rename::encode_journal_records(&[
             crate::rename::JournalRecord::Intent {
                 plan: crate::rename::PlanId::from_fingerprint(78),
@@ -2888,7 +2902,7 @@ mod tests {
         bytes
             .pop()
             .ok_or_else(|| io::Error::other("startup torn-payload fixture was empty"))?;
-        fs::write(&active, &bytes)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &bytes)?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 
@@ -2929,7 +2943,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let journal_directory = create_startup_journal_directory(directory.path())?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(directory.path())?;
         let candidate =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
         drop(candidate);
@@ -3014,10 +3028,10 @@ mod tests {
     fn intent_only_candidate_exports_discards_and_unlocks_after_rediscovery()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        fs::write(
-            journal_directory.join(CANDIDATE_JOURNAL_LEAF),
-            startup_intent_bytes()?,
+        create_startup_journal_file(
+            directory.path(),
+            CANDIDATE_JOURNAL_LEAF,
+            &startup_intent_bytes()?,
         )?;
 
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
@@ -3045,12 +3059,10 @@ mod tests {
     fn active_candidate_collision_preserves_both_without_running_recovery()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
         let bytes = startup_intent_bytes()?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
-        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
-        fs::write(&active, &bytes)?;
-        fs::write(&candidate, &bytes)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &bytes)?;
+        let candidate =
+            create_startup_journal_file(directory.path(), CANDIDATE_JOURNAL_LEAF, &bytes)?;
 
         let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
 
@@ -3086,7 +3098,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let journal_directory = create_startup_journal_directory(directory.path())?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(directory.path())?;
         let mut held = FileJournal::create_new(&root, ACTIVE_JOURNAL_LEAF)?;
         drop(root);
 
@@ -3116,11 +3128,10 @@ mod tests {
     fn corrupt_active_and_candidate_retain_two_exportable_handles()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
-        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
-        fs::write(&active, vec![0_u8; 24])?;
-        fs::write(&candidate, vec![1_u8; 24])?;
+        let active =
+            create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &[0_u8; 24])?;
+        let candidate =
+            create_startup_journal_file(directory.path(), CANDIDATE_JOURNAL_LEAF, &[1_u8; 24])?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 
