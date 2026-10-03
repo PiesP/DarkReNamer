@@ -2876,6 +2876,22 @@ def validate_performance_metrics(scenario: dict) -> dict:
             "wakeups": "not_run"}
 
 
+def validate_performance_lifecycle(lifecycles: object, scenario: dict, application_sha256: str) -> None:
+    require(isinstance(lifecycles, list) and len(lifecycles) == 1 and
+            isinstance(lifecycles[0], dict),
+            "Performance exact process lifecycle did not close normally.")
+    lifecycle = lifecycles[0].get("process_lifecycle")
+    require(isinstance(lifecycle, dict) and
+            int_equals(lifecycle.get("pid"), scenario["process_id"]) and
+            str(scenario.get("process_start_utc_ticks")) == lifecycle.get("start_time_utc_ticks") and
+            lifecycle.get("executable_sha256") == application_sha256 and
+            lifecycle.get("start_observed") is True and
+            lifecycle.get("exit_observed") is True and
+            lifecycle.get("exit_method") == "normal-close" and
+            int_equals(lifecycle.get("exit_code"), 0),
+            "Performance exact process lifecycle did not close normally.")
+
+
 def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
     require(run_id == PERFORMANCE_RUN_ID, "Performance run id is invalid.")
     run_root = root / run_id
@@ -2934,15 +2950,8 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
             nested(scenario, "environment", "hwnd_dpi") == 96 and
             nested(scenario, "environment", "text_scale_factor_percent") == 100,
             "Performance source executable, process, or display identity differs.")
-    lifecycles = raw.get("process_lifecycles")
-    require(isinstance(lifecycles, list) and len(lifecycles) == 1 and
-            int_equals(lifecycles[0].get("pid"), scenario["process_id"]) and
-            str(scenario.get("process_start_utc_ticks")) == lifecycles[0].get("start_time_utc_ticks") and
-            lifecycles[0].get("executable_sha256") == artifacts["application"]["sha256"] and
-            lifecycles[0].get("exit_observed") is True and
-            lifecycles[0].get("exit_method") == "normal-close" and
-            int_equals(lifecycles[0].get("exit_code"), 0),
-            "Performance exact process lifecycle did not close normally.")
+    validate_performance_lifecycle(raw.get("process_lifecycles"), scenario,
+                                   artifacts["application"]["sha256"])
     captures = raw.get("screenshots")
     require("performance-empty.png" in files, "Performance empty-idle PNG is absent from collection.")
     require(isinstance(captures, list) and len(captures) == 1 and

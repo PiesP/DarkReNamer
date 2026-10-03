@@ -2246,6 +2246,23 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
 
 
 class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
+    def test_producer_wrapped_lifecycle_requires_exact_normal_exit(self):
+        scenario = {"process_id": 42, "process_start_utc_ticks": "123456"}
+        lifecycle = {"pid": 42, "start_time_utc_ticks": "123456",
+                     "executable_sha256": "a" * 64, "start_observed": True,
+                     "exit_observed": True, "exit_method": "normal-close", "exit_code": 0}
+        evidence.validate_performance_lifecycle([{"process_lifecycle": lifecycle}], scenario, "a" * 64)
+        for field, value in (("pid", 43), ("start_time_utc_ticks", "123457"),
+                             ("executable_sha256", "b" * 64), ("start_observed", False),
+                             ("exit_observed", False), ("exit_method", "forced-termination"),
+                             ("exit_code", 1)):
+            bad = dict(lifecycle, **{field: value})
+            with self.assertRaisesRegex(evidence.EvidenceError, "exact process lifecycle"):
+                evidence.validate_performance_lifecycle([{"process_lifecycle": bad}], scenario, "a" * 64)
+        for bad in ([], [lifecycle], [{"process_lifecycle": lifecycle}] * 2):
+            with self.assertRaisesRegex(evidence.EvidenceError, "exact process lifecycle"):
+                evidence.validate_performance_lifecycle(bad, scenario, "a" * 64)
+
     def sample_scenario(self):
         rows = []
         for index, phase in enumerate(evidence.PERFORMANCE_PHASES):
