@@ -1302,8 +1302,11 @@ public sealed class DarkReNamerPerformanceSample {
     public int Threads { get; set; }
     public int Handles { get; set; }
     public uint GdiObjects { get; set; }
-    public long UiResponseMs { get; set; }
-    public bool UiResponsive { get; set; }
+    public double UiResponseMs { get; set; }
+    public double ResourceCollectionMs { get; set; }
+    public double SampleGapMs { get; set; }
+    public string ProbeStatus { get; set; }
+    public int ProbeErrorCode { get; set; }
 }
 
 // Observer-only bounded sampler. It does not inject a thread into the product.
@@ -1315,6 +1318,8 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
     [DllImport("user32.dll", SetLastError=true)]
     private static extern uint GetGuiResources(IntPtr process, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="SetLastError")]
+    private static extern void SetLastErrorNative(uint code);
     private readonly System.Diagnostics.Process process;
     private readonly IntPtr window;
     private readonly long startTicks;
@@ -1324,7 +1329,12 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private readonly List<DarkReNamerPerformanceSample> samples = new List<DarkReNamerPerformanceSample>();
     private string failure;
     private string phase = "empty-idle";
+    private long previousSampleTicks;
     private bool stopped;
+
+    public static string ClassifyProbe(bool responsive, int errorCode) {
+        return responsive ? "success" : errorCode == 1460 ? "timeout" : "failure_unknown";
+    }
 
     public DarkReNamerPerformanceSampler(System.Diagnostics.Process ownedProcess, IntPtr ownedWindow) {
         if (ownedProcess == null || ownedWindow == IntPtr.Zero) throw new ArgumentException("Missing owned target.");
@@ -1344,21 +1354,33 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != startTicks ||
                 GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
                 throw new InvalidOperationException("Sampler target identity changed.");
-            long begun = watch.ElapsedMilliseconds;
             IntPtr result;
+            SetLastErrorNative(0);
+            long begun = System.Diagnostics.Stopwatch.GetTimestamp();
             bool responsive = SendMessageTimeoutW(window, 0, IntPtr.Zero, IntPtr.Zero, 3, 50, out result) != IntPtr.Zero;
+            long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();
+            // SetLastError=true cached this call's native error; QPC does not replace that cache.
+            int probeError = responsive ? 0 : Marshal.GetLastWin32Error();
+            string probeStatus = ClassifyProbe(responsive, probeError);
+            long cpuMs = (long)process.TotalProcessorTime.TotalMilliseconds;
+            long privateBytes = process.PrivateMemorySize64;
+            long workingSetBytes = process.WorkingSet64;
+            int threads = process.Threads.Count;
+            int handles = process.HandleCount;
+            uint gdiObjects = GetGuiResources(process.Handle, 0);
+            long collected = System.Diagnostics.Stopwatch.GetTimestamp();
+            double ticksPerMs = (double)System.Diagnostics.Stopwatch.Frequency / 1000.0;
             samples.Add(new DarkReNamerPerformanceSample {
                 Phase = phase,
                 ElapsedMs = watch.ElapsedMilliseconds,
-                CpuMs = (long)process.TotalProcessorTime.TotalMilliseconds,
-                PrivateBytes = process.PrivateMemorySize64,
-                WorkingSetBytes = process.WorkingSet64,
-                Threads = process.Threads.Count,
-                Handles = process.HandleCount,
-                GdiObjects = GetGuiResources(process.Handle, 0),
-                UiResponseMs = watch.ElapsedMilliseconds - begun,
-                UiResponsive = responsive,
+                CpuMs = cpuMs, PrivateBytes = privateBytes, WorkingSetBytes = workingSetBytes,
+                Threads = threads, Handles = handles, GdiObjects = gdiObjects,
+                UiResponseMs = (probeEnded - begun) / ticksPerMs,
+                ResourceCollectionMs = (collected - probeEnded) / ticksPerMs,
+                SampleGapMs = previousSampleTicks == 0 ? 0 : (begun - previousSampleTicks) / ticksPerMs,
+                ProbeStatus = probeStatus, ProbeErrorCode = probeError,
             });
+            previousSampleTicks = begun;
         } catch (Exception error) { failure = error.GetType().Name + ": " + error.Message; stopped = true; }
         finally { System.Threading.Monitor.Exit(gate); }
     }

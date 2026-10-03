@@ -2272,55 +2272,130 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                 rows.append({"phase": phase, "elapsed_ms": elapsed, "cpu_ms": elapsed // 2,
                              "private_bytes": 1024 + elapsed, "working_set_bytes": 2048 + elapsed,
                              "threads": 4, "handles": 20, "gdi_objects": 6,
-                             "ui_response_ms": 2, "ui_responsive": True})
+                             "ui_response_ms": 2, "probe_status": "success",
+                             "probe_error_code": 0, "resource_collection_ms": 3,
+                             "sample_gap_ms": 0 if not rows else 200})
         rows[149]["elapsed_ms"] = 30000
         for index in range(150, len(rows)):
             rows[index]["elapsed_ms"] += 200
+        phase_summary = [{"phase": phase, "sample_count": sum(row["phase"] == phase for row in rows),
+                          "max_sample_gap_ms": max(row["sample_gap_ms"] for row in rows if row["phase"] == phase),
+                          "max_resource_collection_ms": 3}
+                         for phase in evidence.PERFORMANCE_PHASES]
         return {
             "plan": {key: evidence.PERFORMANCE_PLAN[key] for key in (
                 "ordinary_rows", "long_path_rows", "extension_classes", "add_remove_reset_cycles",
-                "idle_seconds", "sample_interval_ms")},
+                "idle_seconds", "sample_interval_ms")} | {"long_path_order": "hidden-visible"},
+            "timing_definitions": deepcopy(evidence.PERFORMANCE_TIMING_DEFINITIONS),
+            "startup": {"launch_request_to_ready_ms": 120, "process_start_to_ready_lower_ms": 100,
+                        "process_start_to_ready_upper_ms": 110, "main_hwnd_bound": True,
+                        "empty_grid": True, "import_command_enabled": True},
             "timings": [{"id": name, "elapsed_ms": 10.5,
                          "rows": {"ordinary-100": 100, "ordinary-1000": 1000,
                                   "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
                          "observed_rows": {"ordinary-100": 100, "ordinary-1000": 1000,
                                            "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
+                         **({"batch_rows": [2250] * 4} if name == "ordinary-10000" else {}),
+                         **({"batch_command_ready_after_rows_ms": [0.5] * 4}
+                            if name == "ordinary-10000" else {}),
+                         **({"command_ready_after_rows_ms": 0.5}
+                            if name not in ("ordinary-10000", "full-preview") and
+                            not name.startswith("cycle-") else {}),
+                         **({"import_command_ready_after_rows_ms": 0.5}
+                            if name.startswith("cycle-") else {}),
                          **({"command_elapsed_ms": 5.0} if name == "full-preview" else {}),
                          **({"import_elapsed_ms": 5.0} if name.startswith("cycle-") else {})}
                         for name in evidence.PERFORMANCE_TIMINGS],
             "clear_row_counts": [0] * 7,
+            "ordinary_representatives": [{"index": index, "name": f"ordinary-{index:05d}.txt"}
+                                         for index in (0, 4999, 9999)],
+            "long_representatives": {mode: [{"index": index, "name": f"long-{index:04d}.txt"}
+                                             for index in (0, 499, 999)]
+                                     for mode in ("long-hidden", "long-visible")},
+            "extension_representatives": [
+                {"index": 0, "name": "extension-0000.e000"},
+                {"index": 499, "name": "recurring-0499.txt"},
+                {"index": 999, "name": "recurring-0999.txt"}],
             "full_preview_rows": [
                 {"index": index, "source": f"ordinary-{index:05d}.txt",
                  "prefixed": f"sample-ordinary-{index:05d}.txt",
                  "reset": f"ordinary-{index:05d}.txt"}
                 for index in (0, 2499, 4999, 7499, 9999)],
             "samples": rows,
+            "phase_summary": phase_summary,
             "columns": {"hidden_widths": [0] * 4, "visible_widths": [120] * 4,
+                        "extension_widths": [120] * 4,
                         "first_values": [r"C:\fixture\long-0000.txt", "10", "date", "date"]},
             "wakeups": {"status": "not_run", "reason": "no-supported-process-wakeup-counter"},
             "disk_unchanged": True, "journal_residue_count": 0, "normal_exit_code": 0,
         }
 
     def test_fixed_request_and_source_binding(self):
-        run = self.fixture.build(evidence.PERFORMANCE_RUN_ID, "standard")
+        run = self.fixture.build(evidence.performance_run_id("hidden-visible"), "standard")
         path = run / "input-manifest.json"
         manifest = json.loads(path.read_text())
         manifest["request"] = {"mode": evidence.PERFORMANCE_MODE, "appearance": "light",
                                "desktop": {"width": 1366, "height": 768, "dpi": 96},
                                "text_scale_percent": 100,
-                               "performance_plan": deepcopy(evidence.PERFORMANCE_PLAN)}
+                               "performance_plan": {**deepcopy(evidence.PERFORMANCE_PLAN),
+                                                    "long_path_order": "hidden-visible"}}
         manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
                                "--output-root", "<external-output-root>",
                                "--connection-profile", "<private-connection-profile>",
-                               "--diagnostic", evidence.PERFORMANCE_MODE]
+                               "--diagnostic", evidence.PERFORMANCE_MODE,
+                               "--performance-column-order", "hidden-visible"]
         write_json(path, manifest)
         evidence.validate_input_manifest(run, SOURCE)
         with self.assertRaisesRegex(evidence.EvidenceError, "expected exact source SHA"):
             evidence.validate_input_manifest(run, "f" * 40)
+        manifest["command"][-1] = "visible-hidden"
+        write_json(path, manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "manifest identity or command"):
+            evidence.validate_input_manifest(run, SOURCE)
+        manifest["command"][-1] = "hidden-visible"
+        manifest["run_id"] = "performance-sample-1366x768-96-text100"
+        write_json(path, manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "run_id differs from its directory"):
+            evidence.validate_input_manifest(run, SOURCE)
+        manifest["run_id"] = evidence.performance_run_id("hidden-visible")
         manifest["request"]["performance_plan"]["idle_seconds"] = 0
         write_json(path, manifest)
         with self.assertRaisesRegex(evidence.EvidenceError, "fixed plan"):
             evidence.validate_input_manifest(run, SOURCE)
+
+    def test_probe_timeout_and_unknown_failure_remain_distinct(self):
+        scenario = self.sample_scenario()
+        scenario["samples"][150].update(probe_status="timeout", probe_error_code=1460)
+        scenario["samples"][151].update(probe_status="failure_unknown", probe_error_code=5)
+        metrics = evidence.validate_performance_metrics(scenario)
+        self.assertEqual((metrics["probe_timeout_count"], metrics["probe_failure_unknown_count"]), (1, 1))
+        scenario["samples"][151]["probe_error_code"] = 1460
+        with self.assertRaisesRegex(evidence.EvidenceError, "probe status"):
+            evidence.validate_performance_metrics(scenario)
+
+    def test_v1_fields_and_unbound_column_order_are_rejected(self):
+        scenario = self.sample_scenario()
+        scenario["samples"][150]["ui_responsive"] = False
+        with self.assertRaisesRegex(evidence.EvidenceError, "performance sample 150"):
+            evidence.validate_performance_metrics(scenario)
+        scenario = self.sample_scenario()
+        scenario["plan"]["long_path_order"] = "visible-hidden"
+        with self.assertRaisesRegex(evidence.EvidenceError, "timing order"):
+            evidence.validate_performance_metrics(scenario)
+
+    def test_visible_then_hidden_order_has_its_own_valid_metric_sequence(self):
+        scenario = self.sample_scenario()
+        scenario["plan"]["long_path_order"] = "visible-hidden"
+        scenario["timings"][4], scenario["timings"][5] = scenario["timings"][5], scenario["timings"][4]
+        for row in scenario["samples"]:
+            if row["phase"] == "long-hidden":
+                row["phase"] = "long-visible"
+            elif row["phase"] == "long-visible":
+                row["phase"] = "long-hidden"
+        scenario["phase_summary"][6], scenario["phase_summary"][7] = (
+            scenario["phase_summary"][7], scenario["phase_summary"][6])
+        self.assertEqual(evidence.validate_performance_metrics(scenario)["sample_count"],
+                         len(scenario["samples"]))
 
     def test_sampled_peak_and_missing_or_duplicate_metric_rejected(self):
         scenario = self.sample_scenario()
