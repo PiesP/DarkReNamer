@@ -1444,6 +1444,35 @@ function Reset-ObserverAppearanceProposals {
     Invoke-AutomationControl -Element $reset -Label 'appearance reset proposals'
 }
 
+function Read-ObserverPerformancePreviewRows {
+    param([Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int[]] $Indices,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Prefix,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    if ($Grid.pattern.Current.RowCount -ne 10000 -or
+        ($Indices -join ',') -cne '0,2499,4999,7499,9999') {
+        throw 'Performance preview probe differs from its fixed five-row plan.'
+    }
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
+    do {
+        $rows = [Collections.Generic.List[object]]::new()
+        $allMatched = $true
+        foreach ($index in $Indices) {
+            $source = 'ordinary-{0:D5}.txt' -f $index
+            $current = [string]$Grid.pattern.GetItem($index, 0).Current.Name
+            $proposed = [string]$Grid.pattern.GetItem($index, 1).Current.Name
+            $rows.Add([ordered]@{ index=$index; source=$current; proposed=$proposed })
+            if ($current -cne $source -or $proposed -cne ($Prefix + $source)) {
+                $allMatched = $false
+                break
+            }
+        }
+        if ($allMatched -and $rows.Count -eq $Indices.Count) { return ,$rows.ToArray() }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'Performance preview did not settle for all five representative rows.'
+}
+
 function Invoke-ObserverPerformanceSampleScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -1563,14 +1592,25 @@ function Invoke-ObserverPerformanceSampleScenario {
             throw 'Performance single-row reset did not restore the original name.'
         }
         $sampler.SetPhase('full-preview')
+        $fullWatch = [Diagnostics.Stopwatch]::StartNew()
         $prefix = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'sample-' `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt'
-        $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$prefix.elapsed_ms;
-            rows=10000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        $previewIndices = [int[]]@(0,2499,4999,7499,9999)
+        $prefixRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
+            -Prefix 'sample-' -WaitSeconds $WaitSeconds
+        $fullElapsedMs = [Math]::Round($fullWatch.Elapsed.TotalMilliseconds, 3)
         Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
-        if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
-            throw 'Performance full-preview reset did not restore the original name.'
-        }
+        $resetRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
+            -Prefix '' -WaitSeconds $WaitSeconds
+        $ObservationSink['full_preview_rows'] = @(
+            for ($probe = 0; $probe -lt $previewIndices.Count; $probe++) {
+                [ordered]@{ index=$previewIndices[$probe]; source=$prefixRows[$probe].source;
+                    prefixed=$prefixRows[$probe].proposed; reset=$resetRows[$probe].proposed }
+            }
+        )
+        $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$fullElapsedMs;
+            command_elapsed_ms=$prefix.elapsed_ms; rows=10000;
+            observed_rows=[int]$grid.pattern.Current.RowCount })
         [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
             [uint32]$application.process.Id, [uint32]0x800E)
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance list clear did not remove all rows.' }
@@ -1623,6 +1663,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         foreach ($cycle in 1..3) {
             $id = 'cycle-{0}' -f $cycle
             $sampler.SetPhase($id)
+            $cycleWatch = [Diagnostics.Stopwatch]::StartNew()
             $cycleTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsCycle `
                 -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
             $cycleObservedRows = [int]$grid.pattern.Current.RowCount
@@ -1636,7 +1677,8 @@ function Invoke-ObserverPerformanceSampleScenario {
                 [uint32]$application.process.Id, [uint32]0x800E)
             if ($grid.pattern.Current.RowCount -ne 0) { throw "Performance $id did not clear." }
             $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
-            $timings.Add([ordered]@{ id=$id; elapsed_ms=$cycleTiming.elapsed_ms;
+            $timings.Add([ordered]@{ id=$id; elapsed_ms=[Math]::Round($cycleWatch.Elapsed.TotalMilliseconds, 3);
+                import_elapsed_ms=$cycleTiming.elapsed_ms;
                 rows=1000; observed_rows=$cycleObservedRows })
         }
         $sampler.SetPhase('post')

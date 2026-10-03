@@ -2902,6 +2902,38 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    $performanceGridPattern = [pscustomobject]@{
+        Current = [pscustomobject]@{ RowCount = 10000 }
+        Prefix = 'sample-'
+        TamperLast = $false
+    }
+    $performanceGridPattern | Add-Member -MemberType ScriptMethod -Name GetItem -Value {
+        param([int] $row, [int] $column)
+        $name = 'ordinary-{0:D5}.txt' -f $row
+        if ($column -eq 1) {
+            $name = $this.Prefix + $name
+            if ($this.TamperLast -and $row -eq 9999) { $name = 'wrong-last.txt' }
+        }
+        [pscustomobject]@{ Current = [pscustomobject]@{ Name = $name } }
+    }
+    $performanceGrid = [pscustomobject]@{ pattern = $performanceGridPattern }
+    $performanceIndices = [int[]]@(0,2499,4999,7499,9999)
+    $prefixProbe = Read-ObserverPerformancePreviewRows -Grid $performanceGrid `
+        -Indices $performanceIndices -Prefix 'sample-' -WaitSeconds 1
+    if ($prefixProbe.Count -ne 5 -or $prefixProbe[4].proposed -cne 'sample-ordinary-09999.txt') {
+        throw 'The performance probe did not verify the last prefixed row.'
+    }
+    $performanceGridPattern.Prefix = ''
+    $resetProbe = Read-ObserverPerformancePreviewRows -Grid $performanceGrid `
+        -Indices $performanceIndices -Prefix '' -WaitSeconds 1
+    if ($resetProbe[4].proposed -cne 'ordinary-09999.txt') {
+        throw 'The performance probe did not verify the last reset row.'
+    }
+    $performanceGridPattern.TamperLast = $true
+    Assert-Fails {
+        Read-ObserverPerformancePreviewRows -Grid $performanceGrid `
+            -Indices $performanceIndices -Prefix '' -WaitSeconds 0
+    } 'did not settle for all five representative rows'
     if ((Resolve-GuiRegressionLayoutVariant `
         -ManifestInput $candidateRegressionInput `
         -Verified $candidateRegressionResolved `

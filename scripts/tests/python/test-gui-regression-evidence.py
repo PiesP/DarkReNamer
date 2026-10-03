@@ -2267,9 +2267,16 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                          "rows": {"ordinary-100": 100, "ordinary-1000": 1000,
                                   "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
                          "observed_rows": {"ordinary-100": 100, "ordinary-1000": 1000,
-                                           "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000)}
+                                           "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
+                         **({"command_elapsed_ms": 5.0} if name == "full-preview" else {}),
+                         **({"import_elapsed_ms": 5.0} if name.startswith("cycle-") else {})}
                         for name in evidence.PERFORMANCE_TIMINGS],
             "clear_row_counts": [0] * 7,
+            "full_preview_rows": [
+                {"index": index, "source": f"ordinary-{index:05d}.txt",
+                 "prefixed": f"sample-ordinary-{index:05d}.txt",
+                 "reset": f"ordinary-{index:05d}.txt"}
+                for index in (0, 2499, 4999, 7499, 9999)],
             "samples": rows,
             "columns": {"hidden_widths": [0] * 4, "visible_widths": [120] * 4,
                         "first_values": [r"C:\fixture\long-0000.txt", "10", "date", "date"]},
@@ -2320,6 +2327,17 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         scenario["disk_unchanged"] = True
         scenario["wakeups"] = {"status": "passed", "reason": "estimated"}
         with self.assertRaisesRegex(evidence.EvidenceError, "not_run"):
+            evidence.validate_performance_metrics(scenario)
+
+    def test_last_preview_probe_and_cycle_total_are_required(self):
+        scenario = self.sample_scenario()
+        scenario["full_preview_rows"][-1]["prefixed"] = "ordinary-09999.txt"
+        with self.assertRaisesRegex(evidence.EvidenceError, "representative row"):
+            evidence.validate_performance_metrics(scenario)
+        scenario = self.sample_scenario()
+        cycle = next(row for row in scenario["timings"] if row["id"] == "cycle-2")
+        cycle["elapsed_ms"] = cycle["import_elapsed_ms"] - 0.1
+        with self.assertRaisesRegex(evidence.EvidenceError, "full-operation timing"):
             evidence.validate_performance_metrics(scenario)
 
 

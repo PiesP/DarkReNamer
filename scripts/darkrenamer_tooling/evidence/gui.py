@@ -2778,11 +2778,22 @@ def validate_performance_metrics(scenario: dict) -> dict:
             "Performance timing rows are missing or duplicated.")
     timings = {}
     for index, value in enumerate(timing_rows):
-        row = exact_keys(value, {"id", "elapsed_ms", "rows", "observed_rows"},
+        timing_id = PERFORMANCE_TIMINGS[index]
+        fields = {"id", "elapsed_ms", "rows", "observed_rows"}
+        if timing_id == "full-preview":
+            fields.add("command_elapsed_ms")
+        if timing_id.startswith("cycle-"):
+            fields.add("import_elapsed_ms")
+        row = exact_keys(value, fields,
                          f"performance timing {index}")
-        require(row["id"] == PERFORMANCE_TIMINGS[index], "Performance timing order differs.")
+        require(row["id"] == timing_id, "Performance timing order differs.")
         require(type(row["elapsed_ms"]) in (int, float) and math.isfinite(row["elapsed_ms"]) and
                 0 < row["elapsed_ms"] <= 600000, "Performance timing is invalid.")
+        if timing_id == "full-preview" or timing_id.startswith("cycle-"):
+            component = row["command_elapsed_ms" if timing_id == "full-preview" else "import_elapsed_ms"]
+            require(type(component) in (int, float) and math.isfinite(component) and
+                    0 < component <= row["elapsed_ms"],
+                    "Performance full-operation timing excludes a measured component.")
         expected_rows = {"ordinary-100": 100, "ordinary-1000": 1000,
                          "ordinary-10000": 10000, "full-preview": 10000}.get(row["id"], 1000)
         require(int_equals(row["rows"], expected_rows) and
@@ -2791,6 +2802,17 @@ def validate_performance_metrics(scenario: dict) -> dict:
         timings[row["id"]] = row["elapsed_ms"]
     require(scenario.get("clear_row_counts") == [0] * 7,
             "Performance remove cycles did not observe seven empty lists.")
+    preview_rows = scenario.get("full_preview_rows")
+    expected_indices = (0, 2499, 4999, 7499, 9999)
+    require(isinstance(preview_rows, list) and len(preview_rows) == len(expected_indices),
+            "Performance full-list preview probes are missing or duplicated.")
+    for index, value in zip(expected_indices, preview_rows, strict=True):
+        row = exact_keys(value, {"index", "source", "prefixed", "reset"},
+                         f"performance preview probe {index}")
+        original = f"ordinary-{index:05d}.txt"
+        require(int_equals(row["index"], index) and row["source"] == row["reset"] == original and
+                row["prefixed"] == "sample-" + original,
+                "Performance full-list preview or reset differs at a representative row.")
     samples = scenario.get("samples")
     require(isinstance(samples, list) and 150 <= len(samples) <= 3000,
             "Performance sample count is outside the fixed 200ms/600s envelope.")

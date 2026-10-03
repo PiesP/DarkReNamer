@@ -578,7 +578,9 @@ serial order when comparing a change. Each attempt has a new output root and a
 600-second observer and 32 MiB output limit. The fixed workload observes 30 seconds of empty idle,
 100/1,000/10,000 ordinary rows, 1,000 long paths with auxiliary columns hidden
 and visible, 300 extension classes with recurring `.txt`, one-row and full-list
-preview/reset, then three 1,000-row add/reset/remove cycles. Import lists stay
+preview/reset with five representative rows including the last row, then three
+1,000-row add/edit/reset/remove cycles. Cycle latency includes every operation.
+Import lists stay
 below the existing 2 MiB limit. The observer samples the exact owned product
 PID and HWND every 200 ms during import and refresh, recording CPU, private and
 working-set bytes, threads, handles, GDI objects, and bounded `WM_NULL` response
