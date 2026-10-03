@@ -356,17 +356,6 @@ ACL/ACE dereferences use checked `NonNull` values while the descriptor remains o
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.
 
-The ListView full-refresh path queries only the live control's scalar row count,
-then constructs each row's owned text and icon before synchronous native writes.
-Its programmatic-update guard and redraw suspension remain active across those
-writes. A partial write or count mismatch marks preview synchronization failed
-and rebuilds from the current model; Apply remains blocked until that rebuild
-succeeds. Native tests use live owned windows and can reject selected writes
-before they reach the control. Their explicit locale-name and dynamic-time-zone
-buffers remain thread-owned through synchronous date formatting; production
-passes null to retain the user's current Windows locale and time zone. Neither
-test seam changes system settings or retains a pointer in the control.
-
 The following bounded design dispositions retain existing behavior:
 
 - **CallbackState / CallbackStateLease: retain the current protocol.** A sole

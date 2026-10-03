@@ -4,7 +4,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
     RestoreDC, SaveDC, SetDCBrushColor,
 };
-use windows_sys::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION;
 use windows_sys::Win32::UI::Controls::{
     I_IMAGENONE, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
 };
@@ -1108,67 +1107,54 @@ pub(super) fn refresh(state: &mut AppState) {
 
 pub(super) fn refresh_all_rows(state: &mut AppState) {
     refresh_preview_count_cache(state);
+    let rows = {
+        let model = &state.model;
+        let issue_cache = &state.preview_issue_cache;
+        let icon_cache = &mut state.icon_cache;
+        model
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(row, item)| rendered_row(icon_cache, item, issue_cache.issue(row)))
+            .collect::<Vec<_>>()
+    };
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        if !state.rendered_rows.is_empty() {
+            counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(rows.len());
+            let payload = rows
+                .iter()
+                .flat_map(|row| &row.values)
+                .map(|text| text.len() * 2)
+                .sum();
+            counters.logical_staged_payload_bytes_peak =
+                counters.logical_staged_payload_bytes_peak.max(payload);
+        }
+    });
     let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let (selected, focused) = {
+    let selected = {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
-        (
-            selected_indices(state.list_window),
-            focused_index(state.list_window),
-        )
+        selected_indices(state.list_window)
     };
-    // A stale native count or any partial write takes the authoritative rebuild
-    // path. A row index alone never establishes cached model identity: every
-    // current model row is rendered and compared before its cache slot changes.
-    // SAFETY: the owned ListView is live; this scalar query retains no data.
-    let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
-    let synchronized = state.preview_synchronization.is_synchronized()
-        && native_count == state.rendered_rows.len() as isize
-        && apply_incremental_rows(state);
-    let synchronized = if synchronized {
-        true
+    let synchronized = if state.preview_synchronization.is_synchronized() {
+        apply_incremental_rows(state.list_window, &state.rendered_rows, &rows)
+            || rebuild_native_rows(state.list_window, &rows)
     } else {
-        state.mark_preview_sync_failed();
-        let rows = {
-            let model = &state.model;
-            let issue_cache = &state.preview_issue_cache;
-            let icon_cache = &mut state.icon_cache;
-            model
-                .items()
-                .iter()
-                .enumerate()
-                .map(|(row, item)| rendered_row(icon_cache, item, issue_cache.issue(row)))
-                .collect::<Vec<_>>()
-        };
-        #[cfg(test)]
-        refresh_profile::record(|counters| {
-            counters.fallback_staged_rows_peak = counters.fallback_staged_rows_peak.max(rows.len());
-            counters.fallback_logical_staged_payload_bytes_peak =
-                counters.fallback_logical_staged_payload_bytes_peak.max(
-                    rows.iter()
-                        .flat_map(|row| &row.values)
-                        .map(|text| text.len() * 2)
-                        .sum(),
-                );
-        });
-        if rebuild_native_rows(state.list_window, &rows) {
-            state.rendered_rows = rows;
-            true
-        } else {
-            false
-        }
+        rebuild_native_rows(state.list_window, &rows)
     };
     if !synchronized {
         state.mark_preview_sync_failed();
         return;
     }
+    state.rendered_rows = rows;
     state.mark_preview_synchronized();
     {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
-        select_rows_with_focus(state.list_window, &selected, focused);
+        select_rows(state.list_window, &selected);
     }
     update_primary_column_widths(state);
 }
@@ -1422,13 +1408,10 @@ fn rendered_row(
     }
 }
 
-fn apply_incremental_rows(state: &mut AppState) -> bool {
-    let window = state.list_window;
-    let new_len = state.model.len();
-    let old_len = state.rendered_rows.len();
-    for row in (new_len..old_len).rev() {
-        #[cfg(test)]
-        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+    for row in (new.len()..old.len()).rev() {
         // SAFETY: window is live and row is a current trailing item.
         if unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) } == 0 {
             return false;
@@ -1436,53 +1419,24 @@ fn apply_incremental_rows(state: &mut AppState) -> bool {
         #[cfg(test)]
         refresh_profile::record(|counters| counters.native_deletions += 1);
     }
-    state.rendered_rows.truncate(new_len);
-    for row in 0..new_len {
-        let value = rendered_row(
-            &mut state.icon_cache,
-            &state.model.items()[row],
-            state.preview_issue_cache.issue(row),
-        );
-        #[cfg(test)]
-        refresh_profile::record(|counters| {
-            counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(1);
-            counters.logical_staged_payload_bytes_peak = counters
-                .logical_staged_payload_bytes_peak
-                .max(value.values.iter().map(|text| text.len() * 2).sum());
-        });
-        if row < state.rendered_rows.len() {
-            let mask = changed_column_mask(&state.rendered_rows[row], &value);
-            let applied = {
-                #[cfg(test)]
-                let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
-                apply_rendered_row_with_mask(window, row, &value, mask)
-            };
-            if !applied {
-                return false;
-            }
-            state.rendered_rows[row] = value;
-        } else {
-            let inserted = {
-                #[cfg(test)]
-                let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
-                insert_native_row(window, row, &value)
-            };
-            if !inserted {
-                return false;
-            }
-            state.rendered_rows.push(value);
+    let shared = old.len().min(new.len());
+    for row in 0..shared {
+        if !apply_rendered_row(window, row, &old[row], &new[row]) {
+            return false;
+        }
+    }
+    for (row, value) in new.iter().enumerate().skip(old.len()) {
+        if !insert_native_row(window, row, value) {
+            return false;
         }
     }
     true
 }
 
 fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &RenderedRow) -> bool {
-    apply_rendered_row_with_mask(window, row, new, changed_column_mask(old, new))
-}
-
-fn apply_rendered_row_with_mask(window: HWND, row: usize, new: &RenderedRow, mask: u8) -> bool {
     #[cfg(test)]
     refresh_profile::record(|counters| counters.native_rows_visited += 1);
+    let mask = changed_column_mask(old, new);
     if mask & 1 != 0 && !set_native_primary(window, row, new) {
         return false;
     }
@@ -1543,10 +1497,6 @@ fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
 }
 
 fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
-    #[cfg(test)]
-    if fail_native_refresh_cell_for_test() {
-        return false;
-    }
     let mut text = value.values[0].units().to_vec();
     text.push(0);
     let mut native = LVITEMW {
@@ -1574,10 +1524,6 @@ fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
 }
 
 fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyText) -> bool {
-    #[cfg(test)]
-    if fail_native_refresh_cell_for_test() {
-        return false;
-    }
     let mut text = value.units().to_vec();
     text.push(0);
     let mut native = LVITEMW {
@@ -1606,10 +1552,6 @@ fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
     let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
     #[cfg(test)]
     refresh_profile::record(|counters| counters.full_rebuilds += 1);
-    #[cfg(test)]
-    if FAIL_NATIVE_REBUILD_FOR_TEST.with(std::cell::Cell::get) {
-        return false;
-    }
     // SAFETY: window is live and the message carries no pointer.
     if unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) } == 0 {
         return false;
@@ -1617,29 +1559,6 @@ fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
     rows.iter()
         .enumerate()
         .all(|(row, value)| insert_native_row(window, row, value))
-}
-
-#[cfg(test)]
-thread_local! {
-    // A valid live HWND remains in use. The seam rejects a selected write
-    // before sending it so partial-update recovery is deterministic.
-    static FAIL_NATIVE_CELL_AFTER_FOR_TEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    static FAIL_NATIVE_REBUILD_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn fail_native_refresh_cell_for_test() -> bool {
-    FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| match slot.get() {
-        Some(0) => {
-            slot.set(None);
-            true
-        }
-        Some(remaining) => {
-            slot.set(Some(remaining - 1));
-            false
-        }
-        None => false,
-    })
 }
 
 fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
@@ -1707,27 +1626,10 @@ fn format_filetime(value: u64) -> LegacyText {
     let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Timestamps);
     #[cfg(test)]
     refresh_profile::record(|counters| counters.timestamp_values += 1);
-    #[cfg(test)]
-    if let Some(formatted) = DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
-        let environment = slot.borrow();
-        environment
-            .as_ref()
-            .map(|(locale, zone)| format_filetime_with_environment(value, locale.as_ptr(), zone))
-    }) {
-        return formatted;
-    }
-    format_filetime_with_environment(value, null(), null())
-}
-
-fn format_filetime_with_environment(
-    value: u64,
-    locale: *const u16,
-    zone: *const DYNAMIC_TIME_ZONE_INFORMATION,
-) -> LegacyText {
-    let Some(system) = local_systemtime_from_filetime(value, zone) else {
+    let Some(system) = local_systemtime_from_filetime(value) else {
         return LegacyText::default();
     };
-    if let Some(localized) = format_local_systemtime(&system, locale) {
+    if let Some(localized) = format_local_systemtime(&system) {
         return LegacyText::from(localized);
     }
     LegacyText::from(format_timestamp_fallback(
@@ -1736,10 +1638,7 @@ fn format_filetime_with_environment(
     ))
 }
 
-fn local_systemtime_from_filetime(
-    value: u64,
-    zone: *const DYNAMIC_TIME_ZONE_INFORMATION,
-) -> Option<SYSTEMTIME> {
+fn local_systemtime_from_filetime(value: u64) -> Option<SYSTEMTIME> {
     if value == 0 {
         return None;
     }
@@ -1754,23 +1653,22 @@ fn local_systemtime_from_filetime(
         return None;
     }
     let mut local = SYSTEMTIME::default();
-    // SAFETY: zone is either null for the current dynamic Windows time zone or
-    // points to a live test-owned zone; utc is readable and local writable.
-    if unsafe { SystemTimeToTzSpecificLocalTimeEx(zone, &utc, &mut local) } == 0 {
+    // SAFETY: null selects the current dynamic Windows time zone, including
+    // its date-specific transition rules; utc is readable and local writable.
+    if unsafe { SystemTimeToTzSpecificLocalTimeEx(null(), &utc, &mut local) } == 0 {
         return None;
     }
     Some(local)
 }
 
-fn format_local_systemtime(system: &SYSTEMTIME, locale: *const u16) -> Option<String> {
+fn format_local_systemtime(system: &SYSTEMTIME) -> Option<String> {
     let date = format_locale_part(|buffer, capacity| {
-        // SAFETY: locale is null for the user's default or points to a live
-        // test-owned locale name; system is readable, and buffer/capacity are
-        // either the documented size query
+        // SAFETY: null locale selects the user's default locale, system is
+        // readable, and buffer/capacity are either the documented size query
         // pair or writable storage supplied by format_locale_part.
         unsafe {
             GetDateFormatEx(
-                locale,
+                null(),
                 DATE_SHORTDATE,
                 system,
                 null(),
@@ -1781,17 +1679,11 @@ fn format_local_systemtime(system: &SYSTEMTIME, locale: *const u16) -> Option<St
         }
     })?;
     let time = format_locale_part(|buffer, capacity| {
-        // SAFETY: locale has the same lifetime as above; system is readable,
-        // and buffer/capacity follow the GetTimeFormatEx contract.
-        unsafe { GetTimeFormatEx(locale, 0, system, null(), buffer, capacity) }
+        // SAFETY: null locale selects the user's default locale, system is
+        // readable, and buffer/capacity follow the GetTimeFormatEx contract.
+        unsafe { GetTimeFormatEx(null(), 0, system, null(), buffer, capacity) }
     })?;
     Some(format!("{date} {time}"))
-}
-
-#[cfg(test)]
-thread_local! {
-    // Native tests select explicit NLS inputs without changing Windows settings.
-    static DATE_ENVIRONMENT_FOR_TEST: std::cell::RefCell<Option<(Vec<u16>, DYNAMIC_TIME_ZONE_INFORMATION)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<String> {
@@ -1844,8 +1736,6 @@ mod refresh_profile {
         pub(super) full_rebuilds: usize,
         pub(super) extra_staged_rows_peak: usize,
         pub(super) logical_staged_payload_bytes_peak: usize,
-        pub(super) fallback_staged_rows_peak: usize,
-        pub(super) fallback_logical_staged_payload_bytes_peak: usize,
         times_ns: [u128; 7],
         maximum_shell_ns: u128,
     }
@@ -1924,7 +1814,7 @@ mod refresh_profile {
             assert!(timestamps + shell <= inclusive_rows);
             let exclusive_rows = inclusive_rows - timestamps - shell;
             println!(
-                "{{\"kind\":\"refresh-stages-test-build\",\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"shell_nested_ns\":{shell},\"shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"shell_calls\":{},\"cache_hits\":{},\"cache_misses\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{}}}",
+                "{{\"kind\":\"refresh-stages-test-build\",\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"shell_nested_ns\":{shell},\"shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"shell_calls\":{},\"cache_hits\":{},\"cache_misses\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{}}}",
                 counters.maximum_shell_ns,
                 counters.issue_count_input_rows_visited,
                 counters.native_rows_visited,
@@ -1939,8 +1829,6 @@ mod refresh_profile {
                 counters.full_rebuilds,
                 counters.extra_staged_rows_peak,
                 counters.logical_staged_payload_bytes_peak,
-                counters.fallback_staged_rows_peak,
-                counters.fallback_logical_staged_payload_bytes_peak,
             );
             counters
         }
@@ -1965,8 +1853,8 @@ mod native_tests {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR,
-        LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_GETITEMW, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
+        LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_APP, WM_NULL,
@@ -2242,18 +2130,11 @@ mod native_tests {
     }
 
     fn assert_native_refresh_values(state: &AppState) {
-        assert_native_refresh_values_at(
-            state,
-            [
-                0,
-                state.model.len() / 2,
-                state.model.len().saturating_sub(1),
-            ],
-        );
-    }
-
-    fn assert_native_refresh_values_at(state: &AppState, rows: impl IntoIterator<Item = usize>) {
-        for row in rows {
+        for row in [
+            0,
+            state.model.len() / 2,
+            state.model.len().saturating_sub(1),
+        ] {
             let Some(expected) = state.rendered_rows.get(row) else {
                 continue;
             };
@@ -2322,283 +2203,6 @@ mod native_tests {
         counters
     }
 
-    fn assert_model_native_rows(state: &AppState) {
-        assert!(state.preview_synchronization.is_synchronized());
-        assert_eq!(state.rendered_rows.len(), state.model.len());
-        // SAFETY: scalar count query against the live test-owned ListView.
-        let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
-        assert_eq!(native_count, state.model.len() as isize);
-        let mut icon_cache = state.icon_cache.clone();
-        for (row, item) in state.model.items().iter().enumerate() {
-            assert_eq!(
-                state.rendered_rows[row],
-                rendered_row(&mut icon_cache, item, state.preview_issue_cache.issue(row)),
-                "rendered cache must represent current model row {row}"
-            );
-        }
-        assert_native_refresh_values_at(state, 0..state.model.len());
-    }
-
-    fn assert_streamed_refresh(state: &mut AppState, label: &str) {
-        let counters = measure_refresh(state, label, refresh_all_rows);
-        assert!(counters.extra_staged_rows_peak <= 1);
-        assert_eq!(counters.fallback_staged_rows_peak, 0);
-        assert_eq!(counters.full_rebuilds, 0);
-        assert_model_native_rows(state);
-    }
-
-    #[test]
-    fn full_refresh_streams_reordered_and_mutated_rows() -> Result<(), Box<dyn std::error::Error>> {
-        let mut app = RefreshTestApp::new()?;
-        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
-            let parent = r"C:\refresh-fixture\normal";
-            let original = refresh_fixture_rows(parent, "ordinary", 0, 6);
-            state
-                .model
-                .append_batch_by(original.clone(), compare_windows)?;
-            refresh_all_rows(state);
-            assert_model_native_rows(state);
-            assert_streamed_refresh(state, "regression-unchanged");
-
-            state.model.clear();
-            state
-                .model
-                .append_batch_by(original.into_iter().rev(), compare_windows)?;
-            assert_streamed_refresh(state, "regression-reordered");
-            assert_eq!(
-                state.rendered_rows[0].values[0],
-                LegacyText::from("ordinary-00005.txt")
-            );
-
-            state.model.append_batch_by(
-                refresh_fixture_rows(parent, "ordinary", 6, 2),
-                compare_windows,
-            )?;
-            assert_streamed_refresh(state, "regression-added");
-            assert_eq!(state.model.remove_rows(&[2]), 1);
-            assert_streamed_refresh(state, "regression-middle-removed");
-            assert_eq!(state.model.remove_rows(&[state.model.len() - 1]), 1);
-            assert_streamed_refresh(state, "regression-trailing-removed");
-            state.model.clear();
-            assert_streamed_refresh(state, "regression-cleared");
-            state.model.append_batch_by(
-                refresh_fixture_rows(parent, "ordinary", 20, 4),
-                compare_windows,
-            )?;
-            assert_streamed_refresh(state, "regression-repopulated");
-
-            let metadata = state.rendered_rows[0].values[2..7].to_vec();
-            let duplicate = state.model.items()[1].current_name().clone();
-            assert!(state.model.manual_change_changed(0, duplicate)?);
-            refresh_proposal_rows(state, &[0]);
-            assert_eq!(
-                state.preview_issue_cache.issue(0),
-                PreviewRowIssue::DuplicateDestination
-            );
-            assert_eq!(
-                state.preview_issue_cache.issue(1),
-                PreviewRowIssue::DuplicateDestination
-            );
-            assert_eq!(state.rendered_rows[0].values[2..7], metadata);
-            assert_model_native_rows(state);
-            state.model.reset_proposals()?;
-            refresh_proposal_rows(state, &[0]);
-            assert_eq!(state.preview_issue_cache.issue(0), PreviewRowIssue::None);
-            assert_eq!(state.preview_issue_cache.issue(1), PreviewRowIssue::None);
-            let changed = state
-                .model
-                .prefix_complete_changed(&LegacyText::from("x_"))?;
-            refresh_proposal_rows(state, &changed);
-            assert_model_native_rows(state);
-            let changed = state.model.reset_proposals_changed()?;
-            refresh_proposal_rows(state, &changed);
-            assert_model_native_rows(state);
-            assert_eq!(state.rendered_rows[0].values[2..7], metadata);
-
-            for column in 0..4 {
-                state.shown_columns[column] = true;
-                update_column_visibility(state, column);
-            }
-            assert_streamed_refresh(state, "regression-auxiliary-visible");
-            assert!(
-                state
-                    .rendered_rows
-                    .iter()
-                    .all(|row| row.values[2..7].iter().all(|v| !v.is_empty()))
-            );
-            Ok(())
-        })??;
-        app.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn full_refresh_reformats_complete_dates_for_explicit_nls_inputs()
-    -> Result<(), Box<dyn std::error::Error>> {
-        struct ResetDateEnvironment;
-        impl Drop for ResetDateEnvironment {
-            fn drop(&mut self) {
-                DATE_ENVIRONMENT_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
-            }
-        }
-        let _reset = ResetDateEnvironment;
-        let mut app = RefreshTestApp::new()?;
-        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
-            state.model.append_batch_by(
-                refresh_fixture_rows(r"C:\refresh-fixture\dates", "ordinary", 0, 2),
-                compare_windows,
-            )?;
-            refresh_all_rows(state);
-            let utc = DYNAMIC_TIME_ZONE_INFORMATION {
-                DynamicDaylightTimeDisabled: true,
-                ..Default::default()
-            };
-            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
-                *slot.borrow_mut() = Some((wide("en-US"), utc));
-            });
-            assert_streamed_refresh(state, "regression-en-us-utc");
-            let utc_dates = state.rendered_rows[0].values[5..7].to_vec();
-            assert!(utc_dates.iter().all(|date| !date.is_empty()));
-
-            let tokyo = DYNAMIC_TIME_ZONE_INFORMATION {
-                Bias: -540,
-                DynamicDaylightTimeDisabled: true,
-                ..Default::default()
-            };
-            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
-                *slot.borrow_mut() = Some((wide("en-US"), tokyo));
-            });
-            assert_eq!(
-                local_systemtime_from_filetime(133_497_936_000_000_000, &tokyo)
-                    .ok_or("explicit time-zone conversion failed")?
-                    .wHour,
-                21
-            );
-            assert_streamed_refresh(state, "regression-en-us-tokyo");
-            assert_ne!(state.rendered_rows[0].values[5..7], utc_dates);
-            let tokyo_dates = state.rendered_rows[0].values[5..7].to_vec();
-            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
-                *slot.borrow_mut() = Some((wide("ko-KR"), tokyo));
-            });
-            assert_streamed_refresh(state, "regression-ko-kr-tokyo");
-            assert_ne!(state.rendered_rows[0].values[5..7], tokyo_dates);
-            assert!(
-                state.rendered_rows[0].values[5..7]
-                    .iter()
-                    .all(|date| !date.is_empty())
-            );
-            Ok(())
-        })??;
-        app.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn full_refresh_rebuilds_after_partial_write_and_locks_failed_preview()
-    -> Result<(), Box<dyn std::error::Error>> {
-        struct ResetNativeFault;
-        impl Drop for ResetNativeFault {
-            fn drop(&mut self) {
-                FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(None));
-                FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(false));
-            }
-        }
-        let _reset = ResetNativeFault;
-        let mut app = RefreshTestApp::new()?;
-        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
-            state.model.append_batch_by(
-                refresh_fixture_rows(r"C:\refresh-fixture\fault", "ordinary", 0, 4),
-                compare_windows,
-            )?;
-            refresh_all_rows(state);
-            let changed = state
-                .model
-                .prefix_complete_changed(&LegacyText::from("first_"))?;
-            assert_eq!(changed.len(), 4);
-            FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(Some(3)));
-            let recovered =
-                measure_refresh(state, "regression-partial-recovered", refresh_all_rows);
-            assert_eq!(recovered.full_rebuilds, 1);
-            assert_eq!(recovered.fallback_staged_rows_peak, 4);
-            assert!(recovered.extra_staged_rows_peak <= 1);
-            assert_model_native_rows(state);
-
-            let changed = state
-                .model
-                .prefix_complete_changed(&LegacyText::from("second_"))?;
-            assert_eq!(changed.len(), 4);
-            FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(Some(2)));
-            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(true));
-            let collection = refresh_profile::Collection::begin();
-            refresh_all_rows(state);
-            let failed = collection.finish("regression-partial-rebuild-failed", state.model.len());
-            assert_eq!(failed.full_rebuilds, 1);
-            assert_eq!(failed.fallback_staged_rows_peak, 4);
-            assert!(!state.preview_synchronization.is_synchronized());
-            assert_eq!(state.presentation(0).apply, ApplyPresentation::Blocked);
-            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(false));
-            let recovered = measure_refresh(
-                state,
-                "regression-failed-preview-recovered",
-                refresh_all_rows,
-            );
-            assert_eq!(recovered.full_rebuilds, 1);
-            assert_eq!(recovered.fallback_staged_rows_peak, 4);
-            assert_model_native_rows(state);
-
-            // A native row-count mismatch also bypasses incremental comparison.
-            // SAFETY: row 0 exists in the live test-owned ListView.
-            let deleted = unsafe { SendMessageW(state.list_window, LVM_DELETEITEM, 0, 0) };
-            assert_ne!(deleted, 0);
-            let mismatch =
-                measure_refresh(state, "regression-native-count-mismatch", refresh_all_rows);
-            assert_eq!(mismatch.full_rebuilds, 1);
-            assert_eq!(mismatch.fallback_staged_rows_peak, 4);
-            assert_model_native_rows(state);
-            Ok(())
-        })??;
-        app.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn full_refresh_preserves_selection_focus_viewport_and_close()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut app = RefreshTestApp::new()?;
-        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
-            state.model.append_batch_by(
-                refresh_fixture_rows(r"C:\refresh-fixture\view", "ordinary", 0, 100),
-                compare_windows,
-            )?;
-            refresh_all_rows(state);
-            assert!(apply_native_control_theme(
-                state.list_window,
-                NativeThemeTarget::FileList,
-                ResolvedTheme::Dark,
-            ));
-            select_rows_with_focus(state.list_window, &[80, 81], Some(81));
-            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
-            assert_eq!(focused_index(state.list_window), Some(81));
-            // SAFETY: this scalar query addresses the live test-owned ListView.
-            let top = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
-            assert!(top > 0, "fixture must exercise a nonzero viewport");
-            assert_streamed_refresh(state, "regression-dark-selected-scrolled");
-            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
-            assert_eq!(focused_index(state.list_window), Some(81));
-            // SAFETY: scalar query against the same live ListView after refresh.
-            let after = unsafe { SendMessageW(state.list_window, LVM_GETTOPINDEX, 0, 0) };
-            assert!(after > 0);
-            assert!(apply_native_control_theme(
-                state.list_window,
-                NativeThemeTarget::FileList,
-                ResolvedTheme::NativeSystem,
-            ));
-            Ok(())
-        })??;
-        app.close()?;
-        Ok(())
-    }
-
     #[test]
     #[ignore = "diagnostic: optimized native refresh attribution on the prepared VM"]
     fn profile_refresh_stages() -> Result<(), Box<dyn std::error::Error>> {
@@ -2635,15 +2239,12 @@ mod native_tests {
             )?;
             let small = measure_refresh(state, "ordinary-100", refresh_all_rows);
             assert_eq!(small.rows_formatted, 100);
-            assert_eq!(small.fallback_staged_rows_peak, 100);
             state.model.append_batch_by(
                 refresh_fixture_rows(ordinary, "ordinary", 100, 900),
                 compare_windows,
             )?;
             let medium = measure_refresh(state, "ordinary-1000", refresh_all_rows);
             assert_eq!(medium.rows_formatted, 1000);
-            assert!(medium.extra_staged_rows_peak <= 1);
-            assert_eq!(medium.fallback_staged_rows_peak, 0);
             let collection = refresh_profile::Collection::begin();
             // Keep the historical ordinary-10000 operation shape. Model append
             // is outside each stage clock but inside this scenario's envelope.
@@ -2660,8 +2261,6 @@ mod native_tests {
             assert_eq!(large.timestamp_values, large.rows_formatted * 2);
             assert_eq!(large.cache_hits + large.cache_misses, large.rows_formatted);
             assert_eq!(large.native_insertions, 9000);
-            assert!(large.extra_staged_rows_peak <= 1);
-            assert_eq!(large.fallback_staged_rows_peak, 0);
             select_rows(state.list_window, &[4999]);
             let unchanged = measure_refresh(state, "ordinary-10000-unchanged", refresh_all_rows);
             assert_eq!(selected_indices(state.list_window), vec![4999]);
@@ -2669,8 +2268,6 @@ mod native_tests {
             assert_eq!(unchanged.native_cells, 0);
             assert_eq!(unchanged.native_insertions, 0);
             assert_eq!(unchanged.full_rebuilds, 0);
-            assert!(unchanged.extra_staged_rows_peak <= 1);
-            assert_eq!(unchanged.fallback_staged_rows_peak, 0);
             assert!(state.model.manual_change_changed(4999, "manual.txt")?);
             let one = measure_refresh(state, "one-row-proposal-edit", |state| {
                 refresh_proposal_rows(state, &[4999])
@@ -2718,8 +2315,6 @@ mod native_tests {
                 };
                 let counters = measure_refresh(state, label, refresh_all_rows);
                 assert_eq!(counters.rows_formatted, 1000);
-                assert!(counters.extra_staged_rows_peak <= 1);
-                assert_eq!(counters.fallback_staged_rows_peak, 0);
                 let label = if visible {
                     "long-visible-unchanged"
                 } else {
@@ -2728,8 +2323,6 @@ mod native_tests {
                 let counters = measure_refresh(state, label, refresh_all_rows);
                 assert_eq!(counters.native_cells, 0);
                 assert_eq!(counters.rows_formatted, 1000);
-                assert!(counters.extra_staged_rows_peak <= 1);
-                assert_eq!(counters.fallback_staged_rows_peak, 0);
                 assert!(state.rendered_rows.iter().all(|row| {
                     row.values[..NATIVE_STATUS_COLUMN_INDEX]
                         .iter()
@@ -3857,7 +3450,7 @@ mod native_tests {
     fn known_utc_filetime_uses_current_dynamic_timezone_without_mutation() {
         // 2024-01-15 12:00:00 UTC. Every Windows time zone maps this to
         // January 15 or 16, while the exact local clock remains environment-owned.
-        let local = local_systemtime_from_filetime(133_497_936_000_000_000, null());
+        let local = local_systemtime_from_filetime(133_497_936_000_000_000);
 
         assert!(local.is_some());
         if let Some(local) = local {
