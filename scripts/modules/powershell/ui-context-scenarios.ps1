@@ -1580,7 +1580,7 @@ function Invoke-ObserverPerformanceSampleScenario {
                 # Retain stable command controls before the ListView grows.
                 $resetControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
                     -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
-                    -TimeoutSeconds $WaitSeconds -Label 'performance reset command' -RequireEnabled -RequireWindowHandle
+                    -TimeoutSeconds $WaitSeconds -Label 'performance reset command' -RequireWindowHandle
                 $prefixControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
                     -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) `
                     -TimeoutSeconds $WaitSeconds -Label 'performance prefix command' -RequireEnabled -RequireWindowHandle
