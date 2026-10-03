@@ -2902,6 +2902,16 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    Assert-Fails -Expected 'performance scenario entered with empty captures' -Action {
+        & {
+            function New-PrivateDirectory { throw 'performance scenario entered with empty captures' }
+            Invoke-ObserverPerformanceSampleScenario -Verified ([pscustomobject]@{}) `
+                -RuntimeRoot 'unopened-fixture' -EvidenceRoot 'unopened-evidence' `
+                -SessionId 1 -WaitSeconds 1 -Captures ([Collections.Generic.List[object]]::new()) `
+                -ProcessLifecycleObservations ([Collections.Generic.List[object]]::new()) `
+                -ObservationSink ([ordered]@{})
+        }
+    }
     $performanceGridPattern = [pscustomobject]@{
         Current = [pscustomobject]@{ RowCount = 10000 }
         Prefix = 'sample-'

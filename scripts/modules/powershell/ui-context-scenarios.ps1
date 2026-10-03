@@ -1479,7 +1479,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][Collections.Generic.List[object]] $Captures,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
