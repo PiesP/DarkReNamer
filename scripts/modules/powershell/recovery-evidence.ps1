@@ -80,18 +80,49 @@ function Write-AcceptanceUtf8Json {
 function Write-AcceptanceNewBytes {
     param(
         [Parameter(Mandatory)][string] $Path,
-        [Parameter(Mandatory)][byte[]] $Bytes
+        [Parameter(Mandatory)][byte[]] $Bytes,
+        [switch] $PrivateUserOwned
     )
 
-    $stream = [IO.FileStream]::new(
-        $Path,
-        [IO.FileMode]::CreateNew,
-        [IO.FileAccess]::Write,
-        [IO.FileShare]::None,
-        4096,
-        [IO.FileOptions]::WriteThrough
-    )
+    $stream = if ($PrivateUserOwned) {
+        # The elevated observer's default owner can be Administrators. This
+        # injected candidate models a journal created by the medium-token user.
+        # Supply its owner and private DACL at creation, before writing payload.
+        $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetOwner($userSid)
+        $security.SetAccessRuleProtection($true, $false)
+        foreach ($principal in @($userSid,
+                [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+                [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+            [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $principal, [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow))
+        }
+        [IO.FileSystemAclExtensions]::Create(
+            [IO.FileInfo]::new($Path), [IO.FileMode]::CreateNew,
+            ([Security.AccessControl.FileSystemRights]::Write -bor
+                [Security.AccessControl.FileSystemRights]::ReadPermissions), [IO.FileShare]::None,
+            4096, [IO.FileOptions]::WriteThrough, $security)
+    }
+    else {
+        [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+    }
     try {
+        if ($PrivateUserOwned) {
+            $actual = [IO.FileSystemAclExtensions]::GetAccessControl($stream)
+            if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $userSid.Value -or
+                -not $actual.AreAccessRulesProtected) {
+                throw 'The injected candidate did not receive its private user-owned security at creation.'
+            }
+        }
         $stream.Write($Bytes, 0, $Bytes.Length)
         $stream.Flush($true)
     }
