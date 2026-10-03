@@ -2098,7 +2098,7 @@ function Invoke-RustTestBinary {
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $Index,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
-        [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+        [ValidateSet('', 'hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
         [ValidateRange(0, 8388608)][long] $OutputBudgetBytes =
             $script:VmTestOutputAggregateLimitBytes
     )

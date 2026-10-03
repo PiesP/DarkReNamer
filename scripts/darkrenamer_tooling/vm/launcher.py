@@ -299,7 +299,8 @@ def parse_arguments(argv=None):
         parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
     args.candidate_mode = all(value is not None for value in candidate_values)
     if args.profile_refresh_stages:
-        if args.candidate_mode or args.task_kind != 'core' or supplied('--test-timeout-seconds'):
+        if (args.candidate_mode or args.task_kind != 'core' or
+                args.acceptance_profile_id != V2_PROFILE_ID or supplied('--test-timeout-seconds')):
             parser.error('The refresh diagnostic requires source-built core mode and its fixed timeout.')
         if (args.desktop_mode != 'rdp' or
                 (supplied('--desktop-scale') and args.desktop_scale != 100) or
@@ -1613,7 +1614,8 @@ def verify_refresh_profile_records(output, order):
                 record['timestamp_values'] != 2 * record['rows_formatted'] or
                 record['cache_hits'] + record['cache_misses'] != record['rows_formatted'] or
                 record['shell_calls'] != record['cache_misses'] or
-                record['row_values_exclusive_ns'] > record['row_values_inclusive_ns'] or
+                record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
+                record['shell_nested_ns'] != record['row_values_inclusive_ns'] or
                 record['shell_max_ns'] > record['shell_nested_ns']):
             raise ValueError('Refresh diagnostic scenario counters are invalid.')
         records.append(record)
@@ -1624,6 +1626,14 @@ def verify_refresh_profile_records(output, order):
     expected = REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths
     if tuple(record['scenario'] for record in records) != expected:
         raise ValueError('Refresh diagnostic scenario inventory or order is invalid.')
+    for record in records:
+        scenario = record['scenario']
+        expected_rows = 100 if scenario == 'ordinary-100' else (
+            1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
+        expected_formatted = 26500 if scenario == 'ordinary-10000' else (
+            0 if 'proposal-' in scenario else expected_rows)
+        if record['rows'] != expected_rows or record['rows_formatted'] != expected_formatted:
+            raise ValueError('Refresh diagnostic workload cardinality is invalid.')
     return records
 
 

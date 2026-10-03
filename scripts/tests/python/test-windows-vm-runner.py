@@ -82,10 +82,18 @@ class VmRunnerTests(unittest.TestCase):
         for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
             row = {'kind': 'refresh-stages-test-build', 'scenario': scenario,
                    **{name: 0 for name in vm.REFRESH_PROFILE_COUNTERS}}
-            row.update(rows=100, rows_formatted=100, timestamp_values=200,
-                       cache_hits=99, cache_misses=1, shell_calls=1,
-                       row_values_inclusive_ns=20, row_values_exclusive_ns=10,
-                       shell_nested_ns=5, shell_max_ns=5)
+            count = 100 if scenario == 'ordinary-100' else (
+                1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
+            formatted = 26500 if scenario == 'ordinary-10000' else (
+                0 if 'proposal-' in scenario else count)
+            row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
+                       cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
+                       shell_calls=int(formatted > 0),
+                       row_values_inclusive_ns=20 if formatted else 0,
+                       row_values_exclusive_ns=10 if formatted else 0,
+                       timestamps_nested_ns=5 if formatted else 0,
+                       shell_nested_ns=5 if formatted else 0,
+                       shell_max_ns=5 if formatted else 0)
             rows.append(json.dumps(row))
         return ('running 1 test\ntest ' + vm.REFRESH_PROFILE_TEST +
                 ' ... ' + rows[0] + '\n' + '\n'.join(rows[1:]) +
@@ -104,12 +112,25 @@ class VmRunnerTests(unittest.TestCase):
                                                       '"timestamp_values": 199', 1),
                 'hidden-visible')
 
+    def test_refresh_profile_rejects_overlapping_time_totals_and_wrong_workload(self):
+        with self.assertRaisesRegex(ValueError, 'counters'):
+            vm.verify_refresh_profile_records(
+                self.refresh_profile_output().replace('"row_values_exclusive_ns": 10',
+                                                      '"row_values_exclusive_ns": 11', 1),
+                'hidden-visible')
+        with self.assertRaisesRegex(ValueError, 'cardinality'):
+            vm.verify_refresh_profile_records(
+                self.refresh_profile_output().replace('"rows": 100', '"rows": 99', 1),
+                'hidden-visible')
+
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
                                    '--profile-refresh-stages'])
         self.assertEqual(args.test_timeout_seconds, 600)
         self.assertEqual(args.task_kind, 'core')
         for invalid in (
+            ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
+             '--acceptance-profile-id', vm.V1_PROFILE_ID],
             ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
              '--test-timeout-seconds', '601'],
             ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
