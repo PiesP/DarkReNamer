@@ -8,7 +8,7 @@ use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
@@ -230,7 +230,7 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
         ));
     }
     let _descriptor_owner = LocalDescriptor(descriptor);
-    if owner.is_null() {
+    if descriptor.is_null() || owner.is_null() {
         return Err(refused());
     }
     // Application-owned state must belong to this user, even when an
@@ -241,19 +241,21 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
         // SAFETY: owner and user SID are backed by live descriptor/owned storage.
         unsafe { EqualSid(owner, user.ptr()) != 0 }
     };
-    if !owner_ok || dacl.is_null() {
+    if !owner_ok {
         return Err(refused());
     }
-    // SAFETY: dacl is returned inside the live descriptor by GetSecurityInfo.
-    let count = unsafe { (*dacl).AceCount };
+    let dacl = NonNull::new(dacl).ok_or_else(refused)?;
+    // SAFETY: checked non-null dacl is inside the owned live GetSecurityInfo descriptor.
+    let count = unsafe { dacl.as_ref().AceCount };
     for index in 0..count {
         let mut ace = ptr::null_mut();
         // SAFETY: index is within the ACL's declared ACE count and output is writable.
-        if unsafe { GetAce(dacl, u32::from(index), &mut ace) } == 0 {
+        if unsafe { GetAce(dacl.as_ptr(), u32::from(index), &mut ace) } == 0 {
             return Err(refused());
         }
-        // SAFETY: GetAce returned a valid ACE header.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        let ace = NonNull::new(ace).ok_or_else(refused)?;
+        // SAFETY: successful GetAce returned a checked non-null header in the live ACL.
+        let header = unsafe { ace.cast::<ACE_HEADER>().as_ref() };
         if usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
             return Err(refused());
         }
@@ -269,10 +271,11 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
             continue;
         }
         // SAFETY: standard allow ACE has fixed mask and SID offset after its header.
-        let allow = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        let allow = unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
         // SAFETY: a standard allow ACE has its SID at SidStart within the ACE.
         let sid = unsafe {
             ace.cast::<u8>()
+                .as_ptr()
                 .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
                 .cast()
         };

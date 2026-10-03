@@ -345,6 +345,8 @@ handle security descriptors and ACEs and passing a protected descriptor to
 the parent-relative `NtCreateFile` creation boundary. The descriptor and SID
 buffers remain live for each synchronous native call; all LocalAlloc outputs
 are released once. Unknown security forms fail closed before journal decoding.
+Successful descriptor, DACL and ACE outputs are explicitly checked for null;
+ACL/ACE dereferences use checked `NonNull` values while the descriptor remains owned.
 
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.
