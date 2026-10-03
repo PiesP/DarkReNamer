@@ -573,21 +573,47 @@ python3 -I scripts/run-gui-regression.py \
   --output-root /absolute/private/new-performance-sample-attempt
 ```
 
-Use two separately retained baseline attempts and two candidate attempts in
-serial order when comparing a change. Each attempt has a new output root and a
+Freeze the product and harness commits, executable hashes, toolchain/profile,
+fixture contents/order, display, initial preferences and cache policy before a
+comparison. Start with two complete observations per product in a declared
+balanced order, such as baseline/candidate/candidate/baseline. Each attempt has
+a new output root and a
 600-second observer and 32 MiB output limit. The fixed workload observes 30 seconds of empty idle,
 100/1,000/10,000 ordinary rows, 1,000 long paths with auxiliary columns hidden
 and visible, 300 extension classes with recurring `.txt`, one-row and full-list
 preview/reset with five representative rows including the last row, then three
-1,000-row add/edit/reset/remove cycles. Cycle latency includes every operation.
+1,000-row add/edit/reset/remove cycles. `ordinary-10000` retains its historical
+meaning: the sum of four 2,250-row additions to an existing 1,000-row list.
+Import elapsed time begins at dialog Open invocation and ends at observed row
+count; it includes completion handoff, rendering and observer polling. It does
+not isolate file I/O or establish complete command readiness. Full-preview time
+includes representative row observation; cycle time includes import, edit,
+reset and removal. Readiness and representative values remain separate evidence.
+Use `--performance-column-order hidden-visible` or `visible-hidden` to declare
+and counterbalance long-path column order. Shared OS/Shell cache effects remain
+possible even with fresh application processes and private preferences.
 Import lists stay
 below the existing 2 MiB limit. The observer samples the exact owned product
 PID and HWND every 200 ms during import and refresh, recording CPU, private and
-working-set bytes, threads, handles, GDI objects, and bounded `WM_NULL` response
-gaps. Wakeups remain `not_run` because this observer has no supported per-process
-counter. The independent validator checks source and executable hashes, the
+working-set bytes, threads, handles, GDI objects, and bounded `WM_NULL` probes.
+The v2 timing scope separates probe duration from resource collection and
+distinguishes success, identified timeout and other/unknown failure using the
+native last-error contract. Per-phase sample counts and gaps describe coverage;
+a 50-ms timeout does not measure the complete stall, and 200-ms sampling can
+miss peaks. Startup records launch-request-to-declared-ready time and monotonic
+bounds around native process creation; the ready criterion is a bound main
+window, an empty list and an enabled import command. Post-operation resources
+use the fixed 400-ms settling interval. Wakeups remain `not_run` because this
+observer has no supported per-process counter. The independent validator checks source and executable hashes, the
 fixed workload and sample sequence, visible column values, unchanged fixture
-bytes, journal absence, normal process close, and cleanup. These samples do not
+bytes, journal absence, normal process close, and cleanup. Changed semantics use
+a distinct run/scope identity; original v1 receipts retain their original source
+and verifier. For historical comparisons, commit harness-only backports and
+prove that product/build inputs are unchanged; record both original and derived
+commits rather than presenting a modified checkout as the original source.
+Retain every failed attempt. Additional focused observations require a stated
+hypothesis and fixed count; two observations do not establish significance or
+tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
 
