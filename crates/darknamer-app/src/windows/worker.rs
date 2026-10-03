@@ -22,6 +22,142 @@ pub(super) struct AdmissionWorker {
     pub(super) handle: JoinHandle<()>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ImportKind {
+    Names,
+    Paths,
+}
+
+pub(super) struct ImportWorker {
+    cancellation: Arc<AtomicBool>,
+    session_id: u64,
+    revision: ModelRevision,
+    kind: ImportKind,
+    receiver: Receiver<io::Result<LegacyText>>,
+    pub(super) handle: JoinHandle<()>,
+}
+
+impl ImportWorker {
+    pub(super) fn cancellation_requested(&self) -> bool {
+        self.cancellation.load(Ordering::Acquire)
+    }
+
+    fn request_cancel(&self) {
+        self.cancellation.store(true, Ordering::Release);
+        // SAFETY: JoinHandle owns the live thread handle until retirement. This
+        // requests cancellation of pending synchronous I/O; completion remains
+        // asynchronous and the result is always discarded after a request.
+        unsafe { CancelSynchronousIo(self.handle.as_raw_handle()) };
+    }
+}
+
+pub(super) fn start_import_worker(
+    window: HWND,
+    state: &mut AppState,
+    session_id: u64,
+    revision: ModelRevision,
+    path: PathBuf,
+    kind: ImportKind,
+) -> io::Result<()> {
+    start_import_worker_from(window, state, session_id, revision, kind, move || {
+        read_legacy_text(&path)
+    })
+}
+
+pub(super) fn start_import_worker_from(
+    window: HWND,
+    state: &mut AppState,
+    session_id: u64,
+    revision: ModelRevision,
+    kind: ImportKind,
+    read: impl FnOnce() -> io::Result<LegacyText> + Send + 'static,
+) -> io::Result<()> {
+    if state.import_worker.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "import already active",
+        ));
+    }
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: the callback-free timer polls the live UI window if a posted
+    // completion wake is lost. No worker-owned pointer crosses the boundary.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let window_value = window as usize;
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-import".to_owned())
+        .spawn(move || {
+            let _wake = SimpleCompletionWake {
+                window: window_value,
+                message: WM_APP_IMPORT_COMPLETE,
+            };
+            let result = read();
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: no import worker is active and this is the timer we set.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            return Err(error);
+        }
+    };
+    state.import_worker = Some(ImportWorker {
+        cancellation,
+        session_id,
+        revision,
+        kind,
+        receiver,
+        handle,
+    });
+    state.mutation_locked = true;
+    state.set_progress_status("가져오기 파일을 읽는 중입니다. 취소를 요청할 수 있습니다...");
+    update_controls(state);
+    Ok(())
+}
+
+pub(super) fn handle_import_completion(window: HWND, state: &mut AppState) {
+    if !state
+        .import_worker
+        .as_ref()
+        .is_some_and(|worker| worker.handle.is_finished())
+    {
+        return;
+    }
+    let Some(worker) = state.import_worker.take() else {
+        return;
+    };
+    // SAFETY: this worker reached its terminal state and owns this timer.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let joined = worker.handle.join();
+    state.clear_progress_status();
+    state.mutation_locked = state.close_pending
+        || state.admission_worker.is_some()
+        || state.plan_worker.is_some()
+        || state.apply_worker.is_some();
+    let cancelled = worker.cancellation.load(Ordering::Acquire);
+    let result = if joined.is_err() {
+        Err(io::Error::other("import worker terminated unexpectedly"))
+    } else {
+        worker
+            .receiver
+            .try_recv()
+            .unwrap_or_else(|_| Err(io::Error::other("import worker did not return a result")))
+    };
+    finish_import_worker_result(
+        window,
+        state,
+        worker.session_id,
+        worker.revision,
+        worker.kind,
+        cancelled,
+        result,
+    );
+    update_controls(state);
+    try_finish_window_close(window, state);
+}
+
 impl ApplyWorker {
     pub(super) fn is_finishing(&self) -> bool {
         self.progress.updates.is_finishing()
@@ -972,6 +1108,17 @@ pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
         let _joined = worker.handle.join();
         state.mutation_locked = false;
     }
+    if let Some(worker) = state.import_worker.take() {
+        worker.request_cancel();
+        // If the message pump failed, an import provider may never return.
+        // Abort this already-failed process rather than block the UI thread or
+        // release the runtime lock while that thread still runs. Process exit
+        // terminates every thread and closes the lock together.
+        if !worker.handle.is_finished() {
+            std::process::abort();
+        }
+        let _joined = worker.handle.join();
+    }
     if let Some(worker) = state.plan_worker.take() {
         worker.cancellation.request();
         // SAFETY: this exact timer belongs to the still-live top-level window.
@@ -1009,6 +1156,7 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
         || state.confirmation_pending
         || state.active_prompt.is_some()
         || state.admission_worker.is_some()
+        || state.import_worker.is_some()
         || state.plan_worker.is_some()
         || state.apply_worker.is_some()
     {
@@ -1032,6 +1180,7 @@ pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
         || state.confirmation_pending
         || state.active_prompt.is_some()
         || state.admission_worker.is_some()
+        || state.import_worker.is_some()
         || state.plan_worker.is_some()
         || state.apply_worker.is_some()
         || !state.preference_persistence.is_joined()
@@ -1059,6 +1208,16 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
             worker.cancellation.store(true, Ordering::Release);
             state.set_progress_status(
                 "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
+            );
+            update_controls(state);
+        }
+        return;
+    }
+    if let Some(worker) = state.import_worker.as_ref() {
+        if !worker.cancellation_requested() {
+            worker.request_cancel();
+            state.set_progress_status(
+                "종료와 가져오기 취소를 요청했습니다. 파일 I/O가 끝나면 종료합니다...",
             );
             update_controls(state);
         }
@@ -1098,6 +1257,10 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
             worker.cancellation.store(true, Ordering::Release);
             let (_, snapshot) = worker.progress.load();
             admission_cancellation_status(snapshot)
+        }),
+        Some(ActiveWorkerKind::Import) => state.import_worker.as_ref().map(|worker| {
+            worker.request_cancel();
+            "가져오기 취소를 요청했습니다. 현재 파일 I/O가 끝나면 결과를 버립니다...".to_owned()
         }),
         Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
             worker.cancellation.request();

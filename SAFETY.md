@@ -91,6 +91,32 @@ exclusive, handle-relative no-replace rename, so a later occupant is never
 overwritten.
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
+Text imports use one bounded result handoff and perform open, opened-handle
+regular-file metadata validation, bounded read, and decode on a worker thread.
+The selected import location remains unrestricted, including network/provider
+paths, so a provider can leave synchronous I/O pending for an unbounded time.
+Cancel and close request `CancelSynchronousIo` through the tracked
+`JoinHandle`'s native thread handle, created by Rust's Windows `CreateThread`
+path with cancellation access. Both requests mark the result discard-only.
+A failed native cancellation request still leaves it discard-only, and no
+request promises immediate completion. The UI remains responsive, while the
+dialog session and runtime lock remain held until the worker thread reaches
+its terminal state and the UI joins it. A successful late read after cancellation
+cannot update the model. On completion the UI rechecks the saved session,
+revision, close state, and mutation/recovery locks before committing name
+proposals or handing bounded paths to admission. No worker borrows `AppState`
+or performs UI/model mutation. The wake carries no pointer and a live-window
+timer provides a missed-wake fallback. Controlled stage-delay tests exercise
+the lifecycle, but do not establish a deadline for any real provider.
+If the Win32 message pump itself fails while import I/O is still pending,
+normal close processing is unavailable. The process captures the message-loop
+error, writes it to standard error where available, and aborts, ending all
+threads and releasing the runtime lock together
+instead of joining indefinitely on the failed UI thread or dropping the lock
+while an import thread still runs. This fatal path does not delete journal
+evidence and import has no filesystem mutation authority. A defensive
+`AppState` teardown check applies the same process-fatal rule if unexpected
+window destruction bypasses the normal close gate while import I/O is live.
 The multi-select file picker extracts only the remaining source capacity plus
 one overflow witness, and it stops after the aggregate UTF-16 path budget is
 exhausted before building additional path values.

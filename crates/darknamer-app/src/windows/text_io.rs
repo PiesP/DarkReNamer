@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
@@ -89,15 +90,40 @@ fn encode_legacy_text(text: &LegacyText) -> io::Result<Vec<u8>> {
 }
 
 pub(super) fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    if fs::metadata(path)?.len() > MAX_IMPORT_BYTES as u64 {
+    read_legacy_text_from(
+        || fs::File::open(path),
+        |file| {
+            let metadata = file.metadata()?;
+            Ok((metadata.is_file(), metadata.len()))
+        },
+    )
+}
+
+fn read_legacy_text_from<R: Read>(
+    open: impl FnOnce() -> io::Result<R>,
+    metadata: impl FnOnce(&R) -> io::Result<(bool, u64)>,
+) -> io::Result<LegacyText> {
+    let file = open()?;
+    let (regular, length) = metadata(&file)?;
+    if !regular {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "import is not a regular file",
+        ));
+    }
+    if length > MAX_IMPORT_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "가져오기 파일이 2 MiB 한도를 초과합니다",
         ));
     }
-    let bytes = read_bounded_import(fs::File::open(path)?)?;
+    let bytes = read_bounded_import(file)?;
+    decode_legacy_text(&bytes)
+}
+
+fn decode_legacy_text(bytes: &[u8]) -> io::Result<LegacyText> {
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        if (bytes.len() - 2) % 2 != 0 {
+        if !(bytes.len() - 2).is_multiple_of(2) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "UTF-16LE text file has an incomplete code unit",
@@ -142,4 +168,148 @@ pub(super) fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
 
 pub(super) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
+
+    #[test]
+    fn import_validates_opened_regular_file_and_preserves_utf16_units() -> io::Result<()> {
+        let bytes = [0xff, 0xfe, 0x00, 0xd8];
+        let decoded = read_legacy_text_from(
+            || Ok(Cursor::new(bytes)),
+            |_| Ok((true, bytes.len() as u64)),
+        )?;
+        assert_eq!(decoded.units(), &[0xd800]);
+        assert!(
+            read_legacy_text_from(
+                || Ok(Cursor::new(bytes)),
+                |_| Ok((false, bytes.len() as u64)),
+            )
+            .is_err()
+        );
+        assert!(
+            read_legacy_text_from(
+                || Ok(Cursor::new(bytes)),
+                |_| Ok((true, MAX_IMPORT_BYTES as u64 + 1)),
+            )
+            .is_err()
+        );
+        assert!(
+            read_legacy_text_from(
+                || Ok(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES + 1])),
+                |_| Ok((true, 1)),
+            )
+            .is_err()
+        );
+        assert!(
+            read_legacy_text_from(|| Ok(Cursor::new([0xff, 0xfe, 0x61])), |_| Ok((true, 3)),)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_propagates_open_metadata_and_partial_read_errors() {
+        let open_error = read_legacy_text_from(
+            || Err::<Cursor<Vec<u8>>, _>(io::Error::from(io::ErrorKind::NotFound)),
+            |_| Err(io::Error::other("metadata must not run after failed open")),
+        );
+        assert_eq!(
+            open_error.err().map(|error| error.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        let metadata_error = read_legacy_text_from(
+            || Ok(Cursor::new(vec![1_u8])),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        );
+        assert_eq!(
+            metadata_error.err().map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+
+        struct PartialFailure(bool);
+        impl Read for PartialFailure {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                self.0 = true;
+                buf[0] = b'a';
+                Ok(1)
+            }
+        }
+        let read_error = read_legacy_text_from(|| Ok(PartialFailure(false)), |_| Ok((true, 1)));
+        assert_eq!(
+            read_error.err().map(|error| error.kind()),
+            Some(io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    #[test]
+    fn controlled_open_metadata_and_read_can_each_stall_then_fail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for stage in 0..3 {
+            let (entered_sender, entered_receiver) = mpsc::sync_channel(0);
+            let (release_sender, release_receiver) = mpsc::sync_channel(0);
+            let release_receiver = Arc::new(Mutex::new(release_receiver));
+            let handle = thread::spawn(move || {
+                let pause = |current| {
+                    if stage == current {
+                        let _ = entered_sender.send(());
+                        let _ = release_receiver
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .recv();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                struct Reader<F: Fn(usize) -> bool>(F);
+                impl<F: Fn(usize) -> bool> Read for Reader<F> {
+                    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                        self.0(2);
+                        Err(io::Error::from(io::ErrorKind::BrokenPipe))
+                    }
+                }
+                read_legacy_text_from(
+                    || {
+                        if pause(0) {
+                            Err(io::Error::from(io::ErrorKind::NotFound))
+                        } else {
+                            Ok(Reader(&pause))
+                        }
+                    },
+                    |_| {
+                        if pause(1) {
+                            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                        } else {
+                            Ok((true, 1))
+                        }
+                    },
+                )
+                .err()
+                .map_or(io::ErrorKind::Other, |error| error.kind())
+            });
+            entered_receiver.recv_timeout(std::time::Duration::from_secs(5))?;
+            assert!(!handle.is_finished());
+            release_sender.send(())?;
+            assert_eq!(
+                handle
+                    .join()
+                    .map_err(|_| io::Error::other("controlled import stage panicked"))?,
+                [
+                    io::ErrorKind::NotFound,
+                    io::ErrorKind::PermissionDenied,
+                    io::ErrorKind::BrokenPipe,
+                ][stage]
+            );
+        }
+        Ok(())
+    }
 }

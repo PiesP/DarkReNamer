@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::num::NonZeroIsize;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::AsRawHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -185,6 +186,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
 #[cfg(test)]
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(test)]
 use windows_sys::Win32::System::Memory::{
@@ -317,6 +319,7 @@ const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const WM_APP_POPUP_MENU_UPDATE: u32 = WM_APP + 0x52;
+const WM_APP_IMPORT_COMPLETE: u32 = WM_APP + 0x53;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
@@ -556,6 +559,7 @@ struct AppState {
     apply_worker: Option<ApplyWorker>,
     plan_worker: Option<PlanWorker>,
     admission_worker: Option<AdmissionWorker>,
+    import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
     close_pending: bool,
     confirmation_pending: bool,
@@ -583,6 +587,22 @@ struct AppState {
     // Fields drop in declaration order. Keep the instance lock last so workers
     // and every retained journal capability close before another launch.
     _runtime_lock: fs::File,
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Defensive teardown can bypass WM_CLOSE (for example, direct window
+        // destruction). A live import may still be blocked in provider I/O.
+        // End the process rather than release the runtime lock before that
+        // thread is terminal or detach a worker retaining application state.
+        if self
+            .import_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.handle.is_finished())
+        {
+            std::process::abort();
+        }
+    }
 }
 
 impl AppState {
@@ -656,6 +676,7 @@ impl AppState {
             apply_worker: None,
             plan_worker: None,
             admission_worker: None,
+            import_worker: None,
             preference_persistence: PreferencePersistence::default(),
             close_pending: false,
             confirmation_pending: false,
@@ -713,6 +734,7 @@ impl AppState {
             || self.apply_worker.is_some()
             || self.plan_worker.is_some()
             || self.admission_worker.is_some()
+            || self.import_worker.is_some()
     }
 
     fn preview_counts(&self, selected: usize) -> PreviewCounts {
@@ -721,7 +743,8 @@ impl AppState {
 
     fn presentation(&self, selected: usize) -> UiPresentation {
         let activity = self.worker_activity();
-        let worker_active = activity.admission || activity.plan || activity.apply;
+        let worker_active =
+            activity.admission || activity.plan || activity.apply || activity.import;
         UiPresentation::derive(
             self.preview_counts(selected),
             PresentationLocks {
@@ -767,6 +790,7 @@ impl AppState {
             && self.apply_worker.is_none()
             && self.plan_worker.is_none()
             && self.admission_worker.is_none()
+            && self.import_worker.is_none()
     }
 
     fn can_export_recovery_journal(&self) -> bool {
@@ -797,6 +821,7 @@ impl AppState {
     fn worker_activity(&self) -> WorkerActivity {
         WorkerActivity {
             admission: self.admission_worker.is_some(),
+            import: self.import_worker.is_some(),
             plan: self.plan_worker.is_some(),
             apply: self.apply_worker.is_some(),
             apply_finishing: self
@@ -807,6 +832,10 @@ impl AppState {
                 .admission_worker
                 .as_ref()
                 .is_some_and(AdmissionWorker::cancellation_requested)
+                || self
+                    .import_worker
+                    .as_ref()
+                    .is_some_and(ImportWorker::cancellation_requested)
                 || self
                     .plan_worker
                     .as_ref()

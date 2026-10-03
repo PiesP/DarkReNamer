@@ -233,7 +233,7 @@ pub(super) fn prepare_appearance_dialog(
         });
     }
     let activity = state.worker_activity();
-    let worker_active = activity.admission || activity.plan || activity.apply;
+    let worker_active = activity.admission || activity.import || activity.plan || activity.apply;
     if !advanced_appearance_available(worker_active, state.confirmation_pending) {
         message(
             owner,
@@ -329,6 +329,7 @@ pub(super) fn run_prepared_appearance_action(
             let activity = state.worker_activity();
             let current = !state.close_pending
                 && !activity.admission
+                && !activity.import
                 && !activity.plan
                 && !activity.apply
                 && !state.confirmation_pending
@@ -386,6 +387,7 @@ pub(super) fn run_prepared_appearance_action(
             let current = exact_session
                 && !state.close_pending
                 && !activity.admission
+                && !activity.import
                 && !activity.plan
                 && !activity.apply
                 && !state.confirmation_pending

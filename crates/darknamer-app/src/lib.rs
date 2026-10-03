@@ -3539,6 +3539,7 @@ impl UiStatus {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WorkerActivity {
     pub(crate) admission: bool,
+    pub(crate) import: bool,
     pub(crate) plan: bool,
     pub(crate) apply: bool,
     pub(crate) cancellation_requested: bool,
@@ -3550,6 +3551,7 @@ pub(crate) struct WorkerActivity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveWorkerKind {
     Admission,
+    Import,
     Plan,
     Apply,
 }
@@ -3557,10 +3559,16 @@ pub(crate) enum ActiveWorkerKind {
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) const fn active_worker_kind(activity: WorkerActivity) -> Option<ActiveWorkerKind> {
-    match (activity.admission, activity.plan, activity.apply) {
-        (true, false, false) => Some(ActiveWorkerKind::Admission),
-        (false, true, false) => Some(ActiveWorkerKind::Plan),
-        (false, false, true) => Some(ActiveWorkerKind::Apply),
+    match (
+        activity.admission,
+        activity.import,
+        activity.plan,
+        activity.apply,
+    ) {
+        (true, false, false, false) => Some(ActiveWorkerKind::Admission),
+        (false, true, false, false) => Some(ActiveWorkerKind::Import),
+        (false, false, true, false) => Some(ActiveWorkerKind::Plan),
+        (false, false, false, true) => Some(ActiveWorkerKind::Apply),
         _ => None,
     }
 }
@@ -7436,6 +7444,10 @@ mod tests {
                 ..WorkerActivity::default()
             },
             WorkerActivity {
+                import: true,
+                ..WorkerActivity::default()
+            },
+            WorkerActivity {
                 plan: true,
                 ..WorkerActivity::default()
             },
@@ -7454,6 +7466,13 @@ mod tests {
                 ..WorkerActivity::default()
             }),
             Some(ActiveWorkerKind::Admission)
+        );
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                import: true,
+                ..WorkerActivity::default()
+            }),
+            Some(ActiveWorkerKind::Import)
         );
         assert_eq!(
             active_worker_kind(WorkerActivity {
