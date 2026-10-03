@@ -167,7 +167,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "a81ee411fe88f1e5f88d0de7f9263440661f799dc671f537ff9bcbe7d6c5e3cd",
+      "sha256": "cd3ea9266777c7f89e232d2752b33cb9963039322533e65ae84935e0788acc1c",
       "dependencies": [
         "tooling-loader",
         "package-root",

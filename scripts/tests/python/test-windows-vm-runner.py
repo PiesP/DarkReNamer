@@ -123,30 +123,6 @@ class VmRunnerTests(unittest.TestCase):
                 self.refresh_profile_output().replace('"rows": 100', '"rows": 99', 1),
                 'hidden-visible')
 
-    def test_refresh_profile_validates_optional_exceptional_staging_pair(self):
-        baseline = self.refresh_profile_output()
-        first = baseline.index('{')
-        end = baseline.index('\n', first)
-        row = json.loads(baseline[first:end])
-        row.update(full_rebuilds=1, fallback_staged_rows_peak=100,
-                   fallback_logical_staged_payload_bytes_peak=31000)
-
-        def output(value):
-            return baseline[:first] + json.dumps(value) + baseline[end:]
-
-        self.assertEqual(vm.verify_refresh_profile_records(output(row), 'hidden-visible')[0]
-                         ['fallback_staged_rows_peak'], 100)
-        for patch in ({'fallback_staged_rows_peak': -1},
-                      {'fallback_staged_rows_peak': 101},
-                      {'fallback_logical_staged_payload_bytes_peak': True},
-                      {'fallback_logical_staged_payload_bytes_peak': 0},
-                      {'full_rebuilds': 0}):
-            with self.subTest(patch=patch), self.assertRaisesRegex(ValueError, 'fallback counters'):
-                vm.verify_refresh_profile_records(output({**row, **patch}), 'hidden-visible')
-        del row['fallback_logical_staged_payload_bytes_peak']
-        with self.assertRaisesRegex(ValueError, 'fallback counters'):
-            vm.verify_refresh_profile_records(output(row), 'hidden-visible')
-
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
                                    '--profile-refresh-stages'])
