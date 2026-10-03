@@ -150,11 +150,12 @@ use safe_runtime::initialize_safe_runtime_at;
 use safe_runtime::{
     JournalRole, SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
-#[cfg(test)]
-use text_io::write_legacy_text;
 use text_io::{
-    compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text_to_target,
+    compare_windows, legacy_path, path_wide, read_legacy_text_cancellable, wide,
+    write_legacy_text_to_target,
 };
+#[cfg(test)]
+use text_io::{read_legacy_text, write_legacy_text};
 #[cfg(test)]
 use windows_sys::Win32::Foundation::E_NOINTERFACE;
 use windows_sys::Win32::Foundation::{

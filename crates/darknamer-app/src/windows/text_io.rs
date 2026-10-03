@@ -4,6 +4,7 @@ use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use darknamer_core::LegacyText;
 use windows_sys::Win32::Globalization::{
@@ -78,21 +79,63 @@ fn encode_legacy_text(text: &LegacyText) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    read_legacy_text_from(
+    read_legacy_text_cancellable(path, &AtomicBool::new(false))
+}
+
+pub(super) fn read_legacy_text_cancellable(
+    path: &Path,
+    cancellation: &AtomicBool,
+) -> io::Result<LegacyText> {
+    read_legacy_text_from_cancellable(
         || fs::File::open(path),
         |file| {
             let metadata = file.metadata()?;
             Ok((metadata.is_file(), metadata.len()))
         },
+        cancellation,
     )
 }
 
+#[cfg(test)]
 fn read_legacy_text_from<R: Read>(
     open: impl FnOnce() -> io::Result<R>,
     metadata: impl FnOnce(&R) -> io::Result<(bool, u64)>,
 ) -> io::Result<LegacyText> {
+    read_legacy_text_from_cancellable(open, metadata, &AtomicBool::new(false))
+}
+
+fn check_import_cancellation(cancellation: &AtomicBool) -> io::Result<()> {
+    if cancellation.load(Ordering::Acquire) {
+        // read_to_end retries Interrupted; an observed cancellation must stop
+        // its retry loop before another native read can be issued.
+        Err(io::Error::other("import cancellation requested"))
+    } else {
+        Ok(())
+    }
+}
+
+struct CancellableImportReader<'a, R> {
+    reader: R,
+    cancellation: &'a AtomicBool,
+}
+
+impl<R: Read> Read for CancellableImportReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        check_import_cancellation(self.cancellation)?;
+        self.reader.read(buffer)
+    }
+}
+
+fn read_legacy_text_from_cancellable<R: Read>(
+    open: impl FnOnce() -> io::Result<R>,
+    metadata: impl FnOnce(&R) -> io::Result<(bool, u64)>,
+    cancellation: &AtomicBool,
+) -> io::Result<LegacyText> {
+    check_import_cancellation(cancellation)?;
     let file = open()?;
+    check_import_cancellation(cancellation)?;
     let (regular, length) = metadata(&file)?;
     if !regular {
         return Err(io::Error::new(
@@ -106,7 +149,12 @@ fn read_legacy_text_from<R: Read>(
             "가져오기 파일이 2 MiB 한도를 초과합니다",
         ));
     }
-    let bytes = read_bounded_import(file)?;
+    check_import_cancellation(cancellation)?;
+    let bytes = read_bounded_import(CancellableImportReader {
+        reader: file,
+        cancellation,
+    })?;
+    check_import_cancellation(cancellation)?;
     decode_legacy_text(&bytes)
 }
 
@@ -200,6 +248,73 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn import_observes_cancellation_before_each_io_boundary() {
+        use std::cell::Cell;
+        for boundary in 0..3 {
+            let cancellation = AtomicBool::new(boundary == 0);
+            let opens = Cell::new(0);
+            let metadata_calls = Cell::new(0);
+            let reads = Cell::new(0);
+            struct CountReads<'a>(&'a Cell<usize>);
+            impl Read for CountReads<'_> {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    self.0.set(self.0.get() + 1);
+                    Ok(0)
+                }
+            }
+            let result = read_legacy_text_from_cancellable(
+                || {
+                    opens.set(opens.get() + 1);
+                    if boundary == 1 {
+                        cancellation.store(true, Ordering::Release);
+                    }
+                    Ok(CountReads(&reads))
+                },
+                |_| {
+                    metadata_calls.set(metadata_calls.get() + 1);
+                    if boundary == 2 {
+                        cancellation.store(true, Ordering::Release);
+                    }
+                    Ok((true, 0))
+                },
+                &cancellation,
+            );
+            assert_eq!(
+                result.err().map(|error| error.kind()),
+                Some(io::ErrorKind::Other)
+            );
+            assert_eq!(opens.get(), usize::from(boundary > 0));
+            assert_eq!(metadata_calls.get(), usize::from(boundary > 1));
+            assert_eq!(reads.get(), 0);
+        }
+    }
+
+    #[test]
+    fn cancelled_interrupted_read_does_not_reissue_native_read() {
+        use std::cell::Cell;
+        let cancellation = AtomicBool::new(false);
+        let reads = Cell::new(0);
+        struct InterruptedRead<'a>(&'a AtomicBool, &'a Cell<usize>);
+        impl Read for InterruptedRead<'_> {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                self.1.set(self.1.get() + 1);
+                self.0.store(true, Ordering::Release);
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            }
+        }
+        let result = read_legacy_text_from_cancellable(
+            || Ok(InterruptedRead(&cancellation, &reads)),
+            |_| Ok((true, 1)),
+            &cancellation,
+        );
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+        assert_eq!(reads.get(), 1);
     }
 
     #[test]

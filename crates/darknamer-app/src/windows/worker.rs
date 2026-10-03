@@ -59,9 +59,14 @@ pub(super) fn start_import_worker(
     path: PathBuf,
     kind: ImportKind,
 ) -> io::Result<()> {
-    start_import_worker_from(window, state, session_id, revision, kind, move || {
-        read_legacy_text(&path)
-    })
+    start_import_worker_from(
+        window,
+        state,
+        session_id,
+        revision,
+        kind,
+        move |cancellation| read_legacy_text_cancellable(&path, cancellation),
+    )
 }
 
 pub(super) fn start_import_worker_from(
@@ -70,7 +75,7 @@ pub(super) fn start_import_worker_from(
     session_id: u64,
     revision: ModelRevision,
     kind: ImportKind,
-    read: impl FnOnce() -> io::Result<LegacyText> + Send + 'static,
+    read: impl FnOnce(&AtomicBool) -> io::Result<LegacyText> + Send + 'static,
 ) -> io::Result<()> {
     if state.import_worker.is_some() {
         return Err(io::Error::new(
@@ -86,6 +91,7 @@ pub(super) fn start_import_worker_from(
         return Err(io::Error::last_os_error());
     }
     let window_value = window as usize;
+    let worker_cancellation = Arc::clone(&cancellation);
     let handle = match thread::Builder::new()
         .name("darkrenamer-import".to_owned())
         .spawn(move || {
@@ -93,7 +99,7 @@ pub(super) fn start_import_worker_from(
                 window: window_value,
                 message: WM_APP_IMPORT_COMPLETE,
             };
-            let result = read();
+            let result = read(&worker_cancellation);
             let _sent = sender.send(result);
         }) {
         Ok(handle) => handle,
@@ -118,11 +124,15 @@ pub(super) fn start_import_worker_from(
 }
 
 pub(super) fn handle_import_completion(window: HWND, state: &mut AppState) {
-    if !state
-        .import_worker
-        .as_ref()
-        .is_some_and(|worker| worker.handle.is_finished())
-    {
+    let Some(worker) = state.import_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        if worker.cancellation_requested() {
+            // Reissue on the existing 100ms poll to cover cancellation between
+            // the worker's flag check and the next native synchronous call.
+            worker.request_cancel();
+        }
         return;
     }
     let Some(worker) = state.import_worker.take() else {

@@ -619,6 +619,9 @@ pub(super) fn dispatch_command(
     command: u16,
 ) -> Option<PreparedCommandAction> {
     if state.active_prompt.is_some() {
+        if command == EXIT_COMMAND && state.import_worker.is_some() {
+            request_window_close(window, state);
+        }
         return None;
     }
     if state.appearance_dialog.is_some() {

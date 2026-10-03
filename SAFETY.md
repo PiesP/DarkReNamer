@@ -90,8 +90,12 @@ paths, so a provider can leave synchronous I/O pending for an unbounded time.
 Cancel and close request `CancelSynchronousIo` through the tracked
 `JoinHandle`'s native thread handle, created by Rust's Windows `CreateThread`
 path with cancellation access. Both requests mark the result discard-only.
-A failed native cancellation request still leaves it discard-only, and no
-request promises immediate completion. The UI remains responsive, while the
+The worker checks the shared cancellation flag before open, handle metadata,
+and every bounded read, and after I/O before decoding. An observed request stops
+new I/O, including retries of interrupted reads. The existing live-window poll
+reissues native cancellation while retirement is pending, covering the gap
+between a flag check and a native call. A failed native cancellation request
+still leaves the result discard-only, and no request promises immediate completion. The UI remains responsive, while the
 dialog session and runtime lock remain held until the worker thread reaches
 its terminal state and the UI joins it. A successful late read after cancellation
 cannot update the model. On completion the UI rechecks the saved session,

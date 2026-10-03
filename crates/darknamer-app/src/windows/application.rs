@@ -1409,11 +1409,7 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
-            if state
-                .import_worker
-                .as_ref()
-                .is_some_and(|worker| worker.handle.is_finished())
-            {
+            if state.import_worker.is_some() {
                 handle_import_completion(window, state);
                 return 0;
             }
@@ -2644,7 +2640,7 @@ mod tests {
                     session_id,
                     revision,
                     ImportKind::Names,
-                    move || {
+                    move |_| {
                         entered_sender
                             .send(())
                             .map_err(|_| io::Error::other("test entry receiver closed"))?;
@@ -2703,7 +2699,7 @@ mod tests {
                 5,
                 revision,
                 ImportKind::Names,
-                move || {
+                move |_| {
                     entered_sender
                         .send(())
                         .map_err(|_| io::Error::other("test entry receiver closed"))?;
@@ -2716,7 +2712,7 @@ mod tests {
         })??;
         entered_receiver.recv_timeout(std::time::Duration::from_secs(5))?;
         app.with_state(|state| {
-            request_window_close(app.owner, state);
+            let _action = dispatch_command(app.owner, state, EXIT_COMMAND);
             assert!(state.close_pending);
             assert!(state.import_worker.is_some());
             assert_eq!(state.active_prompt, Some(5));
