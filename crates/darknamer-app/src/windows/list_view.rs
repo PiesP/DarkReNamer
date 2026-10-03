@@ -1611,6 +1611,8 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 #[cfg(test)]
 mod native_tests {
     use std::process::Command;
+    use std::sync::mpsc::{self, Sender};
+    use std::time::{Duration, Instant};
 
     use super::super::visual_capture::capture_window_pixels;
     use super::*;
@@ -1618,7 +1620,9 @@ mod native_tests {
         LVIR_BOUNDS, LVM_GETITEMRECT, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
         LVM_SETTEXTCOLOR,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::SIF_POS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_APP, WM_NULL,
+    };
 
     const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
 
@@ -1662,6 +1666,361 @@ mod native_tests {
             0
         );
         assert_eq!(queries, 0);
+    }
+
+    #[test]
+    fn shell_icon_cache_queries_exact_classes_across_two_clear_boundaries() {
+        let hot = icon_cache_key(&LegacyText::from("one.TXT"), false);
+        let failed = icon_cache_key(&LegacyText::from("one.BAD"), false);
+        let zero = icon_cache_key(&LegacyText::from("one.ZERO"), false);
+        let mut expected_queries = vec![hot.clone(), failed.clone(), zero.clone()];
+        expected_queries.extend(
+            (0..253).map(|index| icon_cache_key(&LegacyText::from(format!("f.x{index}")), false)),
+        );
+        expected_queries.push(icon_cache_key(&LegacyText::from("f.x253"), false));
+        expected_queries.extend([hot.clone(), failed.clone(), zero.clone()]);
+        expected_queries.extend(
+            (254..506).map(|index| icon_cache_key(&LegacyText::from(format!("f.x{index}")), false)),
+        );
+        expected_queries.push(icon_cache_key(&LegacyText::from("f.x506"), false));
+        expected_queries.extend([hot.clone(), failed.clone(), zero.clone()]);
+
+        let mut cache = HashMap::new();
+        let mut actual_queries = Vec::new();
+        let mut accesses = 0;
+        {
+            let mut visit = |name: &str, expected_index: i32, should_query: bool| {
+                let item = LegacyListItem::new(name, false, 0, 0, 0);
+                let before = actual_queries.len();
+                let index = cached_file_icon_index(&mut cache, &item, |key, is_directory| {
+                    assert!(!is_directory);
+                    actual_queries.push(key.clone());
+                    if *key == failed {
+                        (0, 42)
+                    } else if *key == zero {
+                        (1, 0)
+                    } else if *key == hot {
+                        (1, 17)
+                    } else {
+                        (1, 31)
+                    }
+                });
+                accesses += 1;
+                assert_eq!(index, expected_index, "access {accesses}: {name}");
+                assert_eq!(
+                    actual_queries.len(),
+                    before + usize::from(should_query),
+                    "access {accesses}: {name}"
+                );
+                assert!(cache.len() <= 256, "access {accesses}: {name}");
+                cache.len()
+            };
+
+            assert_eq!(visit("one.TXT", 17, true), 1);
+            assert_eq!(visit("one.BAD", I_IMAGENONE, true), 2);
+            assert_eq!(visit("one.ZERO", 0, true), 3);
+            for index in 0..253 {
+                visit(&format!("f.x{index}"), 31, true);
+            }
+            for (name, expected) in [("two.txt", 17), ("two.bad", I_IMAGENONE), ("two.zero", 0)] {
+                assert_eq!(visit(name, expected, false), 256);
+            }
+            assert_eq!(visit("f.x253", 31, true), 1);
+            for (name, expected) in [
+                ("three.TXT", 17),
+                ("three.BAD", I_IMAGENONE),
+                ("three.ZERO", 0),
+            ] {
+                visit(name, expected, true);
+            }
+            for index in 254..506 {
+                visit(&format!("f.x{index}"), 31, true);
+            }
+            for (name, expected) in [
+                ("four.txt", 17),
+                ("four.bad", I_IMAGENONE),
+                ("four.zero", 0),
+            ] {
+                assert_eq!(visit(name, expected, false), 256);
+            }
+            assert_eq!(visit("f.x506", 31, true), 1);
+            for (name, expected) in [
+                ("five.TXT", 17),
+                ("five.BAD", I_IMAGENONE),
+                ("five.ZERO", 0),
+            ] {
+                visit(name, expected, true);
+            }
+        }
+        assert_eq!(accesses, 522);
+        assert_eq!(actual_queries.len(), 516);
+        assert_eq!(actual_queries, expected_queries);
+        for key in [hot, failed, zero] {
+            assert_eq!(
+                actual_queries.iter().filter(|query| *query == &key).count(),
+                3
+            );
+        }
+        assert_eq!(
+            cache.get(&icon_cache_key(&LegacyText::from("six.bad"), false)),
+            Some(&I_IMAGENONE)
+        );
+    }
+
+    const SLOW_ICON_TEST_MESSAGE: u32 = WM_APP + 27;
+    const SLOW_ICON_TEST_SUBCLASS_ID: usize = 27;
+
+    struct SlowIconTestContext {
+        entered: Sender<()>,
+        ready: mpsc::Receiver<()>,
+        cache: RefCell<HashMap<IconCacheKey, i32>>,
+        result: Cell<i32>,
+        failed: Cell<bool>,
+        retired: Cell<bool>,
+    }
+
+    unsafe extern "system" fn slow_icon_test_subclass(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        context_ref: usize,
+    ) -> LRESULT {
+        if message == WM_NCDESTROY {
+            // SAFETY: this copied reference points to the boxed context until
+            // destruction returns to the owning test thread.
+            let context = unsafe { &*(context_ref as *const SlowIconTestContext) };
+            // SAFETY: this exact test-owned subclass is removed while its
+            // context remains live, before the HWND is destroyed.
+            let removed = unsafe {
+                RemoveWindowSubclass(
+                    window,
+                    Some(slow_icon_test_subclass),
+                    SLOW_ICON_TEST_SUBCLASS_ID,
+                )
+            };
+            context.retired.set(removed != 0);
+            // SAFETY: the native destruction message is forwarded once.
+            return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        }
+        if message == SLOW_ICON_TEST_MESSAGE && context_ref != 0 {
+            // SAFETY: only the owning UI thread dispatches this message. The
+            // boxed context remains live until DestroyWindow returns.
+            let context = unsafe { &*(context_ref as *const SlowIconTestContext) };
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                if context.entered.send(()).is_err()
+                    || context.ready.recv_timeout(Duration::from_secs(1)).is_err()
+                {
+                    context.failed.set(true);
+                    return;
+                }
+                let item = LegacyListItem::new("injected.BAD", false, 0, 0, 0);
+                let Ok(mut cache) = context.cache.try_borrow_mut() else {
+                    context.failed.set(true);
+                    return;
+                };
+                let result = cached_file_icon_index(&mut cache, &item, |_, _| {
+                    // Deliberate test delay; no filesystem or shell provider is involved.
+                    thread::sleep(Duration::from_millis(150));
+                    (0, 42)
+                });
+                context.result.set(result);
+            }));
+            if outcome.is_err() {
+                context.failed.set(true);
+            }
+            return 0;
+        }
+        // SAFETY: all other messages retain the native subclass chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    #[test]
+    #[ignore = "diagnostic: controlled 150 ms UI-thread shell-lookup delay"]
+    fn injected_slow_icon_lookup_blocks_owned_hwnd_dispatch() -> io::Result<()> {
+        // SAFETY: STATIC is a system class; this hidden HWND belongs to the
+        // calling test thread and is destroyed on that same thread below.
+        let window = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if window.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let context = Box::new(SlowIconTestContext {
+            entered: entered_tx,
+            ready: ready_rx,
+            cache: RefCell::new(HashMap::new()),
+            result: Cell::new(i32::MIN),
+            failed: Cell::new(false),
+            retired: Cell::new(false),
+        });
+        // SAFETY: the test-owned context has a stable boxed address until
+        // confirmed window destruction removes the exact subclass.
+        if unsafe {
+            SetWindowSubclass(
+                window,
+                Some(slow_icon_test_subclass),
+                SLOW_ICON_TEST_SUBCLASS_ID,
+                (&*context as *const SlowIconTestContext) as usize,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            // SAFETY: failed subclass installation retained no context pointer.
+            unsafe { DestroyWindow(window) };
+            return Err(error);
+        }
+        let window_value = window as usize;
+        let probe = thread::spawn(move || {
+            if entered_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+                let _ = result_tx.send(None);
+                return;
+            }
+            let _ = ready_tx.send(());
+            let mut reply = 0;
+            let started = Instant::now();
+            // SAFETY: the copied HWND belongs to this test and remains live
+            // until the owning thread receives this bounded probe's result.
+            let status = unsafe {
+                SendMessageTimeoutW(
+                    window_value as HWND,
+                    WM_NULL,
+                    0,
+                    0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    50,
+                    &mut reply,
+                )
+            };
+            let _ = result_tx.send(Some((status, started.elapsed().as_millis())));
+        });
+
+        // SAFETY: the test HWND dispatches this scalar message on its owner
+        // thread. The subclass calls the real cache seam with an injected delay.
+        unsafe { SendMessageW(window, SLOW_ICON_TEST_MESSAGE, 0, 0) };
+        let probe_result = result_rx.recv_timeout(Duration::from_secs(2));
+        let mut recovered_reply = 0;
+        // SAFETY: the owning thread makes this value-only probe after dispatch.
+        let recovered = unsafe {
+            SendMessageTimeoutW(
+                window,
+                WM_NULL,
+                0,
+                0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                50,
+                &mut recovered_reply,
+            )
+        };
+        let failed = context.failed.get();
+        let index = context.result.get();
+        let cached_failure = context
+            .cache
+            .borrow()
+            .get(&icon_cache_key(&LegacyText::from("another.bad"), false))
+            .copied();
+        // SAFETY: DestroyWindow synchronously sends WM_NCDESTROY, which removes
+        // the subclass before the boxed context is dropped.
+        if unsafe { DestroyWindow(window) } == 0 {
+            let error = io::Error::last_os_error();
+            Box::leak(context);
+            return Err(error);
+        }
+        if !context.retired.get() {
+            Box::leak(context);
+            return Err(io::Error::other("test HWND subclass was not retired"));
+        }
+        if let Ok(Some(_)) = probe_result {
+            probe
+                .join()
+                .map_err(|_| io::Error::other("probe thread panicked"))?;
+        }
+        let (blocked, duration_ms) = probe_result
+            .map_err(|_| io::Error::other("bounded cross-thread WM_NULL probe did not finish"))?
+            .ok_or_else(|| io::Error::other("injected lookup callback did not start"))?;
+        println!(
+            "{{\"kind\":\"injected-ui-thread-delay\",\"delay_ms\":150,\"probe_timeout_ms\":50,\"probe_elapsed_ms\":{duration_ms},\"blocked_status\":{blocked},\"recovered_status\":{recovered}}}"
+        );
+        assert!(!failed);
+        assert_eq!(index, I_IMAGENONE);
+        assert_eq!(cached_failure, Some(I_IMAGENONE));
+        assert_eq!(blocked, 0);
+        assert_ne!(recovered, 0);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "diagnostic: live Shell queries and machine-dependent timings"]
+    fn live_shell_icon_lookup_reports_bounded_query_cost() -> io::Result<()> {
+        use ::windows::Win32::System::Com::COINIT_APARTMENTTHREADED;
+
+        struct TestCom;
+        impl Drop for TestCom {
+            fn drop(&mut self) {
+                // SAFETY: this guard drops on the same thread after successful COM initialization.
+                unsafe { CoUninitialize() };
+            }
+        }
+
+        // SAFETY: None is the documented reserved argument. The guard balances
+        // this thread's successful STA initialization after all shell queries.
+        let status = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if status.is_err() {
+            return Err(io::Error::other(format!(
+                "COM STA initialization failed: {status:?}"
+            )));
+        }
+        let _com = TestCom;
+        let mut cache = HashMap::new();
+        let mut queries = 0_u32;
+        let mut cumulative_ns = 0_u128;
+        let mut maximum_ns = 0_u128;
+        let cases = [
+            ("one.TXT", false),
+            ("two.txt", false),
+            ("one.ZIP", false),
+            ("two.zip", false),
+            ("README", false),
+            ("notes", false),
+            ("folder", true),
+            ("another-folder", true),
+        ];
+        for (name, is_directory) in cases {
+            let item = LegacyListItem::new(name, is_directory, 0, 0, 0);
+            cached_file_icon_index(&mut cache, &item, |key, directory| {
+                let started = Instant::now();
+                let result = query_shell_icon_index(key, directory);
+                let elapsed_ns = started.elapsed().as_nanos();
+                queries += 1;
+                cumulative_ns += elapsed_ns;
+                maximum_ns = maximum_ns.max(elapsed_ns);
+                result
+            });
+            assert!(cache.len() <= 256);
+        }
+        assert_eq!(queries, 4);
+        assert_eq!(cache.len(), 4);
+        println!(
+            "{{\"kind\":\"live-shell-test-build\",\"accesses\":8,\"queries\":{queries},\"hits\":4,\"cumulative_query_ns\":{cumulative_ns},\"maximum_query_ns\":{maximum_ns}}}"
+        );
+        Ok(())
     }
 
     struct BlankBodyTestContext {
