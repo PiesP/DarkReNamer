@@ -1777,6 +1777,52 @@ mod native_tests {
         result: Cell<i32>,
         failed: Cell<bool>,
         retired: Cell<bool>,
+        delay_started: Cell<Option<Instant>>,
+        delay_finished: Cell<Option<Instant>>,
+    }
+
+    struct SlowIconTestWindow {
+        window: HWND,
+        context: Option<Box<SlowIconTestContext>>,
+    }
+
+    impl SlowIconTestWindow {
+        fn close(&mut self) -> io::Result<()> {
+            if self.window.is_null() {
+                return Ok(());
+            }
+            // SAFETY: this HWND is test-owned on the current thread. Its
+            // WM_NCDESTROY callback retires the subclass synchronously.
+            let destroyed = unsafe { DestroyWindow(self.window) };
+            self.window = null_mut();
+            if destroyed == 0 {
+                let error = io::Error::last_os_error();
+                if let Some(context) = self.context.take() {
+                    Box::leak(context);
+                }
+                return Err(error);
+            }
+            if !self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.retired.get())
+            {
+                if let Some(context) = self.context.take() {
+                    Box::leak(context);
+                }
+                return Err(io::Error::other("test HWND subclass was not retired"));
+            }
+            self.context.take();
+            Ok(())
+        }
+    }
+
+    impl Drop for SlowIconTestWindow {
+        fn drop(&mut self) {
+            // A failed cleanup leaks the context instead of releasing memory
+            // that a still-installed native callback could reference.
+            let _ = self.close();
+        }
     }
 
     unsafe extern "system" fn slow_icon_test_subclass(
@@ -1822,7 +1868,9 @@ mod native_tests {
                 };
                 let result = cached_file_icon_index(&mut cache, &item, |_, _| {
                     // Deliberate test delay; no filesystem or shell provider is involved.
+                    context.delay_started.set(Some(Instant::now()));
                     thread::sleep(Duration::from_millis(150));
+                    context.delay_finished.set(Some(Instant::now()));
                     (0, 42)
                 });
                 context.result.set(result);
@@ -1870,6 +1918,8 @@ mod native_tests {
             result: Cell::new(i32::MIN),
             failed: Cell::new(false),
             retired: Cell::new(false),
+            delay_started: Cell::new(None),
+            delay_finished: Cell::new(None),
         });
         // SAFETY: the test-owned context has a stable boxed address until
         // confirmed window destruction removes the exact subclass.
@@ -1884,38 +1934,52 @@ mod native_tests {
         {
             let error = io::Error::last_os_error();
             // SAFETY: failed subclass installation retained no context pointer.
-            unsafe { DestroyWindow(window) };
+            if unsafe { DestroyWindow(window) } == 0 {
+                return Err(io::Error::other(format!(
+                    "subclass installation failed ({error}); test HWND cleanup also failed: {}",
+                    io::Error::last_os_error()
+                )));
+            }
             return Err(error);
         }
+        let mut owned = SlowIconTestWindow {
+            window,
+            context: Some(context),
+        };
         let window_value = window as usize;
-        let probe = thread::spawn(move || {
-            if entered_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-                let _ = result_tx.send(None);
-                return;
-            }
-            let _ = ready_tx.send(());
-            let mut reply = 0;
-            let started = Instant::now();
-            // SAFETY: the copied HWND belongs to this test and remains live
-            // until the owning thread receives this bounded probe's result.
-            let status = unsafe {
-                SendMessageTimeoutW(
-                    window_value as HWND,
-                    WM_NULL,
-                    0,
-                    0,
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
-                    50,
-                    &mut reply,
-                )
-            };
-            let _ = result_tx.send(Some((status, started.elapsed().as_millis())));
-        });
+        let probe = thread::Builder::new()
+            .name("slow-icon-wm-null-probe".to_owned())
+            .spawn(move || {
+                if entered_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+                    let _ = result_tx.send(None);
+                    return;
+                }
+                let _ = ready_tx.send(());
+                let mut reply = 0;
+                let started = Instant::now();
+                // SAFETY: the copied HWND belongs to this test and remains live
+                // until the owning thread receives this bounded probe's result.
+                let status = unsafe {
+                    SendMessageTimeoutW(
+                        window_value as HWND,
+                        WM_NULL,
+                        0,
+                        0,
+                        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                        50,
+                        &mut reply,
+                    )
+                };
+                let _ = result_tx.send(Some((status, started, Instant::now())));
+            })?;
 
         // SAFETY: the test HWND dispatches this scalar message on its owner
         // thread. The subclass calls the real cache seam with an injected delay.
         unsafe { SendMessageW(window, SLOW_ICON_TEST_MESSAGE, 0, 0) };
         let probe_result = result_rx.recv_timeout(Duration::from_secs(2));
+        // The worker has only a one-second channel wait and a 50 ms native
+        // message timeout. Retire it before destroying or recycling its HWND.
+        let probe_join = probe.join();
         let mut recovered_reply = 0;
         // SAFETY: the owning thread makes this value-only probe after dispatch.
         let recovered = unsafe {
@@ -1929,6 +1993,10 @@ mod native_tests {
                 &mut recovered_reply,
             )
         };
+        let context = owned
+            .context
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing test context"))?;
         let failed = context.failed.get();
         let index = context.result.get();
         let cached_failure = context
@@ -1936,28 +2004,34 @@ mod native_tests {
             .borrow()
             .get(&icon_cache_key(&LegacyText::from("another.bad"), false))
             .copied();
-        // SAFETY: DestroyWindow synchronously sends WM_NCDESTROY, which removes
-        // the subclass before the boxed context is dropped.
-        if unsafe { DestroyWindow(window) } == 0 {
-            let error = io::Error::last_os_error();
-            Box::leak(context);
-            return Err(error);
-        }
-        if !context.retired.get() {
-            Box::leak(context);
-            return Err(io::Error::other("test HWND subclass was not retired"));
-        }
-        if let Ok(Some(_)) = probe_result {
-            probe
-                .join()
-                .map_err(|_| io::Error::other("probe thread panicked"))?;
-        }
-        let (blocked, duration_ms) = probe_result
+        let delay_started = context.delay_started.get();
+        let delay_finished = context.delay_finished.get();
+        owned.close()?;
+        probe_join.map_err(|_| io::Error::other("probe thread panicked"))?;
+        let (blocked, probe_started, probe_finished) = probe_result
             .map_err(|_| io::Error::other("bounded cross-thread WM_NULL probe did not finish"))?
             .ok_or_else(|| io::Error::other("injected lookup callback did not start"))?;
+        let delay_started =
+            delay_started.ok_or_else(|| io::Error::other("injected delay did not start"))?;
+        let delay_finished =
+            delay_finished.ok_or_else(|| io::Error::other("injected delay did not finish"))?;
+        let duration_ms = probe_finished.duration_since(probe_started).as_millis();
+        let overlaps_delay = probe_started < delay_finished
+            && probe_finished > delay_started
+            && probe_finished <= delay_finished;
+        let conclusion = if overlaps_delay {
+            "measured"
+        } else {
+            "inconclusive"
+        };
         println!(
-            "{{\"kind\":\"injected-ui-thread-delay\",\"delay_ms\":150,\"probe_timeout_ms\":50,\"probe_elapsed_ms\":{duration_ms},\"blocked_status\":{blocked},\"recovered_status\":{recovered}}}"
+            "{{\"kind\":\"injected-ui-thread-delay\",\"conclusion\":\"{conclusion}\",\"delay_ms\":150,\"probe_timeout_ms\":50,\"probe_elapsed_ms\":{duration_ms},\"overlaps_delay\":{overlaps_delay},\"blocked_status\":{blocked},\"recovered_status\":{recovered}}}"
         );
+        if !overlaps_delay {
+            return Err(io::Error::other(
+                "inconclusive: WM_NULL probe did not finish during injected delay",
+            ));
+        }
         assert!(!failed);
         assert_eq!(index, I_IMAGENONE);
         assert_eq!(cached_failure, Some(I_IMAGENONE));
