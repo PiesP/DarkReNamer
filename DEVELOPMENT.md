@@ -335,7 +335,7 @@ committed checkout with a new private output directory:
 ```bash
 python3 -I scripts/test-windows-vm.py \
   --ssh-host configured-vm-alias \
-  --desktop-helper /absolute/private/desktop-session.ps1 \
+  --desktop-helper 'C:\absolute\private\desktop-session.ps1' \
   --profile-refresh-stages \
   --output /absolute/private/new-refresh-stage-attempt
 ```
