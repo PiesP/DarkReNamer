@@ -1766,12 +1766,17 @@ public static class DarkReNamerVmControllerWorkspace {
                 [void]$security.AddAccessRule($rule)
             }
             if ($ForBase) {
-                $traverse = [Security.AccessControl.FileSystemAccessRule]::new(
+                # The runner must read each ancestor's descriptor and attributes
+                # when opening its own private state below this protected base.
+                $ancestorReadRights = [Security.AccessControl.FileSystemRights]::Traverse -bor
+                    [Security.AccessControl.FileSystemRights]::ReadAttributes -bor
+                    [Security.AccessControl.FileSystemRights]::ReadPermissions
+                $ancestorRead = [Security.AccessControl.FileSystemAccessRule]::new(
                     [Security.Principal.SecurityIdentifier]::new($runnerSid),
-                    [Security.AccessControl.FileSystemRights]::Traverse,
+                    $ancestorReadRights,
                     [Security.AccessControl.AccessControlType]::Allow
                 )
-                [void]$security.AddAccessRule($traverse)
+                [void]$security.AddAccessRule($ancestorRead)
             }
             if ($ForGuestRoot) {
                 $identity = [Security.Principal.SecurityIdentifier]::new($runnerSid)
