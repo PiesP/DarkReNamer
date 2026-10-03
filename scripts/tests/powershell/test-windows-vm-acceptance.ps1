@@ -27,7 +27,7 @@ function Invoke-TestAcceptance {
         [switch] $Clipboard,
         [switch] $HighContrast,
         [switch] $RestoreHighContrastOnly,
-        [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip')][string] $RegressionMode,
+        [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')][string] $RegressionMode,
         [string] $InputManifestPath,
         [ValidateSet(100, 150)][int] $TextScalePercent = 100,
         [switch] $RestoreTextScaleOnly,
@@ -2881,6 +2881,27 @@ try {
         -Verified $candidateRegressionResolved -RegressionMode appearance-pair `
         -Appearance light -TextScalePercent 150 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePerformanceInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidatePerformanceInput.request.mode = 'performance-sample'
+    $candidatePerformanceInput.request.text_scale_percent = [long]100
+    $candidatePerformanceInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidatePerformanceInput.request.desktop.width = [long]1366
+    $candidatePerformanceInput.request.desktop.height = [long]768
+    $candidatePerformanceInput.request | Add-Member -NotePropertyName performance_plan -NotePropertyValue ([ordered]@{
+        iterations=2; idle_seconds=30; maximum_seconds=600; ordinary_rows=@(100,1000,10000)
+        long_path_rows=1000; extension_classes=300; add_remove_reset_cycles=3; sample_interval_ms=200
+    })
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+        -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePerformanceInput.request.performance_plan.idle_seconds = 0
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+            -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
     if ((Resolve-GuiRegressionLayoutVariant `
         -ManifestInput $candidateRegressionInput `
         -Verified $candidateRegressionResolved `
@@ -3327,8 +3348,8 @@ $applicationStartCalls = @($captureAst.FindAll({
     $node -is [Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
 }, $true))
-if ($applicationStartCalls.Count -ne 7) {
-    throw 'Expected all seven current-DPI and GUI diagnostic application start sites, including clean-default startup.'
+if ($applicationStartCalls.Count -ne 8) {
+    throw 'Expected all eight current-DPI and GUI diagnostic application start sites, including performance sampling.'
 }
 foreach ($call in $applicationStartCalls) {
     $lifecycleBindings = @($call.CommandElements | Where-Object {

@@ -205,7 +205,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "de59d0b6d131805800a0e42ceb821463fdf809a16c37c820bedf71a85013fa69",
+      "sha256": "009bd7ec8013524edcad18566a7a857eb15389fb839dce507b124fcbb79b5897",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -421,7 +421,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "47091636d407d6a9bfbd43f9516cbfff61bc4d4dc633855b8a2ea22d8d57a0c9",
+      "sha256": "9e2f924212d277d20e3eec4d1655d89dfd82d515adce8b0902fff03bd991fece",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -574,7 +574,7 @@
       "bundle": "ui-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "5ad9edf077ed3f779baa03f31d58125258a640b10501a3f2674e5821dedd6f99",
+      "sha256": "b03d79a0dff42955874bbd9622fc6c6b383cacdae9b4e5290207de8e53be031c",
       "dependencies": []
     },
     {
@@ -619,7 +619,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "569700ae0dcb40e4f710ede3e98133ea73aa41f238c82e60c4fb823da2db5816",
+      "sha256": "31b3f0d918aab6e87d3608db6bed62bb48de8c5df44c47a3ef3d66840eaab18e",
       "dependencies": []
     },
     {
@@ -628,7 +628,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "c55801d58fec55b392277d2d127e52f39d074a66078782811552156504df0b7c",
+      "sha256": "9f43b9b3b39dafec45d3b2212cacdfab618b19f440d887e9a4e2634f98124c55",
       "dependencies": []
     },
     {
@@ -646,7 +646,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "0ca640752448b266d0ccee43b685ca2cbebe6e2c4a95863090f5418e4cf06ab0",
+      "sha256": "eeb6614ece9a95d73a055549feb7eb78ee629dd5151440bd1af58583d96b069e",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -823,7 +823,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "d095e551c4b8cd83cdc2b7ae206a97d0d59dd961241cb0f9ab5bfa3f41a304d3",
+      "sha256": "368e05fd109061355e4f4e8982687a4679a19dc6a897a901d71d67a253b2cf94",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

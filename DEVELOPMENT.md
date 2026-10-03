@@ -561,6 +561,34 @@ declared scenes and configurations; design approval remains separate. This
 opt-in diagnostic does not complete the four fixed GUI regression runs or
 release acceptance.
 
+### Fixed performance sample
+
+Run one source-bound performance sample on a clean committed checkout with the
+prepared 1366×768, 96-DPI VM desktop:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic performance-sample \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-performance-sample-attempt
+```
+
+Use two separately retained baseline attempts and two candidate attempts in
+serial order when comparing a change. Each attempt has a new output root and a
+600-second observer and 32 MiB output limit. The fixed workload observes 30 seconds of empty idle,
+100/1,000/10,000 ordinary rows, 1,000 long paths with auxiliary columns hidden
+and visible, 300 extension classes with recurring `.txt`, one-row and full-list
+preview/reset, then three 1,000-row add/reset/remove cycles. Import lists stay
+below the existing 2 MiB limit. The observer samples the exact owned product
+PID and HWND every 200 ms during import and refresh, recording CPU, private and
+working-set bytes, threads, handles, GDI objects, and bounded `WM_NULL` response
+gaps. Wakeups remain `not_run` because this observer has no supported per-process
+counter. The independent validator checks source and executable hashes, the
+fixed workload and sample sequence, visible column values, unchanged fixture
+bytes, journal absence, normal process close, and cleanup. These samples do not
+complete the four-cell GUI regression, appearance diagnostic, release campaign,
+or physical-media acceptance.
+
 The painting policy keeps control outlines, default outlines, and decorative
 hairlines one physical pixel. Focus inset, pressed displacement, and existing
 separator slots/padding scale in DIP. Adjacent buttons share one outline seam;

@@ -248,6 +248,24 @@ function Assert-GuiRegressionInvocationBinding {
         throw 'Regression invocation differs from its immutable manifest.'
     }
     $requestedContrast = $ManifestInput.request.PSObject.Properties['high_contrast']
+    if ($RegressionMode -ceq 'performance-sample') {
+        $expectedPlan = [ordered]@{ iterations=2; idle_seconds=30; maximum_seconds=600;
+            ordinary_rows=@(100,1000,10000); long_path_rows=1000; extension_classes=300;
+            add_remove_reset_cycles=3; sample_interval_ms=200 }
+        $actualPlan = $ManifestInput.request.PSObject.Properties['performance_plan']
+        if ($null -eq $actualPlan -or
+            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
+            $ManifestInput.request.desktop.width -ne 1366 -or
+            $ManifestInput.request.desktop.height -ne 768 -or
+            $ManifestInput.request.desktop.dpi -ne 96) {
+            throw 'Performance sample differs from its fixed immutable plan.'
+        }
+    }
+    elseif ($null -ne $ManifestInput.request.PSObject.Properties['performance_plan']) {
+        throw 'Performance plan is restricted to performance-sample.'
+    }
     if ($RegressionMode -ceq 'appearance-pair') {
         if ($null -eq $requestedContrast -or $requestedContrast.Value -isnot [bool] -or
             $requestedContrast.Value -ne $HighContrast -or
@@ -661,6 +679,20 @@ function Invoke-GuiRegressionAcceptance {
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations
             }
+            elseif ($RegressionMode -eq 'performance-sample') {
+                $scenarioSink = [ordered]@{}
+                $observations.scenario = $scenarioSink
+                $result.assertions.scenario = $scenarioSink
+                $scenario = Invoke-ObserverPerformanceSampleScenario `
+                    -Verified $verified `
+                    -RuntimeRoot $effectiveRuntimeRoot `
+                    -EvidenceRoot $resolved.output_root `
+                    -SessionId $session `
+                    -WaitSeconds $TimeoutSeconds `
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations `
+                    -ObservationSink $scenarioSink
+            }
             elseif ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
                     -Verified $verified `
@@ -709,11 +741,14 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -eq 'appearance-pair') { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
+        }
+        elseif ($RegressionMode -eq 'performance-sample') {
+            $result.assertions['scope'] = 'performance-sample-p1-p3-v1'
         }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'

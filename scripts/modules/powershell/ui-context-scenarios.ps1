@@ -1443,6 +1443,246 @@ function Reset-ObserverAppearanceProposals {
         -TimeoutSeconds $WaitSeconds -Label 'appearance reset proposals' -RequireEnabled -RequireWindowHandle
     Invoke-AutomationControl -Element $reset -Label 'appearance reset proposals'
 }
+
+function Invoke-ObserverPerformanceSampleScenario {
+    param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
+
+    $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'performance-fixture'
+    $shortFixture = Resolve-JobBoundShortPath -Path $fixture
+    $ordinary = New-PrivateDirectory -Parent $shortFixture -Leaf 'ordinary'
+    $longRoot = New-PrivateDirectory -Parent $fixture -Leaf 'long'
+    foreach ($segment in @(('a' * 42), ('b' * 42), ('c' * 42))) {
+        $longRoot = New-PrivateDirectory -Parent $longRoot -Leaf $segment
+    }
+    $extensionRoot = New-PrivateDirectory -Parent $fixture -Leaf 'extensions'
+    $ordinaryPaths = [Collections.Generic.List[string]]::new()
+    $longPaths = [Collections.Generic.List[string]]::new()
+    $extensionPaths = [Collections.Generic.List[string]]::new()
+    foreach ($index in 0..9999) {
+        $path = Join-Path $ordinary ('ordinary-{0:D5}.txt' -f $index)
+        [IO.File]::WriteAllText($path, ('issue24-ordinary-{0:D5}' -f $index), [Text.Encoding]::ASCII)
+        $ordinaryPaths.Add($path)
+    }
+    foreach ($index in 0..999) {
+        $path = Join-Path $longRoot ('long-{0:D4}.txt' -f $index)
+        [IO.File]::WriteAllText($path, ('issue24-long-{0:D4}' -f $index), [Text.Encoding]::ASCII)
+        $longPaths.Add($path)
+        $extension = if ($index -lt 299) { 'e{0:D3}' -f $index } else { 'txt' }
+        $name = if ($index -lt 299) { 'extension-{0:D4}' -f $index } else { 'recurring-{0:D4}' -f $index }
+        $extensionPath = Join-Path $extensionRoot ($name + '.' + $extension)
+        [IO.File]::WriteAllText($extensionPath, ('issue24-extension-{0:D4}' -f $index), [Text.Encoding]::ASCII)
+        $extensionPaths.Add($extensionPath)
+    }
+    $paths100 = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 100)) -Leaf 'performance-100.txt'
+    $paths900 = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(100, 900)) -Leaf 'performance-900.txt'
+    $paths2250 = @(0..3 | ForEach-Object {
+        New-ObserverPathList -RuntimeRoot $RuntimeRoot `
+            -Paths ([string[]]$ordinaryPaths.GetRange(1000 + 2250 * $_, 2250)) `
+            -Leaf ('performance-2250-{0}.txt' -f $_)
+    })
+    $pathsLong = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$longPaths.ToArray()) -Leaf 'performance-long.txt'
+    $pathsExtensions = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$extensionPaths.ToArray()) -Leaf 'performance-extensions.txt'
+    $pathsCycle = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 1000)) -Leaf 'performance-cycle.txt'
+    $applicationPath = Join-Path $Verified.root $Verified.application.file
+    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+        throw 'Performance application differs from the staged executable.'
+    }
+    $application = $null
+    $sampler = $null
+    $samples = $null
+    $timings = [Collections.Generic.List[object]]::new()
+    $clearRowCounts = [Collections.Generic.List[int]]::new()
+    $ObservationSink['plan'] = [ordered]@{
+        ordinary_rows = @(100,1000,10000); long_path_rows = 1000; extension_classes = 300
+        add_remove_reset_cycles = 3; idle_seconds = 30; sample_interval_ms = 200
+    }
+    $ObservationSink['timings'] = $timings
+    $ObservationSink['clear_row_counts'] = $clearRowCounts
+    try {
+        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'performance sample application' `
+            -ProcessLifecycleObservations $ProcessLifecycleObservations
+        [void](Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main `
+            -Process $application.process -ExpectedSession $SessionId)
+        $environment = Get-ObserverEnvironmentMetadata -Application $application
+        $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        if ($environment.physical_screen.width -ne 1366 -or $environment.physical_screen.height -ne 768 -or
+            $environment.hwnd_dpi -ne 96 -or $environment.text_scale_factor_percent -ne 100) {
+            throw 'Performance sample display differs from the fixed request.'
+        }
+        $ObservationSink['environment'] = $environment
+        $ObservationSink['process_id'] = [int]$application.process.Id
+        $ObservationSink['process_start_utc_ticks'] = [long]$application.process.StartTime.ToUniversalTime().Ticks
+        $ObservationSink['executable_sha256'] = $Verified.application.sha256
+        $ObservationSink['executable_bytes'] = [long](Get-Item -LiteralPath $applicationPath).Length
+        $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance sample did not begin with an empty list.' }
+        $listHandle = [IntPtr]$grid.element.Current.NativeWindowHandle
+        $hiddenWidths = @(3..6 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+        if (@($hiddenWidths | Where-Object { $_ -ne 0 }).Count -ne 0) {
+            throw 'Performance auxiliary columns were not hidden at clean start.'
+        }
+        $sampler = [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle)
+        Start-Sleep -Seconds 30
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+            -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+            -Root $EvidenceRoot -Leaf 'performance-empty.png' -Label 'performance empty idle'))
+        foreach ($stage in @(
+            [ordered]@{ id='ordinary-100'; file=$paths100; rows=100 },
+            [ordered]@{ id='ordinary-1000'; file=$paths900; rows=1000 })) {
+            $sampler.SetPhase($stage.id)
+            $timing = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
+                -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+            $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
+                rows=$stage.rows; observed_rows=[int]$grid.pattern.Current.RowCount })
+        }
+        $sampler.SetPhase('ordinary-10000')
+        $largeElapsed = [double]0
+        for ($chunk = 0; $chunk -lt 4; $chunk++) {
+            $timing = Import-GuiRegressionPathList -Application $application -PathsFile $paths2250[$chunk] `
+                -ExpectedRows (1000 + 2250 * ($chunk + 1)) -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+            $largeElapsed += [double]$timing.elapsed_ms
+        }
+        $timings.Add([ordered]@{ id='ordinary-10000'; elapsed_ms=[Math]::Round($largeElapsed, 3);
+            rows=10000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        $sampler.SetPhase('single-row')
+        [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name 'changed-first.txt' `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds)
+        if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'changed-first.txt') {
+            throw 'Performance single-row preview differs.'
+        }
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
+            throw 'Performance single-row reset did not restore the original name.'
+        }
+        $sampler.SetPhase('full-preview')
+        $prefix = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'sample-' `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt'
+        $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$prefix.elapsed_ms;
+            rows=10000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
+            throw 'Performance full-preview reset did not restore the original name.'
+        }
+        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+            [uint32]$application.process.Id, [uint32]0x800E)
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance list clear did not remove all rows.' }
+        $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+        $sampler.SetPhase('long-hidden')
+        $longTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsLong `
+            -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+        $timings.Add([ordered]@{ id='long-hidden'; elapsed_ms=$longTiming.elapsed_ms;
+            rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        foreach ($command in @(0x8020,0x8021,0x8022,0x8023)) {
+            [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+                [uint32]$application.process.Id, [uint32]$command)
+        }
+        $visibleWidths = @(3..6 | ForEach-Object { [DarkReNamerVmAcceptanceNative]::ReadListViewColumnWidth($listHandle, $_) })
+        if (@($visibleWidths | Where-Object { $_ -le 0 }).Count -ne 0) {
+            throw 'Performance auxiliary columns did not become visible.'
+        }
+        $auxiliaryValues = @(3..6 | ForEach-Object { [string]$grid.pattern.GetItem(0, $_).Current.Name })
+        if ($auxiliaryValues[0] -cne $longPaths[0] -or
+            @($auxiliaryValues | Where-Object { [string]::IsNullOrEmpty($_) }).Count -ne 0) {
+            throw 'Performance visible auxiliary column values differ.'
+        }
+        $ObservationSink['columns'] = [ordered]@{ hidden_widths=$hiddenWidths; visible_widths=$visibleWidths; first_values=$auxiliaryValues }
+        $sampler.SetPhase('long-visible')
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+            [uint32]$application.process.Id, [uint32]0x800E)
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance long hidden list did not clear.' }
+        $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+        $visibleTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsLong `
+            -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+        $timings.Add([ordered]@{ id='long-visible'; elapsed_ms=$visibleTiming.elapsed_ms;
+            rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+            [uint32]$application.process.Id, [uint32]0x800E)
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance long visible list did not clear.' }
+        $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+        $sampler.SetPhase('extensions')
+        $extensionTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsExtensions `
+            -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+        $timings.Add([ordered]@{ id='extensions'; elapsed_ms=$extensionTiming.elapsed_ms;
+            rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount })
+        if ($grid.pattern.GetItem(999, 0).Current.Name -cne 'recurring-0999.txt') {
+            throw 'Performance recurring extension fixture differs.'
+        }
+        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+            [uint32]$application.process.Id, [uint32]0x800E)
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance extension list did not clear.' }
+        $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+        foreach ($cycle in 1..3) {
+            $id = 'cycle-{0}' -f $cycle
+            $sampler.SetPhase($id)
+            $cycleTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsCycle `
+                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
+            $cycleObservedRows = [int]$grid.pattern.Current.RowCount
+            [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 `
+                -Name ('cycle-{0}.txt' -f $cycle) -SessionId $SessionId -WaitSeconds $WaitSeconds)
+            Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+            if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
+                throw "Performance $id reset did not restore the original name."
+            }
+            [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
+                [uint32]$application.process.Id, [uint32]0x800E)
+            if ($grid.pattern.Current.RowCount -ne 0) { throw "Performance $id did not clear." }
+            $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+            $timings.Add([ordered]@{ id=$id; elapsed_ms=$cycleTiming.elapsed_ms;
+                rows=1000; observed_rows=$cycleObservedRows })
+        }
+        $sampler.SetPhase('post')
+        Start-Sleep -Milliseconds 400
+        $samples = @($sampler.Stop())
+        $sampler = $null
+        $ObservationSink['samples'] = @($samples | ForEach-Object {
+            [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
+                private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
+                threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
+                ui_response_ms=$_.UiResponseMs; ui_responsive=$_.UiResponsive }
+        })
+        $ObservationSink['wakeups'] = [ordered]@{ status='not_run'; reason='no-supported-process-wakeup-counter' }
+        $ObservationSink['disk_unchanged'] = $false
+        foreach ($group in @(
+            [ordered]@{ path=$ordinary; files=$ordinaryPaths; kind='ordinary' },
+            [ordered]@{ path=$longRoot; files=$longPaths; kind='long' },
+            [ordered]@{ path=$extensionRoot; files=$extensionPaths; kind='extension' })) {
+            if (@(Get-ChildItem -LiteralPath $group.path -File -Force).Count -ne $group.files.Count) {
+                throw 'Performance fixture file count changed on disk.'
+            }
+            for ($index = 0; $index -lt $group.files.Count; $index++) {
+                $expected = 'issue24-{0}-{1:D4}' -f $group.kind,$index
+                if ($group.kind -eq 'ordinary') { $expected = 'issue24-ordinary-{0:D5}' -f $index }
+                if ([IO.File]::ReadAllText($group.files[$index], [Text.Encoding]::ASCII) -cne $expected) {
+                    throw 'Performance fixture content changed on disk.'
+                }
+            }
+        }
+        $ObservationSink['disk_unchanged'] = $true
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $ObservationSink['journal_residue_count'] = 0
+        $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds -CloseInput ordinary
+        $ObservationSink['normal_exit_code'] = $exitCode
+        $ObservationSink['appearance'] = 'light'
+        $ObservationSink['mode'] = 'performance-sample'
+        return $ObservationSink
+    }
+    finally {
+        if ($null -ne $sampler) { try { [void]$sampler.Stop() } catch {} }
+        if ($null -ne $application) {
+            Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+        }
+    }
+}
 function Get-ObserverAppearanceSelection {
     param([Parameter(Mandatory)][object] $Grid)
     $pattern = $null

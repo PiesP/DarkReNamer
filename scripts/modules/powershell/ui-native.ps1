@@ -672,6 +672,16 @@ public static class DarkReNamerVmAcceptanceNative {
         SendMessageW(window, 0x0111, new IntPtr(command), IntPtr.Zero);
     }
 
+    public static void SendBoundPerformanceCommand(IntPtr window, uint expectedProcessId, uint command) {
+        uint processId;
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId ||
+            !IsMenuCommandEnabled(window, command))
+            throw new InvalidOperationException("Performance command target or menu state is invalid.");
+        IntPtr result;
+        if (SendMessageTimeoutW(window, 0x0111, new IntPtr(command), IntPtr.Zero, 3, 5000, out result) == IntPtr.Zero)
+            throw new InvalidOperationException("Performance menu command timed out.");
+    }
+
     private static void EnumerateWindowsChecked(EnumWindowsCallback callback) {
         Exception callbackError = null;
         bool complete = EnumWindows(delegate(IntPtr window, IntPtr parameter) {
@@ -1281,6 +1291,91 @@ public static class DarkReNamerVmAcceptanceNative {
         if (status != 0) { throw new Win32Exception(status); }
         return value.major + "." + value.minor + "." + value.build;
     }
+}
+
+public sealed class DarkReNamerPerformanceSample {
+    public string Phase { get; set; }
+    public long ElapsedMs { get; set; }
+    public long CpuMs { get; set; }
+    public long PrivateBytes { get; set; }
+    public long WorkingSetBytes { get; set; }
+    public int Threads { get; set; }
+    public int Handles { get; set; }
+    public uint GdiObjects { get; set; }
+    public long UiResponseMs { get; set; }
+    public bool UiResponsive { get; set; }
+}
+
+// Observer-only bounded sampler. It does not inject a thread into the product.
+public sealed class DarkReNamerPerformanceSampler : IDisposable {
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint GetGuiResources(IntPtr process, uint flags);
+    private readonly System.Diagnostics.Process process;
+    private readonly IntPtr window;
+    private readonly long startTicks;
+    private readonly System.Diagnostics.Stopwatch watch;
+    private readonly System.Threading.Timer timer;
+    private readonly object gate = new object();
+    private readonly List<DarkReNamerPerformanceSample> samples = new List<DarkReNamerPerformanceSample>();
+    private string failure;
+    private string phase = "empty-idle";
+    private bool stopped;
+
+    public DarkReNamerPerformanceSampler(System.Diagnostics.Process ownedProcess, IntPtr ownedWindow) {
+        if (ownedProcess == null || ownedWindow == IntPtr.Zero) throw new ArgumentException("Missing owned target.");
+        uint pid;
+        if (GetWindowThreadProcessId(ownedWindow, out pid) == 0 || pid != (uint)ownedProcess.Id)
+            throw new InvalidOperationException("Sampler HWND does not belong to the owned process.");
+        process = ownedProcess; window = ownedWindow; startTicks = process.StartTime.ToUniversalTime().Ticks;
+        watch = System.Diagnostics.Stopwatch.StartNew();
+        timer = new System.Threading.Timer(Sample, null, 0, 200);
+    }
+    private void Sample(object ignored) {
+        if (!System.Threading.Monitor.TryEnter(gate)) return;
+        try {
+            if (stopped || samples.Count >= 3000 || watch.ElapsedMilliseconds > 600000) return;
+            process.Refresh();
+            uint pid;
+            if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != startTicks ||
+                GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+                throw new InvalidOperationException("Sampler target identity changed.");
+            long begun = watch.ElapsedMilliseconds;
+            IntPtr result;
+            bool responsive = SendMessageTimeoutW(window, 0, IntPtr.Zero, IntPtr.Zero, 3, 50, out result) != IntPtr.Zero;
+            samples.Add(new DarkReNamerPerformanceSample {
+                Phase = phase,
+                ElapsedMs = watch.ElapsedMilliseconds,
+                CpuMs = (long)process.TotalProcessorTime.TotalMilliseconds,
+                PrivateBytes = process.PrivateMemorySize64,
+                WorkingSetBytes = process.WorkingSet64,
+                Threads = process.Threads.Count,
+                Handles = process.HandleCount,
+                GdiObjects = GetGuiResources(process.Handle, 0),
+                UiResponseMs = watch.ElapsedMilliseconds - begun,
+                UiResponsive = responsive,
+            });
+        } catch (Exception error) { failure = error.GetType().Name + ": " + error.Message; stopped = true; }
+        finally { System.Threading.Monitor.Exit(gate); }
+    }
+    public void SetPhase(string value) {
+        if (String.IsNullOrEmpty(value) || value.Length > 64) throw new ArgumentException("Invalid sample phase.");
+        lock (gate) { if (stopped) throw new InvalidOperationException("Sampler stopped."); phase = value; }
+    }
+    public DarkReNamerPerformanceSample[] Stop() {
+        timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+        lock (gate) {
+            stopped = true; timer.Dispose();
+            if (failure != null) throw new InvalidOperationException("Performance sampling failed: " + failure);
+            if (samples.Count == 0) throw new InvalidOperationException("Performance sampler produced no samples.");
+            return samples.ToArray();
+        }
+    }
+    public void Dispose() { if (!stopped) Stop(); }
 }
 '@
 }
