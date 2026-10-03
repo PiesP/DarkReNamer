@@ -602,6 +602,8 @@ mod tests {
             let fixture = tempfile::tempdir()?;
             let root = JournalRoot::open_private(fixture.path())?;
             drop(FileJournal::create_new(&root, leaf)?);
+            // Navigation is a separate prerequisite from journal append access.
+            set_dacl_with_extra(root.path(), "(A;;0x001000a0;;;AN)")?;
             let path = root.path().join(leaf);
             fs::write(&path, b"original evidence")?;
             set_dacl_with_extra(&path, "(A;;0x00100004;;;AN)")?;
@@ -665,6 +667,8 @@ mod tests {
         let root = JournalRoot::open_private(fixture.path())?;
         drop(FileJournal::create_new(&root, "active.drj")?);
         drop(FileJournal::create_new(&root, "anonymous.drj")?);
+        // Permit only navigation to both controls, preserving their distinct ACLs.
+        set_dacl_with_extra(root.path(), "(A;;0x001000a0;;;AN)")?;
         set_dacl(&root.path().join("anonymous.drj"), true)?;
         let process_sid = current_sid()?;
 

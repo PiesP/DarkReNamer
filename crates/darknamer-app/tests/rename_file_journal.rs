@@ -990,13 +990,15 @@ fn private_runtime_root_replays_durable_interrupted_journal()
     let mut journal = FileJournal::create_new(&root, "active.drj")?;
     journal.begin(*plan, steps)?;
     journal.prepared(0, JournalDirection::Forward)?;
-    let before = fs::read(root.path().join("active.drj"))?;
     drop(journal);
+    let before = fs::read(root.path().join("active.drj"))?;
     drop(root);
 
     let root = JournalRoot::open_private(fixture.path())?;
     let mut journal = FileJournal::open_existing(&root, "active.drj")?;
-    assert_eq!(fs::read(root.path().join("active.drj"))?, before);
+    let copy = fixture.path().join("reopened-journal-copy");
+    journal.copy_exact_to_new(&copy)?;
+    assert_eq!(fs::read(copy)?, before);
     let mut backend = MemoryBackend::new().with_file("C:\\work\\b.txt", 1);
     let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
     assert!(matches!(
