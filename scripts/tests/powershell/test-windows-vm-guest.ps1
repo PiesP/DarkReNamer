@@ -3268,6 +3268,11 @@ Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCaptur
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
         $initStdoutPath = Join-Path $valid.root 'uia-core-init.stdout.txt'
         $initStderrPath = Join-Path $valid.root 'uia-core-init.stderr.txt'
+        $missingExecutable = Join-Path $valid.root 'missing-process-creation-fixture.exe'
+        if (Test-Path -LiteralPath $missingExecutable) { throw 'Missing-process fixture is occupied.' }
+        Assert-Win32Failure -NativeErrorCode 2 -Label 'Missing native process creation' -Action {
+            Start-JobBoundProcess -FilePath $missingExecutable -Arguments '' -WorkingDirectory $valid.root
+        }
         $launchRequestTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
         $initProcess = Start-JobBoundProcess `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
