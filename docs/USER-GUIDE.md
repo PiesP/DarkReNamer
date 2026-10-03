@@ -27,8 +27,8 @@ existing directory on the same local NTFS volume. This command is unavailable
 when any row is a directory. Review the rebuilt path, collision, Status, and
 Apply-readiness previews after choosing the folder.
 
-**편집 > 대상 폴더 > 대상 폴더 변경 취소** resets destination parents to the
-original parents while keeping proposed names. **편집 > 모든 이름 변경 취소**
+**편집 > 대상 폴더 > 대상 폴더 미리보기 초기화** resets destination parents to the
+original parents while keeping proposed names. **편집 > 이름 미리보기 초기화**
 resets proposed names while keeping destination parents. Both commands change
 the proposal only. Neither command reverses a filesystem operation that has
 already completed.
@@ -65,11 +65,12 @@ the preference cannot be queried, DarkReNamer keeps the normal system font
 size. Windows-owned TaskDialogs retain the operating system's text-sizing
 behavior.
 
-The file list keeps the native Windows ListView style, including system-rendered
-scrollbars that may appear light in Dark mode. The advanced appearance window
+The file list uses native Windows ListView scrolling, input, and accessibility.
+When the app-owned Dark palette is enabled, DarkReNamer repaints the native
+scrollbar geometry with that palette. System, Forced Colors, and unavailable
+custom painting retain Windows rendering. The advanced appearance window
 separately requests a dark native theme for its scrolling body and falls back
-to system rendering when unavailable. Native scrolling, focus, selection, and
-accessibility behavior are retained.
+to system rendering when unavailable. Native focus and selection are retained.
 
 ## Advanced appearance settings
 
@@ -114,9 +115,10 @@ read [Startup recovery and corrupt evidence](../SAFETY.md#startup-recovery-and-c
 
 - The interface is Korean even when this guide is reached through an English or
   Japanese README.
-- Native System, Forced Colors, file dialogs, confirmation TaskDialogs, and
-  native scrollbars follow Windows and may not match the app-owned Light or Dark
-  palette.
+- Native System, Forced Colors, file dialogs, and confirmation TaskDialogs
+  follow Windows and may not match the app-owned Light or Dark palette.
+  Scrollbars retain native behavior; app-owned Dark repainting is described
+  in [Appearance](#appearance).
 - The model preview cannot certify the current filesystem; Apply always performs
   a fresh validation.
 - Proposal reset is not filesystem Undo.
