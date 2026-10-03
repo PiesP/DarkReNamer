@@ -327,6 +327,54 @@ native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
+### ListView refresh stage diagnostic
+
+On the prepared VM, run the fixed native refresh diagnostic from a clean,
+committed checkout with a new private output directory:
+
+```bash
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host configured-vm-alias \
+  --desktop-helper /absolute/private/desktop-session.ps1 \
+  --profile-refresh-stages \
+  --output /absolute/private/new-refresh-stage-attempt
+```
+
+The helper profile must bind the SSH alias to the prepared VM. Do not pass
+`--expected-vm-id` on this source-built SSH core path; that option belongs to
+the `--vm-name` PowerShell Direct path. The selector fixes a managed 1366×768,
+96-DPI RDP desktop, the v2 owned-resource cleanup profile, a 600-second test
+and suite limit per pass, and a 32 MiB aggregate output limit per pass. It
+builds one optimized app-library test binary and an uninstrumented production
+EXE once, then runs exactly the ignored
+`windows::list_view::native_tests::profile_refresh_stages` test with those same
+bytes in hidden-visible and visible-hidden order. It stops on the first failed
+pass and retains the output root, `plan.json`, `attempts.json`, and each
+attempt's evidence. A passing diagnostic requires both passes and verified
+guest cleanup.
+
+Each pass emits stage timings and counts for ordinary 100/1,000/10,000-row
+refreshes, an unchanged 10,000-row refresh, proposal edits/resets, and long
+paths with auxiliary columns hidden and visible. The native test checks row
+counts, representative text in all eight ListView columns even when auxiliary
+columns are hidden, icons, and selection preservation. `row_values_inclusive_ns`
+contains `timestamps_nested_ns` and `shell_nested_ns`;
+`row_values_exclusive_ns` excludes both, so do not add the inclusive and nested
+times. `scenario_envelope_ns` may include fixture changes and assertions
+outside the stage clocks; it is not a pure refresh duration.
+`logical_staged_payload_bytes_peak` counts UTF-16
+payloads staged by the refresh path; it is not process memory or an allocator
+measurement. The test-only clocks and counters do not measure the production
+EXE's response time.
+
+The synthetic metadata snapshots exclude import read/decode, admission,
+delivery, and observer polling. Shell lookup remains synchronous, and this
+diagnostic's observed Shell calls do not establish a bound for a slow provider;
+moving lookup to a worker is outside this procedure. For sampled production
+timing and resource use, run the separate unchanged
+[fixed performance sample](#fixed-performance-sample). Neither diagnostic is a
+release acceptance verdict.
+
 ### VM-Automated campaign development
 
 The campaign runner, native VM backend runner, independent evidence validator,
