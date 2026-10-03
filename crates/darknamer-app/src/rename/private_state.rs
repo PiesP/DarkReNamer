@@ -85,7 +85,7 @@ fn current_sid() -> io::Result<Sid> {
     token_sid(&token)
 }
 
-fn token_sid(token: &std::os::windows::io::OwnedHandle) -> io::Result<Sid> {
+fn token_sid(token: &impl AsRawHandle) -> io::Result<Sid> {
     let mut size = 0;
     // SAFETY: the null buffer obtains the required size; token remains live.
     unsafe {
@@ -619,8 +619,10 @@ mod tests {
                 SHARE_NO_DELETE,
                 FILE_OPEN,
                 FILE_OPTIONS,
-            )?;
-            std::io::Write::write_all(&mut append, b" appended by another principal")?;
+            )
+            .map_err(|error| io::Error::other(format!("anonymous append open: {error}")))?;
+            std::io::Write::write_all(&mut append, b" appended by another principal")
+                .map_err(|error| io::Error::other(format!("anonymous append write: {error}")))?;
             drop(append);
             impersonation.revert()?;
             let expected = fs::read(&path)?;
@@ -684,13 +686,13 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
         let impersonation = AnonymousImpersonation { active: true };
-        let mut token = ptr::null_mut();
-        // SAFETY: the thread has an impersonation token and token is writable.
-        if unsafe { OpenThreadToken(thread, TOKEN_QUERY, 1, &mut token) } == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        // SAFETY: successful OpenThreadToken returns an owned handle.
-        let token = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(token) };
+        // GetCurrentThreadEffectiveToken is an SDK inline returning -6; this
+        // Windows 8+ pseudo-handle grants query rights without reopening the
+        // anonymous token's separately protected object DACL.
+        // SAFETY: the documented pseudo-handle is valid on this thread and is
+        // borrowed, so it will never be passed to CloseHandle.
+        let token =
+            unsafe { std::os::windows::io::BorrowedHandle::borrow_raw((-6_isize) as *mut c_void) };
         let actual = token_sid(&token)?;
         let expected = well_known(WinAnonymousSid)?;
         // SAFETY: both SIDs are owned and live.
@@ -717,7 +719,8 @@ mod tests {
             SHARE_NO_DELETE,
             FILE_OPEN,
             FILE_OPTIONS,
-        )?;
+        )
+        .map_err(|error| io::Error::other(format!("anonymous positive open: {error}")))?;
         drop(public);
         impersonation.revert()?;
         let mut restored = ptr::null_mut();
