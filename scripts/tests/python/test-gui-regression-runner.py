@@ -92,6 +92,26 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.performance_run("unknown")
 
+    def test_prepared_performance_manifest_records_copied_exe_and_bundle_hashes(self):
+        pin = "a" * 64
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": pin}},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "prepared", self.root / "run",
+                                             runner.performance_run(), "e" * 64, {}, {},
+                                             prepared_application_sha256=pin)
+        self.assertEqual(manifest["prepared_bundle"], {
+            "origin": "external-prepared-source-built-bundle",
+            "bundle_manifest_sha256": "b" * 64, "application_sha256": pin})
+        self.assertEqual(manifest["command"][-4:], ["--prepared-bundle-root",
+            "<external-prepared-bundle-root>", "--expected-prepared-application-sha256", pin])
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            with self.assertRaisesRegex(ValueError, "restricted to pinned performance runs"):
+                runner.input_manifest(self.root, self.root, self.root,
+                                      runner.appearance_pair_run(1366, 768, 96), "e" * 64, {}, {},
+                                      prepared_application_sha256=pin)
+
     def test_appearance_pair_selects_one_bounded_run_and_explicit_v1_profile(self):
         pair = runner.appearance_pair_run(1366, 768, 96)
         self.assertEqual(pair["mode"], "appearance-pair")
@@ -480,6 +500,83 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             tampered_root.mkdir()
             with self.assertRaisesRegex(ValueError, "hash differs"):
                 runner.run_input_artifacts(repo, bundle, tampered_root)
+
+    def test_prepared_performance_bundle_rejects_wrong_source_exe_and_incomplete_inputs(self):
+        repo = self.root / "repo"
+        bundle = self.root / "prepared"
+        (repo / "scripts").mkdir(parents=True)
+        bundle.mkdir()
+        (repo / "Cargo.lock").write_bytes(b"locked")
+        (repo / "scripts" / "windows-vm-guest.ps1").write_bytes(b"native runner")
+        (bundle / "DarkReNamer.exe").write_bytes(b"frozen production exe")
+        (bundle / "windows-vm-guest.ps1").write_bytes(b"native runner")
+        (bundle / "darkrenamer-core-tests.exe").write_bytes(b"native test")
+        (bundle / "tooling-bundle.json").write_bytes(b"{}")
+        (bundle / "tooling-loader.py").write_bytes(b"module")
+        reference = lambda name: {"file": name, "sha256": runner.digest(bundle / name),
+                                  "size": (bundle / name).stat().st_size}
+        record = {"schema_version": 1, "manifest": reference("tooling-bundle.json"),
+                  "modules": [{"role": "vm-launcher", **reference("tooling-loader.py")}]}
+        self.write_json(bundle / "tooling-record.json", record)
+        source = "a" * 40
+        manifest = {"schema_version": 1, "source_sha": source, "source_state": "clean",
+                    "target": runner.launcher.TARGET,
+                    "cargo_lock_sha256": runner.digest(repo / "Cargo.lock"),
+                    "application": runner.artifact(bundle / "DarkReNamer.exe"),
+                    "runner": runner.artifact(bundle / "windows-vm-guest.ps1"),
+                    "test_binaries": [runner.artifact(bundle / "darkrenamer-core-tests.exe")]}
+        self.write_json(bundle / "bundle.json", manifest)
+        trusted = {"manifest": record["manifest"], "modules": record["modules"]}
+        pin = manifest["application"]["sha256"]
+        with mock.patch.object(runner, "source_identity", return_value=(source, "b" * 40)), \
+                mock.patch.object(runner, "trusted_tooling_inventory", return_value=trusted):
+            self.assertEqual(runner.validate_prepared_bundle(repo, bundle, pin), manifest)
+            with self.assertRaisesRegex(ValueError, "application pin"):
+                runner.validate_prepared_bundle(repo, bundle, "f" * 64)
+            (bundle / "DarkReNamer.exe").write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "Application hash differs"):
+                runner.validate_prepared_bundle(repo, bundle, pin)
+            (bundle / "DarkReNamer.exe").write_bytes(b"frozen production exe")
+            (bundle / "tooling-loader.py").write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "Staged tooling member .* differs"):
+                runner.validate_prepared_bundle(repo, bundle, pin)
+            (bundle / "tooling-loader.py").write_bytes(b"module")
+            manifest["source_sha"] = "c" * 40
+            self.write_json(bundle / "bundle.json", manifest)
+            with self.assertRaisesRegex(ValueError, "source differ"):
+                runner.validate_prepared_bundle(repo, bundle, pin)
+            manifest["source_sha"] = source
+            self.write_json(bundle / "bundle.json", manifest)
+            (bundle / "darkrenamer-core-tests.exe").unlink()
+            with self.assertRaisesRegex(ValueError, "ordinary file"):
+                runner.validate_prepared_bundle(repo, bundle, pin)
+
+    def test_prepared_bundle_options_are_performance_only_and_paired(self):
+        base = ["--output-root", str(self.root / "output"),
+                "--connection-profile", str(self.root / "missing.json")]
+        with self.assertRaisesRegex(ValueError, "require the performance diagnostic together"):
+            runner.main(self.root, base + ["--prepared-bundle-root", str(self.root)])
+        with self.assertRaisesRegex(ValueError, "require the performance diagnostic together"):
+            runner.main(self.root, base + ["--prepared-bundle-root", str(self.root),
+                                          "--expected-prepared-application-sha256", "a" * 64])
+
+    def test_invalid_prepared_bundle_stops_before_guest_or_build(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        bundle = self.root / "prepared"
+        bundle.mkdir()
+        args = ["--output-root", str(self.root / "attempt"),
+                "--connection-profile", str(self.root / "missing-profile.json"),
+                "--diagnostic", "performance-sample", "--prepared-bundle-root", str(bundle),
+                "--expected-prepared-application-sha256", "a" * 64]
+        with mock.patch.object(runner, "validate_prepared_bundle", side_effect=ValueError("bad prepared bundle")), \
+                mock.patch.object(runner, "guest_preflight") as guest, \
+                mock.patch.object(runner.launcher, "build_bundle") as build:
+            with self.assertRaisesRegex(ValueError, "bad prepared bundle"):
+                runner.main(repo, args)
+            guest.assert_not_called()
+            build.assert_not_called()
+        self.assertFalse((self.root / "attempt").exists())
 
     def test_controller_streams_are_captured_outside_empty_output_then_collected(self):
         run_root = self.root / "stream-run"
