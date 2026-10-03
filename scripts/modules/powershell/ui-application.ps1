@@ -294,21 +294,15 @@ function Import-GuiRegressionPathList {
     catch {
         # Temporary issue24 probe: retain only windows belonging to this fixture.
         $original = $_.Exception
-        $pidCondition = [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Application.process.Id)
-        $windowCondition = [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
-        $condition = [Windows.Automation.AndCondition]::new($pidCondition, $windowCondition)
-        $windows = @([Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [Windows.Automation.TreeScope]::Children, $condition)) +
-            @($Application.main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
-        $names = @($windows | Select-Object -First 16 | ForEach-Object {
-            Assert-AutomationBinding -Element $_ -Process $Application.process -ExpectedSession $SessionId `
-                -Label 'failed import owned window' -RequireWindowHandle
-            [string]$_.Current.Name
-        })
-        $focus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot(
-            [IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
+        $names = @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows(
+            [uint32]$Application.process.Id) | Where-Object { $_.Visible } | Select-Object -First 16 |
+            ForEach-Object { "$($_.ClassName):$($_.Title)" })
+        $focus = @()
+        try {
+            $focus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot(
+                [IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
+        }
+        catch { $focus = @($_.Exception.Message) }
         throw [InvalidOperationException]::new(
             "$($original.Message) Owned windows: $($names -join ' | '); main_enabled=$($Application.main.Current.IsEnabled); rows=$($Grid.pattern.Current.RowCount); focus=$($focus -join ',')", $original)
     }
