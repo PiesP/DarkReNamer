@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind recovery)) { . $definition }
 
-if ($IsWindows) {
+if (-not $ParserOnly -and [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     $ownerFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-candidate-owner-' + [Guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($ownerFixtureRoot)
     $ownerFixturePath = Join-Path $ownerFixtureRoot 'candidate.drj'
@@ -2779,7 +2779,7 @@ for ($index = 0; $index -lt $fileStrings.Count; $index++) {
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     $PSVersionTable.PSVersion.Major -ge 7) {
     # Mandatory array argument binding scales differently in Windows PowerShell
-    # 5.1, the observer runtime. Exercise the many-frame case there as well.
+    # 5.1. Exercise the many-frame parser compatibility case there as well.
     $invocation = "`$ErrorActionPreference = 'Stop'; & '" + $PSCommandPath.Replace("'", "''") + "' -ParserOnly"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
     $process = [Diagnostics.Process]::new()
