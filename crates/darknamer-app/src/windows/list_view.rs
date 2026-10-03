@@ -1616,6 +1616,7 @@ mod native_tests {
 
     use super::super::visual_capture::capture_window_pixels;
     use super::*;
+    use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Controls::{
         LVIR_BOUNDS, LVM_GETITEMRECT, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
         LVM_SETTEXTCOLOR,
@@ -1958,8 +1959,10 @@ mod native_tests {
                 let mut reply = 0;
                 let started = Instant::now();
                 // SAFETY: the copied HWND belongs to this test and remains live
-                // until the owning thread receives this bounded probe's result.
+                // until the worker joins. Reset the worker's last-error slot
+                // directly before the timed call and read it directly after.
                 let status = unsafe {
+                    SetLastError(0);
                     SendMessageTimeoutW(
                         window_value as HWND,
                         WM_NULL,
@@ -1970,7 +1973,13 @@ mod native_tests {
                         &mut reply,
                     )
                 };
-                let _ = result_tx.send(Some((status, started, Instant::now())));
+                let probe_error = if status == 0 {
+                    // SAFETY: GetLastError reads only this worker's error slot.
+                    unsafe { GetLastError() }
+                } else {
+                    0
+                };
+                let _ = result_tx.send(Some((status, probe_error, started, Instant::now())));
             })?;
 
         // SAFETY: the test HWND dispatches this scalar message on its owner
@@ -2008,7 +2017,7 @@ mod native_tests {
         let delay_finished = context.delay_finished.get();
         owned.close()?;
         probe_join.map_err(|_| io::Error::other("probe thread panicked"))?;
-        let (blocked, probe_started, probe_finished) = probe_result
+        let (blocked, probe_error, probe_started, probe_finished) = probe_result
             .map_err(|_| io::Error::other("bounded cross-thread WM_NULL probe did not finish"))?
             .ok_or_else(|| io::Error::other("injected lookup callback did not start"))?;
         let delay_started =
@@ -2019,23 +2028,31 @@ mod native_tests {
         let overlaps_delay = probe_started < delay_finished
             && probe_finished > delay_started
             && probe_finished <= delay_finished;
-        let conclusion = if overlaps_delay {
+        let probe_status = if blocked != 0 {
+            "success"
+        } else if probe_error == ERROR_TIMEOUT {
+            "timeout"
+        } else {
+            "failure_unknown"
+        };
+        let conclusive = overlaps_delay && probe_status != "failure_unknown";
+        let conclusion = if conclusive {
             "measured"
         } else {
             "inconclusive"
         };
         println!(
-            "{{\"kind\":\"injected-ui-thread-delay\",\"conclusion\":\"{conclusion}\",\"delay_ms\":150,\"probe_timeout_ms\":50,\"probe_elapsed_ms\":{duration_ms},\"overlaps_delay\":{overlaps_delay},\"blocked_status\":{blocked},\"recovered_status\":{recovered}}}"
+            "{{\"kind\":\"injected-ui-thread-delay\",\"conclusion\":\"{conclusion}\",\"delay_ms\":150,\"probe_timeout_ms\":50,\"probe_elapsed_ms\":{duration_ms},\"overlaps_delay\":{overlaps_delay},\"probe_status\":\"{probe_status}\",\"probe_error\":{probe_error},\"blocked_status\":{blocked},\"recovered_status\":{recovered}}}"
         );
-        if !overlaps_delay {
+        if !conclusive {
             return Err(io::Error::other(
-                "inconclusive: WM_NULL probe did not finish during injected delay",
+                "inconclusive: WM_NULL probe did not time out with a classified result during injected delay",
             ));
         }
         assert!(!failed);
         assert_eq!(index, I_IMAGENONE);
         assert_eq!(cached_failure, Some(I_IMAGENONE));
-        assert_eq!(blocked, 0);
+        assert_eq!(probe_status, "timeout");
         assert_ne!(recovered, 0);
         Ok(())
     }
