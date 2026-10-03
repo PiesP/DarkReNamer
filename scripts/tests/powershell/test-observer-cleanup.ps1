@@ -1684,16 +1684,20 @@ try {
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($controllerPath, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw $errors[0] }
-    $function = $ast.Find({ param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -ceq 'Get-DrControllerRecoveryProcessIdentities'
-    }, $false)
-    . ([scriptblock]::Create($function.Extent.Text))
+    foreach ($name in @('Get-DrControllerRecoveryProcessIdentities',
+            'Test-DrControllerProcessJobCleanupLedger')) {
+        $function = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        }, $false)
+        if ($null -eq $function) { throw "Missing controller cleanup function: $name" }
+        . ([scriptblock]::Create($function.Extent.Text))
+    }
     $private = Join-Path $root 'private'
     $null = New-Item -ItemType Directory -Path $private
     $references = @()
     $files = foreach ($processId in @(101, 102)) {
-        $leaf = "start-$processId.json"
+        $leaf = 'process-{0:D2}-started.json' -f ($processId - 100)
         $path = Join-Path $private $leaf
         [IO.File]::WriteAllText($path, (@{
             boundary = 'started'
@@ -1711,8 +1715,9 @@ try {
         classification = 'private-path-bearing-raw-recovery-evidence'; files = @($files)
     } | ConvertTo-Json -Depth 6))
     $result = [pscustomobject]@{
+        status = 'passed'
         selected_mode = 'ProcessCrash'
-        process_crash = [pscustomobject]@{ processes = $references[0..1] }
+        process_crash = [pscustomobject]@{ status = 'passed'; processes = $references[0..1] }
         intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'switch-not-selected' }
         private_evidence = [pscustomobject]@{
             sha256 = Get-LowerSha256 -Path $indexPath; bytes = (Get-Item -LiteralPath $indexPath).Length
@@ -1729,6 +1734,61 @@ try {
     }
     $result.intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'interrupted' }
     Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'switch-not-selected' }
+    $savedDigest = $result.private_evidence.sha256
+    $result.private_evidence.sha256 = 'a' * 64
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'does not match'
+    $result.private_evidence.sha256 = $savedDigest
+
+    $result.status = 'failed'
+    $result | Add-Member -NotePropertyName failure_reason -NotePropertyValue 'recovery_acceptance_error'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'recovery_acceptance_error' }
+    $result | Add-Member -NotePropertyName process_job_cleanup -NotePropertyValue @(
+        foreach ($processId in @(101, 102)) {
+            [pscustomobject]@{
+                pid = $processId; process_start_time_utc_ticks = [string]$processId
+                status = 'clean'; job_empty = $true; job_closed = $true
+                capture_complete = $true; had_survivors = $false; forced_termination = $false
+                error = $null; active_processes_at_close = 0
+                active_process_ids_at_stop = @(); active_processes_at_primary_exit = $null
+                active_processes_at_stop = $null; total_processes_at_stop = $null
+                primary_process_active_at_stop = $null; termination_exit_code = $null
+            }
+        }
+    )
+    $identities = Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root
+    if ($identities.Count -ne 2 -or -not $identities.Contains('101|101') -or
+        -not $identities.Contains('102|102') -or
+        -not (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root)) {
+        throw 'Failed recovery lost its protected start receipts or clean Job proof.'
+    }
+    foreach ($mode in @('WorkerCancellation', 'WorkerClose')) {
+        $result.selected_mode = $mode
+        $field = if ($mode -ceq 'WorkerCancellation') { 'worker_cancellation' } else { 'worker_close' }
+        $result | Add-Member -NotePropertyName $field -NotePropertyValue ([pscustomobject]@{
+            status = 'failed'; reason = 'recovery_acceptance_error'
+        })
+        $identities = Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root
+        if ($identities.Count -ne 2 -or
+            -not (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root)) {
+            throw "Failed $mode lost its protected process and Job identities."
+        }
+    }
+    $result.selected_mode = 'ProcessCrash'
+    $result.process_job_cleanup[0].pid = 999
+    if (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root) {
+        throw 'A failed recovery Job identity without a protected start receipt was accepted.'
+    }
+    $result.process_job_cleanup[0].pid = 101
+    $result.process_crash = [pscustomobject]@{
+        status = 'failed'; reason = 'recovery_acceptance_error'; processes = $references[0..1]
+    }
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'wrong-reason' }
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'recovery_acceptance_error' }
+    $result.private_evidence.sha256 = 'a' * 64
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'does not match'
 
     & {
         $script:resourceCalls = [Collections.Generic.List[string]]::new()

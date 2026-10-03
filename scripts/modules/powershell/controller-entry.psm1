@@ -531,26 +531,50 @@ function Get-DrControllerRecoveryProcessIdentities {
     )
 
     $references = @()
+    $failedMode = $false
+    $modeResult = $null
     switch ([string]$Result.selected_mode) {
         'ProcessCrash' {
             $crash = $Result.PSObject.Properties['process_crash']
             $intent = $Result.PSObject.Properties['intent_only_candidate_discard']
             if ($null -eq $crash -or $null -eq $intent) { throw 'Recovery process references are missing.' }
-            $references = @($crash.Value.processes)
-            if ($intent.Value.status -ceq 'passed') {
-                $references += @($intent.Value.processes)
-            }
-            elseif ($intent.Value.status -cne 'not-run' -or
-                $intent.Value.reason -cne 'switch-not-selected') {
-                throw 'Optional recovery intent evidence has an invalid status.'
+            $modeResult = $crash.Value
+            $failedMode = $Result.status -ceq 'failed' -and $crash.Value.status -ceq 'failed'
+            if (-not $failedMode) {
+                $references = @($crash.Value.processes)
+                if ($intent.Value.status -ceq 'passed') {
+                    $references += @($intent.Value.processes)
+                }
+                elseif ($intent.Value.status -cne 'not-run' -or
+                    $intent.Value.reason -cne 'switch-not-selected') {
+                    throw 'Optional recovery intent evidence has an invalid status.'
+                }
             }
         }
-        'WorkerCancellation' { $references = @($Result.worker_cancellation.processes) }
-        'WorkerClose' { $references = @($Result.worker_close.processes) }
+        'WorkerCancellation' {
+            $modeResult = $Result.worker_cancellation
+            $failedMode = $Result.status -ceq 'failed' -and
+                $modeResult.status -ceq 'failed'
+            if (-not $failedMode) { $references = @($modeResult.processes) }
+        }
+        'WorkerClose' {
+            $modeResult = $Result.worker_close
+            $failedMode = $Result.status -ceq 'failed' -and $modeResult.status -ceq 'failed'
+            if (-not $failedMode) { $references = @($modeResult.processes) }
+        }
         default { throw 'Recovery process mode is unavailable.' }
     }
-    if ($references.Count -lt 2 -or $references.Count -gt 14 -or $references.Count % 2 -ne 0) {
+    if (-not $failedMode -and
+        ($references.Count -lt 2 -or $references.Count -gt 14 -or $references.Count % 2 -ne 0)) {
         throw 'Recovery process reference count is invalid.'
+    }
+    if ($failedMode) {
+        if ($Result.failure_reason -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($Result.failure_reason) -or
+            $modeResult.reason -cne $Result.failure_reason -or
+            $null -ne $modeResult.PSObject.Properties['processes']) {
+            throw 'Failed recovery process evidence has an invalid status.'
+        }
     }
     $privateEvidence = $Result.PSObject.Properties['private_evidence']
     if ($null -eq $privateEvidence -or
@@ -574,8 +598,26 @@ function Get-DrControllerRecoveryProcessIdentities {
     }
     $privateDirectory = Split-Path -Parent $indexMatches[0].FullName
     $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    for ($offset = 0; $offset -lt $references.Count; $offset += 2) {
-        $reference = $references[$offset]
+    $starts = @()
+    if ($failedMode) {
+        # Failed modes omit paired public process references; bind cleanup to
+        # the retained private starts and the separate closed-Job ledger.
+        $starts = @($index.files | Where-Object {
+            $_.file -cmatch '^process-[0-9]{2}-started\.json$'
+        })
+        if ($starts.Count -lt 1 -or $starts.Count -gt 64) {
+            throw 'Failed recovery process start count is invalid.'
+        }
+        $starts = @($starts | ForEach-Object {
+            [pscustomobject]@{ boundary = 'started'; sha256 = $_.sha256; bytes = $_.bytes }
+        })
+    }
+    else {
+        for ($offset = 0; $offset -lt $references.Count; $offset += 2) {
+            $starts += $references[$offset]
+        }
+    }
+    foreach ($reference in $starts) {
         if ($reference.boundary -cne 'started' -or
             $reference.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             ($reference.bytes -isnot [int] -and $reference.bytes -isnot [long])) {
