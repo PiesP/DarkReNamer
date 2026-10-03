@@ -286,9 +286,32 @@ function Import-GuiRegressionPathList {
     }
     Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
         -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
-    $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
-        -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
-        -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
+    try {
+        $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
+            -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
+            -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
+    }
+    catch {
+        # Temporary issue24 probe: retain only windows belonging to this fixture.
+        $original = $_.Exception
+        $pidCondition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Application.process.Id)
+        $windowCondition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
+        $condition = [Windows.Automation.AndCondition]::new($pidCondition, $windowCondition)
+        $windows = @([Windows.Automation.AutomationElement]::RootElement.FindAll(
+            [Windows.Automation.TreeScope]::Children, $condition)) +
+            @($Application.main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
+        $names = @($windows | Select-Object -First 16 | ForEach-Object {
+            Assert-AutomationBinding -Element $_ -Process $Application.process -ExpectedSession $SessionId `
+                -Label 'failed import owned window' -RequireWindowHandle
+            [string]$_.Current.Name
+        })
+        $focus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot(
+            [IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
+        throw [InvalidOperationException]::new(
+            "$($original.Message) Owned windows: $($names -join ' | '); main_enabled=$($Application.main.Current.IsEnabled); rows=$($Grid.pattern.Current.RowCount); focus=$($focus -join ',')", $original)
+    }
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
