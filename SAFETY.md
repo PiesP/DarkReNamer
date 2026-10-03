@@ -188,6 +188,10 @@ budget. Growing transforms calculate sizes with checked arithmetic, reserve
 bounded staging storage fallibly, and commit changed rows only after every
 candidate fits. A rejected parameter, size, aggregate budget, or staging
 allocation leaves every proposal and the model revision unchanged.
+These per-name and aggregate UTF-16 limits bound specific input and model data;
+they do not bound total process memory or make every allocation failure a
+recoverable UI error. The release `panic = "abort"` behavior and next-launch
+journal recovery are described below.
 
 Manual edits and imported names use the same boundary as prefix, suffix,
 replacement, extension, parent-folder, digit-padding, and sequence commands.
@@ -327,8 +331,9 @@ current directory, executable location, or runtime-selected checkout.
 
 `darknamer-app` denies unsafe code by default, and the non-Windows library raises
 that policy to `forbid`. Narrow exceptions are attached only to the native UI
-module declaration in `src/lib.rs`, the two Windows rename adapter declarations
-in `src/rename/mod.rs`, and the native backend integration-test crate. Code
+module declaration in `src/lib.rs`, the `private_state`, `windows_backend`, and
+`windows_native` declarations in `src/rename/mod.rs`, and the native backend
+integration-test crate. Code
 outside those boundaries must remain safe Rust.
 
 `unsafe_source_inventory_stays_within_reviewed_native_boundaries` in

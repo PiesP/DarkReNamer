@@ -12,6 +12,7 @@ param(
     [ValidateRange(10, 1800)][int] $TestTimeoutSeconds = 300,
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400,
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
+    [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
     [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
@@ -45,7 +46,7 @@ if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v
     throw 'Unsupported VM acceptance profile identity.'
 }
 
-$ToolingManifestSha256 = 'b703534ea7e62cc538b8cd82507fd52b51837781332f027afc594f9d7c5a2893'
+$ToolingManifestSha256 = '8441a191a9779daa83e2cea63395f288ef658b83717b03a98ec541f01bf85475'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {

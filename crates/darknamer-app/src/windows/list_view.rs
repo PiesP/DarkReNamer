@@ -516,6 +516,8 @@ pub(super) fn native_list_header_height_px(list_window: HWND) -> i32 {
 }
 
 pub(super) fn update_primary_column_widths(state: &AppState) {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Widths);
     let mut rect = RECT::default();
     // SAFETY: list_window is live and rect remains writable through this call.
     if unsafe { GetClientRect(state.list_window, &mut rect) } == 0 {
@@ -1116,10 +1118,27 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
             .map(|(row, item)| rendered_row(icon_cache, item, issue_cache.issue(row)))
             .collect::<Vec<_>>()
     };
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        if !state.rendered_rows.is_empty() {
+            counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(rows.len());
+            let payload = rows
+                .iter()
+                .flat_map(|row| &row.values)
+                .map(|text| text.len() * 2)
+                .sum();
+            counters.logical_staged_payload_bytes_peak =
+                counters.logical_staged_payload_bytes_peak.max(payload);
+        }
+    });
     let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let selected = selected_indices(state.list_window);
+    let selected = {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
+        selected_indices(state.list_window)
+    };
     let synchronized = if state.preview_synchronization.is_synchronized() {
         apply_incremental_rows(state.list_window, &state.rendered_rows, &rows)
             || rebuild_native_rows(state.list_window, &rows)
@@ -1132,7 +1151,11 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     }
     state.rendered_rows = rows;
     state.mark_preview_synchronized();
-    select_rows(state.list_window, &selected);
+    {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
+        select_rows(state.list_window, &selected);
+    }
     update_primary_column_widths(state);
 }
 
@@ -1197,6 +1220,10 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         return;
     };
     let status_rows = if let [row] = plan.rows.as_ref() {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Issues);
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.issue_count_input_rows_visited += 1);
         let item = &state.model.items()[*row];
         let update = state.preview_issue_cache.refresh_one_by(
             state.model.len(),
@@ -1234,6 +1261,8 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         };
         status_rows
     };
+    #[cfg(test)]
+    let _native_clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
     debug_assert_eq!(plan.proposal_cells, plan.rows.len());
     debug_assert_eq!(plan.immutable_cells, 0);
     debug_assert_eq!(plan.full_row_formats, 0);
@@ -1241,6 +1270,8 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     for row in plan.rows {
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.native_rows_visited += 1);
         let proposed = state.model.items()[row].proposed_name();
         if state.rendered_rows[row].values[1] == *proposed {
             continue;
@@ -1261,6 +1292,12 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
 }
 
 fn status_delta_rows(state: &AppState) -> Option<Box<[usize]>> {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Issues);
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        counters.issue_count_input_rows_visited += state.model.len() * 2
+    });
     preview_status_delta_rows(
         state
             .rendered_rows
@@ -1277,6 +1314,8 @@ fn status_delta_rows(state: &AppState) -> Option<Box<[usize]>> {
 
 fn update_status_rows(state: &mut AppState, rows: &[usize]) -> bool {
     for &row in rows {
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.native_rows_visited += 1);
         let Some(item) = state.model.items().get(row) else {
             return false;
         };
@@ -1296,6 +1335,12 @@ fn update_status_rows(state: &mut AppState, rows: &[usize]) -> bool {
 }
 
 fn refresh_preview_count_cache(state: &mut AppState) {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Issues);
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        counters.issue_count_input_rows_visited += state.model.len() * 2
+    });
     state.preview_count_cache.refresh(
         state
             .model
@@ -1344,6 +1389,10 @@ fn rendered_row(
     item: &LegacyListItem,
     issue: PreviewRowIssue,
 ) -> RenderedRow {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Rows);
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.rows_formatted += 1);
     RenderedRow {
         values: [
             item.current_name().clone(),
@@ -1360,11 +1409,15 @@ fn rendered_row(
 }
 
 fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
     for row in (new.len()..old.len()).rev() {
         // SAFETY: window is live and row is a current trailing item.
         if unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) } == 0 {
             return false;
         }
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.native_deletions += 1);
     }
     let shared = old.len().min(new.len());
     for row in 0..shared {
@@ -1381,6 +1434,8 @@ fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]
 }
 
 fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &RenderedRow) -> bool {
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.native_rows_visited += 1);
     let mask = changed_column_mask(old, new);
     if mask & 1 != 0 && !set_native_primary(window, row, new) {
         return false;
@@ -1406,6 +1461,10 @@ pub(super) fn changed_column_mask(old: &RenderedRow, new: &RenderedRow) -> u8 {
 }
 
 fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        counters.native_rows_visited += 1;
+    });
     let mut text = value.values[0].units().to_vec();
     text.push(0);
     let mut native = LVITEMW {
@@ -1428,6 +1487,11 @@ fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
     {
         return false;
     }
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        counters.native_insertions += 1;
+        counters.native_cells += 1;
+    });
     (1..NATIVE_LIST_COLUMN_COUNT)
         .all(|column| set_native_subitem(window, row, column, &value.values[column]))
 }
@@ -1444,14 +1508,19 @@ fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
         ..LVITEMW::default()
     };
     // SAFETY: window is live; native and text outlive the synchronous message.
-    unsafe {
+    let applied = unsafe {
         SendMessageW(
             window,
             LVM_SETITEMW,
             0,
             (&mut native as *mut LVITEMW) as isize,
         ) != 0
+    };
+    #[cfg(test)]
+    if applied {
+        refresh_profile::record(|counters| counters.native_cells += 1);
     }
+    applied
 }
 
 fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyText) -> bool {
@@ -1463,17 +1532,26 @@ fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyTex
         ..LVITEMW::default()
     };
     // SAFETY: window is live; native and text outlive the synchronous message.
-    unsafe {
+    let applied = unsafe {
         SendMessageW(
             window,
             LVM_SETITEMTEXTW,
             row,
             (&mut native as *mut LVITEMW) as isize,
         ) != 0
+    };
+    #[cfg(test)]
+    if applied {
+        refresh_profile::record(|counters| counters.native_cells += 1);
     }
+    applied
 }
 
 fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.full_rebuilds += 1);
     // SAFETY: window is live and the message carries no pointer.
     if unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) } == 0 {
         return false;
@@ -1494,8 +1572,12 @@ fn cached_file_icon_index(
 ) -> i32 {
     let key = icon_cache_key(item.current_name(), item.is_directory());
     if let Some(index) = cache.get(&key) {
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.cache_hits += 1);
         return *index;
     }
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.cache_misses += 1);
     let (result, index) = query(&key, item.is_directory());
     // A failed query leaves SHFILEINFOW unusable. Cache a known no-image
     // fallback so a failing class cannot repeatedly block each row refresh.
@@ -1520,19 +1602,30 @@ fn query_shell_icon_index(key: &IconCacheKey, is_directory: bool) -> (usize, i32
         FILE_ATTRIBUTE_NORMAL
     };
     // SAFETY: path is terminated and info is writable for the shell query.
-    let result = unsafe {
-        SHGetFileInfoW(
-            path.as_ptr(),
-            attributes,
-            &mut info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-        )
+    let result = {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Shell);
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.shell_calls += 1);
+        // SAFETY: path is terminated and info remains writable through the call.
+        unsafe {
+            SHGetFileInfoW(
+                path.as_ptr(),
+                attributes,
+                &mut info,
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
+            )
+        }
     };
     (result, info.iIcon)
 }
 
 fn format_filetime(value: u64) -> LegacyText {
+    #[cfg(test)]
+    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Timestamps);
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.timestamp_values += 1);
     let Some(system) = local_systemtime_from_filetime(value) else {
         return LegacyText::default();
     };
@@ -1609,6 +1702,148 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 }
 
 #[cfg(test)]
+mod refresh_profile {
+    #![forbid(unsafe_code)]
+
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Stage {
+        Issues,
+        Rows,
+        Timestamps,
+        Shell,
+        Native,
+        Selection,
+        Widths,
+    }
+
+    #[derive(Default)]
+    pub(super) struct Counters {
+        // Input model/cache rows handed to count, issue and status-delta passes;
+        // internal cached destination-group visits are timed, not counted here.
+        pub(super) issue_count_input_rows_visited: usize,
+        pub(super) native_rows_visited: usize,
+        pub(super) rows_formatted: usize,
+        pub(super) timestamp_values: usize,
+        pub(super) shell_calls: usize,
+        pub(super) cache_hits: usize,
+        pub(super) cache_misses: usize,
+        pub(super) native_cells: usize,
+        pub(super) native_insertions: usize,
+        pub(super) native_deletions: usize,
+        pub(super) full_rebuilds: usize,
+        pub(super) extra_staged_rows_peak: usize,
+        pub(super) logical_staged_payload_bytes_peak: usize,
+        times_ns: [u128; 7],
+        maximum_shell_ns: u128,
+    }
+
+    thread_local! {
+        static COUNTERS: RefCell<Option<Counters>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn record(action: impl FnOnce(&mut Counters)) {
+        COUNTERS.with(|slot| {
+            if let Some(counters) = slot.borrow_mut().as_mut() {
+                action(counters);
+            }
+        });
+    }
+
+    pub(super) struct Clock {
+        stage: Stage,
+        started: Option<Instant>,
+    }
+
+    impl Clock {
+        pub(super) fn begin(stage: Stage) -> Self {
+            let active = COUNTERS.with(|slot| slot.borrow().is_some());
+            Self {
+                stage,
+                started: active.then(Instant::now),
+            }
+        }
+    }
+
+    impl Drop for Clock {
+        fn drop(&mut self) {
+            if let Some(started) = self.started {
+                let elapsed = started.elapsed().as_nanos();
+                record(|counters| {
+                    counters.times_ns[self.stage as usize] += elapsed;
+                    if matches!(self.stage, Stage::Shell) {
+                        counters.maximum_shell_ns = counters.maximum_shell_ns.max(elapsed);
+                    }
+                });
+            }
+        }
+    }
+
+    pub(super) struct Collection {
+        started: Instant,
+    }
+
+    impl Collection {
+        pub(super) fn begin() -> Self {
+            COUNTERS.with(|slot| {
+                assert!(slot.borrow().is_none(), "refresh collection cannot nest");
+                *slot.borrow_mut() = Some(Counters::default());
+            });
+            Self {
+                started: Instant::now(),
+            }
+        }
+
+        pub(super) fn finish(self, scenario: &str, rows: usize) -> Counters {
+            // Capture both boundaries and detach counters before any output.
+            let elapsed_ns = self.started.elapsed().as_nanos();
+            let counters = COUNTERS
+                .with(|slot| slot.borrow_mut().take())
+                .unwrap_or_default();
+            let [
+                issues,
+                inclusive_rows,
+                timestamps,
+                shell,
+                native,
+                selection,
+                widths,
+            ] = counters.times_ns;
+            assert!(timestamps + shell <= inclusive_rows);
+            let exclusive_rows = inclusive_rows - timestamps - shell;
+            println!(
+                "{{\"kind\":\"refresh-stages-test-build\",\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"shell_nested_ns\":{shell},\"shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"shell_calls\":{},\"cache_hits\":{},\"cache_misses\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{}}}",
+                counters.maximum_shell_ns,
+                counters.issue_count_input_rows_visited,
+                counters.native_rows_visited,
+                counters.rows_formatted,
+                counters.timestamp_values,
+                counters.shell_calls,
+                counters.cache_hits,
+                counters.cache_misses,
+                counters.native_cells,
+                counters.native_insertions,
+                counters.native_deletions,
+                counters.full_rebuilds,
+                counters.extra_staged_rows_peak,
+                counters.logical_staged_payload_bytes_peak,
+            );
+            counters
+        }
+    }
+
+    impl Drop for Collection {
+        fn drop(&mut self) {
+            COUNTERS.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+}
+
+#[cfg(test)]
 mod native_tests {
     use std::process::Command;
     use std::sync::mpsc::{self, Sender};
@@ -1618,7 +1853,7 @@ mod native_tests {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
+        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_GETITEMW, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
         LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -1766,6 +2001,339 @@ mod native_tests {
             cache.get(&icon_cache_key(&LegacyText::from("six.bad"), false)),
             Some(&I_IMAGENONE)
         );
+    }
+
+    // The native fixture publishes the ordinary callback lease and owns all
+    // children. Timing uses only safe Rust; these calls create/retire the HWNDs.
+    struct RefreshTestApp {
+        owner: HWND,
+        slot: *mut AppStateSlot,
+        _directory: tempfile::TempDir,
+    }
+
+    impl RefreshTestApp {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = tempfile::tempdir()?;
+            let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+            };
+            // SAFETY: controls has the exact ABI size and outlives initialization.
+            unsafe { InitCommonControlsEx(&controls) };
+            let class = wide("STATIC");
+            // SAFETY: the system class/current module and null creation data are
+            // valid; this UI thread owns the resulting hidden parent window.
+            let owner = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    null(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    1366,
+                    768,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let slot = CallbackState::into_raw(state);
+            // SAFETY: owner and slot remain owned until close unpublishes them.
+            unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, slot as isize) };
+            let app = Self {
+                owner,
+                slot,
+                _directory: directory,
+            };
+            app.with_state(|state| create_children(owner, state))??;
+            Ok(app)
+        }
+
+        fn with_state<R>(&self, action: impl FnOnce(&mut AppState) -> R) -> io::Result<R> {
+            // SAFETY: this test owns the published slot; leases end before this
+            // function returns and cannot escape into native callbacks.
+            let mut lease = unsafe { CallbackState::try_lease(self.slot) }
+                .ok_or_else(|| io::Error::other("refresh test lease is unavailable"))?;
+            Ok(action(lease.state_mut()))
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            if self.owner.is_null() {
+                return Ok(());
+            }
+            self.with_state(|state| {
+                remove_list_view_notification_subclass(state.list_window);
+                if let Some(rail) = state.left_rail.take() {
+                    rail.destroy();
+                }
+                if let Some(rail) = state.right_rail.take() {
+                    rail.destroy();
+                }
+            })?;
+            // SAFETY: no lease remains. Remove publication before synchronous
+            // child destruction, then reclaim only after confirmed destruction.
+            let destroyed = unsafe {
+                SetWindowLongPtrW(self.owner, GWLP_USERDATA, 0);
+                DestroyWindow(self.owner)
+            };
+            if destroyed == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            discard_deferred_messages(self.owner);
+            self.owner = null_mut();
+            // SAFETY: no lease/publication or child HWND remains for this slot.
+            let reclaimed = unsafe { CallbackState::request_reclaim(self.slot) };
+            if reclaimed != ReclaimDisposition::Reclaimed {
+                return Err(io::Error::other("refresh test state was not reclaimed"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for RefreshTestApp {
+        fn drop(&mut self) {
+            // Preserve the slot on uncertain native teardown instead of freeing
+            // resources still reachable by a native window.
+            let _ = self.close();
+        }
+    }
+
+    fn refresh_fixture_rows(
+        parent: &str,
+        kind: &str,
+        first: usize,
+        count: usize,
+    ) -> Vec<LegacyListItem> {
+        (first..first + count)
+            .map(|index| {
+                let name = if kind == "ordinary" {
+                    format!("ordinary-{index:05}.txt")
+                } else {
+                    format!("long-{index:04}.txt")
+                };
+                LegacyListItem::new_with_actual_size(
+                    format!("{parent}\\{name}"),
+                    false,
+                    24,
+                    24,
+                    133_497_936_000_000_000,
+                    133_497_936_000_000_000,
+                )
+            })
+            .collect()
+    }
+
+    fn assert_native_refresh_values(state: &AppState) {
+        for row in [
+            0,
+            state.model.len() / 2,
+            state.model.len().saturating_sub(1),
+        ] {
+            let Some(expected) = state.rendered_rows.get(row) else {
+                continue;
+            };
+            for (column, value) in expected.values.iter().enumerate() {
+                let mut text = vec![0_u16; value.len() + 1];
+                let mut query = LVITEMW {
+                    iItem: row as i32,
+                    iSubItem: column as i32,
+                    pszText: text.as_mut_ptr(),
+                    cchTextMax: text.len() as i32,
+                    ..LVITEMW::default()
+                };
+                // SAFETY: the owned query/buffer are writable for synchronous
+                // text readback from this test-owned live ListView.
+                let copied = unsafe {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_GETITEMTEXTW,
+                        row,
+                        (&raw mut query) as isize,
+                    )
+                };
+                assert_eq!(copied, value.len() as isize);
+                assert_eq!(&text[..value.len()], value.units());
+            }
+            let mut query = LVITEMW {
+                mask: LVIF_IMAGE,
+                iItem: row as i32,
+                ..LVITEMW::default()
+            };
+            // SAFETY: this live ListView synchronously writes the owned query;
+            // no caller storage or model reference is retained by the control.
+            let found = unsafe {
+                SendMessageW(
+                    state.list_window,
+                    LVM_GETITEMW,
+                    0,
+                    (&raw mut query) as isize,
+                )
+            };
+            assert_ne!(found, 0);
+            assert_eq!(query.iImage, expected.icon);
+        }
+    }
+
+    fn measure_refresh(
+        state: &mut AppState,
+        label: &str,
+        action: impl FnOnce(&mut AppState),
+    ) -> refresh_profile::Counters {
+        let collection = refresh_profile::Collection::begin();
+        action(state);
+        let counters = collection.finish(label, state.model.len());
+        assert!(state.preview_synchronization.is_synchronized());
+        assert_eq!(state.rendered_rows.len(), state.model.len());
+        // SAFETY: this scalar query addresses the live test-owned ListView.
+        let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
+        assert_eq!(native_count, state.model.len() as isize);
+        assert_eq!(counters.timestamp_values, counters.rows_formatted * 2);
+        assert_eq!(
+            counters.cache_hits + counters.cache_misses,
+            counters.rows_formatted
+        );
+        assert_eq!(counters.shell_calls, counters.cache_misses);
+        assert_native_refresh_values(state);
+        counters
+    }
+
+    #[test]
+    #[ignore = "diagnostic: optimized native refresh attribution on the prepared VM"]
+    fn profile_refresh_stages() -> Result<(), Box<dyn std::error::Error>> {
+        struct TestOle;
+        impl Drop for TestOle {
+            fn drop(&mut self) {
+                // SAFETY: paired successful initialization on this same thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+        // SAFETY: null is the reserved parameter; the guard balances success.
+        let status = unsafe { OleInitialize(null()) };
+        if status < 0 {
+            return Err(io::Error::other("refresh diagnostic COM initialization failed").into());
+        }
+        let _ole = TestOle;
+        let order = std::env::var("DARKRENAMER_REFRESH_PROFILE_ORDER")?;
+        let visible_first = match order.as_str() {
+            "hidden-visible" => false,
+            "visible-hidden" => true,
+            _ => return Err(io::Error::other("invalid frozen refresh column order").into()),
+        };
+        let mut app = RefreshTestApp::new()?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            assert_eq!(state.dpi, 96, "fixed refresh diagnostic requires 96 DPI");
+            assert_eq!(state.shown_columns, [false; 4]);
+            // Frozen metadata snapshots follow the performance fixture names,
+            // one extension and 3x42-character long-path segments. File I/O,
+            // admission and delivery are deliberately outside this diagnostic.
+            let ordinary = r"C:\refresh-fixture\ordinary";
+            state.model.append_batch_by(
+                refresh_fixture_rows(ordinary, "ordinary", 0, 100),
+                compare_windows,
+            )?;
+            let small = measure_refresh(state, "ordinary-100", refresh_all_rows);
+            assert_eq!(small.rows_formatted, 100);
+            state.model.append_batch_by(
+                refresh_fixture_rows(ordinary, "ordinary", 100, 900),
+                compare_windows,
+            )?;
+            let medium = measure_refresh(state, "ordinary-1000", refresh_all_rows);
+            assert_eq!(medium.rows_formatted, 1000);
+            let collection = refresh_profile::Collection::begin();
+            // Keep the historical ordinary-10000 operation shape. Model append
+            // is outside each stage clock but inside this scenario's envelope.
+            for batch in 0..4 {
+                state.model.append_batch_by(
+                    refresh_fixture_rows(ordinary, "ordinary", 1000 + batch * 2250, 2250),
+                    compare_windows,
+                )?;
+                refresh_all_rows(state);
+                assert!(state.preview_synchronization.is_synchronized());
+            }
+            let large = collection.finish("ordinary-10000", state.model.len());
+            assert_eq!(large.rows_formatted, 3250 + 5500 + 7750 + 10000);
+            assert_eq!(large.timestamp_values, large.rows_formatted * 2);
+            assert_eq!(large.cache_hits + large.cache_misses, large.rows_formatted);
+            assert_eq!(large.native_insertions, 9000);
+            select_rows(state.list_window, &[4999]);
+            let unchanged = measure_refresh(state, "ordinary-10000-unchanged", refresh_all_rows);
+            assert_eq!(selected_indices(state.list_window), vec![4999]);
+            assert_eq!(unchanged.rows_formatted, 10000);
+            assert_eq!(unchanged.native_cells, 0);
+            assert_eq!(unchanged.native_insertions, 0);
+            assert_eq!(unchanged.full_rebuilds, 0);
+            assert!(state.model.manual_change_changed(4999, "manual.txt")?);
+            let one = measure_refresh(state, "one-row-proposal-edit", |state| {
+                refresh_proposal_rows(state, &[4999])
+            });
+            assert_eq!(one.rows_formatted, 0);
+            assert_eq!(one.issue_count_input_rows_visited, 1);
+            assert_eq!(one.native_cells, 2);
+            state.model.reset_proposals()?;
+            refresh_proposal_rows(state, &[4999]);
+            let changed = state
+                .model
+                .prefix_complete_changed(&LegacyText::from("x_"))?;
+            let whole = measure_refresh(state, "whole-list-proposal-edit", |state| {
+                refresh_proposal_rows(state, &changed)
+            });
+            assert_eq!(whole.rows_formatted, 0);
+            assert_eq!(whole.native_cells, 20000);
+            let changed = state.model.reset_proposals_changed()?;
+            let reset = measure_refresh(state, "whole-list-proposal-reset", |state| {
+                refresh_proposal_rows(state, &changed)
+            });
+            assert_eq!(reset.rows_formatted, 0);
+            assert_eq!(reset.native_cells, 20000);
+            let long = format!(
+                "C:\\refresh-fixture\\long\\{}\\{}\\{}",
+                "a".repeat(42),
+                "b".repeat(42),
+                "c".repeat(42)
+            );
+            for visible in [visible_first, !visible_first] {
+                state.model = LegacyList::new();
+                refresh_all_rows(state);
+                for column in 0..4 {
+                    state.shown_columns[column] = visible;
+                    update_column_visibility(state, column);
+                }
+                state.model.append_batch_by(
+                    refresh_fixture_rows(&long, "long", 0, 1000),
+                    compare_windows,
+                )?;
+                let label = if visible {
+                    "long-visible"
+                } else {
+                    "long-hidden"
+                };
+                let counters = measure_refresh(state, label, refresh_all_rows);
+                assert_eq!(counters.rows_formatted, 1000);
+                let label = if visible {
+                    "long-visible-unchanged"
+                } else {
+                    "long-hidden-unchanged"
+                };
+                let counters = measure_refresh(state, label, refresh_all_rows);
+                assert_eq!(counters.native_cells, 0);
+                assert_eq!(counters.rows_formatted, 1000);
+                assert!(state.rendered_rows.iter().all(|row| {
+                    row.values[..NATIVE_STATUS_COLUMN_INDEX]
+                        .iter()
+                        .all(|text| !text.is_empty())
+                        && row.values[NATIVE_STATUS_COLUMN_INDEX].is_empty()
+                }));
+            }
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
     }
 
     const SLOW_ICON_TEST_MESSAGE: u32 = WM_APP + 27;

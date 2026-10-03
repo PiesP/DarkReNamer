@@ -3489,6 +3489,34 @@ Invoke-DrTestPowerShellModuleScope `
             -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
             -Stderr ''
     } 'must not filter tests'
+    # Exercise the real optional binding while a zero budget prevents native launch.
+    foreach ($order in @($null, '', 'hidden-visible', 'visible-hidden')) {
+        $bindingRoot = Join-Path $temporaryRoot ('refresh-binding-' + [Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $bindingRoot)
+        $bindingResult = Invoke-RustTestBinary -Test ([pscustomobject]@{
+            file = 'not-launched.exe'; sha256 = ('0' * 64)
+        }) -Root $bindingRoot -OutputRoot $bindingRoot -RuntimeRoot $bindingRoot `
+            -Index 1 -TimeoutSeconds 600 -OutputBudgetBytes 0 -RefreshProfileOrder $order
+        if ($bindingResult.failure_reason -cne 'suite_output_limit_exceeded') {
+            throw 'Empty/default and declared diagnostic orders must bind without launching.'
+        }
+    }
+
+    $refreshSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
+        -Stderr '' -RefreshProfile
+    if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
+        throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
+    }
+    foreach ($invalid in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalid -Stderr '' -RefreshProfile
+        } 'must select exactly one passing ignored test'
+    }
     Assert-Fails {
         Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' -Stderr ''
     } 'reported zero tests'

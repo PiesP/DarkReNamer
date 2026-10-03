@@ -73,6 +73,143 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
+    def refresh_profile_output(self, order='hidden-visible'):
+        long_paths = ('long-hidden', 'long-hidden-unchanged',
+                      'long-visible', 'long-visible-unchanged')
+        if order == 'visible-hidden':
+            long_paths = long_paths[2:] + long_paths[:2]
+        rows = []
+        for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
+            row = {'kind': 'refresh-stages-test-build', 'scenario': scenario,
+                   **{name: 0 for name in vm.REFRESH_PROFILE_COUNTERS}}
+            count = 100 if scenario == 'ordinary-100' else (
+                1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
+            formatted = 26500 if scenario == 'ordinary-10000' else (
+                0 if 'proposal-' in scenario else count)
+            row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
+                       cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
+                       shell_calls=int(formatted > 0),
+                       row_values_inclusive_ns=20 if formatted else 0,
+                       row_values_exclusive_ns=10 if formatted else 0,
+                       timestamps_nested_ns=5 if formatted else 0,
+                       shell_nested_ns=5 if formatted else 0,
+                       shell_max_ns=5 if formatted else 0)
+            rows.append(json.dumps(row))
+        return ('running 1 test\ntest ' + vm.REFRESH_PROFILE_TEST +
+                ' ... ' + rows[0] + '\n' + '\n'.join(rows[1:]) +
+                '\nok\ntest result: ok. 1 passed; 0 failed; 0 ignored; '
+                '0 measured; 3 filtered out; finished in 0.01s\n')
+
+    def test_fixed_refresh_profile_records_require_scenarios_and_consistent_counters(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                self.refresh_profile_output(order), order)), 11)
+        with self.assertRaisesRegex(ValueError, 'inventory or order'):
+            vm.verify_refresh_profile_records(self.refresh_profile_output(), 'visible-hidden')
+        with self.assertRaisesRegex(ValueError, 'counters'):
+            vm.verify_refresh_profile_records(
+                self.refresh_profile_output().replace('"timestamp_values": 200',
+                                                      '"timestamp_values": 199', 1),
+                'hidden-visible')
+
+    def test_refresh_profile_rejects_overlapping_time_totals_and_wrong_workload(self):
+        with self.assertRaisesRegex(ValueError, 'counters'):
+            vm.verify_refresh_profile_records(
+                self.refresh_profile_output().replace('"row_values_exclusive_ns": 10',
+                                                      '"row_values_exclusive_ns": 11', 1),
+                'hidden-visible')
+        with self.assertRaisesRegex(ValueError, 'cardinality'):
+            vm.verify_refresh_profile_records(
+                self.refresh_profile_output().replace('"rows": 100', '"rows": 99', 1),
+                'hidden-visible')
+
+    def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
+        args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                   '--profile-refresh-stages'])
+        self.assertEqual(args.test_timeout_seconds, 600)
+        self.assertEqual(args.task_kind, 'core')
+        for invalid in (
+            ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
+             '--acceptance-profile-id', vm.V1_PROFILE_ID],
+            ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
+             '--test-timeout-seconds', '601'],
+            ['--ssh-host', 'prepared-vm', '--profile-refresh-stages',
+             '--task-kind', 'ui'],
+            ['--prepare-only', '--output', str(self.root / 'prepared'),
+             '--profile-refresh-stages'],
+        ):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                vm.parse_arguments(invalid)
+
+    def test_refresh_profile_runs_same_bundle_twice_and_stops_on_failure(self):
+        output = self.root / 'diagnostic'
+        args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                   '--profile-refresh-stages', '--output', str(output)])
+        args.acceptance_profile_sha256 = 'a' * 64
+        calls = []
+
+        def build(_repo, bundle, _tooling, *, refresh_profile):
+            self.assertTrue(refresh_profile)
+            bundle.mkdir()
+            (bundle / 'bundle.json').write_text('{}')
+            (bundle / 'binary.exe').write_bytes(b'one immutable binary')
+            return {'source_sha': 'b' * 40, 'test_binaries': [
+                {'name': 'darknamer_app', 'file': 'binary.exe',
+                 'sha256': vm.sha256(bundle / 'binary.exe')}],
+                'application': self.app}
+
+        def controller(attempt, selected, *_unused):
+            calls.append((selected.refresh_profile_order,
+                          vm.sha256(attempt / 'binary.exe')))
+            if len(calls) == 2:
+                raise RuntimeError('second pass failed')
+
+        with (mock.patch.object(vm, 'prepare_transport', return_value=(output, None, 'pwsh')),
+              mock.patch.object(vm, 'build_bundle', side_effect=build),
+              mock.patch.object(vm, 'clean_source_identity',
+                                return_value=(REPOSITORY_ROOT, 'b' * 40)),
+              mock.patch.object(vm, 'run_controller', side_effect=controller),
+              mock.patch.object(vm, 'verify_refresh_profile_result',
+                                return_value={'status': 'passed'}),
+              mock.patch.object(vm, 'read_json_strict', return_value={}),
+              redirect_stderr(io.StringIO())):
+            self.assertEqual(vm.run_refresh_profile(REPOSITORY_ROOT, args, None), 1)
+        self.assertEqual([row[0] for row in calls],
+                         list(vm.REFRESH_PROFILE_ORDERS))
+        self.assertEqual(calls[0][1], calls[1][1])
+        attempts = json.loads((output / 'attempts.json').read_text())
+        self.assertEqual([row['status'] for row in attempts], ['passed', 'failed'])
+
+    def test_fixed_refresh_profile_result_requires_exact_selection_and_output(self):
+        stdout = self.output_artifact('test-001.stdout.txt',
+                                      self.refresh_profile_output().encode())
+        stderr = self.output_artifact('test-001.stderr.txt', b'')
+        self.manifest['test_binaries'] = [dict(self.test, name='darknamer_app')]
+        self.manifest['runner'] = self.artifact('windows-vm-guest.ps1', b'runner')
+        self.manifest['diagnostic'] = {
+            'kind': 'profile-refresh-stages', 'test_profile': 'release',
+            'test_name': vm.REFRESH_PROFILE_TEST,
+            'orders': list(vm.REFRESH_PROFILE_ORDERS)}
+        self.result.update(diagnostic={
+            'kind': 'profile-refresh-stages', 'order': 'hidden-visible',
+            'test_name': vm.REFRESH_PROFILE_TEST, 'test_profile': 'release'},
+            gui=None, tests=[dict(self.test, status='passed', job_cleanup=True,
+                                  exit_code=0, passed=1, failed=0, ignored=0,
+                                  stdout=stdout, stderr=stderr)])
+        self.result['transport'].update(task_kind='core', status='collected')
+        with (mock.patch.object(vm, 'verify_controller_cleanup'),
+              mock.patch.object(vm, '_verify_v2_result_owned_binding'),
+              mock.patch.object(vm, 'verify_transport_binding')):
+            observed = vm.verify_refresh_profile_result(
+                self.root, self.manifest, self.result, 'hidden-visible',
+                'ssh', None, 'a' * 64)
+            self.assertEqual(observed['filtered_out'], 3)
+            self.result['tests'][0]['ignored'] = 1
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                vm.verify_refresh_profile_result(
+                    self.root, self.manifest, self.result, 'hidden-visible',
+                    'ssh', None, 'a' * 64)
+
     def powershell_function(self, name):
         pwsh = shutil.which('pwsh')
         if pwsh is None:
