@@ -261,6 +261,41 @@ function Get-ObserverGrid {
     }
     [pscustomobject]@{ element = $list; pattern = [Windows.Automation.GridPattern]$pattern }
 }
+function Resolve-ObserverPathImportWindowCandidate {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Windows,
+        [Parameter(Mandatory)][int] $ProcessId,
+        [Parameter(Mandatory)][long] $MainWindowHandle)
+    $matches = @($Windows | Where-Object {
+        $_.ProcessId -eq $ProcessId -and $_.Owner -eq $MainWindowHandle -and $_.Visible -and
+        $_.ClassName -ceq '#32770' -and $_.Title -ceq '파일에서 경로목록 읽어 추가하기'
+    })
+    if ($matches.Count -gt 1) { throw 'Path import has multiple bound native dialogs.' }
+    if ($matches.Count -eq 1) { return $matches[0] }
+    return $null
+}
+function Wait-ObserverPathImportDialog {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
+    do {
+        $Application.process.Refresh()
+        if ($Application.process.HasExited) { throw 'Path import application exited before its dialog appeared.' }
+        $candidate = Resolve-ObserverPathImportWindowCandidate `
+            -Windows @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows([uint32]$Application.process.Id)) `
+            -ProcessId $Application.process.Id -MainWindowHandle ([long]$Application.main_handle)
+        if ($null -ne $candidate) {
+            # Resolve this retained process/owner/class/title tuple directly.
+            # A whole-workbench descendant query grows with every admitted row.
+            $dialog = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$candidate.Handle)
+            Assert-AutomationBinding -Element $dialog -Process $Application.process -ExpectedSession $SessionId `
+                -Label 'native path-list import dialog' -RequireWindowHandle
+            if ($dialog.Current.Name -ceq $candidate.Title) { return $dialog }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'Bound native path-list import dialog was not found before the bounded deadline.'
+}
 function Import-GuiRegressionPathList {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -286,26 +321,7 @@ function Import-GuiRegressionPathList {
     }
     Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
         -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
-    try {
-        $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
-            -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
-            -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
-    }
-    catch {
-        # Temporary issue24 probe: retain only windows belonging to this fixture.
-        $original = $_.Exception
-        $names = @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows(
-            [uint32]$Application.process.Id) | Where-Object { $_.Visible } | Select-Object -First 16 |
-            ForEach-Object { "$($_.ClassName):$($_.Title)" })
-        $focus = @()
-        try {
-            $focus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot(
-                [IntPtr]$Application.main_handle, [uint32]$Application.process.Id)
-        }
-        catch { $focus = @($_.Exception.Message) }
-        throw [InvalidOperationException]::new(
-            "$($original.Message) Owned windows: $($names -join ' | '); main_enabled=$($Application.main.Current.IsEnabled); rows=$($Grid.pattern.Current.RowCount); focus=$($focus -join ',')", $original)
-    }
+    $dialog = Wait-ObserverPathImportDialog -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'

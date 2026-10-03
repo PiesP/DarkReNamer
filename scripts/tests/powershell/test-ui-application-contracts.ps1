@@ -16,6 +16,27 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+$pathDialog = [pscustomobject]@{ ProcessId=42; Owner=10L; Visible=$true;
+    ClassName='#32770'; Title='파일에서 경로목록 읽어 추가하기'; Handle=20L }
+if ($null -ne (Resolve-ObserverPathImportWindowCandidate -Windows @() -ProcessId 42 -MainWindowHandle 10)) {
+    throw 'An absent native dialog was accepted.'
+}
+foreach ($change in @(
+    @{ ProcessId=43 }, @{ Owner=11L }, @{ Visible=$false }, @{ ClassName='Other' }, @{ Title='Other' })) {
+    $wrong = [pscustomobject]@{ ProcessId=42; Owner=10L; Visible=$true;
+        ClassName='#32770'; Title=$pathDialog.Title; Handle=30L }
+    foreach ($key in $change.Keys) { $wrong.$key = $change[$key] }
+    $selected = Resolve-ObserverPathImportWindowCandidate -Windows @($wrong,$pathDialog) `
+        -ProcessId 42 -MainWindowHandle 10
+    if ($selected.Handle -ne 20) { throw 'The native import resolver accepted a mismatched window.' }
+    if ($null -ne (Resolve-ObserverPathImportWindowCandidate -Windows @($wrong) -ProcessId 42 -MainWindowHandle 10)) {
+        throw 'The native import resolver accepted an unbound dialog.'
+    }
+}
+Assert-Fails -Expected 'multiple bound native dialogs' -Action {
+    Resolve-ObserverPathImportWindowCandidate -Windows @($pathDialog,$pathDialog) -ProcessId 42 -MainWindowHandle 10
+}
+
 # These inert UIA/native adapters expose observations and record requests. The
 # complete production functions retain all traversal, ownership and copy logic.
 Add-Type -TypeDefinition @'
