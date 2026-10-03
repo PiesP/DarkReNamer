@@ -971,6 +971,15 @@ function New-ObserverStandardFixture {
         initial = Get-ObserverFixtureState -FixtureRoot $fixtureRoot
     }
 }
+function Assert-ObserverCommandButton {
+    param([Parameter(Mandatory)][object] $Control, [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][string] $AutomationId)
+    Assert-AutomationBinding -Element $Control -Process $Application.process -ExpectedSession $SessionId `
+        -Label 'retained observer command' -RequireWindowHandle
+    if ($Control.Current.AutomationId -cne $AutomationId -or
+        $Control.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        -not $Control.Current.IsEnabled) { throw 'Retained observer command identity or enabled state differs.' }
+}
 function Invoke-ObserverPrefix {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -978,9 +987,13 @@ function Invoke-ObserverPrefix {
         [Parameter(Mandatory)][string] $Prefix,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [string] $ExpectedFirstSourceName = 'item-00000.txt'
+        [string] $ExpectedFirstSourceName = 'item-00000.txt',
+        [object] $Command
     )
-    $command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
+    if ($null -eq $Command) {
+        $Command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
+    }
+    Assert-ObserverCommandButton -Control $Command -Application $Application -SessionId $SessionId -AutomationId '32773'
     $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $command -Label 'large smoke prefix command'
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle

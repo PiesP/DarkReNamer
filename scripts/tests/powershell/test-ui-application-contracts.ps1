@@ -475,4 +475,26 @@ finally {
     Remove-Variable -Name $entryProbeName -Scope Global
 }
 
+& {
+    $script:retainedCommandBindings = 0
+    function Assert-AutomationBinding {
+        param($Element, $Process, $ExpectedSession, $Label, [switch]$RequireWindowHandle)
+        if (-not $RequireWindowHandle) { throw 'Retained command skipped native binding.' }
+        $script:retainedCommandBindings++
+    }
+    $control = [Windows.Automation.AutomationElement]::new()
+    $control.Current.AutomationId = '32781'
+    $application = [pscustomobject]@{ process = [Diagnostics.Process]::GetCurrentProcess() }
+    Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    $control.Current.IsEnabled = $false
+    Assert-Fails -Expected 'identity or enabled state differs' -Action {
+        Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    }
+    $control.Current.IsEnabled = $true
+    $control.Current.AutomationId = '32773'
+    Assert-Fails -Expected 'identity or enabled state differs' -Action {
+        Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    }
+    if ($script:retainedCommandBindings -ne 3) { throw 'Retained commands bypassed repeated identity validation.' }
+}
 Write-Host 'UI application behavior contracts passed.'

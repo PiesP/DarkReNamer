@@ -1437,11 +1437,14 @@ function Get-ObserverSystemVisualStyle {
 }
 function Reset-ObserverAppearanceProposals {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds)
-    $reset = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
-        -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $WaitSeconds -Label 'appearance reset proposals' -RequireEnabled -RequireWindowHandle
-    Invoke-AutomationControl -Element $reset -Label 'appearance reset proposals'
+        [Parameter(Mandatory)][int] $WaitSeconds, [object] $Control)
+    if ($null -eq $Control) {
+        $Control = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
+            -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $WaitSeconds -Label 'appearance reset proposals' -RequireEnabled -RequireWindowHandle
+    }
+    Assert-ObserverCommandButton -Control $Control -Application $Application -SessionId $SessionId -AutomationId '32781'
+    Invoke-AutomationControl -Element $Control -Label 'appearance reset proposals'
 }
 
 function Read-ObserverPerformancePreviewRows {
@@ -1528,6 +1531,8 @@ function Invoke-ObserverPerformanceSampleScenario {
     $samples = $null
     $timings = [Collections.Generic.List[object]]::new()
     $clearRowCounts = [Collections.Generic.List[int]]::new()
+    $resetControl = $null
+    $prefixControl = $null
     $ObservationSink['plan'] = [ordered]@{
         ordinary_rows = @(100,1000,10000); long_path_rows = 1000; extension_classes = 300
         add_remove_reset_cycles = 3; idle_seconds = 30; sample_interval_ms = 200
@@ -1571,6 +1576,15 @@ function Invoke-ObserverPerformanceSampleScenario {
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid
             $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
                 rows=$stage.rows; observed_rows=[int]$grid.pattern.Current.RowCount })
+            if ($stage.rows -eq 100) {
+                # Retain stable command controls before the ListView grows.
+                $resetControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $WaitSeconds -Label 'performance reset command' -RequireEnabled -RequireWindowHandle
+                $prefixControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $WaitSeconds -Label 'performance prefix command' -RequireEnabled -RequireWindowHandle
+            }
         }
         $sampler.SetPhase('ordinary-10000')
         $largeElapsed = [double]0
@@ -1587,19 +1601,19 @@ function Invoke-ObserverPerformanceSampleScenario {
         if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'changed-first.txt') {
             throw 'Performance single-row preview differs.'
         }
-        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
         if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
             throw 'Performance single-row reset did not restore the original name.'
         }
         $sampler.SetPhase('full-preview')
         $fullWatch = [Diagnostics.Stopwatch]::StartNew()
         $prefix = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'sample-' `
-            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt'
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt' -Command $prefixControl
         $previewIndices = [int[]]@(0,2499,4999,7499,9999)
         $prefixRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
             -Prefix 'sample-' -WaitSeconds $WaitSeconds
         $fullElapsedMs = [Math]::Round($fullWatch.Elapsed.TotalMilliseconds, 3)
-        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
         $resetRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
             -Prefix '' -WaitSeconds $WaitSeconds
         $ObservationSink['full_preview_rows'] = @(
@@ -1635,7 +1649,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         }
         $ObservationSink['columns'] = [ordered]@{ hidden_widths=$hiddenWidths; visible_widths=$visibleWidths; first_values=$auxiliaryValues }
         $sampler.SetPhase('long-visible')
-        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
         [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
             [uint32]$application.process.Id, [uint32]0x800E)
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance long hidden list did not clear.' }
@@ -1669,7 +1683,7 @@ function Invoke-ObserverPerformanceSampleScenario {
             $cycleObservedRows = [int]$grid.pattern.Current.RowCount
             [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 `
                 -Name ('cycle-{0}.txt' -f $cycle) -SessionId $SessionId -WaitSeconds $WaitSeconds)
-            Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+            Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
             if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
                 throw "Performance $id reset did not restore the original name."
             }
