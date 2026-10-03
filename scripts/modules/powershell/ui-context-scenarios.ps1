@@ -1649,7 +1649,6 @@ function Invoke-ObserverPerformanceSampleScenario {
         }
         $ObservationSink['columns'] = [ordered]@{ hidden_widths=$hiddenWidths; visible_widths=$visibleWidths; first_values=$auxiliaryValues }
         $sampler.SetPhase('long-visible')
-        Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
         [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
             [uint32]$application.process.Id, [uint32]0x800E)
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance long hidden list did not clear.' }
