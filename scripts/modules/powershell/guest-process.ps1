@@ -8,7 +8,8 @@
         [AllowEmptyString()]
         [string] $Stderr,
 
-        [switch] $AllowZeroTests
+        [switch] $AllowZeroTests,
+        [switch] $RefreshProfile
     )
 
     $pattern = '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out;(?:[^\r\n]*)\r?$'
@@ -21,8 +22,12 @@
     $failed = [int]::Parse($summary.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
     $ignored = [int]::Parse($summary.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture)
     $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
-    if ($filtered -ne 0) {
+    if (-not $RefreshProfile -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
+    }
+    if ($RefreshProfile -and ($summary.Groups[1].Value -cne 'ok' -or
+        $passed -ne 1 -or $failed -ne 0 -or $ignored -ne 0 -or $filtered -lt 1)) {
+        throw 'The fixed refresh diagnostic must select exactly one passing ignored test.'
     }
     if (-not $AllowZeroTests -and ($passed + $failed + $ignored) -eq 0) {
         throw 'A non-main Rust test harness reported zero tests.'
@@ -1992,7 +1997,8 @@ function Invoke-WithIsolatedEnvironment {
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][scriptblock] $Action,
         [string] $TemporaryRoot,
-        [string] $CaseSensitiveFixtureRoot
+        [string] $CaseSensitiveFixtureRoot,
+        [string] $RefreshProfileOrder
     )
 
     $temporary = if ([string]::IsNullOrWhiteSpace($TemporaryRoot)) {
@@ -2021,7 +2027,7 @@ function Invoke-WithIsolatedEnvironment {
     $localAppData = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'localappdata'
     $names = @(
         'TEMP', 'TMP', 'LOCALAPPDATA', 'DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES',
-        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT'
+        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT', 'DARKRENAMER_REFRESH_PROFILE_ORDER'
     )
     $original = @{}
     foreach ($name in $names) {
@@ -2034,6 +2040,9 @@ function Invoke-WithIsolatedEnvironment {
         [Environment]::SetEnvironmentVariable('DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES', '1', 'Process')
         [Environment]::SetEnvironmentVariable(
             'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT', $CaseSensitiveFixtureRoot, 'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'DARKRENAMER_REFRESH_PROFILE_ORDER', $RefreshProfileOrder, 'Process'
         )
         & $Action
     }
@@ -2089,6 +2098,7 @@ function Invoke-RustTestBinary {
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $Index,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
         [ValidateRange(0, 8388608)][long] $OutputBudgetBytes =
             $script:VmTestOutputAggregateLimitBytes
     )
@@ -2142,10 +2152,14 @@ function Invoke-RustTestBinary {
                 -RuntimeRoot $caseRoot `
                 -TemporaryRoot $temporaryRoot `
                 -CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot `
+                -RefreshProfileOrder $RefreshProfileOrder `
                 -Action {
+                $testArguments = if ($RefreshProfileOrder) {
+                    '--exact windows::list_view::native_tests::profile_refresh_stages --ignored --nocapture --test-threads=1'
+                } else { '--nocapture --test-threads=1' }
                 $ownedProcess = Start-JobBoundProcess `
                     -FilePath $binaryPath `
-                    -Arguments '--nocapture --test-threads=1' `
+                    -Arguments $testArguments `
                     -WorkingDirectory $Root `
                     -StdoutPath $stdoutPath `
                     -StderrPath $stderrPath `
@@ -2175,7 +2189,8 @@ function Invoke-RustTestBinary {
                     $summary = Read-RustTestSummary `
                         -Stdout $stdoutText `
                         -Stderr $stderrText `
-                        -AllowZeroTests:($Test.name -ceq 'DarkReNamer')
+                        -AllowZeroTests:($Test.name -ceq 'DarkReNamer') `
+                        -RefreshProfile:([bool]$RefreshProfileOrder)
                     $row.passed = $summary.passed
                     $row.failed = $summary.failed
                     $row.ignored = $summary.ignored

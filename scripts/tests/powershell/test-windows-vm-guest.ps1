@@ -3489,6 +3489,21 @@ Invoke-DrTestPowerShellModuleScope `
             -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
             -Stderr ''
     } 'must not filter tests'
+    $refreshSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
+        -Stderr '' -RefreshProfile
+    if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
+        throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
+    }
+    foreach ($invalid in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalid -Stderr '' -RefreshProfile
+        } 'must select exactly one passing ignored test'
+    }
     Assert-Fails {
         Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' -Stderr ''
     } 'reported zero tests'

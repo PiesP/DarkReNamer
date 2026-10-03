@@ -271,7 +271,8 @@ function Resolve-VerifiedBundle {
         )
     }
     else {
-        Assert-ExactProperties -Value $manifest -Names @(
+        $diagnostic = $manifest.PSObject.Properties['diagnostic']
+        Assert-ExactProperties -Value $manifest -Names (@(
             'schema_version'
             'source_sha'
             'source_state'
@@ -280,7 +281,7 @@ function Resolve-VerifiedBundle {
             'test_binaries'
             'application'
             'runner'
-        ) -Label 'bundle.json'
+        ) + @(if ($null -ne $diagnostic) { 'diagnostic' })) -Label 'bundle.json'
         if (($manifest.schema_version -isnot [int] -and $manifest.schema_version -isnot [long]) -or
             $manifest.schema_version -ne 1) {
             throw 'bundle.json schema_version must be 1 or the exact candidate schema 2.'
@@ -299,6 +300,17 @@ function Resolve-VerifiedBundle {
         $application = $manifest.application
         $runner = $manifest.runner
         $testBinaryRows = @($manifest.test_binaries)
+        if ($null -ne $diagnostic) {
+            Assert-ExactProperties -Value $diagnostic.Value -Names @(
+                'kind', 'test_profile', 'test_name', 'orders') -Label 'bundle.json diagnostic'
+            if ($diagnostic.Value.kind -cne 'profile-refresh-stages' -or
+                $diagnostic.Value.test_profile -cne 'release' -or
+                $diagnostic.Value.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
+                (@($diagnostic.Value.orders) -join ',') -cne 'hidden-visible,visible-hidden' -or
+                $testBinaryRows.Count -ne 1 -or $testBinaryRows[0].name -cne 'darknamer_app') {
+                throw 'bundle.json fixed refresh diagnostic is invalid.'
+            }
+        }
         $candidateArtifacts = @()
     }
     if ($manifest.target -isnot [string] -or $manifest.target -cne 'x86_64-pc-windows-msvc') {

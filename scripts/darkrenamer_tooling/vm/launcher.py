@@ -47,6 +47,25 @@ CANDIDATE_HARNESS_FILES = (
 CORE_RESULT_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES = 64 * 1024 * 1024
+REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES = 32 * 1024 * 1024
+REFRESH_PROFILE_TEST = 'windows::list_view::native_tests::profile_refresh_stages'
+REFRESH_PROFILE_ORDERS = ('hidden-visible', 'visible-hidden')
+REFRESH_PROFILE_PREFIX_SCENARIOS = (
+    'ordinary-100', 'ordinary-1000', 'ordinary-10000',
+    'ordinary-10000-unchanged', 'one-row-proposal-edit',
+    'whole-list-proposal-edit', 'whole-list-proposal-reset',
+)
+REFRESH_PROFILE_COUNTERS = (
+    'rows', 'scenario_envelope_ns', 'issue_count_ns',
+    'row_values_inclusive_ns', 'row_values_exclusive_ns',
+    'timestamps_nested_ns', 'shell_nested_ns', 'shell_max_ns',
+    'native_apply_rebuild_ns', 'selection_ns', 'column_widths_ns',
+    'issue_count_input_rows_visited', 'native_rows_visited', 'rows_formatted',
+    'timestamp_values', 'shell_calls', 'cache_hits', 'cache_misses',
+    'native_cell_updates', 'native_row_insertions', 'native_row_deletions',
+    'full_rebuilds', 'extra_staged_rows_peak',
+    'logical_staged_payload_bytes_peak',
+)
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -256,6 +275,8 @@ def argument_parser():
     parser.add_argument('--recovery-export', action='store_true')
     parser.add_argument('--recovery-intent-only-candidate-discard', action='store_true')
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
+    parser.add_argument('--profile-refresh-stages', action='store_true',
+                        help='Run the fixed two-pass optimized ListView refresh diagnostic.')
     return parser
 
 
@@ -277,6 +298,18 @@ def parse_arguments(argv=None):
             value is not None for value in candidate_values):
         parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
     args.candidate_mode = all(value is not None for value in candidate_values)
+    if args.profile_refresh_stages:
+        if args.candidate_mode or args.task_kind != 'core' or supplied('--test-timeout-seconds'):
+            parser.error('The refresh diagnostic requires source-built core mode and its fixed timeout.')
+        if (args.desktop_mode != 'rdp' or
+                (supplied('--desktop-scale') and args.desktop_scale != 100) or
+                (supplied('--desktop-width') and args.desktop_width != 1366) or
+                (supplied('--desktop-height') and args.desktop_height != 768)):
+            parser.error('The refresh diagnostic requires the prepared 1366x768 96-DPI RDP desktop.')
+        args.test_timeout_seconds = 600
+        args.desktop_scale = 100
+        args.desktop_width = 1366
+        args.desktop_height = 768
     ui_options = any((
         args.acceptance_manifest is not None,
         args.acceptance_mode is not None,
@@ -330,6 +363,8 @@ def parse_arguments(argv=None):
         parser.error('recovery observer options require --task-kind recovery.')
     if args.task_kind != 'ui' and ui_options:
         parser.error('UI observer options require --task-kind ui.')
+    if args.profile_refresh_stages and (ui_options or recovery_options or args.prepare_only):
+        parser.error('The refresh diagnostic does not accept observer or prepare-only options.')
     if args.candidate_mode:
         if not re.fullmatch(r'[0-9a-f]{40}', args.candidate_source_sha):
             parser.error('--candidate-source-sha must be a lowercase full Git SHA.')
@@ -474,6 +509,8 @@ def prepare_observer_inputs(root, manifest, args):
 
 def controller_task_arguments(root, args, path_converter=str):
     arguments = ['-TaskKind', args.task_kind]
+    if getattr(args, 'profile_refresh_stages', False):
+        arguments += ['-RefreshProfileOrder', args.refresh_profile_order]
     if getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID:
         digest = getattr(args, 'acceptance_profile_sha256', None)
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
@@ -520,6 +557,8 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         '-ExpectedBundleManifestSha256', expected_bundle_manifest_sha256,
         *controller_task_arguments(root, args),
     ]
+    if getattr(args, 'profile_refresh_stages', False):
+        common += ['-SuiteTimeoutSeconds', '600']
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
     if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core'):
@@ -542,6 +581,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
         + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
+        + (' -SuiteTimeoutSeconds 600' if getattr(args, 'profile_refresh_stages', False) else '')
         + ''.join(' ' + (value if value.startswith('-') else psquote(value))
                   for value in task_arguments)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
@@ -674,7 +714,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
             process = subprocess.Popen(command, cwd=cwd, text=True, env=environment)
             # The controller's default whole-suite budget is 2400 seconds; the
             # allowance covers natural OS-process exit and evidence collection.
-            deadline = (time.monotonic() + CONTROLLER_SUITE_TIMEOUT_SECONDS +
+            suite_timeout = 600 if getattr(args, 'profile_refresh_stages', False) else CONTROLLER_SUITE_TIMEOUT_SECONDS
+            deadline = (time.monotonic() + suite_timeout +
                         CONTROLLER_CLEANUP_ALLOWANCE_SECONDS)
             while process.poll() is None:
                 if time.monotonic() >= deadline:
@@ -739,7 +780,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
         code = reap(300)
         if code:
             raise subprocess.CalledProcessError(code, command)
-        if desktop and args.task_kind == 'core':
+        if desktop and args.task_kind == 'core' and not getattr(args, 'profile_refresh_stages', False):
             result = read_json_strict(
                 root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
@@ -1394,7 +1435,7 @@ def build_candidate_bundle(repo, root, args, tooling=None):
     return manifest
 
 
-def build_bundle(repo, root, tooling=None):
+def build_bundle(repo, root, tooling=None, *, refresh_profile=False):
     repo = Path(repo)
     root = Path(root)
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
@@ -1413,12 +1454,20 @@ def build_bundle(repo, root, tooling=None):
     with tempfile.TemporaryDirectory(prefix='.cargo-target-', dir=root) as target_directory:
         target_root = Path(target_directory).resolve(strict=True)
         env['CARGO_TARGET_DIR'] = str(target_root)
-        command = ['cargo', 'xwin', 'test', '--workspace', '--all-targets', '--all-features', '--locked', '--target', TARGET, '--no-run', '--message-format=json']
+        command = ['cargo', 'xwin', 'test']
+        if refresh_profile:
+            command += ['--release', '-p', 'darknamer-app', '--lib']
+        else:
+            command += ['--workspace', '--all-targets']
+        command += ['--all-features', '--locked', '--target', TARGET,
+                    '--no-run', '--message-format=json']
         messages_path = root / 'cargo-build.jsonl'
         with messages_path.open('w') as stream:
             subprocess.run(command, cwd=repo, env=env, stdout=stream, check=True)
         with messages_path.open() as stream:
             artifacts = test_artifacts(stream)
+        if refresh_profile and (len(artifacts) != 1 or artifacts[0]['name'] != 'darknamer_app'):
+            raise RuntimeError('Optimized refresh diagnostic must produce one app library test binary.')
         for row in artifacts:
             row['path'] = str(build_output_file(
                 target_root, row['path'], 'Windows test executable ' + row['file']))
@@ -1476,6 +1525,12 @@ def build_bundle(repo, root, tooling=None):
             'sha256': frozen['script:windows-vm-guest.ps1'],
         },
     }
+    if refresh_profile:
+        manifest['diagnostic'] = {
+            'kind': 'profile-refresh-stages', 'test_profile': 'release',
+            'test_name': REFRESH_PROFILE_TEST,
+            'orders': list(REFRESH_PROFILE_ORDERS),
+        }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     if tooling is not None:
         stage_verified_tooling(tooling, root)
@@ -1537,6 +1592,169 @@ def _verify_v2_result_owned_binding(result, transport):
             not isinstance(task, dict) or
             result.get('observer_lifecycle') != task.get('observer_lifecycle')):
         raise ValueError('V2 cleanup does not bind the result Job and observer lifetimes.')
+
+
+def verify_refresh_profile_records(output, order):
+    records = []
+    test_prefix = 'test ' + REFRESH_PROFILE_TEST + ' ... '
+    for line in output.splitlines():
+        payload = line[len(test_prefix):] if line.startswith(test_prefix) else line
+        if not payload.startswith('{'):
+            continue
+        try:
+            record = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError('Refresh diagnostic emitted malformed JSON.') from error
+        if not isinstance(record, dict) or record.get('kind') != 'refresh-stages-test-build':
+            continue
+        if (not isinstance(record.get('scenario'), str) or
+                any(type(record.get(key)) is not int or record[key] < 0
+                    for key in REFRESH_PROFILE_COUNTERS) or
+                record['timestamp_values'] != 2 * record['rows_formatted'] or
+                record['cache_hits'] + record['cache_misses'] != record['rows_formatted'] or
+                record['shell_calls'] != record['cache_misses'] or
+                record['row_values_exclusive_ns'] > record['row_values_inclusive_ns'] or
+                record['shell_max_ns'] > record['shell_nested_ns']):
+            raise ValueError('Refresh diagnostic scenario counters are invalid.')
+        records.append(record)
+    long_paths = ('long-hidden', 'long-hidden-unchanged',
+                  'long-visible', 'long-visible-unchanged')
+    if order == 'visible-hidden':
+        long_paths = long_paths[2:] + long_paths[:2]
+    expected = REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths
+    if tuple(record['scenario'] for record in records) != expected:
+        raise ValueError('Refresh diagnostic scenario inventory or order is invalid.')
+    return records
+
+
+def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
+                                  expected_vm_id, profile_sha256):
+    if (manifest.get('diagnostic') != {
+            'kind': 'profile-refresh-stages', 'test_profile': 'release',
+            'test_name': REFRESH_PROFILE_TEST,
+            'orders': list(REFRESH_PROFILE_ORDERS)} or
+            len(manifest.get('test_binaries', [])) != 1 or
+            manifest['test_binaries'][0].get('name') != 'darknamer_app'):
+        raise ValueError('The fixed optimized test bundle is invalid.')
+    if (result.get('schema_version') != 1 or
+            any(result.get(key) != manifest[key] for key in
+                ('source_sha', 'source_state', 'target')) or
+            result.get('diagnostic') != {
+                'kind': 'profile-refresh-stages', 'order': order,
+                'test_name': REFRESH_PROFILE_TEST, 'test_profile': 'release'} or
+            result.get('gui') is not None or result.get('status') != 'passed'):
+        raise ValueError('Refresh result does not match the fixed diagnostic selection.')
+    rows = result.get('tests')
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ValueError('Refresh result must contain exactly one native test binary.')
+    row = rows[0]
+    binary = manifest['test_binaries'][0]
+    if (row.get('file') != binary['file'] or row.get('sha256') != binary['sha256'] or
+            row.get('status') != 'passed' or row.get('job_cleanup') is not True or
+            row.get('exit_code') != 0 or
+            [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
+        raise ValueError('Refresh native test result is incomplete.')
+    checked_artifact(root, binary)
+    checked_artifact(root, manifest['application'])
+    checked_artifact(root, manifest['runner'])
+    output_bytes = 0
+    for channel in ('stdout', 'stderr'):
+        record = row.get(channel)
+        if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
+                record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES or
+                output_bytes > REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES - record['bytes']):
+            raise ValueError('Refresh diagnostic output exceeds its bound.')
+        path = checked_artifact(root, record)
+        if path.stat().st_size != record['bytes']:
+            raise ValueError('Refresh diagnostic output size differs from its record.')
+        output_bytes += record['bytes']
+    output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
+    summaries = re.findall(
+        r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; '
+        r'\d+ measured; (\d+) filtered out;', output, re.MULTILINE)
+    if (len(summaries) != 1 or summaries[0][0:4] != ('ok', '1', '0', '0') or
+            int(summaries[0][4]) < 1 or
+            output.count('test ' + REFRESH_PROFILE_TEST + ' ... ') != 1 or
+            re.search(r'(?m)^ok\r?$', output) is None):
+        raise ValueError('Refresh diagnostic did not execute the exact ignored test.')
+    records = verify_refresh_profile_records(output, order)
+    transport = result.get('transport')
+    if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
+            transport.get('status') != 'collected' or
+            transport.get('guest_cleanup') is not True):
+        raise ValueError('Refresh diagnostic transport did not finish with clean collection.')
+    verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
+                              profile_sha256=profile_sha256)
+    _verify_v2_result_owned_binding(result, transport)
+    verify_transport_binding(transport, transport_kind, expected_vm_id)
+    return {'order': order, 'status': 'passed', 'test_binary_sha256': binary['sha256'],
+            'stdout_sha256': row['stdout']['sha256'],
+            'stderr_sha256': row['stderr']['sha256'],
+            'filtered_out': int(summaries[0][4]), 'output_bytes': output_bytes,
+            'scenarios': len(records)}
+
+
+def run_refresh_profile(repo, args, tooling):
+    root, defaults, pwsh = prepare_transport(repo, args)
+    root = resolve_prepare_output_root(repo, root)
+    root.mkdir(mode=0o700)
+    prepared = root / 'bundle'
+    manifest = build_bundle(repo, prepared, tooling, refresh_profile=True)
+    frozen = {path.relative_to(prepared): sha256(path) for path in prepared.rglob('*')
+              if path.is_file() and not path.is_symlink()}
+    if any(path.is_symlink() for path in prepared.rglob('*')):
+        raise ValueError('The prepared diagnostic bundle contains a symbolic link.')
+    profile_sha256 = args.acceptance_profile_sha256
+    plan = {'schema_version': 1, 'diagnostic': 'profile-refresh-stages',
+            'source_sha': manifest['source_sha'],
+            'test_binary': manifest['test_binaries'][0],
+            'application': manifest['application'],
+            'bundle_manifest_sha256': frozen[Path('bundle.json')],
+            'profile_id': V2_PROFILE_ID, 'profile_sha256': profile_sha256,
+            'test_timeout_seconds': 600, 'suite_timeout_seconds': 600,
+            'output_limit_bytes': REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES,
+            'orders': list(REFRESH_PROFILE_ORDERS),
+            'scenarios': list(REFRESH_PROFILE_PREFIX_SCENARIOS) + [
+                'long-hidden', 'long-hidden-unchanged',
+                'long-visible', 'long-visible-unchanged'],
+            'rust_toolchain_sha256': sha256(repo / 'rust-toolchain.toml'),
+            'desktop': {'mode': args.desktop_mode, 'scale': args.desktop_scale,
+                        'width': args.desktop_width, 'height': args.desktop_height},
+            'initial_preferences': 'fresh-isolated-localappdata'}
+    (root / 'plan.json').write_text(json.dumps(plan, indent=2) + '\n')
+    attempts = []
+    for index, order in enumerate(REFRESH_PROFILE_ORDERS, 1):
+        if clean_source_identity(repo, 'Refresh diagnostic checkout')[1] != manifest['source_sha']:
+            raise RuntimeError('Checkout changed after the optimized diagnostic build.')
+        if any(sha256(prepared / name) != digest for name, digest in frozen.items()):
+            raise RuntimeError('The prepared optimized diagnostic bundle changed.')
+        attempt = root / ('pass-%02d-%s' % (index, order))
+        shutil.copytree(prepared, attempt)
+        if any(sha256(attempt / name) != digest for name, digest in frozen.items()):
+            raise RuntimeError('The copied optimized diagnostic bundle changed.')
+        args.refresh_profile_order = order
+        args.expected_bundle_manifest_sha256 = frozen[Path('bundle.json')]
+        record = {'order': order, 'path': str(attempt), 'status': 'failed'}
+        attempts.append(record)
+        try:
+            run_controller(attempt, args, defaults, pwsh)
+            if clean_source_identity(repo, 'Refresh diagnostic checkout')[1] != manifest['source_sha']:
+                raise RuntimeError('Checkout changed during the optimized diagnostic pass.')
+            result = read_json_strict(attempt / 'result.json', CORE_RESULT_MAXIMUM_BYTES)
+            record.update(verify_refresh_profile_result(
+                attempt, manifest, result, order,
+                'ssh' if args.ssh_host else 'powershell_direct', args.expected_vm_id,
+                profile_sha256))
+        except Exception as error:
+            record['error_type'] = type(error).__name__
+            print('FAIL: optimized refresh diagnostic ' + order + '; evidence=' +
+                  str(attempt) + '; reason=' + str(error), file=sys.stderr, flush=True)
+            return 1
+        finally:
+            (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+        print('PASS: optimized refresh diagnostic ' + order + '; evidence=' + str(attempt),
+              flush=True)
+    return 0
 
 
 def verify_observer_transport(root, role, expected_transport_kind, expected_vm_id,
@@ -1670,6 +1888,8 @@ def main(repo, argv=None, tooling=None):
             'bundle': str(root),
         }))
         return 0
+    if args.profile_refresh_stages:
+        return run_refresh_profile(repo, args, tooling)
     root, defaults, pwsh = prepare_transport(repo, args)
     manifest = (build_candidate_bundle(repo, root, args, tooling) if args.candidate_mode
                 else build_bundle(repo, root, tooling))
