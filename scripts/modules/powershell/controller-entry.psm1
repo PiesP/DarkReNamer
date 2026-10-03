@@ -1077,6 +1077,7 @@ function Invoke-DrWindowsVmController {
     [ValidateRange(10, 1800)][int] $TestTimeoutSeconds = 300,
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400,
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
+    [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
     [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
@@ -1140,6 +1141,13 @@ $taskSelection = Resolve-ControllerTaskSelection `
     -RecoveryIntentOnlyCandidateDiscard ([bool]$RecoveryIntentOnlyCandidateDiscard) `
     -HasRecoveryFixtureCount $PSBoundParameters.ContainsKey('RecoveryFixtureCount') `
     -TimeoutSeconds $TestTimeoutSeconds
+$refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+if ($refreshProfile -and ($taskSelection.kind -cne 'core' -or
+    $TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 600 -or
+    $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
+    throw 'Refresh profiling requires the fixed core diagnostic and v2 bounds.'
+}
+if ($refreshProfile) { $coreTestOutputAggregateMaximumBytes = 32MB }
 
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
 $v2Engine = $null
@@ -1277,6 +1285,19 @@ try {
         if ($manifest.schema_version -ne 1 -or $manifest.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
             $manifest.source_state -ne 'clean' -or @($manifest.test_binaries).Count -eq 0) {
             throw 'A clean source-bound bundle with native tests is required.'
+        }
+        if ($refreshProfile) {
+            if ($manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
+                $manifest.diagnostic.test_profile -cne 'release' -or
+                $manifest.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
+                (@($manifest.diagnostic.orders) -join ',') -cne 'hidden-visible,visible-hidden' -or
+                @($manifest.test_binaries).Count -ne 1 -or
+                $manifest.test_binaries[0].name -cne 'darknamer_app') {
+                throw 'Refresh diagnostic bundle identity is invalid.'
+            }
+        }
+        elseif ($null -ne $manifest.PSObject.Properties['diagnostic']) {
+            throw 'A diagnostic bundle requires its fixed selector.'
         }
         $artifacts = @($manifest.test_binaries) + @($manifest.application, $manifest.runner)
     }
@@ -4688,8 +4709,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
-    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine)
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
         $powerShell = Get-DrVmTrustedPowerShellPath
@@ -4716,6 +4737,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $out = Join-Path $trustedRoot 'out'
         $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtimeRoot + '"'
         if ($v2) { $arguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
+        if ($refreshOrder) { $arguments += ' -RefreshProfileOrder ' + $refreshOrder }
         $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
@@ -4859,8 +4881,14 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
-        $result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup) {
+        (-not $refreshProfile -and
+         ($result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup))) {
         throw 'Guest process jobs were not empty and closed before result collection.'
+    }
+    if ($refreshProfile -and ($result.diagnostic.kind -cne 'profile-refresh-stages' -or
+        $result.diagnostic.order -cne $RefreshProfileOrder -or
+        @($result.tests).Count -ne 1 -or $null -ne $result.gui)) {
+        throw 'Refresh diagnostic result selection is invalid.'
     }
     $processJobsClosed = $true
     $outputs = @()

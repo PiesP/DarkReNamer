@@ -36,6 +36,8 @@ function Invoke-DrWindowsVmGuest {
     [ValidateRange(1, 3600)]
     [int] $TestTimeoutSeconds = 300,
 
+    [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+
     [string] $OutputRoot,
 
     [string] $RuntimeRoot,
@@ -119,6 +121,19 @@ if ($null -eq $verified) {
         & $writeBootstrapDiagnostic 'bundle-verification-failed' $message
         throw
     }
+}
+$refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+if ($refreshProfile) {
+    if ($verified.manifest.schema_version -ne 1 -or
+        $verified.manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
+        $verified.manifest.diagnostic.test_profile -cne 'release' -or
+        $verified.tests.Count -ne 1 -or $TestTimeoutSeconds -ne 600 -or
+        $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
+        throw 'The guest refresh diagnostic selection is invalid.'
+    }
+}
+elseif ($null -ne $verified.manifest.PSObject.Properties['diagnostic']) {
+    throw 'A diagnostic bundle requires its fixed guest selector.'
 }
 $fixtureParentRoot = $null
 & $writeBootstrapDiagnostic 'fixture-root-validation'
@@ -208,6 +223,14 @@ $result = if ($candidateLane) {
         failure_reason = $null
     }
 }
+if ($refreshProfile) {
+    $result['diagnostic'] = [ordered]@{
+        kind = 'profile-refresh-stages'
+        order = $RefreshProfileOrder
+        test_name = 'windows::list_view::native_tests::profile_refresh_stages'
+        test_profile = 'release'
+    }
+}
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     $result.failure_reason = 'unsupported_platform'
     Initialize-TrustedResultWriter -Root $verified.root
@@ -267,6 +290,7 @@ try {
     }
     $testResults = [Collections.Generic.List[object]]::new()
     $remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes
+    if ($refreshProfile) { $remainingSuiteOutputBytes = [long](32MB) }
     for ($index = 0; $index -lt $verified.tests.Count; $index++) {
         $testOutputBudgetBytes = [Math]::Min(
             [long]$script:VmTestOutputAggregateLimitBytes,
@@ -279,6 +303,7 @@ try {
             -RuntimeRoot $effectiveRuntimeRoot `
             -Index ($index + 1) `
             -TimeoutSeconds $TestTimeoutSeconds `
+            -RefreshProfileOrder $RefreshProfileOrder `
             -OutputBudgetBytes $testOutputBudgetBytes
         $testOutputBytes = [long]0
         foreach ($channel in @('stdout', 'stderr')) {
@@ -298,19 +323,23 @@ try {
     } else {
         $verified.manifest.application
     }
-    $result.gui = Invoke-GuiSmoke `
-        -Application $applicationArtifact `
-        -Root $verified.root `
-        -OutputRoot $OutputRoot `
-        -RuntimeRoot $effectiveRuntimeRoot `
-        -FixtureParentRoot $fixtureParentRoot `
-        -ExpectedSession $ExpectedSessionId `
-        -TimeoutSeconds $TestTimeoutSeconds `
-        -RawEvidence:$candidateLane
+    if (-not $refreshProfile) {
+        $result.gui = Invoke-GuiSmoke `
+            -Application $applicationArtifact `
+            -Root $verified.root `
+            -OutputRoot $OutputRoot `
+            -RuntimeRoot $effectiveRuntimeRoot `
+            -FixtureParentRoot $fixtureParentRoot `
+            -ExpectedSession $ExpectedSessionId `
+            -TimeoutSeconds $TestTimeoutSeconds `
+            -RawEvidence:$candidateLane
+    }
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
-    if ($testFailures.Count -eq 0 -and $result.gui.status -ceq 'passed' -and
-        ($candidateLane -or $result.tests.Count -gt 0)) {
+    if ($testFailures.Count -eq 0 -and
+        (($refreshProfile -and $result.tests.Count -eq 1 -and $null -eq $result.gui) -or
+         (-not $refreshProfile -and $result.gui.status -ceq 'passed' -and
+          ($candidateLane -or $result.tests.Count -gt 0)))) {
         $result.status = 'passed'
     }
 }
