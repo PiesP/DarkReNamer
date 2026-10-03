@@ -251,9 +251,22 @@ function Assert-GuiRegressionInvocationBinding {
     if ($RegressionMode -ceq 'performance-sample') {
         $expectedPlan = [ordered]@{ iterations=2; idle_seconds=30; maximum_seconds=600;
             ordinary_rows=@(100,1000,10000); long_path_rows=1000; extension_classes=300;
-            add_remove_reset_cycles=3; sample_interval_ms=200 }
+            add_remove_reset_cycles=3; sample_interval_ms=200; long_path_order='hidden-visible' }
         $actualPlan = $ManifestInput.request.PSObject.Properties['performance_plan']
+        $order = ''
+        if ($null -ne $actualPlan) {
+            if ($actualPlan.Value -is [Collections.IDictionary]) {
+                if ($actualPlan.Value.Contains('long_path_order')) {
+                    $order = [string]$actualPlan.Value['long_path_order']
+                }
+            }
+            elseif ($null -ne $actualPlan.Value.PSObject.Properties['long_path_order']) {
+                $order = [string]$actualPlan.Value.long_path_order
+            }
+        }
+        if ($order -in @('hidden-visible','visible-hidden')) { $expectedPlan.long_path_order = $order }
         if ($null -eq $actualPlan -or
+            $order -cnotin @('hidden-visible','visible-hidden') -or
             ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
             ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
             $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
@@ -689,6 +702,7 @@ function Invoke-GuiRegressionAcceptance {
                     -EvidenceRoot $resolved.output_root `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
+                    -LongPathOrder ([string]$manifestInput.request.performance_plan.long_path_order) `
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations `
                     -ObservationSink $scenarioSink
@@ -748,7 +762,7 @@ function Invoke-GuiRegressionAcceptance {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
         }
         elseif ($RegressionMode -eq 'performance-sample') {
-            $result.assertions['scope'] = 'performance-sample-p1-p3-v1'
+            $result.assertions['scope'] = 'performance-sample-p1-p3-v2'
         }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'

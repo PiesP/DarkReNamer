@@ -484,4 +484,28 @@ finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($scheme) }
     }
     finally { $process.Dispose() }
 }
+$performanceSample = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSample'
+$performanceSampler = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSampler'
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+$performanceSample
+$performanceSampler
+"@
+Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($true, 0)) 'success' 'Successful probe classification'
+Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, 1460)) 'timeout' 'Identified timeout classification'
+foreach ($unknown in @(0, 5, 87)) {
+    Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, $unknown)) 'failure_unknown' 'Unknown failure classification'
+}
+$resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
+$beginAt = $performanceSampler.IndexOf('long begun = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
+$sendAt = $performanceSampler.IndexOf('bool responsive = SendMessageTimeoutW(', [StringComparison]::Ordinal)
+$endAt = $performanceSampler.IndexOf('long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
+$errorAt = $performanceSampler.IndexOf('Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
+$resourcesAt = $performanceSampler.IndexOf('process.TotalProcessorTime', [StringComparison]::Ordinal)
+if (-not (0 -le $resetAt -and $resetAt -lt $beginAt -and $beginAt -lt $sendAt -and
+    $sendAt -lt $endAt -and $endAt -lt $errorAt -and $errorAt -lt $resourcesAt)) {
+    throw 'Performance native probe timestamp or last-error capture order changed.'
+}
 Write-Output 'UI native/input behavior contracts passed.'

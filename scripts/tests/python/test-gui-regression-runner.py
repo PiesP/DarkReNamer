@@ -64,6 +64,8 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
                                              run, "c" * 64, {}, {})
         self.assertEqual(manifest["request"]["performance_plan"], runner.PERFORMANCE_PLAN)
+        self.assertEqual(run["run_id"], runner.PERFORMANCE_RUN_ID + "-hidden-visible")
+        self.assertEqual(manifest["command"][-2:], ["--performance-column-order", "hidden-visible"])
         self.assertEqual(manifest["command"].count("--diagnostic"), 1)
         self.assertEqual(manifest["command"][manifest["command"].index("--diagnostic") + 1],
                          "performance-sample")
@@ -76,6 +78,19 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-AcceptanceMode") + 1], "performance-sample")
         self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
         self.assertNotIn("-AcceptanceProfileId", command)
+
+    def test_performance_column_order_is_bound_to_manifest(self):
+        visible = runner.performance_run("visible-hidden")
+        self.assertEqual(visible["run_id"], runner.PERFORMANCE_RUN_ID + "-visible-hidden")
+        inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,
+                  "source_tree": "b" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
+                                             visible, "c" * 64, {}, {})
+        self.assertEqual(manifest["request"]["performance_plan"]["long_path_order"], "visible-hidden")
+        self.assertEqual(manifest["command"][-2:], ["--performance-column-order", "visible-hidden"])
+        with self.assertRaises(ValueError):
+            runner.performance_run("unknown")
 
     def test_appearance_pair_selects_one_bounded_run_and_explicit_v1_profile(self):
         pair = runner.appearance_pair_run(1366, 768, 96)

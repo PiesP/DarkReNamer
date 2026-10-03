@@ -67,19 +67,23 @@ RUNS = (
     },
 )
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
-PERFORMANCE_RUN_ID = "performance-sample-1366x768-96-text100"
+PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+PERFORMANCE_ORDERS = ("hidden-visible", "visible-hidden")
 PERFORMANCE_PLAN = {
     "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
     "ordinary_rows": [100, 1000, 10000], "long_path_rows": 1000,
     "extension_classes": 300, "add_remove_reset_cycles": 3,
     "sample_interval_ms": 200,
+    "long_path_order": "hidden-visible",
 }
 
 
-def performance_run() -> dict:
-    return {"run_id": PERFORMANCE_RUN_ID, "mode": "performance-sample",
+def performance_run(order: str = "hidden-visible") -> dict:
+    if order not in PERFORMANCE_ORDERS:
+        raise ValueError("Unsupported performance long-path order.")
+    return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
-            "text_scale_percent": 100}
+            "text_scale_percent": 100, "long_path_order": order}
 
 
 def appearance_pair_run(width: int, height: int, dpi: int, *,
@@ -620,13 +624,16 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
-            **({"performance_plan": PERFORMANCE_PLAN} if run["mode"] == "performance-sample" else {}),
+            **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
+               if run["mode"] == "performance-sample" else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
             *(["--diagnostic", run["mode"]] if run["mode"] in {"appearance-pair", "performance-sample"} else []),
+            *(["--performance-column-order", run["long_path_order"]]
+              if run["mode"] == "performance-sample" else []),
             *(["--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
@@ -736,7 +743,7 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id == PERFORMANCE_RUN_ID:
+    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS}:
         require(total_bytes <= 32 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == 1,
                 "Performance sample must stay within 32 MiB and one original PNG.")
@@ -991,6 +998,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample"])
+    parser.add_argument("--performance-column-order", choices=PERFORMANCE_ORDERS)
     parser.add_argument("--configuration-set", choices=["focused"])
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--desktop-width", type=int, default=1366)
@@ -1006,10 +1014,12 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "A configuration set requires --diagnostic appearance-pair.")
     require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
             "Acceptance profile selection requires --diagnostic appearance-pair.")
+    require(args.performance_column_order is None or args.diagnostic == "performance-sample",
+            "Long-path order selection requires --diagnostic performance-sample.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
-    selected_runs = ((performance_run(),) if args.diagnostic == "performance-sample" else
+    selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
