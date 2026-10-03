@@ -452,7 +452,7 @@ mod tests {
         let current = current_sid()?;
         let current = sid_string(current.ptr())?;
         let extra = if anonymous {
-            "(A;;FA;;;AN)"
+            "(A;OICI;FA;;;AN)"
         } else {
             "(A;;FA;;;WD)"
         };
@@ -654,6 +654,67 @@ mod tests {
         let after = current_sid()?;
         // SAFETY: process-token SIDs are owned and live.
         assert_eq!(unsafe { EqualSid(after.ptr(), process_sid.ptr()) }, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_new_export_denies_anonymous_stage_access_until_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        set_dacl(fixture.path(), true)?;
+        let parent = OpenOptions::new()
+            .access_mode(DIRECTORY_ACCESS)
+            .share_mode(SHARE_NO_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(fixture.path())?;
+        let destination = fixture.path().join("shared.txt");
+        let target = windows_native::prepare_text_export_target(&destination)?;
+        let bytes = b"intentionally shared final export";
+        windows_native::write_text_export_target_with_before_commit(target, bytes, || {
+            let entries = fs::read_dir(fixture.path())?.collect::<io::Result<Vec<_>>>()?;
+            assert_eq!(entries.len(), 1);
+            let stage = entries[0].file_name().encode_wide().collect::<Vec<_>>();
+            // SAFETY: the test owns this thread; the guard restores impersonation.
+            if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let impersonation = AnonymousImpersonation { active: true };
+            for access in [FILE_READ_DATA, FILE_WRITE_DATA, DELETE] {
+                assert!(
+                    windows_native::open_relative(
+                        &parent,
+                        &stage,
+                        access | SYNCHRONIZE,
+                        SHARE_NO_DELETE
+                            | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+                        FILE_OPEN,
+                        FILE_OPTIONS,
+                    )
+                    .is_err()
+                );
+            }
+            impersonation.revert()
+        })?;
+        // A positive control checks the deliberately inherited final permissions
+        // through the same retained directory and genuinely different principal.
+        // SAFETY: the test owns this thread; the guard restores impersonation.
+        if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let impersonation = AnonymousImpersonation { active: true };
+        let mut published = windows_native::open_relative(
+            &parent,
+            &"shared.txt".encode_utf16().collect::<Vec<_>>(),
+            FILE_READ_DATA | SYNCHRONIZE,
+            SHARE_NO_DELETE | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPTIONS,
+        )?;
+        let mut actual = Vec::new();
+        std::io::Read::read_to_end(&mut published, &mut actual)?;
+        assert_eq!(actual, bytes);
+        drop(published);
+        impersonation.revert()?;
         Ok(())
     }
 }
