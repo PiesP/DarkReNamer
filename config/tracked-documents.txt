@@ -10,4 +10,5 @@ THIRD_PARTY_NOTICES.md
 config/tracked-documents.txt
 crates/darknamer-app/THIRD_PARTY_NOTICES.md
 docs/USER-GUIDE.md
+docs/USER-GUIDE.ko.md
 docs/history/WINDOWS-ACCEPTANCE.md

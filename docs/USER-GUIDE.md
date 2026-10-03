@@ -1,5 +1,7 @@
 # User guide
 
+[한국어 사용자 안내](USER-GUIDE.ko.md)
+
 This guide covers the native Korean-language DarkReNamer interface. For the
 supported operating-system and filesystem boundary, read the
 [README](../README.md#supported-environment). The
@@ -10,7 +12,8 @@ supported operating-system and filesystem boundary, read the
 Start DarkReNamer normally, without administrator elevation. Use **파일 추가...**
 (Add files) to add entries within the supported scope. Choose a name
 transformation and review both the proposed name and the Status column before
-Apply.
+Apply. The final confirmation defaults to Cancel; approve only after checking
+the proposed changes.
 
 Blue emphasis identifies planned names, amber identifies warnings, and red
 identifies blocked names. Status text carries the same meaning without relying
@@ -21,12 +24,29 @@ not check live filesystem occupancy or authorize Apply.
 
 ## Save names or paths
 
-Save Names and Save Paths write a complete UTF-16LE text file with a BOM.
+**파일 > 내보내기 > 변경 후 이름 목록 저장...** and
+**파일 > 내보내기 > 현재 경로 목록 저장...**
+write a complete UTF-16LE text file with a BOM.
 Choose a new, unused file name in a supported local NTFS folder. Existing files
 are never overwritten; if another process creates the selected name before the
 save completes, the export fails and that file remains unchanged. New files use
 the selected folder's normal inherited permissions. To keep an export private,
 choose a private folder.
+
+## Text import, cancellation, and close
+
+Use **파일 > 변경 후 이름 목록 가져오기...** to load proposed names in list
+order, or **파일 > 경로 목록에서 추가...** to add entries named in a text
+file. Selecting the text file is separate from validating the filesystem scope
+of entries that will be renamed. The import picker can select provider or
+network locations; the supported rename scope remains local NTFS. Import reads
+the selected file on a worker thread, and a provider may leave an I/O request
+pending without a fixed completion deadline.
+
+A cancellation request does not mean import has finished. Closing the window or
+starting another operation may wait until the import worker finishes. A result
+read after cancellation is discarded rather than applied to the list. Do not
+move, edit, or delete a journal or lock file to clear a waiting state.
 
 ## Set or reset a target folder
 
@@ -109,7 +129,8 @@ reconciling current identities and attempting reverse-order rollback.
 Keep Apply locked and preserve the journal evidence when the application reports
 both active and candidate journals, corrupt or torn content, an uncertain
 promotion, or another ambiguous state. Do not rename, move, edit, or delete the
-journal files to force the workbench to unlock.
+journal or lock files to force the workbench to unlock. Report the displayed
+diagnostic rather than bypassing the lock.
 
 Diagnostic export copies retained journal evidence to new files without
 overwriting an existing destination. Store exported evidence privately: it can
@@ -134,3 +155,6 @@ read [Startup recovery and corrupt evidence](../SAFETY.md#startup-recovery-and-c
 - The supported scope excludes cross-volume and directory moves, destination
   creation, replacement, folder merging, non-NTFS filesystems, network or device
   paths, case-sensitive directories, elevated execution, and reparse traversal.
+- Automated checks do not establish human visual quality, comprehensive
+  accessibility, actual IME or Explorer interaction, or physical-device and
+  power-loss behavior.
