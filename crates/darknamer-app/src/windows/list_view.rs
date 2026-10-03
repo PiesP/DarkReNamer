@@ -1992,18 +1992,25 @@ mod native_tests {
         let mut queries = 0_u32;
         let mut cumulative_ns = 0_u128;
         let mut maximum_ns = 0_u128;
-        let cases = [
-            ("one.TXT", false),
-            ("two.txt", false),
-            ("one.ZIP", false),
-            ("two.zip", false),
-            ("README", false),
-            ("notes", false),
-            ("folder", true),
-            ("another-folder", true),
+        // Use the same fixed miss/hit/clear schedule as the deterministic
+        // cache test. The actual Shell decides whether each class resolves;
+        // this probe measures real query costs without simulating outcomes.
+        let mut names = vec![
+            "one.TXT".to_owned(),
+            "one.BAD".to_owned(),
+            "one.ZERO".to_owned(),
         ];
-        for (name, is_directory) in cases {
-            let item = LegacyListItem::new(name, is_directory, 0, 0, 0);
+        names.extend((0..253).map(|index| format!("f.x{index}")));
+        names.extend(["two.txt", "two.bad", "two.zero"].map(str::to_owned));
+        names.push("f.x253".to_owned());
+        names.extend(["three.TXT", "three.BAD", "three.ZERO"].map(str::to_owned));
+        names.extend((254..506).map(|index| format!("f.x{index}")));
+        names.extend(["four.txt", "four.bad", "four.zero"].map(str::to_owned));
+        names.push("f.x506".to_owned());
+        names.extend(["five.TXT", "five.BAD", "five.ZERO"].map(str::to_owned));
+        assert_eq!(names.len(), 522);
+        for name in names {
+            let item = LegacyListItem::new(name, false, 0, 0, 0);
             cached_file_icon_index(&mut cache, &item, |key, directory| {
                 let started = Instant::now();
                 let result = query_shell_icon_index(key, directory);
@@ -2015,10 +2022,10 @@ mod native_tests {
             });
             assert!(cache.len() <= 256);
         }
-        assert_eq!(queries, 4);
+        assert_eq!(queries, 516);
         assert_eq!(cache.len(), 4);
         println!(
-            "{{\"kind\":\"live-shell-test-build\",\"accesses\":8,\"queries\":{queries},\"hits\":4,\"cumulative_query_ns\":{cumulative_ns},\"maximum_query_ns\":{maximum_ns}}}"
+            "{{\"kind\":\"live-shell-test-build\",\"accesses\":522,\"queries\":{queries},\"hits\":6,\"cumulative_query_ns\":{cumulative_ns},\"maximum_query_ns\":{maximum_ns}}}"
         );
         Ok(())
     }
