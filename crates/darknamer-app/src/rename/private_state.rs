@@ -27,11 +27,11 @@ use windows_sys::Win32::Security::{
     TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_DELETE_CHILD,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
-    FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
-    WRITE_OWNER,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL,
+    SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -309,6 +309,7 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
                 | WRITE_OWNER
                 | FILE_READ_DATA
                 | FILE_WRITE_DATA
+                | FILE_APPEND_DATA
                 | FILE_READ_EA
                 | FILE_WRITE_EA
                 | FILE_WRITE_ATTRIBUTES
@@ -411,22 +412,46 @@ impl PrivateState {
         windows_native::validate_safe_local_root(local_app_data)?;
         let (drive, components) = windows_native::traversal_parts(local_app_data)?;
         let mut chain = Vec::with_capacity(components.len() + 3);
-        let drive_file = windows_native::open_private_root_directory(&drive)?;
+        let drive_file =
+            windows_native::open_private_root_directory(&drive).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("private state drive open: {_error}");
+            })?;
         windows_native::validate_directory_handle(&drive_file)?;
         windows_native::reject_case_sensitive_directory(&drive_file)?;
         windows_native::reject_remote_protocol_if_reported(&drive_file)?;
-        self.validate(&drive_file, true, true)?;
+        self.validate(&drive_file, true, true)
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("private state drive ACL: {_error}");
+            })?;
         chain.push(drive_file);
         for component in &components {
             let parent = chain.last().ok_or_else(refused)?;
-            let file = self.open_directory(parent, component, false)?;
-            self.validate(&file, true, true)?;
+            let file = self
+                .open_directory(parent, component, false)
+                .inspect_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("private state ancestor open: {_error}");
+                })?;
+            self.validate(&file, true, true).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("private state ancestor ACL: {_error}");
+            })?;
             chain.push(file);
         }
         for leaf in [OsStr::new("DarkReNamer"), OsStr::new("journal")] {
             let parent = chain.last().ok_or_else(refused)?;
-            let file = self.open_directory(parent, leaf, true)?;
-            self.validate(&file, false, true)?;
+            let file = self
+                .open_directory(parent, leaf, true)
+                .inspect_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("private state owned directory open/create: {_error}");
+                })?;
+            self.validate(&file, false, true).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("private state owned directory ACL: {_error}");
+            })?;
             chain.push(file);
         }
         windows_native::reject_unsupported_filesystem(chain.last().ok_or_else(refused)?)?;
@@ -449,13 +474,17 @@ mod tests {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
     fn set_dacl(path: &Path, anonymous: bool) -> io::Result<()> {
-        let current = current_sid()?;
-        let current = sid_string(current.ptr())?;
         let extra = if anonymous {
             "(A;OICI;FA;;;AN)"
         } else {
             "(A;;FA;;;WD)"
         };
+        set_dacl_with_extra(path, extra)
+    }
+
+    fn set_dacl_with_extra(path: &Path, extra: &str) -> io::Result<()> {
+        let current = current_sid()?;
+        let current = sid_string(current.ptr())?;
         let sddl = format!("D:P(A;;FA;;;{current})(A;;FA;;;SY)(A;;FA;;;BA){extra}");
         let encoded = OsStr::new(&sddl)
             .encode_wide()
@@ -562,6 +591,47 @@ mod tests {
                 assert!(error.into_evidence().is_some());
             }
             assert_eq!(fs::read(&path)?, b"retained evidence");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_anonymous_journal_permission_is_rejected_before_decode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for leaf in ["active.drj", "candidate.drj"] {
+            let fixture = tempfile::tempdir()?;
+            let root = JournalRoot::open_private(fixture.path())?;
+            drop(FileJournal::create_new(&root, leaf)?);
+            let path = root.path().join(leaf);
+            fs::write(&path, b"original evidence")?;
+            set_dacl_with_extra(&path, "(A;;0x00100004;;;AN)")?;
+            // SAFETY: this test owns the thread; the guard restores its identity.
+            if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let impersonation = AnonymousImpersonation { active: true };
+            let mut append = windows_native::open_relative(
+                root.retained_file_for_test(),
+                &leaf.encode_utf16().collect::<Vec<_>>(),
+                FILE_APPEND_DATA | SYNCHRONIZE,
+                SHARE_NO_DELETE,
+                FILE_OPEN,
+                FILE_OPTIONS,
+            )?;
+            std::io::Write::write_all(&mut append, b" appended by another principal")?;
+            drop(append);
+            impersonation.revert()?;
+            let expected = fs::read(&path)?;
+            assert_eq!(expected, b"original evidence appended by another principal");
+            let error = FileJournal::open_existing_retained(&root, leaf)
+                .err()
+                .ok_or_else(refused)?;
+            assert_eq!(
+                error.failure().stage,
+                super::super::JournalOpenStage::Validate
+            );
+            assert!(error.into_evidence().is_some());
+            assert_eq!(fs::read(&path)?, expected);
         }
         Ok(())
     }
