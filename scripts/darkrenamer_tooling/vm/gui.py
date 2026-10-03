@@ -17,7 +17,9 @@ import sys
 from darkrenamer_tooling.vm import launcher
 from darkrenamer_tooling.vm.connection import load_connection_profile, guest_preflight
 from darkrenamer_tooling.formats.png import PngPolicy, decode_png_bytes
-from darkrenamer_tooling.contracts.tooling import staged_tooling_files
+from darkrenamer_tooling.contracts.tooling import (
+    RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
+)
 
 
 SAFE_LEAF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
@@ -67,19 +69,23 @@ RUNS = (
     },
 )
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
-PERFORMANCE_RUN_ID = "performance-sample-1366x768-96-text100"
+PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+PERFORMANCE_ORDERS = ("hidden-visible", "visible-hidden")
 PERFORMANCE_PLAN = {
     "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
     "ordinary_rows": [100, 1000, 10000], "long_path_rows": 1000,
     "extension_classes": 300, "add_remove_reset_cycles": 3,
     "sample_interval_ms": 200,
+    "long_path_order": "hidden-visible",
 }
 
 
-def performance_run() -> dict:
-    return {"run_id": PERFORMANCE_RUN_ID, "mode": "performance-sample",
+def performance_run(order: str = "hidden-visible") -> dict:
+    if order not in PERFORMANCE_ORDERS:
+        raise ValueError("Unsupported performance long-path order.")
+    return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
-            "text_scale_percent": 100}
+            "text_scale_percent": 100, "long_path_order": order}
 
 
 def appearance_pair_run(width: int, height: int, dpi: int, *,
@@ -533,10 +539,11 @@ def source_identity(repo: Path) -> tuple[str, str]:
     return source_sha, source_tree
 
 
-def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
-                        acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict]:
-    manifest = read_json(bundle / "bundle.json")
-    source_sha, source_tree = source_identity(repo)
+def validated_bundle_sources(repo: Path, bundle: Path,
+                             acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict[str, Path]]:
+    manifest = read_json(ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024,
+                                       "Native bundle manifest"))
+    source_sha, _ = source_identity(repo)
     require(manifest.get("source_sha") == source_sha and manifest.get("source_state") == "clean",
             "Native bundle and checkout source differ.")
     application = ordinary_file(bundle / manifest["application"]["file"], 256 * 1024 * 1024,
@@ -547,6 +554,8 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
             "Native bundle must contain its real nonempty test binary set.")
     require(digest(application) == manifest["application"]["sha256"], "Application hash differs from bundle.json.")
     require(digest(runner) == manifest["runner"]["sha256"], "Runner hash differs from bundle.json.")
+    require(digest(repo / "Cargo.lock") == manifest.get("cargo_lock_sha256"),
+            "Cargo.lock differs from bundle.json.")
     scripts = repo / "scripts"
     sources = {
         "bundle.json": bundle / "bundle.json",
@@ -573,6 +582,16 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
         require(digest(source) == row.get("sha256"),
                 f"Native test binary hash differs from bundle.json: {row['file']}")
         sources[row["file"]] = source
+    return manifest, sources
+
+
+def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
+                        acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict]:
+    manifest, sources = validated_bundle_sources(repo, bundle, acceptance_profile_id)
+    source_sha, source_tree = source_identity(repo)
+    test_binaries = manifest["test_binaries"]
+    application = sources[manifest["application"]["file"]]
+    runner = sources[manifest["runner"]["file"]]
     rows = materialize_inputs(run_root, sources)
     require(rows[application.name]["sha256"] == manifest["application"]["sha256"],
             "Copied application differs from the native bundle.")
@@ -600,10 +619,47 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
     }
 
 
+def validate_prepared_bundle(repo: Path, bundle: Path, expected_application_sha256: str) -> dict:
+    """Bind a prepared native bundle to the current clean source before any VM work."""
+    require(bundle.is_absolute() and bundle.is_dir() and not bundle.is_symlink() and
+            bundle.resolve(strict=True) == bundle and not bundle.is_relative_to(repo),
+            "Prepared bundle root must be an ordinary external absolute directory.")
+    require(SHA256.fullmatch(expected_application_sha256) is not None,
+            "Prepared application pin must be a lowercase SHA-256.")
+    manifest, sources = validated_bundle_sources(repo, bundle)
+    require(manifest.get("schema_version") == 1 and manifest.get("target") == launcher.TARGET and
+            manifest["application"].get("file") == "DarkReNamer.exe" and
+            manifest["runner"].get("file") == "windows-vm-guest.ps1" and
+            manifest["application"]["sha256"] == expected_application_sha256,
+            "Prepared native bundle identity or application pin differs.")
+    require(digest(sources["windows-vm-guest.ps1"]) == digest(repo / "scripts" / "windows-vm-guest.ps1"),
+            "Prepared native runner differs from current source.")
+    record = read_json(ordinary_file(bundle / RECORD_NAME, 2 * 1024 * 1024,
+                                     "Prepared tooling record"))
+    roles = tuple(row["role"] for row in record["modules"])
+    require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
+             "powershell-guest-entry"}.issubset(roles),
+            "Prepared tooling lacks the native GUI execution closure.")
+    trusted = trusted_tooling_inventory(repo, manifest["source_sha"], roles)
+    require(record.get("schema_version") == 1 and record.get("manifest") == trusted["manifest"] and
+            {row["role"]: row for row in record["modules"]} ==
+            {row["role"]: row for row in trusted["modules"]},
+            "Prepared tooling closure differs from trusted source.")
+    return manifest
+
+
 def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_sha256: str,
                    host_preflight: dict, guest_preflight: dict,
-                   reference: dict | None = None) -> dict:
+                   reference: dict | None = None,
+                   prepared_application_sha256: str | None = None) -> dict:
+    require(prepared_application_sha256 is None or
+            (run["mode"] == "performance-sample" and
+             SHA256.fullmatch(prepared_application_sha256) is not None),
+            "Prepared bundle provenance is restricted to pinned performance runs.")
     _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
+    require(prepared_application_sha256 is None or
+            inputs["artifacts"]["application"]["sha256"] == prepared_application_sha256,
+            "Prepared application pin differs from copied run input.")
     result = {
         "schema_version": 1,
         "run_id": run["run_id"],
@@ -614,19 +670,29 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
         "guest_preflight": guest_preflight,
         "bundle_manifest": inputs["bundle_manifest"],
         "artifacts": inputs["artifacts"],
+        **({"prepared_bundle": {"origin": "external-prepared-source-built-bundle",
+                "bundle_manifest_sha256": inputs["bundle_manifest"]["sha256"],
+                "application_sha256": prepared_application_sha256}}
+           if prepared_application_sha256 is not None else {}),
         "request": {
             "mode": run["mode"],
             "appearance": run["appearance"],
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
-            **({"performance_plan": PERFORMANCE_PLAN} if run["mode"] == "performance-sample" else {}),
+            **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
+               if run["mode"] == "performance-sample" else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
             *(["--diagnostic", run["mode"]] if run["mode"] in {"appearance-pair", "performance-sample"} else []),
+            *(["--performance-column-order", run["long_path_order"]]
+              if run["mode"] == "performance-sample" else []),
+            *(["--prepared-bundle-root", "<external-prepared-bundle-root>",
+               "--expected-prepared-application-sha256", prepared_application_sha256]
+              if prepared_application_sha256 is not None else []),
             *(["--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
@@ -736,7 +802,7 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id == PERFORMANCE_RUN_ID:
+    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS}:
         require(total_bytes <= 32 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == 1,
                 "Performance sample must stay within 32 MiB and one original PNG.")
@@ -991,6 +1057,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample"])
+    parser.add_argument("--performance-column-order", choices=PERFORMANCE_ORDERS)
+    parser.add_argument("--prepared-bundle-root", type=Path)
+    parser.add_argument("--expected-prepared-application-sha256")
     parser.add_argument("--configuration-set", choices=["focused"])
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--desktop-width", type=int, default=1366)
@@ -1006,10 +1075,16 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "A configuration set requires --diagnostic appearance-pair.")
     require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
             "Acceptance profile selection requires --diagnostic appearance-pair.")
+    require(args.performance_column_order is None or args.diagnostic == "performance-sample",
+            "Long-path order selection requires --diagnostic performance-sample.")
+    require((args.prepared_bundle_root is None) ==
+            (args.expected_prepared_application_sha256 is None) and
+            (args.prepared_bundle_root is None or args.diagnostic == "performance-sample"),
+            "Prepared bundle and pinned application hash require the performance diagnostic together.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
-    selected_runs = ((performance_run(),) if args.diagnostic == "performance-sample" else
+    selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
@@ -1030,33 +1105,44 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                                **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
                               for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
+    prepared_manifest = None
+    if args.prepared_bundle_root is not None:
+        prepared_manifest = validate_prepared_bundle(
+            repo, args.prepared_bundle_root, args.expected_prepared_application_sha256)
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
     host = host_preflight()
     guest = guest_preflight(profile)
     root.mkdir()
-    bundle = root / "bundle"
+    bundle = args.prepared_bundle_root if prepared_manifest is not None else root / "bundle"
     runs_root = root / "runs"
     runs_root.mkdir()
-    launcher.build_bundle(repo, bundle, tooling)
+    if prepared_manifest is None:
+        launcher.build_bundle(repo, bundle, tooling)
     reference = None
     for run in selected_runs:
         run_root = runs_root / run["run_id"]
         run_root.mkdir()
         if run["mode"] == "tooltip":
             reference = reference_for(runs_root / RUNS[0]["run_id"])
-        write_json(
-            run_root / "input-manifest.json",
-            input_manifest(repo, bundle, run_root, run, profile_sha256, host, guest, reference),
-            exclusive=True,
-        )
+        manifest_document = input_manifest(
+            repo, bundle, run_root, run, profile_sha256, host, guest, reference,
+            args.expected_prepared_application_sha256 if prepared_manifest is not None else None)
+        if prepared_manifest is not None:
+            validate_prepared_bundle(repo, bundle, args.expected_prepared_application_sha256)
+            require(manifest_document["artifacts"]["application"]["sha256"] ==
+                    args.expected_prepared_application_sha256 and
+                    manifest_document["bundle_manifest"]["sha256"] == digest(bundle / "bundle.json"),
+                    "Prepared bundle changed while immutable run inputs were staged.")
+        write_json(run_root / "input-manifest.json", manifest_document, exclusive=True)
         execute_run(repo, run_root / "inputs", run_root, run, profile, launcher)
     validate_all(repo, runs_root, root, args.diagnostic, selected_runs, args.configuration_set)
     print(json.dumps({
         "status": "diagnostic-validated" if args.diagnostic else "validated",
-        "source_sha": read_json(bundle / "bundle.json")["source_sha"],
+        "source_sha": (prepared_manifest or read_json(bundle / "bundle.json"))["source_sha"],
         "runs": [run["run_id"] for run in selected_runs],
         "diagnostic": args.diagnostic,
+        "bundle_mode": "prepared" if prepared_manifest is not None else "built",
         "configuration_set": args.configuration_set,
         "output_root": str(root),
     }))

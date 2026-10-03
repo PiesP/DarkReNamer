@@ -430,6 +430,17 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+The ignored icon-delay diagnostic in `windows/list_view.rs` installs a subclass
+only on its test-owned HWND. Its boxed context remains on the owning UI thread
+through synchronous destruction; `WM_NCDESTROY` removes the exact subclass and
+records retirement. A guard handles fallible probe-thread creation and retains
+the context on uncertain native cleanup. The independent thread receives only
+a copied HWND and performs a bounded `WM_NULL` probe; it finishes before the
+owner destroys the window. Callback failures are contained before crossing the
+native ABI. This test injects a fixed delay into the cache lookup seam, without
+installing a provider or changing production lookup behavior. Its timings are
+test-build diagnostics, separate from production executable measurements.
+
 Button and decorative separator painting uses pure bounded rectangles. Interactive
 outlines and decorative hairlines stay one physical pixel; focus/pressed insets
 use the live control DPI without changing control layout or command metadata.

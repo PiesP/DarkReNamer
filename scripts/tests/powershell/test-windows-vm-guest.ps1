@@ -3268,6 +3268,12 @@ Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCaptur
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
         $initStdoutPath = Join-Path $valid.root 'uia-core-init.stdout.txt'
         $initStderrPath = Join-Path $valid.root 'uia-core-init.stderr.txt'
+        $missingExecutable = Join-Path $valid.root 'missing-process-creation-fixture.exe'
+        if (Test-Path -LiteralPath $missingExecutable) { throw 'Missing-process fixture is occupied.' }
+        Assert-Win32Failure -NativeErrorCode 2 -Label 'Missing native process creation' -Action {
+            Start-JobBoundProcess -FilePath $missingExecutable -Arguments '' -WorkingDirectory $valid.root
+        }
+        $launchRequestTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
         $initProcess = Start-JobBoundProcess `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
             -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
@@ -3275,6 +3281,14 @@ Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCaptur
             -StdoutPath $initStdoutPath `
             -StderrPath $initStderrPath
         try {
+            $launchReturnedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            if ($initProcess.ProcessCreateBeginTimestamp -lt $launchRequestTimestamp -or
+                $initProcess.ProcessCreateEndTimestamp -lt $initProcess.ProcessCreateBeginTimestamp -or
+                $initProcess.ProcessCreateEndTimestamp -gt $launchReturnedTimestamp -or
+                $initProcess.ProcessCreateBeginTimestamp -ne $initProcess.owner.ProcessCreateBeginTimestamp -or
+                $initProcess.ProcessCreateEndTimestamp -ne $initProcess.owner.ProcessCreateEndTimestamp) {
+                throw 'Native process creation interval is outside its monotonic launch bounds.'
+            }
             $initResult = Wait-JobBoundProcessWithOutputLimit `
                 -State $initProcess `
                 -StdoutPath $initStdoutPath `

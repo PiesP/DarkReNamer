@@ -181,6 +181,8 @@ function Start-AcceptanceApplication {
     $owned = $null
     try {
         $executableSha256 = Get-LowerSha256 -Path $FilePath
+        # Captured immediately before launch; Stopwatch is monotonic across the readiness poll.
+        $launchTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory
         $process = $owned.process
         $application = [pscustomobject]@{
@@ -188,6 +190,7 @@ function Start-AcceptanceApplication {
             process = $process
             main = $null
             main_handle = [IntPtr]::Zero
+            launch_ticks = $launchTicks
             process_lifecycle = $null
         }
         $application.process_lifecycle = New-AcceptanceProcessLifecycle `
@@ -303,7 +306,8 @@ function Import-GuiRegressionPathList {
         [Parameter(Mandatory)][int] $ExpectedRows,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [object] $Grid
+        [object] $Grid,
+        [switch] $MeasureCommandReadiness
     )
     if ($null -eq $Grid) {
         $Grid = Get-ObserverGrid -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -338,7 +342,21 @@ function Import-GuiRegressionPathList {
     if ($Grid.pattern.Current.RowCount -ne $ExpectedRows) {
         throw "Path admission did not reach $ExpectedRows rows before the bounded deadline."
     }
-    [pscustomobject]@{ grid = $Grid; elapsed_ms = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3) }
+    $rowObservedMs = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
+    $readinessMs = $null
+    if ($MeasureCommandReadiness) {
+        $readinessWatch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+            [IntPtr]$Application.main_handle, [uint32]0x801D)) {
+            if ($readinessWatch.Elapsed.TotalSeconds -ge $WaitSeconds) {
+                throw 'Path-list import command did not become ready after row observation.'
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        $readinessMs = [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3)
+    }
+    [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
+        command_ready_after_rows_ms = $readinessMs }
 }
 function Set-ObserverSelectedRow {
     param(

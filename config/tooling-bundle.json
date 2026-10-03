@@ -205,7 +205,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "009bd7ec8013524edcad18566a7a857eb15389fb839dce507b124fcbb79b5897",
+      "sha256": "4ffe09710ed2e92fa6bd316876d7aeffb4145e34e40b008dd8e5de95470e8c9f",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -421,7 +421,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "fa3b027a391e43465e3050da9c353d34d971969b60054ae4ea3986ce0c41869e",
+      "sha256": "ceff0da2f8eef91d41aa5817a4010bf78b42c825d0be9a9ee79602f0a14e3fdf",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -474,7 +474,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "5a0256a47a1d283a1fbc04e0419a49710cca6c4cfb0a1eecd22a0d21e50675c5",
+      "sha256": "9435eb3d43de90455b04e5d2ae513ad097912ddf208678450f116fb462b3cbd4",
       "dependencies": []
     },
     {
@@ -574,7 +574,7 @@
       "bundle": "ui-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b03d79a0dff42955874bbd9622fc6c6b383cacdae9b4e5290207de8e53be031c",
+      "sha256": "a9b0bd7c3957e45a9e5fc473f5540b1d2afcdafb20ac6e859492ac0458709038",
       "dependencies": []
     },
     {
@@ -601,7 +601,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "45654c3ea51706e51589272fa5cc5a0b92e36fc00ec59c231f4943de98656e9b",
+      "sha256": "85dade95e971557c330a2b071382fd58e874540086e04d6723b864561edbfc3f",
       "dependencies": []
     },
     {
@@ -619,7 +619,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "dd346ea12fa272cfeec3a807aec28a0ca7a7c94249d6b41dde77ad306eaecb4f",
+      "sha256": "19d31036810943b446f0b15c6a3cefa0e9291dd125af6ee171e60ec7b89c3eb9",
       "dependencies": []
     },
     {
@@ -628,7 +628,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9f43b9b3b39dafec45d3b2212cacdfab618b19f440d887e9a4e2634f98124c55",
+      "sha256": "5ffb934b0ad645d85f1f74cf54bfacce996f31b720349d7657f79308d58470bc",
       "dependencies": []
     },
     {

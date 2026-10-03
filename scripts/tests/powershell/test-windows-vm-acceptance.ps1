@@ -2890,11 +2890,25 @@ try {
     $candidatePerformanceInput.request | Add-Member -NotePropertyName performance_plan -NotePropertyValue ([ordered]@{
         iterations=2; idle_seconds=30; maximum_seconds=600; ordinary_rows=@(100,1000,10000)
         long_path_rows=1000; extension_classes=300; add_remove_reset_cycles=3; sample_interval_ms=200
+        long_path_order='hidden-visible'
     })
     Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
         -Verified $candidateRegressionResolved -RegressionMode performance-sample `
         -Appearance light -TextScalePercent 100 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePerformanceInput.request.performance_plan.long_path_order = 'visible-hidden'
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+        -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePerformanceInput.request.performance_plan.long_path_order = 'invalid'
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+            -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidatePerformanceInput.request.performance_plan.long_path_order = 'hidden-visible'
     $candidatePerformanceInput.request.performance_plan.idle_seconds = 0
     Assert-Fails {
         Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `

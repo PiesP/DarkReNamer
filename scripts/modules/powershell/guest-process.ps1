@@ -719,6 +719,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private long channelLimit, aggregateLimit;
     private volatile bool outputLimitExceeded;
     public Process Process { get; private set; }
+    public long ProcessCreateBeginTimestamp { get; private set; }
+    public long ProcessCreateEndTimestamp { get; private set; }
     public bool OutputLimitExceeded { get { return outputLimitExceeded; } }
     public uint LastProcessListAssigned;
     public uint LastProcessListListed;
@@ -891,6 +893,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             if (elevatedObserver && commandLine.Length >= 1024)
                 throw new InvalidOperationException(
                     "The CreateProcessWithTokenW command line exceeds its supported bound.");
+            long processCreateBegin = Stopwatch.GetTimestamp();
             bool started = elevatedObserver
                 ? CreateProcessWithTokenW(observerToken, 0, filePath, commandLine,
                     flags, environmentBlock,
@@ -898,10 +901,13 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 : CreateProcessW(filePath, commandLine, IntPtr.Zero, IntPtr.Zero,
                     inheritHandles, flags, IntPtr.Zero, workingDirectory,
                     ref startup, out created);
+            // The P/Invoke last error is captured before timing or cleanup work.
+            int processCreateError = started ? 0 : Marshal.GetLastWin32Error();
+            long processCreateEnd = Stopwatch.GetTimestamp();
             if (!started) {
-                throw Win32Failure(elevatedObserver
-                    ? "CreateProcessWithTokenW for the verified medium shell token"
-                    : "CreateProcessW for the VM test child");
+                throw new Win32Exception(processCreateError, elevatedObserver
+                    ? "CreateProcessWithTokenW for the verified medium shell token failed."
+                    : "CreateProcessW for the VM test child failed.");
             }
             if (!AssignProcessToJobObject(job, created.hProcess)) {
                 int error = Marshal.GetLastWin32Error();
@@ -945,6 +951,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             process = Process.GetProcessById((int)created.dwProcessId);
             if (process.Handle == IntPtr.Zero) throw new Win32Exception();
             result = new DarkReNamerVmJobBoundProcess(job, process);
+            result.ProcessCreateBeginTimestamp = processCreateBegin;
+            result.ProcessCreateEndTimestamp = processCreateEnd;
             job = IntPtr.Zero;
             process = null;
             if (redirect) {
@@ -1434,6 +1442,8 @@ function Start-JobBoundProcess {
     [pscustomobject]@{
         process = $owner.Process
         owner = $owner
+        ProcessCreateBeginTimestamp = $owner.ProcessCreateBeginTimestamp
+        ProcessCreateEndTimestamp = $owner.ProcessCreateEndTimestamp
         process_start_time_utc_ticks = $owner.Process.StartTime.ToUniversalTime().Ticks.ToString(
             [Globalization.CultureInfo]::InvariantCulture
         )
