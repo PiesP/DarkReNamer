@@ -5,7 +5,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     RestoreDC, SaveDC, SetDCBrushColor,
 };
 use windows_sys::Win32::UI::Controls::{
-    STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
+    I_IMAGENONE, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetScrollBarInfo, OBJID_HSCROLL, OBJID_VSCROLL, SCROLLBARINFO, WM_HSCROLL,
@@ -1484,31 +1484,52 @@ fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
 }
 
 fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
+    cached_file_icon_index(cache, item, query_shell_icon_index)
+}
+
+fn cached_file_icon_index(
+    cache: &mut HashMap<IconCacheKey, i32>,
+    item: &LegacyListItem,
+    query: impl FnOnce(&IconCacheKey, bool) -> (usize, i32),
+) -> i32 {
     let key = icon_cache_key(item.current_name(), item.is_directory());
     if let Some(index) = cache.get(&key) {
         return *index;
     }
+    let (result, index) = query(&key, item.is_directory());
+    // A failed query leaves SHFILEINFOW unusable. Cache a known no-image
+    // fallback so a failing class cannot repeatedly block each row refresh.
+    // I_IMAGECALLBACK (-1) would instead request a parent callback.
+    let index = if result != 0 && index >= 0 {
+        index
+    } else {
+        I_IMAGENONE
+    };
+    cache_icon_index(cache, key, index);
+    index
+}
+
+fn query_shell_icon_index(key: &IconCacheKey, is_directory: bool) -> (usize, i32) {
     let mut info = SHFILEINFOW::default();
     let path = key.lookup_text();
     let mut path = path.units().to_vec();
     path.push(0);
-    let attributes = if item.is_directory() {
+    let attributes = if is_directory {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
     // SAFETY: path is terminated and info is writable for the shell query.
-    unsafe {
+    let result = unsafe {
         SHGetFileInfoW(
             path.as_ptr(),
             attributes,
             &mut info,
             size_of::<SHFILEINFOW>() as u32,
             SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-        );
-    }
-    cache_icon_index(cache, key, info.iIcon);
-    info.iIcon
+        )
+    };
+    (result, info.iIcon)
 }
 
 fn format_filetime(value: u64) -> LegacyText {
@@ -1600,6 +1621,48 @@ mod native_tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::SIF_POS;
 
     const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
+
+    #[test]
+    fn failed_shell_lookup_caches_no_image_instead_of_unvalidated_index() {
+        let mut cache = HashMap::new();
+        let item = LegacyListItem::new("one.TXT", false, 0, 0, 0);
+        assert_eq!(
+            cached_file_icon_index(&mut cache, &item, |_, _| (0, 42)),
+            I_IMAGENONE
+        );
+        let same_class = LegacyListItem::new("two.txt", false, 0, 0, 0);
+        let mut queries = 0;
+        assert_eq!(
+            cached_file_icon_index(&mut cache, &same_class, |_, _| {
+                queries += 1;
+                (1, 42)
+            }),
+            I_IMAGENONE
+        );
+        assert_eq!(queries, 0);
+    }
+
+    #[test]
+    fn shell_lookup_rejects_callback_index_but_accepts_image_zero() {
+        let item = LegacyListItem::new("one.txt", false, 0, 0, 0);
+        for index in [-1, -2, i32::MIN] {
+            assert_eq!(
+                cached_file_icon_index(&mut HashMap::new(), &item, |_, _| (1, index)),
+                I_IMAGENONE
+            );
+        }
+        let mut cache = HashMap::new();
+        assert_eq!(cached_file_icon_index(&mut cache, &item, |_, _| (1, 0)), 0);
+        let mut queries = 0;
+        assert_eq!(
+            cached_file_icon_index(&mut cache, &item, |_, _| {
+                queries += 1;
+                (1, 42)
+            }),
+            0
+        );
+        assert_eq!(queries, 0);
+    }
 
     struct BlankBodyTestContext {
         list: HWND,

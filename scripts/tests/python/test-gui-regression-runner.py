@@ -54,6 +54,29 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_performance_sample_is_one_opt_in_bounded_run(self):
+        run = runner.performance_run()
+        self.assertEqual(run["mode"], "performance-sample")
+        self.assertEqual(len(runner.RUNS), 4)
+        inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,
+                  "source_tree": "b" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
+                                             run, "c" * 64, {}, {})
+        self.assertEqual(manifest["request"]["performance_plan"], runner.PERFORMANCE_PLAN)
+        self.assertEqual(manifest["command"].count("--diagnostic"), 1)
+        self.assertEqual(manifest["command"][manifest["command"].index("--diagnostic") + 1],
+                         "performance-sample")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "run", run,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
+            )
+        self.assertEqual(command[command.index("-AcceptanceMode") + 1], "performance-sample")
+        self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
+        self.assertNotIn("-AcceptanceProfileId", command)
+
     def test_appearance_pair_selects_one_bounded_run_and_explicit_v1_profile(self):
         pair = runner.appearance_pair_run(1366, 768, 96)
         self.assertEqual(pair["mode"], "appearance-pair")

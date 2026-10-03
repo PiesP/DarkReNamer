@@ -3539,6 +3539,7 @@ impl UiStatus {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WorkerActivity {
     pub(crate) admission: bool,
+    pub(crate) import: bool,
     pub(crate) plan: bool,
     pub(crate) apply: bool,
     pub(crate) cancellation_requested: bool,
@@ -3550,6 +3551,7 @@ pub(crate) struct WorkerActivity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveWorkerKind {
     Admission,
+    Import,
     Plan,
     Apply,
 }
@@ -3557,10 +3559,16 @@ pub(crate) enum ActiveWorkerKind {
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) const fn active_worker_kind(activity: WorkerActivity) -> Option<ActiveWorkerKind> {
-    match (activity.admission, activity.plan, activity.apply) {
-        (true, false, false) => Some(ActiveWorkerKind::Admission),
-        (false, true, false) => Some(ActiveWorkerKind::Plan),
-        (false, false, true) => Some(ActiveWorkerKind::Apply),
+    match (
+        activity.admission,
+        activity.import,
+        activity.plan,
+        activity.apply,
+    ) {
+        (true, false, false, false) => Some(ActiveWorkerKind::Admission),
+        (false, true, false, false) => Some(ActiveWorkerKind::Import),
+        (false, false, true, false) => Some(ActiveWorkerKind::Plan),
+        (false, false, false, true) => Some(ActiveWorkerKind::Apply),
         _ => None,
     }
 }
@@ -4387,7 +4395,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         "이름 저장",
         menu(MenuGroup::File, 2, 1),
         "변경 후 이름 목록 저장...",
-        "모든 항목의 변경 후 이름을 텍스트 파일로 저장합니다.",
+        "모든 항목의 변경 후 이름을 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
         None,
         Rows,
         Filesystem,
@@ -4415,7 +4423,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         "경로 저장",
         menu(MenuGroup::File, 3, 1),
         "현재 경로 목록 저장...",
-        "모든 항목의 현재 실제 경로를 텍스트 파일로 저장합니다.",
+        "모든 항목의 현재 실제 경로를 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
         legacy(
             LegacyVirtualKey::Character(b'X' as u16),
             LegacyShortcutModifiers::ControlShift,
@@ -7436,6 +7444,10 @@ mod tests {
                 ..WorkerActivity::default()
             },
             WorkerActivity {
+                import: true,
+                ..WorkerActivity::default()
+            },
+            WorkerActivity {
                 plan: true,
                 ..WorkerActivity::default()
             },
@@ -7454,6 +7466,13 @@ mod tests {
                 ..WorkerActivity::default()
             }),
             Some(ActiveWorkerKind::Admission)
+        );
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                import: true,
+                ..WorkerActivity::default()
+            }),
+            Some(ActiveWorkerKind::Import)
         );
         assert_eq!(
             active_worker_kind(WorkerActivity {

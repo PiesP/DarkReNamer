@@ -16,6 +16,27 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+$pathDialog = [pscustomobject]@{ ProcessId=42; Owner=10L; Visible=$true;
+    ClassName='#32770'; Title='파일에서 경로목록 읽어 추가하기'; Handle=20L }
+if ($null -ne (Resolve-ObserverPathImportWindowCandidate -Windows @() -ProcessId 42 -MainWindowHandle 10)) {
+    throw 'An absent native dialog was accepted.'
+}
+foreach ($change in @(
+    @{ ProcessId=43 }, @{ Owner=11L }, @{ Visible=$false }, @{ ClassName='Other' }, @{ Title='Other' })) {
+    $wrong = [pscustomobject]@{ ProcessId=42; Owner=10L; Visible=$true;
+        ClassName='#32770'; Title=$pathDialog.Title; Handle=30L }
+    foreach ($key in $change.Keys) { $wrong.$key = $change[$key] }
+    $selected = Resolve-ObserverPathImportWindowCandidate -Windows @($wrong,$pathDialog) `
+        -ProcessId 42 -MainWindowHandle 10
+    if ($selected.Handle -ne 20) { throw 'The native import resolver accepted a mismatched window.' }
+    if ($null -ne (Resolve-ObserverPathImportWindowCandidate -Windows @($wrong) -ProcessId 42 -MainWindowHandle 10)) {
+        throw 'The native import resolver accepted an unbound dialog.'
+    }
+}
+Assert-Fails -Expected 'multiple bound native dialogs' -Action {
+    Resolve-ObserverPathImportWindowCandidate -Windows @($pathDialog,$pathDialog) -ProcessId 42 -MainWindowHandle 10
+}
+
 # These inert UIA/native adapters expose observations and record requests. The
 # complete production functions retain all traversal, ownership and copy logic.
 Add-Type -TypeDefinition @'
@@ -454,4 +475,26 @@ finally {
     Remove-Variable -Name $entryProbeName -Scope Global
 }
 
+& {
+    $script:retainedCommandBindings = 0
+    function Assert-AutomationBinding {
+        param($Element, $Process, $ExpectedSession, $Label, [switch]$RequireWindowHandle)
+        if (-not $RequireWindowHandle) { throw 'Retained command skipped native binding.' }
+        $script:retainedCommandBindings++
+    }
+    $control = [Windows.Automation.AutomationElement]::new()
+    $control.Current.AutomationId = '32781'
+    $application = [pscustomobject]@{ process = [Diagnostics.Process]::GetCurrentProcess() }
+    Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    $control.Current.IsEnabled = $false
+    Assert-Fails -Expected 'identity or enabled state differs' -Action {
+        Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    }
+    $control.Current.IsEnabled = $true
+    $control.Current.AutomationId = '32773'
+    Assert-Fails -Expected 'identity or enabled state differs' -Action {
+        Assert-ObserverCommandButton -Control $control -Application $application -SessionId 1 -AutomationId '32781'
+    }
+    if ($script:retainedCommandBindings -ne 3) { throw 'Retained commands bypassed repeated identity validation.' }
+}
 Write-Host 'UI application behavior contracts passed.'

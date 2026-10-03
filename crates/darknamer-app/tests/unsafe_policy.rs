@@ -89,6 +89,7 @@ impl UnsafeCounts {
 const ALLOWED_BOUNDARIES: &[(&str, bool, bool)] = &[
     ("src/rename/windows_backend.rs", false, false),
     ("src/rename/windows_native.rs", false, false),
+    ("src/rename/private_state.rs", false, false),
     ("src/windows.rs", true, true),
     ("src/windows/appearance.rs", false, false),
     ("src/windows/appearance_dialog.rs", false, true),

@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::num::NonZeroIsize;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::AsRawHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -149,12 +150,12 @@ use safe_runtime::initialize_safe_runtime_at;
 use safe_runtime::{
     JournalRole, SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
-#[cfg(test)]
-use text_io::write_legacy_text;
 use text_io::{
-    TEXT_EXPORT_CLEANUP_WARNING_TITLE, compare_windows, legacy_path, path_wide, read_legacy_text,
-    text_export_cleanup_warning_korean, wide, write_legacy_text_to_target,
+    compare_windows, legacy_path, path_wide, read_legacy_text_cancellable, wide,
+    write_legacy_text_to_target,
 };
+#[cfg(test)]
+use text_io::{read_legacy_text, write_legacy_text};
 #[cfg(test)]
 use windows_sys::Win32::Foundation::E_NOINTERFACE;
 use windows_sys::Win32::Foundation::{
@@ -185,6 +186,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
 #[cfg(test)]
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(test)]
 use windows_sys::Win32::System::Memory::{
@@ -317,6 +319,7 @@ const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const WM_APP_POPUP_MENU_UPDATE: u32 = WM_APP + 0x52;
+const WM_APP_IMPORT_COMPLETE: u32 = WM_APP + 0x53;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
@@ -556,6 +559,7 @@ struct AppState {
     apply_worker: Option<ApplyWorker>,
     plan_worker: Option<PlanWorker>,
     admission_worker: Option<AdmissionWorker>,
+    import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
     close_pending: bool,
     confirmation_pending: bool,
@@ -583,6 +587,22 @@ struct AppState {
     // Fields drop in declaration order. Keep the instance lock last so workers
     // and every retained journal capability close before another launch.
     _runtime_lock: fs::File,
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Defensive teardown can bypass WM_CLOSE (for example, direct window
+        // destruction). A live import may still be blocked in provider I/O.
+        // End the process rather than release the runtime lock before that
+        // thread is terminal or detach a worker retaining application state.
+        if self
+            .import_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.handle.is_finished())
+        {
+            std::process::abort();
+        }
+    }
 }
 
 impl AppState {
@@ -656,6 +676,7 @@ impl AppState {
             apply_worker: None,
             plan_worker: None,
             admission_worker: None,
+            import_worker: None,
             preference_persistence: PreferencePersistence::default(),
             close_pending: false,
             confirmation_pending: false,
@@ -713,6 +734,7 @@ impl AppState {
             || self.apply_worker.is_some()
             || self.plan_worker.is_some()
             || self.admission_worker.is_some()
+            || self.import_worker.is_some()
     }
 
     fn preview_counts(&self, selected: usize) -> PreviewCounts {
@@ -721,7 +743,8 @@ impl AppState {
 
     fn presentation(&self, selected: usize) -> UiPresentation {
         let activity = self.worker_activity();
-        let worker_active = activity.admission || activity.plan || activity.apply;
+        let worker_active =
+            activity.admission || activity.plan || activity.apply || activity.import;
         UiPresentation::derive(
             self.preview_counts(selected),
             PresentationLocks {
@@ -767,6 +790,7 @@ impl AppState {
             && self.apply_worker.is_none()
             && self.plan_worker.is_none()
             && self.admission_worker.is_none()
+            && self.import_worker.is_none()
     }
 
     fn can_export_recovery_journal(&self) -> bool {
@@ -797,6 +821,7 @@ impl AppState {
     fn worker_activity(&self) -> WorkerActivity {
         WorkerActivity {
             admission: self.admission_worker.is_some(),
+            import: self.import_worker.is_some(),
             plan: self.plan_worker.is_some(),
             apply: self.apply_worker.is_some(),
             apply_finishing: self
@@ -807,6 +832,10 @@ impl AppState {
                 .admission_worker
                 .as_ref()
                 .is_some_and(AdmissionWorker::cancellation_requested)
+                || self
+                    .import_worker
+                    .as_ref()
+                    .is_some_and(ImportWorker::cancellation_requested)
                 || self
                     .plan_worker
                     .as_ref()
@@ -1793,9 +1822,28 @@ mod tests {
     fn create_startup_journal_directory(
         local_app_data: &Path,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let journal = local_app_data.join("DarkReNamer").join("journal");
-        fs::create_dir_all(&journal)?;
-        Ok(journal)
+        let root = JournalRoot::open_private(local_app_data)?;
+        Ok(root.path().to_path_buf())
+    }
+
+    fn create_startup_journal_file(
+        local_app_data: &Path,
+        leaf: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let root = JournalRoot::open_private(local_app_data)?;
+        let journal = if leaf == ACTIVE_JOURNAL_LEAF {
+            FileJournal::create_new(&root, leaf)?
+        } else if leaf == CANDIDATE_JOURNAL_LEAF {
+            FileJournal::create_candidate(&root, leaf, ACTIVE_JOURNAL_LEAF)?
+        } else {
+            return Err(io::Error::other("unexpected startup journal fixture leaf").into());
+        };
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        drop(root);
+        fs::write(&path, bytes)?;
+        Ok(path)
     }
 
     #[test]
@@ -2192,10 +2240,9 @@ mod tests {
             ))
             .into());
         }
-        let journal_directory = create_startup_journal_directory(&local_app_data)?;
         let data = local_app_data.join("data");
         let graph = CrashGraph::parse(&env::var("DARKRENAMER_TEST_GRAPH")?)?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(&local_app_data)?;
         let mut journal =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
         if env::var_os("DARKRENAMER_TEST_FAILURE_ROLLBACK").is_some() {
@@ -2577,172 +2624,44 @@ mod tests {
         let expected = LegacyText::from("첫째.txt\r\n둘째.txt\r\n");
         write_legacy_text(&path, &expected)?;
         let shorter = LegacyText::from("이름.txt\r\n");
-        write_legacy_text(&path, &shorter)?;
+        let second = directory.path().join("shorter.txt");
+        write_legacy_text(&second, &shorter)?;
         let bytes = fs::read(&path)?;
         assert!(bytes.starts_with(&[0xFF, 0xFE]));
-        assert_eq!(read_legacy_text(&path)?, shorter);
+        assert_eq!(read_legacy_text(&path)?, expected);
+        assert_eq!(read_legacy_text(&second)?, shorter);
         Ok(())
     }
 
     #[test]
-    fn text_export_rejects_hard_linked_destination_without_truncating_either_name()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let original = directory.path().join("original.txt");
-        let destination = directory.path().join("names.txt");
-        let sentinel = b"keep both hard-link names intact";
-        fs::write(&original, sentinel)?;
-        fs::hard_link(&original, &destination)?;
-
-        let Err(error) = write_legacy_text(&destination, &LegacyText::from("replacement")) else {
-            return Err(io::Error::other("multiply-linked destination was accepted").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&original)?, sentinel);
-        assert_eq!(fs::read(&destination)?, sentinel);
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_text_export_target_rejects_a_hard_link_added_before_write()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let alias = directory.path().join("alias.txt");
-        let sentinel = b"both names stay unchanged";
-        fs::write(&destination, sentinel)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        fs::hard_link(&destination, &alias)?;
-        let Err(error) =
-            crate::rename::windows_native::write_text_export_target(target, b"replacement")
-        else {
-            return Err(io::Error::other("a late hard link was not detected").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&destination)?, sentinel);
-        assert_eq!(fs::read(&alias)?, sentinel);
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_atomic_replace_keeps_a_late_hard_link_on_original_contents()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let original = b"original contents stay with the alias";
-        fs::write(&destination, original)?;
-        let alias = directory.path().join("alias.txt");
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        crate::rename::windows_native::write_text_export_target_with_before_replace(
-            target,
-            b"accepted output",
-            || fs::hard_link(&destination, &alias).map(|_| ()),
-        )?;
-
-        assert_eq!(fs::read(&destination)?, b"accepted output");
-        assert_eq!(fs::read(&alias)?, original);
-        assert!(!directory.path().read_dir()?.any(|entry| {
-            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("backup"))
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_reports_committed_content_when_backup_cleanup_fails()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let original = b"original contents remain in the backup";
-        fs::write(&destination, original)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-        let mut backup_guard = None;
-
-        let outcome =
-            crate::rename::windows_native::write_text_export_target_with_before_backup_cleanup(
-                target,
-                b"accepted output",
-                |backup_path| {
-                    backup_guard = Some(
-                        std::fs::OpenOptions::new()
-                            .read(true)
-                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                            .open(backup_path)?,
-                    );
-                    Ok(())
-                },
-            )?;
-
-        let crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(warning) =
-            outcome
-        else {
-            return Err(io::Error::other("cleanup failure was not reported as committed").into());
-        };
-        assert_eq!(warning.raw_os_error(), Some(32));
-        assert_eq!(fs::read(&destination)?, b"accepted output");
-        let retained_backups = directory
-            .path()
-            .read_dir()?
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with(".darkrenamer-text-export-backup-") && name.ends_with(".tmp")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(retained_backups.len(), 1);
-        assert_eq!(fs::read(retained_backups[0].path())?, original);
-        assert!(!directory.path().read_dir()?.any(|entry| {
-            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("stage"))
-        }));
-        drop(backup_guard);
-        Ok(())
-    }
-
-    #[test]
-    fn text_export_cleanup_warning_says_the_file_was_saved() {
-        let warning = io::Error::new(io::ErrorKind::PermissionDenied, "backup is in use");
-        let message = text_io::text_export_cleanup_warning_korean(&warning);
-
-        assert!(message.starts_with("파일은 저장했습니다."));
-        assert!(message.contains("임시 백업"));
-        assert!(message.contains(".darkrenamer-text-export-backup-"));
-        assert!(!message.contains("파일을 저장하지 못했습니다"));
-        assert_eq!(
-            text_io::TEXT_EXPORT_CLEANUP_WARNING_TITLE,
-            "DarkReNamer - 저장 후 정리 필요"
-        );
-    }
-
-    #[test]
-    fn text_export_replace_preserves_existing_named_streams()
+    fn text_export_rejects_existing_file_without_changing_contents_or_streams()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("names.txt");
         let stream = std::path::PathBuf::from(format!("{}:metadata", destination.display()));
-        fs::write(&destination, b"old content")?;
+        let alias = directory.path().join("alias.txt");
+        fs::write(&destination, b"original contents")?;
         fs::write(&stream, b"preserved stream")?;
-
-        write_legacy_text(&destination, &LegacyText::from("new output"))?;
-
+        fs::hard_link(&destination, &alias)?;
+        let identity =
+            crate::rename::windows_native::file_identity(&fs::File::open(&destination)?)?;
+        let error = write_legacy_text(&destination, &LegacyText::from("new output"))
+            .err()
+            .ok_or_else(|| io::Error::other("existing export target was overwritten"))?;
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&destination)?, b"original contents");
+        assert_eq!(fs::read(&alias)?, b"original contents");
         assert_eq!(fs::read(&stream)?, b"preserved stream");
         assert_eq!(
-            read_legacy_text(&destination)?,
-            LegacyText::from("new output")
+            crate::rename::windows_native::file_identity(&fs::File::open(&destination)?)?,
+            identity
         );
+        assert_eq!(directory.path().read_dir()?.count(), 2);
         Ok(())
     }
 
     #[test]
-    fn text_export_accepts_existing_targets_with_full_paths_over_64_units()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn text_export_accepts_new_targets_with_long_paths() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let mut parent = directory.path().to_path_buf();
         for index in 0..8 {
@@ -2750,46 +2669,12 @@ mod tests {
         }
         fs::create_dir_all(&parent)?;
         let destination = parent.join("names.txt");
-        fs::write(&destination, b"old")?;
         assert!(destination.to_string_lossy().encode_utf16().count() > 64);
-
         write_legacy_text(&destination, &LegacyText::from("long path output"))?;
-
         assert_eq!(
             read_legacy_text(&destination)?,
             LegacyText::from("long path output")
         );
-        Ok(())
-    }
-
-    #[test]
-    fn prepared_text_export_target_rejects_a_replaced_existing_leaf()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let replacement = directory.path().join("replacement.txt");
-        let original = b"original";
-        let replacement_occupant = b"replacement occupant";
-        fs::write(&destination, original)?;
-        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
-
-        let Err(error) =
-            crate::rename::windows_native::write_text_export_target_with_before_replace(
-                target,
-                b"accepted output",
-                || {
-                    fs::rename(&destination, &replacement)?;
-                    fs::write(&destination, replacement_occupant)
-                },
-            )
-        else {
-            return Err(io::Error::other("a replaced destination was accepted").into());
-        };
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(&destination)?, replacement_occupant);
-        assert_eq!(fs::read(&replacement)?, original);
-        assert_eq!(directory.path().read_dir()?.count(), 2);
         Ok(())
     }
 
@@ -2801,12 +2686,91 @@ mod tests {
         let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
         let sentinel = b"later occupant remains intact";
         fs::write(&destination, sentinel)?;
-
         assert!(
             crate::rename::windows_native::write_text_export_target(target, b"replacement")
                 .is_err()
         );
         assert_eq!(fs::read(&destination)?, sentinel);
+        assert_eq!(directory.path().read_dir()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_final_commit_rejects_late_occupant_and_preserves_its_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let alias = directory.path().join("alias.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let result = crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"accepted output",
+            || {
+                fs::write(&destination, b"final-boundary occupant")?;
+                fs::hard_link(&destination, &alias)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination)?, b"final-boundary occupant");
+        assert_eq!(fs::read(&alias)?, b"final-boundary occupant");
+        assert_eq!(directory.path().read_dir()?.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_stage_remains_exclusive_until_final_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"complete output",
+            || {
+                let entries = directory
+                    .path()
+                    .read_dir()?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(entries.len(), 1);
+                let stage = entries[0].path();
+                let read = fs::File::open(&stage)
+                    .err()
+                    .ok_or_else(|| io::Error::other("exclusive staging bytes were readable"))?;
+                assert_eq!(read.raw_os_error(), Some(32));
+                let write = fs::OpenOptions::new()
+                    .write(true)
+                    .open(&stage)
+                    .err()
+                    .ok_or_else(|| io::Error::other("exclusive staging bytes were writable"))?;
+                assert_eq!(write.raw_os_error(), Some(32));
+                assert!(fs::rename(&stage, directory.path().join("substitute.txt")).is_err());
+                Ok(())
+            },
+        )?;
+        assert_eq!(fs::read(&destination)?, b"complete output");
+        assert_eq!(directory.path().read_dir()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_failed_final_hook_cleans_only_its_owned_stage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let sentinel = directory.path().join("sentinel.txt");
+        fs::write(&sentinel, b"unrelated contents")?;
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let error = crate::rename::windows_native::write_text_export_target_with_before_commit(
+            target,
+            b"never published",
+            || Err(io::Error::from_raw_os_error(5)),
+        )
+        .err()
+        .ok_or_else(|| io::Error::other("injected commit failure was ignored"))?;
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&sentinel)?, b"unrelated contents");
+        assert_eq!(directory.path().read_dir()?.count(), 1);
         Ok(())
     }
 
@@ -2845,7 +2809,7 @@ mod tests {
             return Err(io::Error::other("final reparse point was accepted").into());
         };
 
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&target)?, sentinel);
         Ok(())
     }
@@ -2881,10 +2845,8 @@ mod tests {
     fn corrupt_active_journal_starts_recovery_locked_with_retained_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
         let corrupt = vec![0_u8; 24];
-        fs::write(&active, &corrupt)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &corrupt)?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 
@@ -2926,8 +2888,6 @@ mod tests {
     fn terminal_active_journal_with_torn_payload_stays_locked_retained_and_undeleted()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
         let mut bytes = crate::rename::encode_journal_records(&[
             crate::rename::JournalRecord::Intent {
                 plan: crate::rename::PlanId::from_fingerprint(78),
@@ -2942,7 +2902,7 @@ mod tests {
         bytes
             .pop()
             .ok_or_else(|| io::Error::other("startup torn-payload fixture was empty"))?;
-        fs::write(&active, &bytes)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &bytes)?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 
@@ -2983,7 +2943,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let journal_directory = create_startup_journal_directory(directory.path())?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(directory.path())?;
         let candidate =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
         drop(candidate);
@@ -3068,10 +3028,10 @@ mod tests {
     fn intent_only_candidate_exports_discards_and_unlocks_after_rediscovery()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        fs::write(
-            journal_directory.join(CANDIDATE_JOURNAL_LEAF),
-            startup_intent_bytes()?,
+        create_startup_journal_file(
+            directory.path(),
+            CANDIDATE_JOURNAL_LEAF,
+            &startup_intent_bytes()?,
         )?;
 
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
@@ -3099,12 +3059,10 @@ mod tests {
     fn active_candidate_collision_preserves_both_without_running_recovery()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
         let bytes = startup_intent_bytes()?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
-        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
-        fs::write(&active, &bytes)?;
-        fs::write(&candidate, &bytes)?;
+        let active = create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &bytes)?;
+        let candidate =
+            create_startup_journal_file(directory.path(), CANDIDATE_JOURNAL_LEAF, &bytes)?;
 
         let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
 
@@ -3140,7 +3098,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let journal_directory = create_startup_journal_directory(directory.path())?;
-        let root = JournalRoot::open(&journal_directory)?;
+        let root = JournalRoot::open_private(directory.path())?;
         let mut held = FileJournal::create_new(&root, ACTIVE_JOURNAL_LEAF)?;
         drop(root);
 
@@ -3170,11 +3128,10 @@ mod tests {
     fn corrupt_active_and_candidate_retain_two_exportable_handles()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let journal_directory = create_startup_journal_directory(directory.path())?;
-        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
-        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
-        fs::write(&active, vec![0_u8; 24])?;
-        fs::write(&candidate, vec![1_u8; 24])?;
+        let active =
+            create_startup_journal_file(directory.path(), ACTIVE_JOURNAL_LEAF, &[0_u8; 24])?;
+        let candidate =
+            create_startup_journal_file(directory.path(), CANDIDATE_JOURNAL_LEAF, &[1_u8; 24])?;
 
         let runtime = initialize_safe_runtime_at(directory.path())?;
 

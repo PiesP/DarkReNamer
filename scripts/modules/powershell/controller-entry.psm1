@@ -202,10 +202,68 @@ function Copy-DrControllerV2TaskBaseline {
     }
 }
 
+function Get-DrControllerV2OwnedStartMap {
+    param($Context)
+    $starts = @{}
+    $lifecycles = @($Context.declared_processes) + @(
+        $Context.preflight_child, $Context.engine_child,
+        $Context.task_execution.observer_lifecycle
+    ) + @($Context.rescue_executions | ForEach-Object { $_.task_execution.observer_lifecycle })
+    foreach ($lifecycle in $lifecycles) {
+        if ($null -eq $lifecycle -or [int]$lifecycle.pid -le 0 -or
+            $lifecycle.start_time_utc_ticks -isnot [string] -or
+            $lifecycle.start_time_utc_ticks -cnotmatch '^[1-9][0-9]{0,18}$') {
+            throw 'V2 owned process lifetime is incomplete.'
+        }
+        $ticks = [long]::Parse($lifecycle.start_time_utc_ticks,
+            [Globalization.CultureInfo]::InvariantCulture)
+        if ($ticks -gt [datetime]::MaxValue.Ticks) {
+            throw 'V2 owned process lifetime is invalid.'
+        }
+        $processId = [int]$lifecycle.pid
+        if (-not $starts.ContainsKey($processId)) {
+            $starts[$processId] = [Collections.Generic.List[long]]::new()
+        }
+        $starts[$processId].Add($ticks)
+    }
+    return ,$starts
+}
+
+function Test-DrControllerV2OwnedProcessLifetime {
+    param($Row,$Starts)
+    if ($null -eq $Row -or [string]$Row.creation_time_utc -cnotmatch
+        '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
+        throw 'V2 process creation time is incomplete.'
+    }
+    $created = [datetime]::ParseExact([string]$Row.creation_time_utc,
+        'yyyy-MM-ddTHH:mm:ss.fffffffZ', [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal).Ticks
+    if ($created % 10 -ne 0) {
+        throw 'V2 process creation time has unexpected precision.'
+    }
+    $processId = [int]$Row.pid
+    if ($Starts.ContainsKey($processId)) {
+        foreach ($start in $Starts[$processId]) {
+            if ($start -ge $created -and $start -le $created + 9) { return $true }
+        }
+    }
+    $parentPid = [int]$Row.parent_pid
+    if ($Starts.ContainsKey($parentPid)) {
+        foreach ($start in $Starts[$parentPid]) {
+            # CIM records microseconds; the owned .NET start retains 100 ns ticks.
+            if ($created -ge ($start - ($start % 10))) { return $true }
+        }
+    }
+    return $false
+}
+
 function Invoke-DrControllerOwnedCleanupAfterFailure {
     param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256)
-    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256 -ScriptBlock {
-        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
+        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256,$startMapDefinition,$lifetimeDefinition)
+        Set-Item -Path Function:Get-DrControllerV2OwnedStartMap -Value ([scriptblock]::Create($startMapDefinition))
+        Set-Item -Path Function:Test-DrControllerV2OwnedProcessLifetime -Value ([scriptblock]::Create($lifetimeDefinition))
         $v2 = $null -ne $v2Evidence
         $proof = [ordered]@{
             schema_version = if ($v2) { 2 } else { 1 }
@@ -288,14 +346,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     throw 'V2 task definition changed from the baseline.'
                 }
             }
-            $ownedPids = [Collections.Generic.HashSet[int]]::new()
-            foreach ($row in @($v2Evidence.declared_processes)) { [void]$ownedPids.Add([int]$row.pid) }
-            [void]$ownedPids.Add([int]$v2Evidence.preflight_child.pid)
-            [void]$ownedPids.Add([int]$v2Evidence.engine_child.pid)
-            [void]$ownedPids.Add([int]$v2Evidence.task_execution.observer_lifecycle.pid)
-            foreach ($rescue in @($v2Evidence.rescue_executions)) {
-                [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
-            }
+            $ownedStarts = Get-DrControllerV2OwnedStartMap -Context $v2Evidence
             $known = @{}
             foreach ($row in @($Earlier.processes)) { $known[[int]$row.pid] = $row }
             foreach ($row in @($Inventory.processes)) {
@@ -307,7 +358,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     $scope.IndexOf($name,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                     $scope.IndexOf([string]$roots.guest.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                     $scope.IndexOf([string]$roots.trusted.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                    $ownedPids.Contains([int]$row.pid) -or $ownedPids.Contains([int]$row.parent_pid)) {
+                    (Test-DrControllerV2OwnedProcessLifetime -Row $row -Starts $ownedStarts)) {
                     throw 'V2 process has unknown identity or protected execution scope.'
                 }
                 if ($known.ContainsKey([int]$row.pid) -and
@@ -531,26 +582,50 @@ function Get-DrControllerRecoveryProcessIdentities {
     )
 
     $references = @()
+    $failedMode = $false
+    $modeResult = $null
     switch ([string]$Result.selected_mode) {
         'ProcessCrash' {
             $crash = $Result.PSObject.Properties['process_crash']
             $intent = $Result.PSObject.Properties['intent_only_candidate_discard']
             if ($null -eq $crash -or $null -eq $intent) { throw 'Recovery process references are missing.' }
-            $references = @($crash.Value.processes)
-            if ($intent.Value.status -ceq 'passed') {
-                $references += @($intent.Value.processes)
-            }
-            elseif ($intent.Value.status -cne 'not-run' -or
-                $intent.Value.reason -cne 'switch-not-selected') {
-                throw 'Optional recovery intent evidence has an invalid status.'
+            $modeResult = $crash.Value
+            $failedMode = $Result.status -ceq 'failed' -and $crash.Value.status -ceq 'failed'
+            if (-not $failedMode) {
+                $references = @($crash.Value.processes)
+                if ($intent.Value.status -ceq 'passed') {
+                    $references += @($intent.Value.processes)
+                }
+                elseif ($intent.Value.status -cne 'not-run' -or
+                    $intent.Value.reason -cne 'switch-not-selected') {
+                    throw 'Optional recovery intent evidence has an invalid status.'
+                }
             }
         }
-        'WorkerCancellation' { $references = @($Result.worker_cancellation.processes) }
-        'WorkerClose' { $references = @($Result.worker_close.processes) }
+        'WorkerCancellation' {
+            $modeResult = $Result.worker_cancellation
+            $failedMode = $Result.status -ceq 'failed' -and
+                $modeResult.status -ceq 'failed'
+            if (-not $failedMode) { $references = @($modeResult.processes) }
+        }
+        'WorkerClose' {
+            $modeResult = $Result.worker_close
+            $failedMode = $Result.status -ceq 'failed' -and $modeResult.status -ceq 'failed'
+            if (-not $failedMode) { $references = @($modeResult.processes) }
+        }
         default { throw 'Recovery process mode is unavailable.' }
     }
-    if ($references.Count -lt 2 -or $references.Count -gt 14 -or $references.Count % 2 -ne 0) {
+    if (-not $failedMode -and
+        ($references.Count -lt 2 -or $references.Count -gt 14 -or $references.Count % 2 -ne 0)) {
         throw 'Recovery process reference count is invalid.'
+    }
+    if ($failedMode) {
+        if ($Result.failure_reason -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($Result.failure_reason) -or
+            $modeResult.reason -cne $Result.failure_reason -or
+            $null -ne $modeResult.PSObject.Properties['processes']) {
+            throw 'Failed recovery process evidence has an invalid status.'
+        }
     }
     $privateEvidence = $Result.PSObject.Properties['private_evidence']
     if ($null -eq $privateEvidence -or
@@ -574,8 +649,26 @@ function Get-DrControllerRecoveryProcessIdentities {
     }
     $privateDirectory = Split-Path -Parent $indexMatches[0].FullName
     $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    for ($offset = 0; $offset -lt $references.Count; $offset += 2) {
-        $reference = $references[$offset]
+    $starts = @()
+    if ($failedMode) {
+        # Failed modes omit paired public process references; bind cleanup to
+        # the retained private starts and the separate closed-Job ledger.
+        $starts = @($index.files | Where-Object {
+            $_.file -cmatch '^process-[0-9]{2}-started\.json$'
+        })
+        if ($starts.Count -lt 1 -or $starts.Count -gt 64) {
+            throw 'Failed recovery process start count is invalid.'
+        }
+        $starts = @($starts | ForEach-Object {
+            [pscustomobject]@{ boundary = 'started'; sha256 = $_.sha256; bytes = $_.bytes }
+        })
+    }
+    else {
+        for ($offset = 0; $offset -lt $references.Count; $offset += 2) {
+            $starts += $references[$offset]
+        }
+    }
+    foreach ($reference in $starts) {
         if ($reference.boundary -cne 'started' -or
             $reference.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             ($reference.bytes -isnot [int] -and $reference.bytes -isnot [long])) {
@@ -986,7 +1079,7 @@ function Invoke-DrWindowsVmController {
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1766,12 +1859,17 @@ public static class DarkReNamerVmControllerWorkspace {
                 [void]$security.AddAccessRule($rule)
             }
             if ($ForBase) {
-                $traverse = [Security.AccessControl.FileSystemAccessRule]::new(
+                # The runner must read each ancestor's descriptor and attributes
+                # when opening its own private state below this protected base.
+                $ancestorReadRights = [Security.AccessControl.FileSystemRights]::Traverse -bor
+                    [Security.AccessControl.FileSystemRights]::ReadAttributes -bor
+                    [Security.AccessControl.FileSystemRights]::ReadPermissions
+                $ancestorRead = [Security.AccessControl.FileSystemAccessRule]::new(
                     [Security.Principal.SecurityIdentifier]::new($runnerSid),
-                    [Security.AccessControl.FileSystemRights]::Traverse,
+                    $ancestorReadRights,
                     [Security.AccessControl.AccessControlType]::Allow
                 )
-                [void]$security.AddAccessRule($traverse)
+                [void]$security.AddAccessRule($ancestorRead)
             }
             if ($ForGuestRoot) {
                 $identity = [Security.Principal.SecurityIdentifier]::new($runnerSid)
@@ -4980,8 +5078,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 [ordered]@{ pid = [int]$parts[0]; start_time_utc_ticks = [string]$parts[1] }
                             })
                     }
-                    $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext,(${function:Test-DrControllerCleanupObservation}.ToString()) -ScriptBlock {
-                        param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext,$completionDefinition)
+                    $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext,(${function:Test-DrControllerCleanupObservation}.ToString()),(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
+                        param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext,$completionDefinition,$startMapDefinition,$lifetimeDefinition)
+                        Set-Item -Path Function:Get-DrControllerV2OwnedStartMap -Value ([scriptblock]::Create($startMapDefinition))
+                        Set-Item -Path Function:Test-DrControllerV2OwnedProcessLifetime -Value ([scriptblock]::Create($lifetimeDefinition))
                         $diagnosticEnabled = $null -ne $taskContext.PSObject.Properties['diagnostic_enabled'] -and
                             $taskContext.diagnostic_enabled -is [bool] -and $taskContext.diagnostic_enabled
                         $expectedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $name
@@ -5027,23 +5127,13 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             }
                             function Get-V2OwnedScopeProcesses {
                                 param($Snapshot)
-                                $ownedPids = [Collections.Generic.HashSet[int]]::new()
-                                foreach ($row in @($taskContext.declared_processes)) {
-                                    [void]$ownedPids.Add([int]$row.pid)
-                                }
-                                [void]$ownedPids.Add([int]$taskContext.preflight_child.pid)
-                                [void]$ownedPids.Add([int]$taskContext.engine_child.pid)
-                                [void]$ownedPids.Add([int]$taskContext.task_execution.observer_lifecycle.pid)
-                                foreach ($rescue in @($taskContext.rescue_executions)) {
-                                    [void]$ownedPids.Add([int]$rescue.task_execution.observer_lifecycle.pid)
-                                }
+                                $ownedStarts = Get-DrControllerV2OwnedStartMap -Context $taskContext
                                 @($Snapshot.processes | Where-Object {
                                     $scope = ([string]$_.executable_path + ' ' + [string]$_.command_line)
                                     $scope.IndexOf($name,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                                     $scope.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                                     $scope.IndexOf($trustedRoot,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                                    $ownedPids.Contains([int]$_.pid) -or
-                                    $ownedPids.Contains([int]$_.parent_pid)
+                                    (Test-DrControllerV2OwnedProcessLifetime -Row $_ -Starts $ownedStarts)
                                 })
                             }
                             $before = $null; $intervention = $null; $after = $null

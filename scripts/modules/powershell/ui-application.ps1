@@ -261,6 +261,41 @@ function Get-ObserverGrid {
     }
     [pscustomobject]@{ element = $list; pattern = [Windows.Automation.GridPattern]$pattern }
 }
+function Resolve-ObserverPathImportWindowCandidate {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Windows,
+        [Parameter(Mandatory)][int] $ProcessId,
+        [Parameter(Mandatory)][long] $MainWindowHandle)
+    $matches = @($Windows | Where-Object {
+        $_.ProcessId -eq $ProcessId -and $_.Owner -eq $MainWindowHandle -and $_.Visible -and
+        $_.ClassName -ceq '#32770' -and $_.Title -ceq '파일에서 경로목록 읽어 추가하기'
+    })
+    if ($matches.Count -gt 1) { throw 'Path import has multiple bound native dialogs.' }
+    if ($matches.Count -eq 1) { return $matches[0] }
+    return $null
+}
+function Wait-ObserverPathImportDialog {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
+    do {
+        $Application.process.Refresh()
+        if ($Application.process.HasExited) { throw 'Path import application exited before its dialog appeared.' }
+        $candidate = Resolve-ObserverPathImportWindowCandidate `
+            -Windows @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows([uint32]$Application.process.Id)) `
+            -ProcessId $Application.process.Id -MainWindowHandle ([long]$Application.main_handle)
+        if ($null -ne $candidate) {
+            # Resolve this retained process/owner/class/title tuple directly.
+            # A whole-workbench descendant query grows with every admitted row.
+            $dialog = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$candidate.Handle)
+            Assert-AutomationBinding -Element $dialog -Process $Application.process -ExpectedSession $SessionId `
+                -Label 'native path-list import dialog' -RequireWindowHandle
+            if ($dialog.Current.Name -ceq $candidate.Title) { return $dialog }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'Bound native path-list import dialog was not found before the bounded deadline.'
+}
 function Import-GuiRegressionPathList {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -278,10 +313,15 @@ function Import-GuiRegressionPathList {
     [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
     Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
         -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
-    [Windows.Forms.SendKeys]::SendWait('^+v')
-    $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
-        -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
-        -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
+    $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+    while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+        [IntPtr]$Application.main_handle, [uint32]0x801D)) {
+        if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
+        Start-Sleep -Milliseconds 100
+    }
+    Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
+        -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
+    $dialog = Wait-ObserverPathImportDialog -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
@@ -931,6 +971,15 @@ function New-ObserverStandardFixture {
         initial = Get-ObserverFixtureState -FixtureRoot $fixtureRoot
     }
 }
+function Assert-ObserverCommandButton {
+    param([Parameter(Mandatory)][object] $Control, [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][string] $AutomationId)
+    Assert-AutomationBinding -Element $Control -Process $Application.process -ExpectedSession $SessionId `
+        -Label 'retained observer command' -RequireWindowHandle
+    if ($Control.Current.AutomationId -cne $AutomationId -or
+        $Control.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        -not $Control.Current.IsEnabled) { throw 'Retained observer command identity or enabled state differs.' }
+}
 function Invoke-ObserverPrefix {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -938,9 +987,13 @@ function Invoke-ObserverPrefix {
         [Parameter(Mandatory)][string] $Prefix,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [string] $ExpectedFirstSourceName = 'item-00000.txt'
+        [string] $ExpectedFirstSourceName = 'item-00000.txt',
+        [object] $Command
     )
-    $command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
+    if ($null -eq $Command) {
+        $Command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
+    }
+    Assert-ObserverCommandButton -Control $Command -Application $Application -SessionId $SessionId -AutomationId '32773'
     $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $command -Label 'large smoke prefix command'
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle

@@ -599,6 +599,10 @@ fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
+            // A failed message pump cannot service a pending import. Preserve
+            // the original error before the emergency teardown path, which
+            // ends the process if provider I/O still has no terminal result.
+            eprintln!("DarkReNamer message pump failed: {error}");
             if let Some(mut state_lease) = try_app_state(window) {
                 let cancelled = cancel_appearance_dialog(window, state_lease.state_mut());
                 drop(state_lease);
@@ -1381,6 +1385,11 @@ unsafe extern "system" fn window_proc(
             );
             0
         }
+        WM_APP_IMPORT_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_import_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
             // SAFETY: the posted handoff re-resolves live UI-thread state after
             // the OLE Drop callback and its AppState borrow have ended.
@@ -1400,6 +1409,10 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
+            if state.import_worker.is_some() {
+                handle_import_completion(window, state);
+                return 0;
+            }
             if state
                 .admission_worker
                 .as_ref()
@@ -2192,6 +2205,23 @@ mod tests {
             Err(io::Error::other("admission worker did not finish"))
         }
 
+        fn drain_import(&self) -> io::Result<()> {
+            for _ in 0..200 {
+                let finished = self.with_state(|state| {
+                    state
+                        .import_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.handle.is_finished())
+                })?;
+                if finished {
+                    self.with_state(|state| handle_import_completion(self.owner, state))?;
+                    return Ok(());
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("import worker did not finish"))
+        }
+
         fn finish_directory_admission_with_selector(
             &self,
             selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
@@ -2561,6 +2591,7 @@ mod tests {
             assert!(matches!(kind, PreparedFileDialogKind::ImportNames));
             PreparedFileDialogSelection::ImportNames(imported_names)
         })?;
+        app.drain_import()?;
         app.assert_session_cleared()?;
 
         let imported_paths = app._directory.path().join("import-paths.txt");
@@ -2569,8 +2600,134 @@ mod tests {
             assert!(matches!(kind, PreparedFileDialogKind::ImportPaths));
             PreparedFileDialogSelection::ImportPaths(imported_paths)
         })?;
+        app.drain_import()?;
         app.assert_session_cleared()?;
         app.drain_admission()?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_worker_retires_before_cancelled_or_stale_results_can_touch_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            state.model.append(LegacyListItem::new_with_actual_size(
+                r"C:\fixture\original.txt",
+                false,
+                1,
+                1,
+                0,
+                0,
+            ))
+        })??;
+
+        for phase in 0..4 {
+            let (entered_sender, entered_receiver) = sync_channel(0);
+            let (release_sender, release_receiver) = sync_channel(0);
+            let session_id = u64::try_from(phase + 1)?;
+            // The controlled read cannot finish before release. The UI start
+            // call must return promptly even while that read is stalled.
+            let start = std::time::Instant::now();
+            app.with_state(|state| {
+                state.active_prompt = Some(session_id);
+                let revision = state.revision();
+                start_import_worker_from(
+                    app.owner,
+                    state,
+                    session_id,
+                    revision,
+                    ImportKind::Names,
+                    move |_| {
+                        entered_sender
+                            .send(())
+                            .map_err(|_| io::Error::other("test entry receiver closed"))?;
+                        release_receiver
+                            .recv()
+                            .map_err(|_| io::Error::other("test release sender closed"))?;
+                        Ok(LegacyText::from("changed.txt"))
+                    },
+                )
+            })??;
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            entered_receiver.recv_timeout(std::time::Duration::from_secs(5))?;
+            app.with_state(|state| {
+                assert!(state.import_worker.is_some());
+                assert!(state.mutation_locked);
+                assert_eq!(state.active_prompt, Some(session_id));
+                assert_eq!(
+                    state.model.items()[0].proposed_name(),
+                    &LegacyText::from("original.txt")
+                );
+                match phase {
+                    0 => request_active_worker_cancel(state),
+                    1 => state.commit_known_model_change(true),
+                    2 => state.active_prompt = Some(99),
+                    _ => (),
+                }
+            })?;
+            release_sender.send(())?;
+            app.drain_import()?;
+            app.with_state(|state| {
+                assert!(state.import_worker.is_none());
+                assert!(!state.mutation_locked);
+                assert_eq!(state.active_prompt, (phase == 2).then_some(99));
+                let expected = if phase == 3 {
+                    "changed.txt"
+                } else {
+                    "original.txt"
+                };
+                assert_eq!(
+                    state.model.items()[0].proposed_name(),
+                    &LegacyText::from(expected)
+                );
+                if phase == 2 {
+                    state.active_prompt = None;
+                }
+            })?;
+        }
+        let (entered_sender, entered_receiver) = sync_channel(0);
+        let (release_sender, release_receiver) = sync_channel(0);
+        app.with_state(|state| {
+            state.active_prompt = Some(5);
+            let revision = state.revision();
+            start_import_worker_from(
+                app.owner,
+                state,
+                5,
+                revision,
+                ImportKind::Names,
+                move |_| {
+                    entered_sender
+                        .send(())
+                        .map_err(|_| io::Error::other("test entry receiver closed"))?;
+                    release_receiver
+                        .recv()
+                        .map_err(|_| io::Error::other("test release sender closed"))?;
+                    Ok(LegacyText::from("after-close.txt"))
+                },
+            )
+        })??;
+        entered_receiver.recv_timeout(std::time::Duration::from_secs(5))?;
+        app.with_state(|state| {
+            let _action = dispatch_command(app.owner, state, EXIT_COMMAND);
+            assert!(state.close_pending);
+            assert!(state.import_worker.is_some());
+            assert_eq!(state.active_prompt, Some(5));
+            assert!(state.mutation_locked);
+        })?;
+        release_sender.send(())?;
+        app.drain_import()?;
+        app.with_state(|state| {
+            assert!(state.import_worker.is_none());
+            assert!(state.active_prompt.is_none());
+            assert_eq!(
+                state.model.items()[0].proposed_name(),
+                &LegacyText::from("changed.txt")
+            );
+        })?;
         Ok(())
     }
 

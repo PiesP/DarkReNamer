@@ -1,4 +1,4 @@
-"""Run four fixed GUI cells or one opt-in paired appearance diagnostic."""
+"""Run fixed GUI cells or an opt-in appearance/performance diagnostic."""
 
 from __future__ import annotations
 
@@ -67,6 +67,19 @@ RUNS = (
     },
 )
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
+PERFORMANCE_RUN_ID = "performance-sample-1366x768-96-text100"
+PERFORMANCE_PLAN = {
+    "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
+    "ordinary_rows": [100, 1000, 10000], "long_path_rows": 1000,
+    "extension_classes": 300, "add_remove_reset_cycles": 3,
+    "sample_interval_ms": 200,
+}
+
+
+def performance_run() -> dict:
+    return {"run_id": PERFORMANCE_RUN_ID, "mode": "performance-sample",
+            "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
+            "text_scale_percent": 100}
 
 
 def appearance_pair_run(width: int, height: int, dpi: int, *,
@@ -607,12 +620,13 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
+            **({"performance_plan": PERFORMANCE_PLAN} if run["mode"] == "performance-sample" else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
-            *(["--diagnostic", "appearance-pair"] if run["mode"] == "appearance-pair" else []),
+            *(["--diagnostic", run["mode"]] if run["mode"] in {"appearance-pair", "performance-sample"} else []),
             *(["--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
@@ -696,6 +710,8 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
             command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
         if run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
+    elif run["mode"] == "performance-sample":
+        command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
     return command
 
 
@@ -720,6 +736,10 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
+    if run_id == PERFORMANCE_RUN_ID:
+        require(total_bytes <= 32 * 1024 * 1024 and
+                sum(row["relative_path"].endswith(".png") for row in files) == 1,
+                "Performance sample must stay within 32 MiB and one original PNG.")
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -808,8 +828,9 @@ def finalize_run(run_root: Path) -> None:
     write_json(collection_path, collection_document(run_root, input_sha256, manifest["run_id"]), exclusive=True)
     result_path = run_root / "output" / "run-result.json"
     require(not result_path.exists(), "Normalized run result already exists.")
-    normalized = (normalize_pair_result(run_root, input_sha256)
-                  if manifest["request"]["mode"] == "appearance-pair"
+    mode = manifest["request"]["mode"]
+    normalized = (normalize_pair_result(run_root, input_sha256) if mode == "appearance-pair"
+                  else normalize_performance_result(run_root, input_sha256) if mode == "performance-sample"
                   else normalize_run_result(run_root, input_sha256))
     write_json(result_path, normalized, exclusive=True)
 
@@ -846,6 +867,32 @@ def normalize_pair_result(run_root: Path, input_sha256: str) -> dict:
                        "window_rect": window.get("rect")},
         },
         "status": observer.get("status"), "exit_code": 0,
+    }
+
+
+def normalize_performance_result(run_root: Path, input_sha256: str) -> dict:
+    manifest = read_json(run_root / "input-manifest.json")
+    output = run_root / "output"
+    raw = read_json(output / "acceptance-result.json")
+    observations = read_json(output / "acceptance-observations.json")
+    require(raw.get("observations", {}).get("file") == "acceptance-observations.json" and
+            raw["observations"].get("sha256") == digest(output / "acceptance-observations.json") and
+            raw.get("acceptance_observations") == observations,
+            "Performance observer observations are not bound to the protected result.")
+    transport = read_json(output / "transport.json")
+    require(transport.get("observer_process") == {"state": "exited", "exit_code": 0},
+            "Performance observer process did not exit successfully.")
+    artifacts = manifest["artifacts"]
+    return {
+        "schema_version": 1, "diagnostic": "performance-sample", "run_id": manifest["run_id"],
+        "input_manifest_sha256": input_sha256,
+        "collection_sha256": digest(run_root / "collection.json"),
+        "cleanup_sha256": digest(output / "cleanup.json"),
+        "source_sha": manifest["source_sha"],
+        "application_sha256": artifacts["application"]["sha256"],
+        "observer_sha256": artifacts["observer"]["sha256"],
+        "observer_result_sha256": digest(output / "acceptance-result.json"),
+        "status": raw.get("status"), "exit_code": 0,
     }
 
 
@@ -924,11 +971,12 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
         "--expected-source-sha", source_sha,
     ]
     runs = selected_runs if selected_runs is not None else (
-        (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else RUNS)
+        (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else
+        (performance_run(),) if diagnostic == "performance-sample" else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
-    if diagnostic == "appearance-pair":
-        command += ["--diagnostic", "appearance-pair"]
+    if diagnostic in {"appearance-pair", "performance-sample"}:
+        command += ["--diagnostic", diagnostic]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
     else:
@@ -942,7 +990,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
-    parser.add_argument("--diagnostic", choices=["appearance-pair"])
+    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample"])
     parser.add_argument("--configuration-set", choices=["focused"])
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--desktop-width", type=int, default=1366)
@@ -953,7 +1001,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require(args.desktop_width in range(800, 1921) and args.desktop_height in range(600, 1081),
             "Appearance pair desktop must be between 800x600 and 1920x1080.")
     require(args.diagnostic or (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
-            "Desktop selection requires --diagnostic appearance-pair.")
+            "Desktop selection requires a diagnostic.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
     require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
@@ -961,7 +1009,8 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
-    selected_runs = (FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
+    selected_runs = ((performance_run(),) if args.diagnostic == "performance-sample" else
+                     FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
     if args.diagnostic == "appearance-pair":

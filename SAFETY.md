@@ -12,6 +12,28 @@ interrupted transaction. Paths selected through the UI, imported text, current
 filesystem occupancy, reparse points, parent identities, and concurrent changes
 by other processes are untrusted.
 
+Production recovery state is rooted under the selected local `LOCALAPPDATA` on
+NTFS. The runtime retains every directory handle from the drive root through
+`DarkReNamer/journal` without delete sharing. It reads the owner and DACL from
+each retained handle. Ancestors may be owned by the user, SYSTEM, built-in
+Administrators, or the exact Windows TrustedInstaller service SID; other
+principals may traverse/read but may not replace a child or change its ACL or
+owner. The two application-owned directories and all recovery files must be
+owned by the current process user; only that user, SYSTEM, and built-in
+Administrators may receive read, write, delete, or control rights. Both explicit
+and inherited allow ACEs are inspected; unrecognized ACE forms and null DACLs
+fail closed. A deny ACE does not make an unsafe allow ACE acceptable. New state
+objects receive a protected DACL before creation. The runtime lock must have
+one hard link. Pre-existing unsafe state is never repaired and trusted in the
+same startup: unsafe directories or lock files stop startup, while unsafe active
+or candidate journals remain retained, block Apply, and preserve their bytes.
+This protects against a different non-admin principal with access through a
+permissive profile or state ACL. It does not authenticate historical contents
+written while that boundary was absent; previously shared evidence should be
+quarantined for separate review. Same-token processes and administrators remain
+outside this ACL boundary. Checksums and strict replay validate structure, not
+the origin of old journal records.
+
 The UI may display paths but does not authorize mutation by string alone.
 Planning freezes source, entry, and parent identities. The Windows backend
 reopens and verifies those identities and performs handle-relative,
@@ -62,35 +84,57 @@ and unvalidated for v0.1. That limitation belongs to the release evidence
 contract and the runtime boundary: DarkReNamer queries the filesystem from the
 retained final directory handle and fails closed unless it reports NTFS.
 
-Save Names and Save Paths treat the selected destination as untrusted. While
-the save dialog is open, the application reads the current shell folder's NTFS
-volume GUID and file reference number, opens that directory by ID, and verifies
-that it matches a no-reparse handle chain for the selected path. It retains the
-folder and every ancestor without delete sharing. At acceptance, it reads the
-selected item's parent volume GUID and file reference number and checks them
-against the retained folder. If the selected leaf exposes exact volume GUID
-and file reference properties, it opens the leaf immediately, compares those
-properties with a native metadata handle, and retains a no-delete guard
-through session revalidation. An existing leaf without an exact identity is
-rejected. The export is written and flushed to a unique sibling file before
-the selected leaf is checked again. Existing reparse points and files with
-more than one hard link are rejected before commit. Existing files are
-replaced atomically with `ReplaceFileW`, which preserves supported file
-metadata and leaves hard-link aliases attached to the prior file contents. The
-selected file identity and link count are checked after staging. Since Windows
-permits a same-user rename while the retained leaf handle is open, the final
-path is reopened and checked against the selected identity immediately before
-`ReplaceFileW`; that name-based call still has a narrow same-user race after
-the recheck. A failed replacement's last-error is captured into an owned error
-immediately after the native return, before releasing the retained target entry.
-Only that saved code selects the existing identity-checked, no-replace backup
-restoration for error 1177; handle cleanup cannot change the recovery decision.
-A successful replacement ignores stale last-error and retains the existing
-committed-with-cleanup-warning outcome. A missing leaf is committed with an
-exclusive, handle-relative no-replace rename, so a later occupant is never
-overwritten.
+Save Names and Save Paths create new files only. Existing destinations,
+including hard links, directories and reparse points, are never overwritten;
+the user must choose an unused file name. While the save dialog is open, the
+application binds the selected folder's shell volume/file identity to a retained
+no-reparse local NTFS directory chain. Every ancestor remains open without
+delete sharing. Session and revision revalidation still precede writing.
+
+Export bytes are written, flushed and synchronized to a uniquely named sibling
+opened exclusively. The same staging handle remains open with no sharing through
+the final handle-relative no-replace rename. The final native operation refuses
+any later occupant, including one introduced immediately before commit; it does
+not reopen a target name for replacement. The stage inherits the selected
+folder's new-file permissions, which are also the intended new destination's
+permissions. An intentionally shared new export is not given an existing private
+file's DACL. Failure cleanup deletes only the retained owned staging handle and
+never reopens a possibly substituted temporary name. A cleanup failure reports
+that temporary evidence may remain. There is no existing-file replacement,
+metadata merge, replacement backup, or target-release interval in this path.
+
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
+Text imports use one bounded result handoff and perform open, opened-handle
+regular-file metadata validation, bounded read, and decode on a worker thread.
+The selected import location remains unrestricted, including network/provider
+paths, so a provider can leave synchronous I/O pending for an unbounded time.
+Cancel and close request `CancelSynchronousIo` through the tracked
+`JoinHandle`'s native thread handle, created by Rust's Windows `CreateThread`
+path with cancellation access. Both requests mark the result discard-only.
+The worker checks the shared cancellation flag before open, handle metadata,
+and every bounded read, and after I/O before decoding. An observed request stops
+new I/O, including retries of interrupted reads. The existing live-window poll
+reissues native cancellation while retirement is pending, covering the gap
+between a flag check and a native call. A failed native cancellation request
+still leaves the result discard-only, and no request promises immediate completion. The UI remains responsive, while the
+dialog session and runtime lock remain held until the worker thread reaches
+its terminal state and the UI joins it. A successful late read after cancellation
+cannot update the model. On completion the UI rechecks the saved session,
+revision, close state, and mutation/recovery locks before committing name
+proposals or handing bounded paths to admission. No worker borrows `AppState`
+or performs UI/model mutation. The wake carries no pointer and a live-window
+timer provides a missed-wake fallback. Controlled stage-delay tests exercise
+the lifecycle, but do not establish a deadline for any real provider.
+If the Win32 message pump itself fails while import I/O is still pending,
+normal close processing is unavailable. The process captures the message-loop
+error, writes it to standard error where available, and aborts, ending all
+threads and releasing the runtime lock together
+instead of joining indefinitely on the failed UI thread or dropping the lock
+while an import thread still runs. This fatal path does not delete journal
+evidence and import has no filesystem mutation authority. A defensive
+`AppState` teardown check applies the same process-fatal rule if unexpected
+window destruction bypasses the normal close gate while import I/O is live.
 The multi-select file picker extracts only the remaining source capacity plus
 one overflow witness, and it stops after the aggregate UTF-16 path budget is
 exhausted before building additional path values.
@@ -296,6 +340,13 @@ does not require a synchronized count table. Every modified exception, including
 additions within an allowed location, still requires native-boundary review and
 a local `SAFETY` justification. The Windows Clippy gate keeps
 `undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` denied.
+`rename/private_state.rs` is the reviewed exception for querying token SIDs,
+handle security descriptors and ACEs and passing a protected descriptor to
+the parent-relative `NtCreateFile` creation boundary. The descriptor and SID
+buffers remain live for each synchronous native call; all LocalAlloc outputs
+are released once. Unknown security forms fail closed before journal decoding.
+Successful descriptor, DACL and ACE outputs are explicitly checked for null;
+ACL/ACE dereferences use checked `NonNull` values while the descriptor remains owned.
 
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.

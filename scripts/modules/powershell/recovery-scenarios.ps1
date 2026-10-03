@@ -365,7 +365,7 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
     $candidateSource = Write-AcceptanceJournalBytesEvidence `
         -PrivateRoot $PrivateRoot -Leaf 'intent-authentic-source.drj' `
         -Boundary 'authentic-first-intent-frame' -Bytes $IntentBytes
-    Write-AcceptanceNewBytes -Path $candidatePath -Bytes $IntentBytes
+    Write-AcceptanceNewBytes -Path $candidatePath -Bytes $IntentBytes -PrivateUserOwned
     if (-not (Test-AcceptanceBytesEqual `
             -Expected $IntentBytes `
             -Actual ([IO.File]::ReadAllBytes($candidatePath)))) {

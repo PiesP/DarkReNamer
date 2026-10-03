@@ -1194,7 +1194,7 @@ pub(super) fn apply_command_states(state: &AppState) {
     };
     let activity = state.worker_activity();
     let advanced_enabled = advanced_appearance_available(
-        activity.admission || activity.plan || activity.apply,
+        activity.admission || activity.import || activity.plan || activity.apply,
         state.confirmation_pending,
     );
     // SAFETY: these are application-owned auxiliary menu items on the live menu.

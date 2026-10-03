@@ -117,17 +117,7 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
     if !local_app_data.is_absolute() {
         return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
     }
-    drop(JournalRoot::open(local_app_data).map_err(io::Error::other)?);
-    let app_root = local_app_data.join("DarkReNamer");
-    if !app_root.exists() {
-        fs::create_dir(&app_root)?;
-    }
-    drop(JournalRoot::open(&app_root).map_err(io::Error::other)?);
-    let root_path = app_root.join("journal");
-    if !root_path.exists() {
-        fs::create_dir(&root_path)?;
-    }
-    let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
+    let root = JournalRoot::open_private(local_app_data).map_err(io::Error::other)?;
     let runtime_lock = root.acquire_runtime_lock("runtime.lock").map_err(|error| {
         io::Error::other(format!(
             "다른 DarkReNamer 인스턴스가 실행 중이거나 runtime lock을 확보할 수 없습니다: {error}"

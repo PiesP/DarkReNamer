@@ -2834,6 +2834,21 @@ if ($waitProbeResult.natural_status -cne 'natural-exit' -or
             throw "The protected Windows VM workspace contract is missing '$workspaceContract'."
         }
     }
+    $baseBegin = $hostRunnerText.IndexOf('if ($ForBase) {', [StringComparison]::Ordinal)
+    $baseEnd = $hostRunnerText.IndexOf('if ($ForGuestRoot) {', $baseBegin, [StringComparison]::Ordinal)
+    if ($baseBegin -lt 0 -or $baseEnd -le $baseBegin) {
+        throw 'The protected workspace base ACL clause is missing.'
+    }
+    $baseAclClause = $hostRunnerText.Substring($baseBegin, $baseEnd - $baseBegin)
+    $baseRights = @([regex]::Matches(
+        $baseAclClause, '\[Security\.AccessControl\.FileSystemRights\]::([A-Za-z]+)') |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+    if (($baseRights -join ',') -cne 'ReadAttributes,ReadPermissions,Traverse' -or
+        $baseAclClause.IndexOf('[Security.AccessControl.InheritanceFlags]', [StringComparison]::Ordinal) -ge 0 -or
+        $baseAclClause.IndexOf('[Security.AccessControl.PropagationFlags]', [StringComparison]::Ordinal) -ge 0 -or
+        $baseAclClause.IndexOf('$security.AddAccessRule($ancestorRead)', [StringComparison]::Ordinal) -lt 0) {
+        throw 'The runner base ACL must grant only non-inherited traverse, attribute read, and descriptor read rights.'
+    }
     if ([regex]::Matches(
             $hostRunnerText,
             [regex]::Escape('-RuntimeRoot $runtime '),

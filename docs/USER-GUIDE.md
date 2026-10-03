@@ -19,6 +19,15 @@ item diagnostics) to read the complete explanation, source and proposed path,
 and corrective action. The diagnostic is a synchronized model preview; it does
 not check live filesystem occupancy or authorize Apply.
 
+## Save names or paths
+
+Save Names and Save Paths write a complete UTF-16LE text file with a BOM.
+Choose a new, unused file name in a supported local NTFS folder. Existing files
+are never overwritten; if another process creates the selected name before the
+save completes, the export fails and that file remains unchanged. New files use
+the selected folder's normal inherited permissions. To keep an export private,
+choose a private folder.
+
 ## Set or reset a target folder
 
 Use **편집 > 대상 폴더 > 모든 파일의 대상 폴더 지정...** (Edit > Target folder

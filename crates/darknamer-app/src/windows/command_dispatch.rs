@@ -528,12 +528,13 @@ pub(super) fn take_prepared_task_dialog(
     let current = state.confirmation_pending
         && state.mutation_locked
         && !activity.admission
+        && !activity.import
         && !activity.plan
         && !activity.apply
         && state.revision() == session.expected_revision
         && policy_matches;
     let closing = state.close_pending;
-    let worker_active = activity.admission || activity.plan || activity.apply;
+    let worker_active = activity.admission || activity.import || activity.plan || activity.apply;
     state.active_prompt = None;
     state.confirmation_pending = false;
     state.mutation_locked = closing || worker_active;
@@ -618,6 +619,9 @@ pub(super) fn dispatch_command(
     command: u16,
 ) -> Option<PreparedCommandAction> {
     if state.active_prompt.is_some() {
+        if command == EXIT_COMMAND && state.import_worker.is_some() {
+            request_window_close(window, state);
+        }
         return None;
     }
     if state.appearance_dialog.is_some() {
@@ -632,7 +636,7 @@ pub(super) fn dispatch_command(
         return None;
     }
     let activity = state.worker_activity();
-    let worker_active = activity.admission || activity.plan || activity.apply;
+    let worker_active = activity.admission || activity.import || activity.plan || activity.apply;
     if state.mutation_locked
         && !matches!(command, VERSION | EXIT_COMMAND)
         && !appearance_command_allowed(command, worker_active)
@@ -1336,16 +1340,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 .is_some()
             {
                 match write_legacy_text_to_target(target, &text) {
-                    Ok(crate::rename::windows_native::TextExportOutcome::Committed) => {}
-                    Ok(
-                        crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(
-                            error,
-                        ),
-                    ) => message(
-                        window,
-                        &text_export_cleanup_warning_korean(&error),
-                        TEXT_EXPORT_CLEANUP_WARNING_TITLE,
-                    ),
+                    Ok(()) => {}
                     Err(error) => message(
                         window,
                         &format!("파일을 저장하지 못했습니다: {error}"),
@@ -1355,127 +1350,10 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
             }
         }
         PreparedFileDialogSelection::ImportNames(path) => {
-            if !file_dialog_session_is_current(window, session) {
-                let _ = finish_file_dialog_session(
-                    window,
-                    session,
-                    FileDialogCompletion::Accept,
-                    |_| (),
-                );
-                return;
-            }
-            let text = match read_legacy_text(&path) {
-                Ok(text) => text,
-                Err(error) => {
-                    if finish_file_dialog_session(
-                        window,
-                        session,
-                        FileDialogCompletion::Accept,
-                        |_| (),
-                    )
-                    .is_some()
-                    {
-                        message(
-                            window,
-                            &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-                            "DarkReNamer",
-                        );
-                    }
-                    return;
-                }
-            };
-            let result = finish_file_dialog_session(
-                window,
-                session,
-                FileDialogCompletion::Accept,
-                |state| {
-                    state.model.import_names_changed(&text).map(|changed| {
-                        let outcome = proposal_outcome(state, changed);
-                        apply_command_outcome(window, state, outcome, None);
-                    })
-                },
-            );
-            if let Some(Err(error)) = result {
-                message(
-                    window,
-                    proposal_mutation_error_korean(error),
-                    "DarkReNamer - 이름 가져오기",
-                );
-            }
+            start_selected_import(window, session, path, ImportKind::Names);
         }
         PreparedFileDialogSelection::ImportPaths(path) => {
-            if !file_dialog_session_is_current(window, session) {
-                let _ = finish_file_dialog_session(
-                    window,
-                    session,
-                    FileDialogCompletion::Accept,
-                    |_| (),
-                );
-                return;
-            }
-            let text = match read_legacy_text(&path) {
-                Ok(text) => text,
-                Err(error) => {
-                    if finish_file_dialog_session(
-                        window,
-                        session,
-                        FileDialogCompletion::Accept,
-                        |_| (),
-                    )
-                    .is_some()
-                    {
-                        message(
-                            window,
-                            &format!("경로 목록을 읽지 못했습니다: {error}"),
-                            "DarkReNamer",
-                        );
-                    }
-                    return;
-                }
-            };
-            let prepared = inspect_file_dialog_session(window, session, |state| {
-                let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-                let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
-                let over_limit = truncated || lines.len() > remaining;
-                let paths = lines
-                    .into_iter()
-                    .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
-                    .collect();
-                (over_limit, paths)
-            });
-            let Some((over_limit, paths)) = prepared else {
-                let _ = finish_file_dialog_session(
-                    window,
-                    session,
-                    FileDialogCompletion::Accept,
-                    |_| (),
-                );
-                return;
-            };
-            if over_limit {
-                message(
-                    window,
-                    "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-                    "DarkReNamer - 가져오기 한도",
-                );
-            }
-            let result = finish_file_dialog_session(
-                window,
-                session,
-                FileDialogCompletion::Accept,
-                |state| {
-                    let result = admit_paths(window, state, paths);
-                    if result.is_ok() {
-                        finalize_admission_start(state);
-                    } else {
-                        finalize_admission_start_failure(state);
-                    }
-                    result
-                },
-            );
-            if let Some(Err(error)) = result {
-                report_admission_start_error(window, &error);
-            }
+            start_selected_import(window, session, path, ImportKind::Paths);
         }
         PreparedFileDialogSelection::RecoveryExportDirectory(_) => {
             let _ =
@@ -1486,6 +1364,131 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
 
 fn file_dialog_session_is_current(window: HWND, session: PreparedFileDialogSession) -> bool {
     inspect_file_dialog_session(window, session, |_| ()).is_some()
+}
+
+fn start_selected_import(
+    window: HWND,
+    session: PreparedFileDialogSession,
+    path: PathBuf,
+    kind: ImportKind,
+) {
+    let Some(mut lease) = try_app_state(window) else {
+        return;
+    };
+    let state = lease.state_mut();
+    if !file_dialog_window_is_current(window, session.owner)
+        || !deferred_result_can_apply(
+            state.active_prompt,
+            session.session_id,
+            completion_locks(state),
+            state.revision(),
+            session.expected_revision,
+        )
+    {
+        if state.active_prompt == Some(session.session_id) {
+            state.active_prompt = None;
+        }
+        try_finish_window_close(window, state);
+        return;
+    }
+    if let Err(error) = start_import_worker(
+        window,
+        state,
+        session.session_id,
+        session.expected_revision,
+        path,
+        kind,
+    ) {
+        state.active_prompt = None;
+        update_controls(state);
+        message(
+            window,
+            &format!("가져오기 작업을 시작하지 못했습니다: {error}"),
+            "DarkReNamer - 가져오기 실패",
+        );
+        try_finish_window_close(window, state);
+    }
+}
+
+pub(super) fn finish_import_worker_result(
+    window: HWND,
+    state: &mut AppState,
+    session_id: u64,
+    revision: ModelRevision,
+    kind: ImportKind,
+    cancelled: bool,
+    result: io::Result<LegacyText>,
+) {
+    let locks = completion_locks(state);
+    let current_revision = state.revision();
+    let disposition = take_file_dialog_session(
+        &mut state.active_prompt,
+        session_id,
+        if cancelled {
+            FileDialogCompletion::Cancel
+        } else {
+            FileDialogCompletion::Accept
+        },
+        locks,
+        current_revision,
+        revision,
+    );
+    if disposition != FileDialogSessionDisposition::Accepted {
+        if disposition == FileDialogSessionDisposition::Rejected && !state.close_pending {
+            state.set_transient_status(
+                "가져오기 중 목록 또는 작업 상태가 바뀌어 결과를 적용하지 않았습니다.",
+            );
+        }
+        return;
+    }
+    let text = match result {
+        Ok(text) => text,
+        Err(error) => {
+            message(
+                window,
+                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
+                "DarkReNamer - 가져오기 실패",
+            );
+            return;
+        }
+    };
+    match kind {
+        ImportKind::Names => match state.model.import_names_changed(&text) {
+            Ok(changed) => {
+                let outcome = proposal_outcome(state, changed);
+                apply_command_outcome(window, state, outcome, None);
+            }
+            Err(error) => message(
+                window,
+                proposal_mutation_error_korean(error),
+                "DarkReNamer - 이름 가져오기",
+            ),
+        },
+        ImportKind::Paths => {
+            let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+            let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
+            let over_limit = truncated || lines.len() > remaining;
+            let paths = lines
+                .into_iter()
+                .take(remaining)
+                .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
+                .collect();
+            if over_limit {
+                message(
+                    window,
+                    "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                    "DarkReNamer - 가져오기 한도",
+                );
+            }
+            match admit_paths(window, state, paths) {
+                Ok(()) => finalize_admission_start(state),
+                Err(error) => {
+                    finalize_admission_start_failure(state);
+                    report_admission_start_error(window, &error);
+                }
+            }
+        }
+    }
 }
 
 fn inspect_file_dialog_session<R>(
@@ -1563,7 +1566,10 @@ fn completion_locks(state: &AppState) -> PromptCompletionLocks {
         close_pending: state.close_pending,
         read_only_locked: state.read_only_locked(),
         mutation_locked: state.mutation_locked,
-        worker_active: worker_activity.admission || worker_activity.plan || worker_activity.apply,
+        worker_active: worker_activity.admission
+            || worker_activity.import
+            || worker_activity.plan
+            || worker_activity.apply,
     }
 }
 

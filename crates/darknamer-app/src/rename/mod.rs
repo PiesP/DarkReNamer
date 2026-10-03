@@ -10,6 +10,12 @@ mod memory;
 mod model;
 mod planner;
 mod ports;
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "reviewed Windows recovery-state ACL and handle boundary"
+)]
+mod private_state;
 mod recovery;
 mod schedule;
 #[cfg(windows)]

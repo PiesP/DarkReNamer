@@ -38,7 +38,8 @@ foreach ($entry in @(
     $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
-    foreach ($functionName in @('Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
+    foreach ($functionName in @('Get-DrControllerV2OwnedStartMap',
+        'Test-DrControllerV2OwnedProcessLifetime','Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
         $definitions=@($ast.FindAll({param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
         },$true))
@@ -48,18 +49,57 @@ foreach ($entry in @(
     $name='unique-run';$root='C:\owned\run';$trustedRoot='C:\owned\run-trusted'
     $roots=@{guest=@{path=$root};trusted=@{path=$trustedRoot}}
     $sid='fixture';$desktopSession=2
-    $taskContext=@{declared_processes=@();baseline_tasks=@();preflight_child=@{pid=1};engine_child=@{pid=2}
-        task_execution=@{observer_lifecycle=@{pid=3}}
-        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777}}})}
+    $base=[datetime]::ParseExact('2026-10-03T00:00:00.0000000Z',
+        'yyyy-MM-ddTHH:mm:ss.fffffffZ',[Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal)
+    $at={param([int]$seconds) ($base.AddSeconds($seconds).Ticks + 8).ToString(
+        [Globalization.CultureInfo]::InvariantCulture)}
+    $iso={param([int]$seconds) $base.AddSeconds($seconds).ToString('o')}
+    $taskContext=@{declared_processes=@(@{pid=3252;start_time_utc_ticks=(& $at 20)})
+        baseline_tasks=@();preflight_child=@{pid=1;start_time_utc_ticks=(& $at 0)}
+        engine_child=@{pid=2;start_time_utc_ticks=(& $at 1)}
+        task_execution=@{observer_lifecycle=@{pid=3;start_time_utc_ticks=(& $at 2)}}
+        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777;start_time_utc_ticks=(& $at 10)}}})}
     $v2Evidence=$taskContext
     $owned=[pscustomobject]@{pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
+        creation_time_utc=(& $iso 11)
         executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding'}
     $ambient=[pscustomobject]@{pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
+        creation_time_utc=(& $iso 5)
         executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding'}
     $found=@(Get-V2OwnedScopeProcesses @{processes=@($owned,$ambient)})
     if($found.Count -ne 1 -or $found[0].pid -ne 900){throw 'Rescue descendant escaped normal owned scope.'}
     Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()}
     Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($owned)} @{processes=@()} } 'protected execution scope'
+    $staleChild=$ambient.PSObject.Copy();$staleChild.parent_pid=3252
+    $staleChild.identity='901|stale-parent'
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($staleChild)}).Count -ne 0){
+        throw 'A process older than its recycled parent PID was claimed as owned.'
+    }
+    Assert-V2Inventory @{tasks=@();processes=@($staleChild)} @{processes=@()}
+    $direct=$ambient.PSObject.Copy();$direct.pid=3252;$direct.identity='3252|owned'
+    $direct.creation_time_utc=& $iso 20
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($direct)}).Count -ne 1){
+        throw 'Exact owned process lifetime escaped cleanup scope.'
+    }
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($direct)} @{processes=@()} } 'protected execution scope'
+    $reused=$direct.PSObject.Copy();$reused.identity='3252|reused';$reused.creation_time_utc=& $iso 21
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($reused)}).Count -ne 0){
+        throw 'Reused direct PID was claimed as the earlier owned lifetime.'
+    }
+    Assert-V2Inventory @{tasks=@();processes=@($reused)} @{processes=@()}
+    $pathOwned=$staleChild.PSObject.Copy();$pathOwned.command_line=$root+'\fixture.exe'
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($pathOwned)}).Count -ne 1){
+        throw 'Run path lost its independent cleanup scope.'
+    }
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($pathOwned)} @{processes=@()} } 'protected execution scope'
+    $malformed=$ambient.PSObject.Copy();$malformed.creation_time_utc='invalid'
+    Assert-Fails { Get-V2OwnedScopeProcesses @{processes=@($malformed)} } 'creation time'
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($malformed)} @{processes=@()} } 'creation time'
+    $taskContext.declared_processes[0].start_time_utc_ticks='invalid'
+    Assert-Fails { Get-V2OwnedScopeProcesses @{processes=@($ambient)} } 'owned process lifetime'
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()} } 'owned process lifetime'
 }
 
 # Exercise the host binding through the authenticated guest's native argv decoder.
@@ -1170,6 +1210,8 @@ try {
             $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
         }, $true).ScriptBlock.GetScriptBlock()
         $completionDefinition = ${function:Test-DrControllerCleanupObservation}.ToString()
+        $startMapDefinition = ${function:Get-DrControllerV2OwnedStartMap}.ToString()
+        $lifetimeDefinition = ${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()
         foreach($name in @('New-DrVmSpotlightCaptureContext','Close-DrVmSpotlightCaptureContext')){
             $definition=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq ('global:'+$name)}.GetNewClosure(),$true))
             . ([scriptblock]::Create($definition[0].Extent.Text.Replace('function global:','function ')))
@@ -1236,7 +1278,8 @@ try {
                     baseline_tasks = @([pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = 'a' * 64 })
                     baseline_process_identities = @()
                 }
-                $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context `
+                    $completionDefinition $startMapDefinition $lifetimeDefinition
                 if ($mode -ceq 'clean' -and
                     (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $observed)) {
                     throw 'A normal successful cleanup must bypass the strict-failure finalizer.'
@@ -1684,16 +1727,20 @@ try {
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($controllerPath, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw $errors[0] }
-    $function = $ast.Find({ param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -ceq 'Get-DrControllerRecoveryProcessIdentities'
-    }, $false)
-    . ([scriptblock]::Create($function.Extent.Text))
+    foreach ($name in @('Get-DrControllerRecoveryProcessIdentities',
+            'Test-DrControllerProcessJobCleanupLedger')) {
+        $function = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        }, $false)
+        if ($null -eq $function) { throw "Missing controller cleanup function: $name" }
+        . ([scriptblock]::Create($function.Extent.Text))
+    }
     $private = Join-Path $root 'private'
     $null = New-Item -ItemType Directory -Path $private
     $references = @()
     $files = foreach ($processId in @(101, 102)) {
-        $leaf = "start-$processId.json"
+        $leaf = 'process-{0:D2}-started.json' -f ($processId - 100)
         $path = Join-Path $private $leaf
         [IO.File]::WriteAllText($path, (@{
             boundary = 'started'
@@ -1711,8 +1758,9 @@ try {
         classification = 'private-path-bearing-raw-recovery-evidence'; files = @($files)
     } | ConvertTo-Json -Depth 6))
     $result = [pscustomobject]@{
+        status = 'passed'
         selected_mode = 'ProcessCrash'
-        process_crash = [pscustomobject]@{ processes = $references[0..1] }
+        process_crash = [pscustomobject]@{ status = 'passed'; processes = $references[0..1] }
         intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'switch-not-selected' }
         private_evidence = [pscustomobject]@{
             sha256 = Get-LowerSha256 -Path $indexPath; bytes = (Get-Item -LiteralPath $indexPath).Length
@@ -1729,6 +1777,61 @@ try {
     }
     $result.intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'interrupted' }
     Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.intent_only_candidate_discard = [pscustomobject]@{ status = 'not-run'; reason = 'switch-not-selected' }
+    $savedDigest = $result.private_evidence.sha256
+    $result.private_evidence.sha256 = 'a' * 64
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'does not match'
+    $result.private_evidence.sha256 = $savedDigest
+
+    $result.status = 'failed'
+    $result | Add-Member -NotePropertyName failure_reason -NotePropertyValue 'recovery_acceptance_error'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'recovery_acceptance_error' }
+    $result | Add-Member -NotePropertyName process_job_cleanup -NotePropertyValue @(
+        foreach ($processId in @(101, 102)) {
+            [pscustomobject]@{
+                pid = $processId; process_start_time_utc_ticks = [string]$processId
+                status = 'clean'; job_empty = $true; job_closed = $true
+                capture_complete = $true; had_survivors = $false; forced_termination = $false
+                error = $null; active_processes_at_close = 0
+                active_process_ids_at_stop = @(); active_processes_at_primary_exit = $null
+                active_processes_at_stop = $null; total_processes_at_stop = $null
+                primary_process_active_at_stop = $null; termination_exit_code = $null
+            }
+        }
+    )
+    $identities = Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root
+    if ($identities.Count -ne 2 -or -not $identities.Contains('101|101') -or
+        -not $identities.Contains('102|102') -or
+        -not (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root)) {
+        throw 'Failed recovery lost its protected start receipts or clean Job proof.'
+    }
+    foreach ($mode in @('WorkerCancellation', 'WorkerClose')) {
+        $result.selected_mode = $mode
+        $field = if ($mode -ceq 'WorkerCancellation') { 'worker_cancellation' } else { 'worker_close' }
+        $result | Add-Member -NotePropertyName $field -NotePropertyValue ([pscustomobject]@{
+            status = 'failed'; reason = 'recovery_acceptance_error'
+        })
+        $identities = Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root
+        if ($identities.Count -ne 2 -or
+            -not (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root)) {
+            throw "Failed $mode lost its protected process and Job identities."
+        }
+    }
+    $result.selected_mode = 'ProcessCrash'
+    $result.process_job_cleanup[0].pid = 999
+    if (Test-DrControllerProcessJobCleanupLedger -Result $result -RecoveryEvidenceRoot $root) {
+        throw 'A failed recovery Job identity without a protected start receipt was accepted.'
+    }
+    $result.process_job_cleanup[0].pid = 101
+    $result.process_crash = [pscustomobject]@{
+        status = 'failed'; reason = 'recovery_acceptance_error'; processes = $references[0..1]
+    }
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'wrong-reason' }
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'invalid status'
+    $result.process_crash = [pscustomobject]@{ status = 'failed'; reason = 'recovery_acceptance_error' }
+    $result.private_evidence.sha256 = 'a' * 64
+    Assert-Fails { Get-DrControllerRecoveryProcessIdentities -Result $result -EvidenceRoot $root } 'does not match'
 
     & {
         $script:resourceCalls = [Collections.Generic.List[string]]::new()

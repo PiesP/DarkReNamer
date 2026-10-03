@@ -26,6 +26,23 @@ MAX_COLLECTION_BYTES = 512 * 1024 * 1024
 REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
+PERFORMANCE_MODE = "performance-sample"
+PERFORMANCE_RUN_ID = "performance-sample-1366x768-96-text100"
+PERFORMANCE_PLAN = {
+    "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
+    "ordinary_rows": [100, 1000, 10000], "long_path_rows": 1000,
+    "extension_classes": 300, "add_remove_reset_cycles": 3,
+    "sample_interval_ms": 200,
+}
+PERFORMANCE_PHASES = (
+    "empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
+    "single-row", "full-preview", "long-hidden", "long-visible", "extensions",
+    "cycle-1", "cycle-2", "cycle-3", "post",
+)
+PERFORMANCE_TIMINGS = (
+    "ordinary-100", "ordinary-1000", "ordinary-10000", "full-preview",
+    "long-hidden", "long-visible", "extensions", "cycle-1", "cycle-2", "cycle-3",
+)
 PAIR_RUN_ID = "appearance-pair-light-dark-light"
 PAIR_CONFIGURATIONS = {
     "appearance-pair-base-1920x1080-96-text100": ("light", 1920, 1080, 96, 100, False),
@@ -342,8 +359,10 @@ def validate_request(value: object) -> dict:
     fields = {"mode", "appearance", "desktop", "text_scale_percent"}
     if isinstance(value, dict) and value.get("mode") == PAIR_MODE and "high_contrast" in value:
         fields.add("high_contrast")
+    if isinstance(value, dict) and value.get("mode") == PERFORMANCE_MODE:
+        fields.add("performance_plan")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE}, "request.mode is invalid.")
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE}, "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
     checked_int(desktop["width"], 800, 8192, "request.desktop.width")
@@ -358,6 +377,11 @@ def validate_request(value: object) -> dict:
                 800 <= desktop["width"] <= 1920 and 600 <= desktop["height"] <= 1080 and
                 desktop["dpi"] in {96, 120, 144, 192},
                 "Appearance pair request is outside its bounded display configurations.")
+    elif request["mode"] == PERFORMANCE_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                request["performance_plan"] == PERFORMANCE_PLAN,
+                "Performance request differs from its fixed plan.")
     else:
         expected = FIXED_REQUESTS[request["mode"]]
         require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
@@ -453,6 +477,12 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
                 command[0:3] == ["python3", "-I", "scripts/run-gui-regression.py"] and
                 command.count("--diagnostic") == 1 and command.count(PAIR_MODE) == 1,
                 "Appearance pair manifest identity or command is invalid.")
+    if request["mode"] == PERFORMANCE_MODE:
+        require(manifest["run_id"] == PERFORMANCE_RUN_ID and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", PERFORMANCE_MODE],
+                "Performance manifest identity or command is invalid.")
     if request["mode"] == "tooltip":
         require("full_context_reference" in manifest,
                 "The tooltip run requires a direct full-context reference.")
@@ -2733,7 +2763,206 @@ def validate_focused_pair_results(pairs: list[dict]) -> None:
     for before, after in zip(baseline["raster_regions"]["same_glyph"], enlarged["raster_regions"]["same_glyph"], strict=True):
         require(before["phase"] == after["phase"] and before["text_sha256"] == after["text_sha256"] and
                 after["width"] > before["width"] * 1.15 and after["height"] > before["height"] * 1.15,
-                "Appearance Text150 did not enlarge both dimensions of the same glyphs.")
+            "Appearance Text150 did not enlarge both dimensions of the same glyphs.")
+
+
+def validate_performance_metrics(scenario: dict) -> dict:
+    plan = exact_keys(scenario.get("plan"),
+                      {"ordinary_rows", "long_path_rows", "extension_classes",
+                       "add_remove_reset_cycles", "idle_seconds", "sample_interval_ms"},
+                      "performance plan")
+    require(plan == {key: PERFORMANCE_PLAN[key] for key in plan},
+            "Performance observed plan differs from the fixed request.")
+    timing_rows = scenario.get("timings")
+    require(isinstance(timing_rows, list) and len(timing_rows) == len(PERFORMANCE_TIMINGS),
+            "Performance timing rows are missing or duplicated.")
+    timings = {}
+    for index, value in enumerate(timing_rows):
+        timing_id = PERFORMANCE_TIMINGS[index]
+        fields = {"id", "elapsed_ms", "rows", "observed_rows"}
+        if timing_id == "full-preview":
+            fields.add("command_elapsed_ms")
+        if timing_id.startswith("cycle-"):
+            fields.add("import_elapsed_ms")
+        row = exact_keys(value, fields,
+                         f"performance timing {index}")
+        require(row["id"] == timing_id, "Performance timing order differs.")
+        require(type(row["elapsed_ms"]) in (int, float) and math.isfinite(row["elapsed_ms"]) and
+                0 < row["elapsed_ms"] <= 600000, "Performance timing is invalid.")
+        if timing_id == "full-preview" or timing_id.startswith("cycle-"):
+            component = row["command_elapsed_ms" if timing_id == "full-preview" else "import_elapsed_ms"]
+            require(type(component) in (int, float) and math.isfinite(component) and
+                    0 < component <= row["elapsed_ms"],
+                    "Performance full-operation timing excludes a measured component.")
+        expected_rows = {"ordinary-100": 100, "ordinary-1000": 1000,
+                         "ordinary-10000": 10000, "full-preview": 10000}.get(row["id"], 1000)
+        require(int_equals(row["rows"], expected_rows) and
+                int_equals(row["observed_rows"], expected_rows),
+                "Performance timing observed row count differs.")
+        timings[row["id"]] = row["elapsed_ms"]
+    require(scenario.get("clear_row_counts") == [0] * 7,
+            "Performance remove cycles did not observe seven empty lists.")
+    preview_rows = scenario.get("full_preview_rows")
+    expected_indices = (0, 2499, 4999, 7499, 9999)
+    require(isinstance(preview_rows, list) and len(preview_rows) == len(expected_indices),
+            "Performance full-list preview probes are missing or duplicated.")
+    for index, value in zip(expected_indices, preview_rows, strict=True):
+        row = exact_keys(value, {"index", "source", "prefixed", "reset"},
+                         f"performance preview probe {index}")
+        original = f"ordinary-{index:05d}.txt"
+        require(int_equals(row["index"], index) and row["source"] == row["reset"] == original and
+                row["prefixed"] == "sample-" + original,
+                "Performance full-list preview or reset differs at a representative row.")
+    samples = scenario.get("samples")
+    require(isinstance(samples, list) and 150 <= len(samples) <= 3000,
+            "Performance sample count is outside the fixed 200ms/600s envelope.")
+    phases = {phase: [] for phase in PERFORMANCE_PHASES}
+    previous_time = -1
+    previous_cpu = -1
+    previous_phase = 0
+    for index, value in enumerate(samples):
+        sample = exact_keys(value,
+                            {"phase", "elapsed_ms", "cpu_ms", "private_bytes", "working_set_bytes",
+                             "threads", "handles", "gdi_objects", "ui_response_ms", "ui_responsive"},
+                            f"performance sample {index}")
+        require(sample["phase"] in phases, "Performance sample phase is invalid.")
+        phase_index = PERFORMANCE_PHASES.index(sample["phase"])
+        require(phase_index >= previous_phase, "Performance sample phases regressed.")
+        previous_phase = phase_index
+        elapsed = checked_int(sample["elapsed_ms"], 0, 600000, "performance elapsed_ms")
+        cpu = checked_int(sample["cpu_ms"], 0, 6000000, "performance cpu_ms")
+        require(elapsed > previous_time and cpu >= previous_cpu,
+                "Performance sample time or CPU regressed or duplicated.")
+        previous_time, previous_cpu = elapsed, cpu
+        for name in ("private_bytes", "working_set_bytes"):
+            checked_int(sample[name], 1, 32 * 1024**3, f"performance {name}")
+        for name, maximum in (("threads", 4096), ("handles", 1000000), ("gdi_objects", 1000000)):
+            checked_int(sample[name], 0, maximum, f"performance {name}")
+        checked_int(sample["ui_response_ms"], 0, 5000, "performance ui_response_ms")
+        require(type(sample["ui_responsive"]) is bool, "Performance UI responsiveness must be boolean.")
+        phases[sample["phase"]].append(sample)
+    require(samples[0]["phase"] == "empty-idle" and samples[-1]["phase"] == "post" and
+            phases["empty-idle"][-1]["elapsed_ms"] >= 29000 and
+            all(phases[phase] for phase in ("ordinary-10000", "full-preview", "long-hidden",
+                                             "long-visible", "extensions", "cycle-1", "cycle-2", "cycle-3")),
+            "Performance samples do not cover idle and each expensive import/refresh phase.")
+    columns = exact_keys(scenario.get("columns"),
+                         {"hidden_widths", "visible_widths", "first_values"}, "performance columns")
+    require(isinstance(columns["hidden_widths"], list) and columns["hidden_widths"] == [0] * 4 and
+            isinstance(columns["visible_widths"], list) and len(columns["visible_widths"]) == 4 and
+            all(type(width) is int and width > 0 for width in columns["visible_widths"]) and
+            isinstance(columns["first_values"], list) and len(columns["first_values"]) == 4 and
+            all(isinstance(value, str) and value for value in columns["first_values"]),
+            "Performance auxiliary columns were not observed hidden and visible with values.")
+    require(columns["first_values"][0].endswith("long-0000.txt"),
+            "Performance full-path column differs from the fixture.")
+    require(scenario.get("wakeups") == {"status": "not_run", "reason": "no-supported-process-wakeup-counter"},
+            "Unavailable wakeups must remain not_run.")
+    require(scenario.get("disk_unchanged") is True and
+            int_equals(scenario.get("journal_residue_count"), 0) and
+            int_equals(scenario.get("normal_exit_code"), 0),
+            "Performance fixture, journal, or normal exit proof is missing.")
+    return {"sample_count": len(samples), "timings_ms": timings,
+            "cpu_delta_ms": samples[-1]["cpu_ms"] - samples[0]["cpu_ms"],
+            "private_peak_bytes": max(row["private_bytes"] for row in samples),
+            "working_set_peak_bytes": max(row["working_set_bytes"] for row in samples),
+            "private_post_bytes": samples[-1]["private_bytes"],
+            "working_set_post_bytes": samples[-1]["working_set_bytes"],
+            "threads_peak": max(row["threads"] for row in samples),
+            "handles_peak": max(row["handles"] for row in samples),
+            "gdi_peak": max(row["gdi_objects"] for row in samples),
+            "ui_response_gap_max_ms": max(row["ui_response_ms"] for row in samples),
+            "ui_timeout_count": sum(not row["ui_responsive"] for row in samples),
+            "wakeups": "not_run"}
+
+
+def validate_performance_lifecycle(lifecycles: object, scenario: dict, application_sha256: str) -> None:
+    require(isinstance(lifecycles, list) and len(lifecycles) == 1 and
+            isinstance(lifecycles[0], dict),
+            "Performance exact process lifecycle did not close normally.")
+    lifecycle = lifecycles[0].get("process_lifecycle")
+    require(isinstance(lifecycle, dict) and
+            int_equals(lifecycle.get("pid"), scenario["process_id"]) and
+            str(scenario.get("process_start_utc_ticks")) == lifecycle.get("start_time_utc_ticks") and
+            lifecycle.get("executable_sha256") == application_sha256 and
+            lifecycle.get("start_observed") is True and
+            lifecycle.get("exit_observed") is True and
+            lifecycle.get("exit_method") == "normal-close" and
+            int_equals(lifecycle.get("exit_code"), 0),
+            "Performance exact process lifecycle did not close normally.")
+
+
+def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
+    require(run_id == PERFORMANCE_RUN_ID, "Performance run id is invalid.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "Performance run directory is missing or unsafe.")
+    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    require(manifest["request"]["mode"] == PERFORMANCE_MODE, "Performance request mode is missing.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 32 * 1024 * 1024 and
+            sum(name.endswith(".png") for name in files) == 1,
+            "Performance sample exceeds its 32 MiB/one-PNG output budget.")
+    preflight, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    result, _ = read_json(run_root / "output", Path("run-result.json"), "performance result")
+    result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
+        "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256",
+        "observer_sha256", "observer_result_sha256", "status", "exit_code"}, "performance result")
+    artifacts = manifest["artifacts"]
+    require(int_equals(result["schema_version"], 1) and result["diagnostic"] == PERFORMANCE_MODE and
+            result["run_id"] == run_id and result["input_manifest_sha256"] == input_hash and
+            result["collection_sha256"] == sha256_bytes(collection_bytes) and
+            result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            result["source_sha"] == source_sha and
+            result["application_sha256"] == artifacts["application"]["sha256"] and
+            result["observer_sha256"] == artifacts["observer"]["sha256"] and
+            result["status"] == "review_required" and int_equals(result["exit_code"], 0),
+            "Performance result binding or terminal status differs.")
+    validate_transport_exit(run_root, files, 0)
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "performance observer")
+    observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"),
+                                                "performance observations")
+    require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) == files["acceptance-result.json"]["sha256"] and
+            sha256_bytes(observation_bytes) == files["acceptance-observations.json"]["sha256"] and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observation_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "Performance protected observer observations are not source-bound.")
+    require(raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("status") == "review_required" and
+            nested(raw, "assertions", "overall") == "passed" and
+            nested(raw, "assertions", "scope") == "performance-sample-p1-p3-v1" and
+            raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            nested(raw, "capture", "status") == "passed",
+            "Performance observer identity, scope, or cleanup differs.")
+    scenario = observations.get("scenario")
+    require(isinstance(scenario, dict) and scenario.get("mode") == PERFORMANCE_MODE and
+            scenario.get("appearance") == "light" and
+            scenario.get("executable_sha256") == artifacts["application"]["sha256"] and
+            type(scenario.get("executable_bytes")) is int and scenario["executable_bytes"] > 0 and
+            int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"]) and
+            nested(scenario, "environment", "main_window", "process_id") == scenario["process_id"] and
+            nested(scenario, "environment", "hwnd_dpi") == 96 and
+            nested(scenario, "environment", "text_scale_factor_percent") == 100,
+            "Performance source executable, process, or display identity differs.")
+    validate_performance_lifecycle(raw.get("process_lifecycles"), scenario,
+                                   artifacts["application"]["sha256"])
+    captures = raw.get("screenshots")
+    require("performance-empty.png" in files, "Performance empty-idle PNG is absent from collection.")
+    require(isinstance(captures, list) and len(captures) == 1 and
+            captures[0].get("file") == "performance-empty.png" and
+            captures[0].get("sha256") == files["performance-empty.png"]["sha256"],
+            "Performance empty-idle PNG evidence is missing or unbound.")
+    metrics = validate_performance_metrics(scenario)
+    return {"run_id": run_id, "source_sha": source_sha,
+            "application_sha256": artifacts["application"]["sha256"],
+            "process_id": scenario["process_id"], "metrics": metrics,
+            "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -2742,7 +2971,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -2754,6 +2983,16 @@ def main(repo: Path, argv=None) -> int:
             "--expected-source-sha must be a full lowercase Git SHA.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
+    if args.diagnostic == PERFORMANCE_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                args.runs == [PERFORMANCE_RUN_ID],
+                "Performance sample requires its single declared opt-in run and cannot complete acceptance.")
+        measured = validate_performance_run(root, PERFORMANCE_RUN_ID, args.expected_source_sha)
+        print(json.dumps({"schema_version": 1, "diagnostic": PERFORMANCE_MODE,
+                          "status": "measured", "source_sha": args.expected_source_sha,
+                          "runs": [measured], "full_four_run_regression": "not-run",
+                          "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
+        return 0
     if args.diagnostic == PAIR_MODE:
         focused = args.configuration_set == "focused"
         require(not args.require_complete_set and

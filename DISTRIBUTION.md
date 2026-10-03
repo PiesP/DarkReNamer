@@ -30,9 +30,9 @@ authorization for the version, source SHA, EXE SHA-256, candidate run/attempt/
 artifact, campaign/profile, hosted validation run/attempt and statement digest,
 and chosen channel. Record the approval in an issue comment or the existing
 handoff, including ignored or unexecuted tests and the documented limitations.
-The regular-release decision accepts the current unsigned `NotSigned` policy
-and the narrow same-user race in Save Names / Save Paths replacement described
-in [the safety model](SAFETY.md); it does not claim race-free writes or formal
+The regular-release decision accepts the current unsigned `NotSigned` policy.
+Save Names / Save Paths create new files without replacing existing targets,
+as described in [the safety model](SAFETY.md). This policy does not claim formal
 memory soundness. Human Explorer/IME or visual/accessibility acceptance,
 physical-media performance, physical power loss and VM reset/storage faults
 remain outside this release guarantee, rather than additional mandatory gates.

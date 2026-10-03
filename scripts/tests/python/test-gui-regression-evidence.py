@@ -2245,5 +2245,118 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
             self.validate()
 
 
+class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
+    def test_producer_wrapped_lifecycle_requires_exact_normal_exit(self):
+        scenario = {"process_id": 42, "process_start_utc_ticks": "123456"}
+        lifecycle = {"pid": 42, "start_time_utc_ticks": "123456",
+                     "executable_sha256": "a" * 64, "start_observed": True,
+                     "exit_observed": True, "exit_method": "normal-close", "exit_code": 0}
+        evidence.validate_performance_lifecycle([{"process_lifecycle": lifecycle}], scenario, "a" * 64)
+        for field, value in (("pid", 43), ("start_time_utc_ticks", "123457"),
+                             ("executable_sha256", "b" * 64), ("start_observed", False),
+                             ("exit_observed", False), ("exit_method", "forced-termination"),
+                             ("exit_code", 1)):
+            bad = dict(lifecycle, **{field: value})
+            with self.assertRaisesRegex(evidence.EvidenceError, "exact process lifecycle"):
+                evidence.validate_performance_lifecycle([{"process_lifecycle": bad}], scenario, "a" * 64)
+        for bad in ([], [lifecycle], [{"process_lifecycle": lifecycle}] * 2):
+            with self.assertRaisesRegex(evidence.EvidenceError, "exact process lifecycle"):
+                evidence.validate_performance_lifecycle(bad, scenario, "a" * 64)
+
+    def sample_scenario(self):
+        rows = []
+        for index, phase in enumerate(evidence.PERFORMANCE_PHASES):
+            count = 149 if index == 0 else 1
+            for _ in range(count):
+                elapsed = len(rows) * 200
+                rows.append({"phase": phase, "elapsed_ms": elapsed, "cpu_ms": elapsed // 2,
+                             "private_bytes": 1024 + elapsed, "working_set_bytes": 2048 + elapsed,
+                             "threads": 4, "handles": 20, "gdi_objects": 6,
+                             "ui_response_ms": 2, "ui_responsive": True})
+        rows[149]["elapsed_ms"] = 30000
+        for index in range(150, len(rows)):
+            rows[index]["elapsed_ms"] += 200
+        return {
+            "plan": {key: evidence.PERFORMANCE_PLAN[key] for key in (
+                "ordinary_rows", "long_path_rows", "extension_classes", "add_remove_reset_cycles",
+                "idle_seconds", "sample_interval_ms")},
+            "timings": [{"id": name, "elapsed_ms": 10.5,
+                         "rows": {"ordinary-100": 100, "ordinary-1000": 1000,
+                                  "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
+                         "observed_rows": {"ordinary-100": 100, "ordinary-1000": 1000,
+                                           "ordinary-10000": 10000, "full-preview": 10000}.get(name, 1000),
+                         **({"command_elapsed_ms": 5.0} if name == "full-preview" else {}),
+                         **({"import_elapsed_ms": 5.0} if name.startswith("cycle-") else {})}
+                        for name in evidence.PERFORMANCE_TIMINGS],
+            "clear_row_counts": [0] * 7,
+            "full_preview_rows": [
+                {"index": index, "source": f"ordinary-{index:05d}.txt",
+                 "prefixed": f"sample-ordinary-{index:05d}.txt",
+                 "reset": f"ordinary-{index:05d}.txt"}
+                for index in (0, 2499, 4999, 7499, 9999)],
+            "samples": rows,
+            "columns": {"hidden_widths": [0] * 4, "visible_widths": [120] * 4,
+                        "first_values": [r"C:\fixture\long-0000.txt", "10", "date", "date"]},
+            "wakeups": {"status": "not_run", "reason": "no-supported-process-wakeup-counter"},
+            "disk_unchanged": True, "journal_residue_count": 0, "normal_exit_code": 0,
+        }
+
+    def test_fixed_request_and_source_binding(self):
+        run = self.fixture.build(evidence.PERFORMANCE_RUN_ID, "standard")
+        path = run / "input-manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["request"] = {"mode": evidence.PERFORMANCE_MODE, "appearance": "light",
+                               "desktop": {"width": 1366, "height": 768, "dpi": 96},
+                               "text_scale_percent": 100,
+                               "performance_plan": deepcopy(evidence.PERFORMANCE_PLAN)}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+                               "--output-root", "<external-output-root>",
+                               "--connection-profile", "<private-connection-profile>",
+                               "--diagnostic", evidence.PERFORMANCE_MODE]
+        write_json(path, manifest)
+        evidence.validate_input_manifest(run, SOURCE)
+        with self.assertRaisesRegex(evidence.EvidenceError, "expected exact source SHA"):
+            evidence.validate_input_manifest(run, "f" * 40)
+        manifest["request"]["performance_plan"]["idle_seconds"] = 0
+        write_json(path, manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "fixed plan"):
+            evidence.validate_input_manifest(run, SOURCE)
+
+    def test_sampled_peak_and_missing_or_duplicate_metric_rejected(self):
+        scenario = self.sample_scenario()
+        metrics = evidence.validate_performance_metrics(scenario)
+        self.assertEqual(metrics["sample_count"], len(scenario["samples"]))
+        self.assertEqual(metrics["private_peak_bytes"], max(row["private_bytes"] for row in scenario["samples"]))
+        missing = deepcopy(scenario)
+        del missing["samples"][150]["private_bytes"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "performance sample 150"):
+            evidence.validate_performance_metrics(missing)
+        duplicate = deepcopy(scenario)
+        duplicate["timings"][1]["id"] = duplicate["timings"][0]["id"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "timing order"):
+            evidence.validate_performance_metrics(duplicate)
+
+    def test_cleanup_and_unmeasured_wakeups_cannot_be_promoted(self):
+        scenario = self.sample_scenario()
+        scenario["disk_unchanged"] = False
+        with self.assertRaisesRegex(evidence.EvidenceError, "fixture, journal, or normal exit"):
+            evidence.validate_performance_metrics(scenario)
+        scenario["disk_unchanged"] = True
+        scenario["wakeups"] = {"status": "passed", "reason": "estimated"}
+        with self.assertRaisesRegex(evidence.EvidenceError, "not_run"):
+            evidence.validate_performance_metrics(scenario)
+
+    def test_last_preview_probe_and_cycle_total_are_required(self):
+        scenario = self.sample_scenario()
+        scenario["full_preview_rows"][-1]["prefixed"] = "ordinary-09999.txt"
+        with self.assertRaisesRegex(evidence.EvidenceError, "representative row"):
+            evidence.validate_performance_metrics(scenario)
+        scenario = self.sample_scenario()
+        cycle = next(row for row in scenario["timings"] if row["id"] == "cycle-2")
+        cycle["elapsed_ms"] = cycle["import_elapsed_ms"] - 0.1
+        with self.assertRaisesRegex(evidence.EvidenceError, "full-operation timing"):
+            evidence.validate_performance_metrics(scenario)
+
+
 if __name__ == "__main__":
     unittest.main()

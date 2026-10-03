@@ -33,8 +33,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
     FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo, FileIdInfo, FileIdType,
     FileRemoteProtocolInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OpenFileById, ReplaceFileW,
-    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID, VOLUME_NAME_NONE,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OpenFileById, SYNCHRONIZE,
+    SetFileInformationByHandle, VOLUME_NAME_GUID, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
@@ -45,7 +45,6 @@ const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
 const ERROR_FILENAME_EXCED_RANGE: i32 = 206;
-const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
 const MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS: u32 = 32_768;
 
@@ -65,23 +64,6 @@ pub(crate) struct NativeParent {
 pub(crate) struct TextExportTarget {
     parents: Arc<Vec<NativeParent>>,
     leaf: Vec<u16>,
-    accepted_leaf: TextExportLeaf,
-}
-
-#[derive(Debug)]
-pub(crate) enum TextExportOutcome {
-    /// The destination contains the complete requested bytes and no cleanup
-    /// issue remains.
-    Committed,
-    /// The destination contains the complete requested bytes, but the
-    /// identity-checked backup could not be removed safely.
-    CommittedWithCleanupWarning(io::Error),
-}
-
-#[derive(Debug)]
-enum TextExportLeaf {
-    Existing { guard: File, identity: (u128, u64) },
-    Missing,
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +136,7 @@ impl NativeParent {
     }
 }
 
-fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
+pub(super) fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
     let mut info = FILE_CASE_SENSITIVE_INFO::default();
     let size = u32::try_from(size_of::<FILE_CASE_SENSITIVE_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -182,7 +164,7 @@ pub(crate) const fn case_sensitive_flags_unsupported(flags: u32) -> bool {
     flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
 }
 
-fn reject_unsupported_filesystem(file: &File) -> io::Result<()> {
+pub(super) fn reject_unsupported_filesystem(file: &File) -> io::Result<()> {
     let mut filesystem_name = [u16::MAX; FILESYSTEM_NAME_CAPACITY];
     let filesystem_name_capacity = u32::try_from(filesystem_name.len())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -318,7 +300,7 @@ pub(crate) fn mark_file_delete(file: &File) -> io::Result<()> {
     }
 }
 
-fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
+pub(super) fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
     let mut info = FILE_REMOTE_PROTOCOL_INFO::default();
     let size = u32::try_from(size_of::<FILE_REMOTE_PROTOCOL_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -339,7 +321,7 @@ fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
     }
 }
 
-fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
+pub(super) fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(io::Error::new(
@@ -386,7 +368,16 @@ fn open_root_directory(path: &Path, share: u32) -> io::Result<File> {
         .open(path)
 }
 
-fn validate_directory_handle(file: &File) -> io::Result<()> {
+pub(super) fn open_private_root_directory(path: &Path) -> io::Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+    OpenOptions::new()
+        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE)
+        .share_mode(SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+pub(super) fn validate_directory_handle(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
         Ok(())
@@ -585,50 +576,26 @@ impl TextExportParent {
             .directories
             .last()
             .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-        // Retain the selected leaf handle and identity through the stage write.
-        // A same-user rename can still change the name while this handle is
-        // open, so the name is reopened and checked immediately before commit.
-        let options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT;
-        let accepted_leaf = match open_relative(
+        // This check improves the dialog error; only the final handle-relative
+        // no-replace rename authorizes creation, even after a namespace change.
+        if require_shell_identity && shell_identity.is_some() {
+            return Err(text_export_existing_target_error());
+        }
+        match open_relative(
             parent.file(),
             &leaf,
             FILE_READ_ATTRIBUTES,
-            SHARE_READ_WRITE,
+            SHARE_ALL,
             FILE_OPEN,
-            options,
+            FILE_OPEN_REPARSE_POINT,
         ) {
-            Ok(file) => {
-                validate_text_export_file(&file)?;
-                let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
-                if require_shell_identity {
-                    let expected = shell_identity.ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "the selected existing output file has no shell identity",
-                        )
-                    })?;
-                    require_matching_text_export_leaf_identity(expected, actual)?;
-                }
-                TextExportLeaf::Existing {
-                    guard: file,
-                    identity: actual,
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if require_shell_identity && shell_identity.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "the selected output file disappeared before it was retained",
-                    ));
-                }
-                TextExportLeaf::Missing
-            }
+            Ok(_) => return Err(text_export_existing_target_error()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         };
         Ok(TextExportTarget {
             parents: Arc::clone(&self.directories),
             leaf,
-            accepted_leaf,
         })
     }
 }
@@ -649,18 +616,11 @@ fn validated_text_export_leaf(leaf: &OsStr) -> io::Result<Vec<u16>> {
     Ok(leaf)
 }
 
-fn require_matching_text_export_leaf_identity(
-    expected: (u128, u64),
-    actual: (u128, u64),
-) -> io::Result<()> {
-    if expected == actual {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the selected output file identity changed before it was retained",
-        ))
-    }
+fn text_export_existing_target_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "기존 파일은 덮어쓰지 않습니다. 사용하지 않는 새 파일 이름을 선택해 주세요.",
+    )
 }
 
 fn open_directory_by_file_reference(volume: &File, file_reference: u64) -> io::Result<File> {
@@ -773,179 +733,58 @@ fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
     Ok(value)
 }
 
-pub(crate) fn write_text_export_target(
-    target: TextExportTarget,
-    bytes: &[u8],
-) -> io::Result<TextExportOutcome> {
-    write_text_export_target_inner(target, bytes, || Ok(()), |_| Ok(()))
+pub(crate) fn write_text_export_target(target: TextExportTarget, bytes: &[u8]) -> io::Result<()> {
+    write_text_export_target_inner(target, bytes, || Ok(()))
 }
 
 #[cfg(test)]
-pub(crate) fn write_text_export_target_with_before_replace<F>(
+pub(crate) fn write_text_export_target_with_before_commit<F>(
     target: TextExportTarget,
     bytes: &[u8],
-    before_replace: F,
-) -> io::Result<TextExportOutcome>
+    before_commit: F,
+) -> io::Result<()>
 where
     F: FnOnce() -> io::Result<()>,
 {
-    write_text_export_target_inner(target, bytes, before_replace, |_| Ok(()))
+    write_text_export_target_inner(target, bytes, before_commit)
 }
 
-#[cfg(test)]
-pub(crate) fn write_text_export_target_with_before_backup_cleanup<F>(
+fn write_text_export_target_inner<F>(
     target: TextExportTarget,
     bytes: &[u8],
-    before_backup_cleanup: F,
-) -> io::Result<TextExportOutcome>
-where
-    F: FnOnce(&Path) -> io::Result<()>,
-{
-    write_text_export_target_inner(target, bytes, || Ok(()), before_backup_cleanup)
-}
-
-fn write_text_export_target_inner<F, G>(
-    target: TextExportTarget,
-    bytes: &[u8],
-    before_replace: F,
-    before_backup_cleanup: G,
-) -> io::Result<TextExportOutcome>
+    before_commit: F,
+) -> io::Result<()>
 where
     F: FnOnce() -> io::Result<()>,
-    G: FnOnce(&Path) -> io::Result<()>,
 {
     let parent = target
         .parents
         .last()
         .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-    let (stage_leaf, stage_file) = create_text_export_stage(parent.file())?;
-    let mut stage = Some(stage_file);
-    let stage_file_reference = match stage.as_ref() {
-        Some(file) => match ntfs_file_reference_number(file) {
-            Ok(file_reference) => file_reference,
-            Err(error) => {
-                if let Some(file) = stage.take() {
-                    let _ = mark_file_delete(&file);
-                }
-                return Err(error);
-            }
-        },
-        None => return Err(io::Error::other("text export staging handle is missing")),
-    };
-    let mut stage_committed = false;
-
+    let (_stage_leaf, mut stage) = create_text_export_stage(parent.file())?;
     let result = (|| {
-        let stage_file = stage
-            .as_mut()
-            .ok_or_else(|| io::Error::other("text export staging handle is missing"))?;
-        validate_text_export_file(stage_file)?;
-        stage_file.write_all(bytes)?;
-        stage_file.flush()?;
-        stage_file.sync_all()?;
-        validate_text_export_file(stage_file)?;
-
-        match target.accepted_leaf {
-            TextExportLeaf::Missing => {
-                rename_noreplace(stage_file, parent.file(), &target.leaf)?;
-                stage_committed = true;
-                Ok(TextExportOutcome::Committed)
-            }
-            TextExportLeaf::Existing { guard, identity } => {
-                validate_text_export_file(&guard)?;
-                let actual = (ntfs_volume_id(&guard)?, ntfs_file_reference_number(&guard)?);
-                require_matching_text_export_leaf_identity(identity, actual)?;
-
-                let target_path = absolute_path_for_leaf(parent.file(), &target.leaf)?;
-                let stage_path = absolute_path_for_leaf(parent.file(), &stage_leaf)?;
-                let backup_leaf = text_export_temporary_leaf("backup")?;
-                let backup_path = absolute_path_for_leaf(parent.file(), &backup_leaf)?;
-
-                // ReplaceFileW opens both names itself, so close our exclusive
-                // stage and no-delete leaf guard only after the staged bytes
-                // and selected identity have been checked.
-                drop(stage.take());
-                drop(guard);
-                before_replace()?;
-                let target_entry =
-                    open_text_export_target_for_replace(parent.file(), &target.leaf, identity)?;
-
-                replace_text_export_with_recovery(
-                    || {
-                        // SAFETY: all three UTF-16 paths are NUL-terminated and remain
-                        // live for this synchronous call; the names are siblings on
-                        // the retained NTFS volume, and reserved arguments are null.
-                        unsafe {
-                            ReplaceFileW(
-                                target_path.as_ptr(),
-                                stage_path.as_ptr(),
-                                backup_path.as_ptr(),
-                                0,
-                                ptr::null(),
-                                ptr::null(),
-                            )
-                        }
-                    },
-                    || drop(target_entry),
-                    || {
-                        restore_text_export_backup(
-                            parent.file(),
-                            &backup_leaf,
-                            &target.leaf,
-                            identity,
-                        )
-                    },
-                )?;
-
-                stage_committed = true;
-                let backup_path = PathBuf::from(std::ffi::OsString::from_wide(
-                    &backup_path[..backup_path.len() - 1],
-                ));
-                let cleanup_result = before_backup_cleanup(&backup_path).and_then(|()| {
-                    remove_text_export_backup(parent.file(), &backup_leaf, identity)
-                });
-                Ok(match cleanup_result {
-                    Ok(()) => TextExportOutcome::Committed,
-                    Err(error) => TextExportOutcome::CommittedWithCleanupWarning(error),
-                })
-            }
-        }
+        validate_text_export_file(&stage)?;
+        stage.write_all(bytes)?;
+        stage.flush()?;
+        stage.sync_all()?;
+        before_commit()?;
+        validate_text_export_file(&stage)?;
+        // Keep the exclusive staging handle live through the native operation.
+        // Its inherited DACL is also the intended new destination's DACL;
+        // no protected existing file is replaced or borrowed for its metadata.
+        rename_noreplace(&stage, parent.file(), &target.leaf)
     })();
-
-    if !stage_committed {
-        if let Some(file) = stage.take() {
-            let _ = mark_file_delete(&file);
-            drop(file);
-        }
-        cleanup_text_export_stage(parent.file(), &stage_leaf, stage_file_reference)?;
+    if result.is_err() {
+        // The retained handle is the owned stage, even if its name changed.
+        // Never reopen a temporary pathname to delete a possible substitute.
+        mark_file_delete(&stage).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("내보내기를 완료하지 못했고 임시 파일도 정리하지 못했습니다: {error}"),
+            )
+        })?;
     }
     result
-}
-
-fn replace_text_export_with_recovery<F, G, H>(
-    replace: F,
-    release_target_entry: G,
-    restore_backup: H,
-) -> io::Result<()>
-where
-    F: FnOnce() -> i32,
-    G: FnOnce(),
-    H: FnOnce() -> io::Result<()>,
-{
-    let replaced = replace();
-    // GetLastError belongs to the ReplaceFileW call, not handle cleanup.
-    let replacement_error = if replaced == 0 {
-        Some(io::Error::last_os_error())
-    } else {
-        None
-    };
-    release_target_entry();
-    if let Some(error) = replacement_error {
-        if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
-            restore_backup()?;
-        }
-        return Err(error);
-    }
-    Ok(())
 }
 
 fn create_text_export_stage(parent: &File) -> io::Result<(Vec<u16>, File)> {
@@ -983,132 +822,10 @@ fn text_export_temporary_leaf(kind: &str) -> io::Result<Vec<u16>> {
     Ok(leaf)
 }
 
-fn absolute_path_for_leaf(parent: &File, leaf: &[u16]) -> io::Result<Vec<u16>> {
-    let mut path = normalized_final_path(parent, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID)?;
-    if path.last().copied() != Some(b'\\' as u16) {
-        path.push(b'\\' as u16);
-    }
-    path.extend_from_slice(leaf);
-    if path.len() >= usize::try_from(MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS).unwrap_or(usize::MAX) {
-        return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
-    }
-    path.push(0);
-    Ok(path)
-}
-
-fn cleanup_text_export_stage(
-    parent: &File,
-    leaf: &[u16],
-    expected_file_reference: u64,
-) -> io::Result<()> {
-    let file = match open_relative(
-        parent,
-        leaf,
-        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        SHARE_ALL,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-    ) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if ntfs_file_reference_number(&file)? != expected_file_reference {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "text export staging name changed before cleanup",
-        ));
-    }
-    if !file.metadata()?.is_file()
-        || file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "text export staging name no longer identifies a regular file",
-        ));
-    }
-    mark_file_delete(&file)
-}
-
-fn remove_text_export_backup(
-    parent: &File,
-    leaf: &[u16],
-    expected_identity: (u128, u64),
-) -> io::Result<()> {
-    let file = open_relative(
-        parent,
-        leaf,
-        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        SHARE_ALL,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-    )?;
-    if !file.metadata()?.is_file()
-        || file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "text export backup is not a regular file",
-        ));
-    }
-    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
-    require_matching_text_export_leaf_identity(expected_identity, actual)?;
-    mark_file_delete(&file)
-}
-
-fn open_text_export_target_for_replace(
-    parent: &File,
-    target_leaf: &[u16],
-    expected_identity: (u128, u64),
-) -> io::Result<File> {
-    let file = open_relative(
-        parent,
-        target_leaf,
-        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        SHARE_ALL,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-    )?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "text export destination changed to a non-regular file before replacement",
-        ));
-    }
-    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
-    require_matching_text_export_leaf_identity(expected_identity, actual)?;
-    Ok(file)
-}
-
-fn restore_text_export_backup(
-    parent: &File,
-    backup_leaf: &[u16],
-    target_leaf: &[u16],
-    expected_identity: (u128, u64),
-) -> io::Result<()> {
-    let backup = open_relative(
-        parent,
-        backup_leaf,
-        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        SHARE_ALL,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-    )?;
-    let actual = (
-        ntfs_volume_id(&backup)?,
-        ntfs_file_reference_number(&backup)?,
-    );
-    require_matching_text_export_leaf_identity(expected_identity, actual)?;
-    rename_noreplace(&backup, parent, target_leaf)
-}
-
-/// Writes complete output to a sibling file, then atomically replaces an
-/// existing destination or no-replace renames a new destination. Replacing
-/// the directory entry keeps any late hard-link alias attached to the old
-/// file contents.
+/// Writes complete output to an exclusively held sibling, then commits a
+/// new destination with a handle-relative no-replace rename.
 #[cfg(test)]
-pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<TextExportOutcome> {
+pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
 }
 
@@ -1545,13 +1262,33 @@ pub(crate) fn open_file_relative_exclusive(root: &File, leaf: &str) -> io::Resul
     )
 }
 
-fn open_relative(
+pub(super) fn open_relative(
     parent: &File,
     leaf: &[u16],
     desired_access: u32,
     share_access: u32,
     disposition: u32,
     options: u32,
+) -> io::Result<File> {
+    open_relative_with_security(
+        parent,
+        leaf,
+        desired_access,
+        share_access,
+        disposition,
+        options,
+        ptr::null(),
+    )
+}
+
+pub(super) fn open_relative_with_security(
+    parent: &File,
+    leaf: &[u16],
+    desired_access: u32,
+    share_access: u32,
+    disposition: u32,
+    options: u32,
+    security_descriptor: *const std::ffi::c_void,
 ) -> io::Result<File> {
     if leaf.is_empty() || leaf.contains(&0) {
         return Err(io::Error::new(
@@ -1577,7 +1314,7 @@ fn open_relative(
         RootDirectory: parent.as_raw_handle(),
         ObjectName: ptr::from_ref(&object_name),
         Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: ptr::null(),
+        SecurityDescriptor: security_descriptor.cast(),
         SecurityQualityOfService: ptr::null(),
     };
     let mut status_block = IO_STATUS_BLOCK::default();
@@ -1731,77 +1468,6 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-    use windows_sys::Win32::Foundation::SetLastError;
-
-    fn set_last_error_for_test(code: u32) {
-        // SAFETY: SetLastError changes only the calling test thread's error value.
-        unsafe { SetLastError(code) };
-    }
-
-    #[test]
-    fn replace_error_survives_cleanup_and_selects_backup_recovery() {
-        let restored = Cell::new(false);
-        let result = replace_text_export_with_recovery(
-            || {
-                set_last_error_for_test(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as u32);
-                0
-            },
-            || {
-                set_last_error_for_test(5);
-                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(5));
-            },
-            || {
-                restored.set(true);
-                Ok(())
-            },
-        );
-        assert_eq!(
-            result.err().and_then(|error| error.raw_os_error()),
-            Some(1177)
-        );
-        assert!(restored.get());
-    }
-
-    #[test]
-    fn other_replace_error_survives_cleanup_without_backup_recovery() {
-        let restored = Cell::new(false);
-        let result = replace_text_export_with_recovery(
-            || {
-                set_last_error_for_test(32);
-                0
-            },
-            || set_last_error_for_test(5),
-            || {
-                restored.set(true);
-                Ok(())
-            },
-        );
-        assert_eq!(
-            result.err().and_then(|error| error.raw_os_error()),
-            Some(32)
-        );
-        assert!(!restored.get());
-    }
-
-    #[test]
-    fn successful_replace_ignores_stale_last_error() {
-        let restored = Cell::new(false);
-        let result = replace_text_export_with_recovery(
-            || {
-                set_last_error_for_test(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as u32);
-                1
-            },
-            || set_last_error_for_test(5),
-            || {
-                restored.set(true);
-                Ok(())
-            },
-        );
-        assert!(result.is_ok());
-        assert!(!restored.get());
-    }
-
     #[test]
     fn rename_buffer_bounds_preserve_exact_units_and_os_length() -> io::Result<()> {
         for leaf in [
@@ -1870,21 +1536,6 @@ mod tests {
             0x1234_5678_9abc_def0
         );
         assert_eq!(file_reference_number_from_index_number(-1), u64::MAX);
-    }
-
-    #[test]
-    fn text_export_leaf_identity_mismatch_fails_closed() {
-        let expected = (0x1234, 0x5678);
-
-        assert!(require_matching_text_export_leaf_identity(expected, expected).is_ok());
-        assert!(matches!(
-            require_matching_text_export_leaf_identity(expected, (0x9999, expected.1)),
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput
-        ));
-        assert!(matches!(
-            require_matching_text_export_leaf_identity(expected, (expected.0, 0xabcd)),
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput
-        ));
     }
 
     #[test]

@@ -10,6 +10,36 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind recovery)) { . $definition }
 
+if (-not $ParserOnly -and [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $ownerFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-candidate-owner-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($ownerFixtureRoot)
+    $ownerFixturePath = Join-Path $ownerFixtureRoot 'candidate.drj'
+    try {
+        $ownerFixtureBytes = [byte[]]@(1, 2, 3, 4)
+        Write-AcceptanceNewBytes -Path $ownerFixturePath -Bytes $ownerFixtureBytes -PrivateUserOwned
+        $ownerFixtureSecurity = Get-Acl -LiteralPath $ownerFixturePath
+        if ($ownerFixtureSecurity.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne
+                [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -or
+            -not $ownerFixtureSecurity.AreAccessRulesProtected -or
+            -not (Test-AcceptanceBytesEqual -Expected $ownerFixtureBytes -Actual ([IO.File]::ReadAllBytes($ownerFixturePath)))) {
+            throw 'Injected candidate creation did not retain user ownership, private DACL and exact bytes.'
+        }
+        $duplicateRejected = $false
+        try {
+            Write-AcceptanceNewBytes -Path $ownerFixturePath -Bytes ([byte[]]@(9)) -PrivateUserOwned
+        }
+        catch { $duplicateRejected = $true }
+        if (-not $duplicateRejected -or
+            -not (Test-AcceptanceBytesEqual -Expected $ownerFixtureBytes -Actual ([IO.File]::ReadAllBytes($ownerFixturePath)))) {
+            throw 'Injected candidate creation replaced an existing fixture.'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $ownerFixturePath) { [IO.File]::Delete($ownerFixturePath) }
+        [IO.Directory]::Delete($ownerFixtureRoot, $false)
+    }
+}
+
 function Invoke-TestRecoveryAcceptance {
     [CmdletBinding()]
     param(
@@ -2749,7 +2779,7 @@ for ($index = 0; $index -lt $fileStrings.Count; $index++) {
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     $PSVersionTable.PSVersion.Major -ge 7) {
     # Mandatory array argument binding scales differently in Windows PowerShell
-    # 5.1, the observer runtime. Exercise the many-frame case there as well.
+    # 5.1. Exercise the many-frame parser compatibility case there as well.
     $invocation = "`$ErrorActionPreference = 'Stop'; & '" + $PSCommandPath.Replace("'", "''") + "' -ParserOnly"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
     $process = [Diagnostics.Process]::new()
