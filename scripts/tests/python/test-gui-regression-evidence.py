@@ -2363,6 +2363,40 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "fixed plan"):
             evidence.validate_input_manifest(run, SOURCE)
 
+    def test_prepared_bundle_provenance_requires_matching_copied_inputs_and_command(self):
+        run = self.fixture.build(evidence.performance_run_id("hidden-visible"), "standard")
+        path = run / "input-manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["request"] = {"mode": evidence.PERFORMANCE_MODE, "appearance": "light",
+                               "desktop": {"width": 1366, "height": 768, "dpi": 96},
+                               "text_scale_percent": 100,
+                               "performance_plan": {**deepcopy(evidence.PERFORMANCE_PLAN),
+                                                    "long_path_order": "hidden-visible"}}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+                               "--output-root", "<external-output-root>",
+                               "--connection-profile", "<private-connection-profile>",
+                               "--diagnostic", evidence.PERFORMANCE_MODE,
+                               "--performance-column-order", "hidden-visible"]
+        app_hash = manifest["artifacts"]["application"]["sha256"]
+        manifest["prepared_bundle"] = {
+            "origin": "external-prepared-source-built-bundle",
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "application_sha256": app_hash,
+        }
+        manifest["command"] += ["--prepared-bundle-root", "<external-prepared-bundle-root>",
+                                "--expected-prepared-application-sha256", app_hash]
+        write_json(path, manifest)
+        evidence.validate_input_manifest(run, SOURCE)
+        manifest["prepared_bundle"]["application_sha256"] = "f" * 64
+        write_json(path, manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "provenance differs"):
+            evidence.validate_input_manifest(run, SOURCE)
+        manifest["prepared_bundle"]["application_sha256"] = app_hash
+        manifest["command"][-1] = "f" * 64
+        write_json(path, manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "manifest identity or command"):
+            evidence.validate_input_manifest(run, SOURCE)
+
     def test_probe_timeout_and_unknown_failure_remain_distinct(self):
         scenario = self.sample_scenario()
         scenario["samples"][150].update(probe_status="timeout", probe_error_code=1460)

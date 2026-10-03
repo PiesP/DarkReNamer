@@ -433,6 +433,8 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     }
     if isinstance(value, dict) and "full_context_reference" in value:
         required.add("full_context_reference")
+    if isinstance(value, dict) and "prepared_bundle" in value:
+        required.add("prepared_bundle")
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == PAIR_MODE:
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID:
@@ -498,11 +500,26 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
                 "Appearance pair manifest identity or command is invalid.")
     if request["mode"] == PERFORMANCE_MODE:
         order = request["performance_plan"]["long_path_order"]
+        prepared = manifest.get("prepared_bundle")
+        if prepared is not None:
+            prepared = exact_keys(prepared, {"origin", "bundle_manifest_sha256",
+                                             "application_sha256"}, "prepared bundle")
+            require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                    prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                    prepared["application_sha256"] == artifacts["application"]["sha256"],
+                    "Prepared bundle provenance differs from retained run inputs.")
+        prepared_args = (["--prepared-bundle-root", "<external-prepared-bundle-root>",
+                          "--expected-prepared-application-sha256", prepared["application_sha256"]]
+                         if prepared is not None else [])
         require(manifest["run_id"] == performance_run_id(order) and
                 command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
                             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
-                            "--diagnostic", PERFORMANCE_MODE, "--performance-column-order", order],
+                            "--diagnostic", PERFORMANCE_MODE, "--performance-column-order", order,
+                            *prepared_args],
                 "Performance manifest identity or command is invalid.")
+    else:
+        require("prepared_bundle" not in manifest,
+                "Prepared bundle provenance is restricted to performance runs.")
     if request["mode"] == "tooltip":
         require("full_context_reference" in manifest,
                 "The tooltip run requires a direct full-context reference.")
@@ -3070,6 +3087,7 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
     metrics = validate_performance_metrics(scenario)
     return {"run_id": run_id, "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
+            "bundle_mode": "prepared" if "prepared_bundle" in manifest else "built",
             "process_id": scenario["process_id"], "metrics": metrics,
             "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
