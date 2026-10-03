@@ -976,3 +976,37 @@ fn journal_root_rejects_symlinked_root_intermediate_and_final_leaf()
     );
     Ok(())
 }
+
+#[cfg(windows)]
+#[test]
+fn private_runtime_root_replays_durable_interrupted_journal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempfile::tempdir()?;
+    let root = JournalRoot::open_private(fixture.path())?;
+    let records = prepared_fixture()?;
+    let JournalRecord::Intent { plan, steps } = &records[0] else {
+        return Err(std::io::Error::other("missing prepared intent").into());
+    };
+    let mut journal = FileJournal::create_new(&root, "active.drj")?;
+    journal.begin(*plan, steps)?;
+    journal.prepared(0, JournalDirection::Forward)?;
+    let before = fs::read(root.path().join("active.drj"))?;
+    drop(journal);
+    drop(root);
+
+    let root = JournalRoot::open_private(fixture.path())?;
+    let mut journal = FileJournal::open_existing(&root, "active.drj")?;
+    assert_eq!(fs::read(root.path().join("active.drj"))?, before);
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\b.txt", 1);
+    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+    assert!(matches!(
+        outcome,
+        RecoveryOutcome::Recovered {
+            restored_steps: 1,
+            ..
+        }
+    ));
+    assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\work\\b.txt"), None);
+    Ok(())
+}

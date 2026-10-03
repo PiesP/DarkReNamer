@@ -136,7 +136,7 @@ impl NativeParent {
     }
 }
 
-fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
+pub(super) fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
     let mut info = FILE_CASE_SENSITIVE_INFO::default();
     let size = u32::try_from(size_of::<FILE_CASE_SENSITIVE_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -164,7 +164,7 @@ pub(crate) const fn case_sensitive_flags_unsupported(flags: u32) -> bool {
     flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
 }
 
-fn reject_unsupported_filesystem(file: &File) -> io::Result<()> {
+pub(super) fn reject_unsupported_filesystem(file: &File) -> io::Result<()> {
     let mut filesystem_name = [u16::MAX; FILESYSTEM_NAME_CAPACITY];
     let filesystem_name_capacity = u32::try_from(filesystem_name.len())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -300,7 +300,7 @@ pub(crate) fn mark_file_delete(file: &File) -> io::Result<()> {
     }
 }
 
-fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
+pub(super) fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
     let mut info = FILE_REMOTE_PROTOCOL_INFO::default();
     let size = u32::try_from(size_of::<FILE_REMOTE_PROTOCOL_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -321,7 +321,7 @@ fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
     }
 }
 
-fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
+pub(super) fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(io::Error::new(
@@ -368,7 +368,16 @@ fn open_root_directory(path: &Path, share: u32) -> io::Result<File> {
         .open(path)
 }
 
-fn validate_directory_handle(file: &File) -> io::Result<()> {
+pub(super) fn open_private_root_directory(path: &Path) -> io::Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+    OpenOptions::new()
+        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE)
+        .share_mode(SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+pub(super) fn validate_directory_handle(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
         Ok(())
@@ -1253,13 +1262,33 @@ pub(crate) fn open_file_relative_exclusive(root: &File, leaf: &str) -> io::Resul
     )
 }
 
-fn open_relative(
+pub(super) fn open_relative(
     parent: &File,
     leaf: &[u16],
     desired_access: u32,
     share_access: u32,
     disposition: u32,
     options: u32,
+) -> io::Result<File> {
+    open_relative_with_security(
+        parent,
+        leaf,
+        desired_access,
+        share_access,
+        disposition,
+        options,
+        ptr::null(),
+    )
+}
+
+pub(super) fn open_relative_with_security(
+    parent: &File,
+    leaf: &[u16],
+    desired_access: u32,
+    share_access: u32,
+    disposition: u32,
+    options: u32,
+    security_descriptor: *const std::ffi::c_void,
 ) -> io::Result<File> {
     if leaf.is_empty() || leaf.contains(&0) {
         return Err(io::Error::new(
@@ -1285,7 +1314,7 @@ fn open_relative(
         RootDirectory: parent.as_raw_handle(),
         ObjectName: ptr::from_ref(&object_name),
         Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: ptr::null(),
+        SecurityDescriptor: security_descriptor.cast(),
         SecurityQualityOfService: ptr::null(),
     };
     let mut status_block = IO_STATUS_BLOCK::default();

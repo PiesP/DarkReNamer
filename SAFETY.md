@@ -12,6 +12,28 @@ interrupted transaction. Paths selected through the UI, imported text, current
 filesystem occupancy, reparse points, parent identities, and concurrent changes
 by other processes are untrusted.
 
+Production recovery state is rooted under the selected local `LOCALAPPDATA` on
+NTFS. The runtime retains every directory handle from the drive root through
+`DarkReNamer/journal` without delete sharing. It reads the owner and DACL from
+each retained handle. Ancestors may be owned by the user, SYSTEM, built-in
+Administrators, or the exact Windows TrustedInstaller service SID; other
+principals may traverse/read but may not replace a child or change its ACL or
+owner. The two application-owned directories and all recovery files must be
+owned by the current process user; only that user, SYSTEM, and built-in
+Administrators may receive read, write, delete, or control rights. Both explicit
+and inherited allow ACEs are inspected; unrecognized ACE forms and null DACLs
+fail closed. A deny ACE does not make an unsafe allow ACE acceptable. New state
+objects receive a protected DACL before creation. The runtime lock must have
+one hard link. Pre-existing unsafe state is never repaired and trusted in the
+same startup: unsafe directories or lock files stop startup, while unsafe active
+or candidate journals remain retained, block Apply, and preserve their bytes.
+This protects against a different non-admin principal with access through a
+permissive profile or state ACL. It does not authenticate historical contents
+written while that boundary was absent; previously shared evidence should be
+quarantined for separate review. Same-token processes and administrators remain
+outside this ACL boundary. Checksums and strict replay validate structure, not
+the origin of old journal records.
+
 The UI may display paths but does not authorize mutation by string alone.
 Planning freezes source, entry, and parent identities. The Windows backend
 reopens and verifies those identities and performs handle-relative,
@@ -318,6 +340,11 @@ does not require a synchronized count table. Every modified exception, including
 additions within an allowed location, still requires native-boundary review and
 a local `SAFETY` justification. The Windows Clippy gate keeps
 `undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` denied.
+`rename/private_state.rs` is the reviewed exception for querying token SIDs,
+handle security descriptors and ACEs and passing a protected descriptor to
+the parent-relative `NtCreateFile` creation boundary. The descriptor and SID
+buffers remain live for each synchronous native call; all LocalAlloc outputs
+are released once. Unknown security forms fail closed before journal decoding.
 
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.

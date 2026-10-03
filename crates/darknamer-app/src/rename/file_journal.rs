@@ -407,6 +407,8 @@ pub struct JournalRoot {
     path: PathBuf,
     file: File,
     identity: u64,
+    #[cfg(windows)]
+    private_chain: Option<Vec<File>>,
 }
 
 impl JournalRoot {
@@ -434,6 +436,26 @@ impl JournalRoot {
             path,
             file,
             identity: next_file_identity(),
+            #[cfg(windows)]
+            private_chain: None,
+        })
+    }
+
+    /// Opens the production recovery state under LOCALAPPDATA with a retained,
+    /// no-delete-share and ACL-checked ancestor chain.
+    #[cfg(windows)]
+    pub fn open_private(local_app_data: &Path) -> Result<Self, FileJournalError> {
+        let policy = super::private_state::PrivateState::new()?;
+        let chain = policy.open_root(local_app_data)?;
+        let file = chain
+            .last()
+            .ok_or_else(|| io::Error::other("missing private journal root"))?
+            .try_clone()?;
+        Ok(Self {
+            path: local_app_data.join("DarkReNamer").join("journal"),
+            file,
+            identity: next_file_identity(),
+            private_chain: Some(chain),
         })
     }
 
@@ -443,13 +465,67 @@ impl JournalRoot {
         &self.path
     }
 
+    #[cfg(all(windows, test))]
+    pub(super) fn retained_file_for_test(&self) -> &File {
+        &self.file
+    }
+
     /// Clones the retained directory capability for a serialized worker job.
     pub fn try_clone(&self) -> Result<Self, FileJournalError> {
         Ok(Self {
             path: self.path.clone(),
             file: self.file.try_clone()?,
             identity: self.identity,
+            #[cfg(windows)]
+            private_chain: self
+                .private_chain
+                .as_ref()
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .map(File::try_clone)
+                        .collect::<io::Result<Vec<_>>>()
+                })
+                .transpose()?,
         })
+    }
+
+    #[cfg(windows)]
+    fn clone_private_chain(&self) -> io::Result<Option<Vec<File>>> {
+        self.private_chain
+            .as_ref()
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(File::try_clone)
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .transpose()
+    }
+
+    fn create_leaf(&self, path: &Path, leaf: &str) -> io::Result<File> {
+        #[cfg(windows)]
+        if self.private_chain.is_some() {
+            return super::private_state::PrivateState::new()?.create_file(&self.file, leaf);
+        }
+        open_create_new(&self.file, path, leaf)
+    }
+
+    fn open_leaf(&self, path: &Path, leaf: &str) -> io::Result<File> {
+        #[cfg(windows)]
+        if self.private_chain.is_some() {
+            return super::private_state::PrivateState::new()?.open_file(&self.file, leaf);
+        }
+        open_existing(&self.file, path, leaf)
+    }
+
+    fn validate_private_leaf(&self, file: &File) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.private_chain.is_some() {
+            return super::private_state::PrivateState::new()?.validate(file, false, false);
+        }
+        let _ = file;
+        Ok(())
     }
 
     fn child(&self, leaf: &str) -> Result<PathBuf, FileJournalError> {
@@ -474,14 +550,23 @@ impl JournalRoot {
     /// created relative to this retained root, or is held by another process.
     pub fn acquire_runtime_lock(&self, leaf: &str) -> Result<File, FileJournalError> {
         let path = self.child(leaf)?;
-        let file = match open_existing(&self.file, &path, leaf) {
+        let file = match self.open_leaf(&path, leaf) {
             Ok(file) => file,
             Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => {
-                open_create_new(&self.file, &path, leaf)?
+                self.create_leaf(&path, leaf)?
             }
             Err(error) => return Err(error.into()),
         };
         validate_file_type(&file)?;
+        #[cfg(windows)]
+        if self.private_chain.is_some() && !super::windows_native::file_is_single_linked(&file)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "runtime lock has another hard link",
+            )
+            .into());
+        }
+        self.validate_private_leaf(&file)?;
         Ok(file)
     }
 }
@@ -1103,6 +1188,8 @@ fn crc32_parts(parts: &[&[u8]]) -> u32 {
 pub struct FileJournal {
     path: PathBuf,
     _root: File,
+    #[cfg(windows)]
+    _private_chain: Option<Vec<File>>,
     _root_identity: u64,
     file: File,
     records: Vec<JournalRecord>,
@@ -1130,11 +1217,14 @@ impl FileJournal {
     /// Creates and exclusively retains a new empty journal.
     pub fn create_new(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
         let path = root.child(leaf)?;
-        let file = open_create_new(&root.file, &path, leaf)?;
+        let file = root.create_leaf(&path, leaf)?;
         validate_file_type(&file)?;
+        root.validate_private_leaf(&file)?;
         Ok(Self {
             path,
             _root: root.file.try_clone()?,
+            #[cfg(windows)]
+            _private_chain: root.clone_private_chain()?,
             _root_identity: root.identity,
             file,
             records: Vec::new(),
@@ -1164,11 +1254,14 @@ impl FileJournal {
                 os_code: None,
             });
         }
-        let file = open_create_new(&root.file, &candidate_path, candidate_leaf)?;
+        let file = root.create_leaf(&candidate_path, candidate_leaf)?;
         validate_file_type(&file)?;
+        root.validate_private_leaf(&file)?;
         Ok(Self {
             path: candidate_path,
             _root: root.file.try_clone()?,
+            #[cfg(windows)]
+            _private_chain: root.clone_private_chain()?,
             _root_identity: root.identity,
             file,
             records: Vec::new(),
@@ -1207,8 +1300,9 @@ impl FileJournal {
             failure: JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error),
             evidence: None,
         })?;
-        let mut file =
-            open_existing(&root.file, &path, leaf).map_err(|error| ExistingJournalOpenError {
+        let mut file = root
+            .open_leaf(&path, leaf)
+            .map_err(|error| ExistingJournalOpenError {
                 path: path.clone(),
                 failure: JournalOpenFailure::from_file_error(JournalOpenStage::Open, error.into()),
                 evidence: None,
@@ -1225,6 +1319,14 @@ impl FileJournal {
             }
         };
         let byte_len = metadata.len();
+        if let Err(error) = root.validate_private_leaf(&file) {
+            return Err(existing_evidence_error(
+                path,
+                file,
+                byte_len,
+                JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+            ));
+        }
         // A retained journal is mutable recovery state. Reject pre-existing
         // hard-link aliases so truncation, append, or disposition cannot alter
         // an unrelated name that refers to the same file.
@@ -1349,9 +1451,23 @@ impl FileJournal {
                 ));
             }
         };
+        #[cfg(windows)]
+        let retained_chain = match root.clone_private_chain() {
+            Ok(chain) => chain,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+                ));
+            }
+        };
         Ok(Self {
             path,
             _root: retained_root,
+            #[cfg(windows)]
+            _private_chain: retained_chain,
             _root_identity: root.identity,
             file,
             records,
