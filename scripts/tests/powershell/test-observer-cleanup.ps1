@@ -38,7 +38,8 @@ foreach ($entry in @(
     $source=Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
-    foreach ($functionName in @('Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
+    foreach ($functionName in @('Get-DrControllerV2OwnedStartMap',
+        'Test-DrControllerV2OwnedProcessLifetime','Get-V2OwnedScopeProcesses','Assert-V2Inventory')) {
         $definitions=@($ast.FindAll({param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
         },$true))
@@ -48,18 +49,57 @@ foreach ($entry in @(
     $name='unique-run';$root='C:\owned\run';$trustedRoot='C:\owned\run-trusted'
     $roots=@{guest=@{path=$root};trusted=@{path=$trustedRoot}}
     $sid='fixture';$desktopSession=2
-    $taskContext=@{declared_processes=@();baseline_tasks=@();preflight_child=@{pid=1};engine_child=@{pid=2}
-        task_execution=@{observer_lifecycle=@{pid=3}}
-        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777}}})}
+    $base=[datetime]::ParseExact('2026-10-03T00:00:00.0000000Z',
+        'yyyy-MM-ddTHH:mm:ss.fffffffZ',[Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal)
+    $at={param([int]$seconds) ($base.AddSeconds($seconds).Ticks + 8).ToString(
+        [Globalization.CultureInfo]::InvariantCulture)}
+    $iso={param([int]$seconds) $base.AddSeconds($seconds).ToString('o')}
+    $taskContext=@{declared_processes=@(@{pid=3252;start_time_utc_ticks=(& $at 20)})
+        baseline_tasks=@();preflight_child=@{pid=1;start_time_utc_ticks=(& $at 0)}
+        engine_child=@{pid=2;start_time_utc_ticks=(& $at 1)}
+        task_execution=@{observer_lifecycle=@{pid=3;start_time_utc_ticks=(& $at 2)}}
+        rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777;start_time_utc_ticks=(& $at 10)}}})}
     $v2Evidence=$taskContext
     $owned=[pscustomobject]@{pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
+        creation_time_utc=(& $iso 11)
         executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding'}
     $ambient=[pscustomobject]@{pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
+        creation_time_utc=(& $iso 5)
         executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding'}
     $found=@(Get-V2OwnedScopeProcesses @{processes=@($owned,$ambient)})
     if($found.Count -ne 1 -or $found[0].pid -ne 900){throw 'Rescue descendant escaped normal owned scope.'}
     Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()}
     Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($owned)} @{processes=@()} } 'protected execution scope'
+    $staleChild=$ambient.PSObject.Copy();$staleChild.parent_pid=3252
+    $staleChild.identity='901|stale-parent'
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($staleChild)}).Count -ne 0){
+        throw 'A process older than its recycled parent PID was claimed as owned.'
+    }
+    Assert-V2Inventory @{tasks=@();processes=@($staleChild)} @{processes=@()}
+    $direct=$ambient.PSObject.Copy();$direct.pid=3252;$direct.identity='3252|owned'
+    $direct.creation_time_utc=& $iso 20
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($direct)}).Count -ne 1){
+        throw 'Exact owned process lifetime escaped cleanup scope.'
+    }
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($direct)} @{processes=@()} } 'protected execution scope'
+    $reused=$direct.PSObject.Copy();$reused.identity='3252|reused';$reused.creation_time_utc=& $iso 21
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($reused)}).Count -ne 0){
+        throw 'Reused direct PID was claimed as the earlier owned lifetime.'
+    }
+    Assert-V2Inventory @{tasks=@();processes=@($reused)} @{processes=@()}
+    $pathOwned=$staleChild.PSObject.Copy();$pathOwned.command_line=$root+'\fixture.exe'
+    if(@(Get-V2OwnedScopeProcesses @{processes=@($pathOwned)}).Count -ne 1){
+        throw 'Run path lost its independent cleanup scope.'
+    }
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($pathOwned)} @{processes=@()} } 'protected execution scope'
+    $malformed=$ambient.PSObject.Copy();$malformed.creation_time_utc='invalid'
+    Assert-Fails { Get-V2OwnedScopeProcesses @{processes=@($malformed)} } 'creation time'
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($malformed)} @{processes=@()} } 'creation time'
+    $taskContext.declared_processes[0].start_time_utc_ticks='invalid'
+    Assert-Fails { Get-V2OwnedScopeProcesses @{processes=@($ambient)} } 'owned process lifetime'
+    Assert-Fails { Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()} } 'owned process lifetime'
 }
 
 # Exercise the host binding through the authenticated guest's native argv decoder.
@@ -1170,6 +1210,8 @@ try {
             $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
         }, $true).ScriptBlock.GetScriptBlock()
         $completionDefinition = ${function:Test-DrControllerCleanupObservation}.ToString()
+        $startMapDefinition = ${function:Get-DrControllerV2OwnedStartMap}.ToString()
+        $lifetimeDefinition = ${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()
         foreach($name in @('New-DrVmSpotlightCaptureContext','Close-DrVmSpotlightCaptureContext')){
             $definition=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq ('global:'+$name)}.GetNewClosure(),$true))
             . ([scriptblock]::Create($definition[0].Extent.Text.Replace('function global:','function ')))
@@ -1236,7 +1278,8 @@ try {
                     baseline_tasks = @([pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = 'a' * 64 })
                     baseline_process_identities = @()
                 }
-                $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context `
+                    $completionDefinition $startMapDefinition $lifetimeDefinition
                 if ($mode -ceq 'clean' -and
                     (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $observed)) {
                     throw 'A normal successful cleanup must bypass the strict-failure finalizer.'
