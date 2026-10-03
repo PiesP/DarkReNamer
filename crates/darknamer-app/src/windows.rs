@@ -2791,7 +2791,7 @@ mod tests {
             return Err(io::Error::other("final reparse point was accepted").into());
         };
 
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&target)?, sentinel);
         Ok(())
     }
