@@ -25,12 +25,16 @@ pub struct RequestToken {
 
 impl RequestToken {
     /// Session supplied by the application when it created this state.
+    #[cfg(test)]
+    #[allow(dead_code)] // Used by the independent integration test's included module.
     #[must_use]
     pub const fn session(self) -> u64 {
         self.session
     }
 
     /// Request generation current when this dispatch was admitted.
+    #[cfg(test)]
+    #[allow(dead_code)] // Used by the independent integration test's included module.
     #[must_use]
     pub const fn generation(self) -> u64 {
         self.generation
@@ -45,7 +49,7 @@ pub struct Request<K> {
 }
 
 /// Result held until the UI drains it; payload interpretation stays with the caller.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Completion<K, R> {
     pub request: Request<K>,
     pub result: R,
@@ -167,9 +171,21 @@ impl<K: Clone + Eq, R> IconRequests<K, R> {
     }
 
     /// Free one completion slot for the caller's bounded UI reconciliation.
+    #[cfg(test)]
+    #[allow(dead_code)] // Used by the independent integration test's included module.
     #[must_use]
     pub fn pop_completion(&mut self) -> Option<Completion<K, R>> {
         self.completed.pop_front()
+    }
+
+    /// Acknowledge only the completed prefix already reconciled by the UI.
+    /// Until then these results continue occupying the shared 64-slot bound.
+    pub fn acknowledge_completions(&mut self, count: usize) -> usize {
+        let acknowledged = count.min(self.completed.len());
+        for _ in 0..acknowledged {
+            self.completed.pop_front();
+        }
+        acknowledged
     }
 
     /// Invalidate queued and undrained work while preserving the actual call's
@@ -210,5 +226,23 @@ impl<K: Clone + Eq, R> IconRequests<K, R> {
     #[must_use]
     pub fn completed_count(&self) -> usize {
         self.completed.len()
+    }
+
+    #[must_use]
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl<K: Clone + Eq, R: Clone> IconRequests<K, R> {
+    /// A bounded UI delivery batch, still counted as undrained until acked.
+    #[must_use]
+    pub fn completed_snapshot(&self) -> Vec<Completion<K, R>> {
+        self.completed.iter().cloned().collect()
     }
 }

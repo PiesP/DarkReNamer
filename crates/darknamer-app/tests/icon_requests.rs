@@ -17,6 +17,7 @@ fn class(name: &str) -> RequestKey<IconCacheKey> {
 fn bootstrap_inflight_and_undrained_results_share_the_64_unique_slot_limit()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut requests = IconRequests::<IconCacheKey, i32>::new(11);
+    assert_eq!(requests.generation(), 0);
     assert_eq!(
         requests.submit(RequestKey::Bootstrap),
         SubmitDisposition::Queued
@@ -52,6 +53,7 @@ fn bootstrap_inflight_and_undrained_results_share_the_64_unique_slot_limit()
         SubmitDisposition::Queued
     );
     assert_eq!(requests.pending_count(), MAX_PENDING_ICON_REQUESTS);
+    assert_eq!(requests.queued_count(), MAX_PENDING_ICON_REQUESTS - 2);
     for index in 63..128 {
         assert_eq!(
             requests.submit(class(&format!("file.ext{index}"))),
@@ -239,6 +241,46 @@ fn more_than_256_sequential_classes_can_complete_without_a_side_pending_map()
         assert_eq!(completion.result, key);
         assert_eq!(requests.pending_count(), 0);
     }
+    Ok(())
+}
+
+#[test]
+fn copied_delivery_batch_keeps_all_64_slots_until_explicit_ack()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut requests = IconRequests::<u32, u32>::new(71);
+    for key in 0..MAX_PENDING_ICON_REQUESTS as u32 {
+        assert_eq!(
+            requests.submit(RequestKey::Class(key)),
+            SubmitDisposition::Queued
+        );
+    }
+    for key in 0..MAX_PENDING_ICON_REQUESTS as u32 {
+        let request = requests
+            .take_next()
+            .ok_or_else(|| io::Error::other("queued class was not dispatched"))?;
+        assert_eq!(request.key, RequestKey::Class(key));
+        assert_eq!(
+            requests.complete(request.token, key),
+            CompletionDisposition::Published
+        );
+    }
+    let batch = requests.completed_snapshot();
+    assert_eq!(batch.len(), MAX_PENDING_ICON_REQUESTS);
+    assert_eq!(requests.pending_count(), MAX_PENDING_ICON_REQUESTS);
+    assert_eq!(
+        requests.submit(RequestKey::Class(100)),
+        SubmitDisposition::Saturated
+    );
+    assert_eq!(requests.acknowledge_completions(32), 32);
+    assert_eq!(requests.pending_count(), 32);
+    assert_eq!(batch[0].request.key, RequestKey::Class(0));
+    assert_eq!(batch[63].result, 63);
+    assert_eq!(
+        requests.submit(RequestKey::Class(100)),
+        SubmitDisposition::Queued
+    );
+    assert_eq!(requests.acknowledge_completions(usize::MAX), 32);
+    assert_eq!(requests.pending_count(), 1);
     Ok(())
 }
 

@@ -592,6 +592,34 @@ fn run_unsafe() -> io::Result<()> {
         unsafe { DestroyWindow(window) };
         return Err(io::Error::other("window state retirement hold failed"));
     };
+    // This run scope owns the only Shell JoinHandle. The callback sidecar can
+    // revoke queued work during nested WM_DESTROY without borrowing AppState.
+    let mut icon_guardian = icon_worker::IconRunGuardian::start(
+        // SAFETY: this scalar identifies the UI thread that owns this run.
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+    )
+    .ok();
+    if let Some(guardian) = icon_guardian.as_ref() {
+        // SAFETY: the hidden live owner still publishes this held slot.
+        if !unsafe { CallbackState::install_icon_retirement(state, Arc::clone(&guardian.shared)) } {
+            if let Some(guardian) = icon_guardian.as_mut() {
+                guardian.retire_and_join_responsively();
+            }
+            // SAFETY: no worker remains and the hidden owner is still live.
+            unsafe { DestroyWindow(window) };
+            return Err(io::Error::other("icon worker retirement sidecar failed"));
+        }
+        let Some(mut state_lease) = try_app_state(window) else {
+            if let Some(guardian) = icon_guardian.as_mut() {
+                guardian.retire_and_join_responsively();
+            }
+            // SAFETY: no worker remains and the hidden owner is still live.
+            unsafe { DestroyWindow(window) };
+            return Err(io::Error::other("icon worker state adoption failed"));
+        };
+        state_lease.state_mut().icon_shared = Some(Arc::clone(&guardian.shared));
+        list_view::schedule_icon_poll(state_lease.state());
+    }
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     unsafe {
         ShowWindow(window, SW_SHOW);
@@ -612,6 +640,10 @@ fn run_unsafe() -> io::Result<()> {
             // the original error before the emergency teardown path, which
             // ends the process if provider I/O still has no terminal result.
             eprintln!("DarkReNamer message pump failed: {error}");
+            request_worker_shutdown_after_message_loop_failure(window);
+            if let Some(guardian) = icon_guardian.as_mut() {
+                guardian.retire_and_join_responsively();
+            }
             if let Some(mut state_lease) = try_app_state(window) {
                 let cancelled = cancel_appearance_dialog(window, state_lease.state_mut());
                 drop(state_lease);
@@ -626,7 +658,32 @@ fn run_unsafe() -> io::Result<()> {
             return Err(error);
         }
         if result == 0 {
+            if has_window_state(window) {
+                request_worker_shutdown_after_message_loop_failure(window);
+            }
+            if let Some(guardian) = icon_guardian.as_mut() {
+                guardian.retire_and_join_responsively();
+            }
+            if has_window_state(window) {
+                finish_apply_after_message_loop_failure(window);
+                // SAFETY: the tracked worker is terminal and this UI-owned
+                // window still publishes its exact callback slot.
+                unsafe { DestroyWindow(window) };
+            }
             break;
+        }
+        if message.message == WM_APP_ICON_WAKE
+            || (message.message == WM_TIMER && message.wParam == ICON_POLL_TIMER_ID)
+        {
+            if let Some(guardian) = icon_guardian.as_mut() {
+                guardian.poll_join();
+            }
+            if message.hwnd.is_null() && message.message == WM_APP_ICON_WAKE {
+                if let Some(mut state_lease) = try_app_state(window) {
+                    poll_icon_work(state_lease.state_mut());
+                }
+                continue;
+            }
         }
         let state_is_live = has_window_state(window);
         let appearance_dialog = if state_is_live {
@@ -662,6 +719,9 @@ fn run_unsafe() -> io::Result<()> {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+    if let Some(guardian) = icon_guardian.as_mut() {
+        guardian.retire_and_join_responsively();
     }
     Ok(())
 }
@@ -974,6 +1034,13 @@ unsafe extern "system" fn window_proc(
         }
     }
     let state_slot = app_state_slot(window);
+    if message == WM_APP_ICON_STATUS {
+        // SAFETY: this exact UI-thread publication is leased only for an O(1)
+        // scalar snapshot; busy or retired slots return the invalid sentinel.
+        return unsafe { CallbackState::try_lease(state_slot) }
+            .and_then(|lease| lease.state().icon_status_value(wparam))
+            .unwrap_or(-1);
+    }
     if message == WM_APP_SHOW_DEFERRED_MESSAGE {
         if app_callback_is_busy(window) {
             // The successful post may be consumed by a nested modal loop while
@@ -1017,6 +1084,9 @@ unsafe extern "system" fn window_proc(
         );
     }
     if message == WM_NCDESTROY {
+        // SAFETY: this sidecar is disjoint from an outer AppState lease and
+        // stays allocated through the run-scope hold until worker join.
+        unsafe { CallbackState::request_icon_retirement(state_slot) };
         discard_deferred_messages(window);
         if !state_slot.is_null() {
             // SAFETY: this final callback owns the publication slot. Clearing it
@@ -1029,6 +1099,7 @@ unsafe extern "system" fn window_proc(
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
                 KillTimer(window, STATUS_RENDER_TIMER_ID);
                 KillTimer(window, DEFERRED_MESSAGE_TIMER_ID);
+                KillTimer(window, ICON_POLL_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -1056,6 +1127,11 @@ unsafe extern "system" fn window_proc(
             paint_menu_bottom_edge(window, color);
         }
         return result;
+    }
+    if message == WM_DESTROY {
+        // SAFETY: the copied live slot exposes only a disjoint atomic worker
+        // retirement sidecar; this works even when an outer callback is leased.
+        unsafe { CallbackState::request_icon_retirement(state_slot) };
     }
     // SAFETY: the slot is the current UI-thread publication and remains live
     // until this callback either releases or defers reclamation of its lease.
@@ -1413,6 +1489,24 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if !state_ptr.is_null() && wparam == PREFERENCES_POLL_TIMER_ID => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             handle_preferences_wake(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == ICON_POLL_TIMER_ID => {
+            // SAFETY: this callback owns the sole AppState lease; reconciliation
+            // applies only scalar image indices to the current live ListView.
+            let state = unsafe { &mut *state_ptr };
+            poll_icon_work(state);
+            if state.close_pending {
+                try_finish_window_close(window, state);
+            }
+            0
+        }
+        WM_APP_ICON_CONTINUE if !state_ptr.is_null() => {
+            // SAFETY: only the UI callback writes this coalescing flag and
+            // reconciles at most one bounded row chunk per dispatch.
+            let state = unsafe { &mut *state_ptr };
+            state.icon_continue_posted = false;
+            poll_icon_work(state);
             0
         }
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {

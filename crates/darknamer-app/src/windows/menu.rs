@@ -372,30 +372,6 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     let menu = create_menu_for_mode(owner_draw_menu)?;
     state.owner_draw_menu = owner_draw_menu;
     state.pending_menu = Some(menu);
-    let mut shell_info = SHFILEINFOW::default();
-    let empty = wide("");
-    // SAFETY: The lookup path is owned terminated UTF-16 and info is writable SHFILEINFOW retained for the shell query.
-    let image_list = unsafe {
-        SHGetFileInfoW(
-            empty.as_ptr(),
-            0,
-            &mut shell_info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-        )
-    };
-    if image_list != 0 {
-        // SAFETY: state.list_window is live and LVM_SETIMAGELIST carries the
-        // shell-owned image-list handle without a caller pointer payload.
-        unsafe {
-            SendMessageW(
-                state.list_window,
-                LVM_SETIMAGELIST,
-                LVSIL_SMALL as usize,
-                image_list as isize,
-            )
-        };
-    }
     install_list_view_notification_subclass(state)?;
     apply_native_appearance_nonblocking(window, state);
     arrange(window, state);

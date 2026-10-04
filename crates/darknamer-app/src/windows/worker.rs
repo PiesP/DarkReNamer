@@ -1106,6 +1106,35 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
     update_controls(state);
 }
 
+/// Prompt cancellation is separate from the terminal joins below: a blocked
+/// Shell lookup must not postpone cancellation of an active rename operation.
+pub(super) fn request_worker_shutdown_after_message_loop_failure(window: HWND) {
+    let Some(mut state_lease) = try_app_state(window) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    state.close_pending = true;
+    state.mutation_locked = true;
+    if let Some(shared) = &state.icon_shared {
+        shared.request_retire();
+    }
+    if let Some(worker) = &state.admission_worker {
+        worker.cancellation.store(true, Ordering::Release);
+    }
+    if let Some(worker) = &state.import_worker {
+        worker.request_cancel();
+    }
+    if let Some(worker) = &state.plan_worker {
+        worker.cancellation.request();
+    }
+    if let Some(worker) = &state.apply_worker {
+        worker.cancellation.request();
+    }
+    let _messages = state
+        .preference_persistence
+        .shutdown(state.column_states, state.appearance);
+}
+
 pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
     let Some(mut state_lease) = try_app_state(window) else {
         return;
@@ -1163,6 +1192,10 @@ fn request_preferences_shutdown(state: &mut AppState) {
 
 pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
     if !state.close_pending
+        || state
+            .icon_shared
+            .as_ref()
+            .is_some_and(|shared| !shared.is_joined())
         || state.confirmation_pending
         || state.active_prompt.is_some()
         || state.admission_worker.is_some()
@@ -1187,6 +1220,10 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
 
 pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
     if !state.close_pending
+        || state
+            .icon_shared
+            .as_ref()
+            .is_some_and(|shared| !shared.is_joined())
         || state.confirmation_pending
         || state.active_prompt.is_some()
         || state.admission_worker.is_some()
@@ -1207,6 +1244,15 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     if !state.close_pending {
         state.close_pending = true;
         state.mutation_locked = true;
+        if let Some(shared) = &state.icon_shared {
+            shared.request_retire();
+            if !shared.is_joined() {
+                state.set_progress_status(
+                    "아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다.",
+                );
+            }
+        }
+        schedule_icon_poll(state);
         request_preferences_shutdown(state);
         update_controls(state);
     }
