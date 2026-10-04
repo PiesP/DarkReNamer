@@ -3404,8 +3404,42 @@ $applicationStartCalls = @($captureAst.FindAll({
     $node -is [Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
 }, $true))
-if ($applicationStartCalls.Count -ne 8) {
-    throw 'Expected all eight current-DPI and GUI diagnostic application start sites, including performance sampling.'
+$expectedApplicationStartSites = @(
+    'Invoke-DrCurrentDpiAcceptanceScenario|current-DPI acceptance application'
+    'Invoke-ObserverContextScenario|repeated-name GUI regression application'
+    'Invoke-ObserverContextScenario|movement GUI regression application'
+    'Invoke-ObserverContextScenario|mixed GUI regression application'
+    'Invoke-ObserverStandardScenario|standard GUI regression application'
+    'Invoke-ObserverAppearanceDefaultColumnsScene|clean-start default application'
+    'Invoke-ObserverPerformanceSampleScenario|performance sample application'
+    'Invoke-ObserverAppearancePairScenario|appearance pair application'
+    'Invoke-ObserverIconSettlementScenario|icon settlement application'
+)
+$actualApplicationStartSites = foreach ($call in $applicationStartCalls) {
+    $owner = $call.Parent
+    while ($null -ne $owner -and
+        $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) {
+        $owner = $owner.Parent
+    }
+    $elements = @($call.CommandElements)
+    $labels = @(
+        for ($index = 0; $index -lt $elements.Count - 1; $index++) {
+            if ($elements[$index] -is [Management.Automation.Language.CommandParameterAst] -and
+                $elements[$index].ParameterName -ceq 'Label') {
+                $elements[$index + 1]
+            }
+        }
+    )
+    if ($null -eq $owner -or $labels.Count -ne 1 -or
+        $labels[0] -isnot [Management.Automation.Language.StringConstantExpressionAst]) {
+        throw "Application start has no fixed owner or label at line $($call.Extent.StartLineNumber)."
+    }
+    '{0}|{1}' -f $owner.Name, $labels[0].Value
+}
+if ($actualApplicationStartSites.Count -ne $expectedApplicationStartSites.Count -or
+    (@($actualApplicationStartSites | Sort-Object) -join "`n") -cne
+    (@($expectedApplicationStartSites | Sort-Object) -join "`n")) {
+    throw 'Current-DPI and GUI diagnostic application start sites differ from their fixed owner/label inventory.'
 }
 foreach ($call in $applicationStartCalls) {
     $lifecycleBindings = @($call.CommandElements | Where-Object {
