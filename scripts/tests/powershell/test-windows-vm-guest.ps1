@@ -219,13 +219,45 @@ try {
     Save-Manifest $focused
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
-    } 'fixed focused icon selection is invalid'
+    } 'fixed focused native selection is invalid'
+    $refreshFocused = New-Fixture -Name 'focused-refresh-selection'
+    $refreshFocused.manifest.test_binaries[0].name = 'darknamer_app'
+    $refreshFocused.manifest.diagnostic = [ordered]@{
+        kind = 'focused-refresh-tests'
+        test_profile = 'debug'
+        test_filter = 'windows::list_view::native_tests::full_refresh_'
+        test_names = @(
+            'windows::list_view::native_tests::full_refresh_native_rows_and_proposals',
+            'windows::list_view::native_tests::full_refresh_native_fallback_and_apply_lock',
+            'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone',
+            'windows::list_view::native_tests::full_refresh_native_viewport_focus_and_close'
+        )
+    }
+    Save-Manifest $refreshFocused
+    Invoke-TestGuest -EntryPointPath $refreshFocused.runner -BundleRoot $refreshFocused.root -ExpectedSessionId 1 -ValidateOnly
+    [array]::Reverse($refreshFocused.manifest.diagnostic.test_names)
+    Save-Manifest $refreshFocused
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $refreshFocused.runner -BundleRoot $refreshFocused.root -ExpectedSessionId 1 -ValidateOnly
+    } 'fixed focused native selection is invalid'
+    [array]::Reverse($refreshFocused.manifest.diagnostic.test_names)
+    [void]$refreshFocused.manifest.diagnostic.Remove('test_names')
+    $refreshFocused.manifest.diagnostic['test_name'] =
+        'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone'
+    Save-Manifest $refreshFocused
+    Invoke-TestGuest -EntryPointPath $refreshFocused.runner -BundleRoot $refreshFocused.root -ExpectedSessionId 1 -ValidateOnly
+    $refreshFocused.manifest.diagnostic['test_name'] =
+        'windows::list_view::native_tests::full_refresh_not_allowed'
+    Save-Manifest $refreshFocused
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $refreshFocused.runner -BundleRoot $refreshFocused.root -ExpectedSessionId 1 -ValidateOnly
+    } 'fixed focused native selection is invalid'
     $focused.manifest.diagnostic.test_filter = 'windows::list_view::native_tests::icon_worker_'
     [array]::Reverse($focused.manifest.diagnostic.test_names)
     Save-Manifest $focused
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
-    } 'fixed focused icon selection is invalid'
+    } 'fixed focused native selection is invalid'
     [array]::Reverse($focused.manifest.diagnostic.test_names)
     $focused.manifest.diagnostic.test_profile = 'release'
     Save-Manifest $focused
@@ -240,7 +272,7 @@ try {
     Save-Manifest $focused
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
-    } 'fixed focused icon selection is invalid'
+    } 'fixed focused native selection is invalid'
     $leakedCommand = Get-Command Get-DrToolingVerifiedBundle -ErrorAction SilentlyContinue
     $leakedModules = @(Get-Module | Where-Object Name -Like 'DarkReNamer.*')
     if ($null -ne $leakedCommand) { throw "The public guest facade leaked loader command from $($leakedCommand.ModuleName)." }
@@ -3562,6 +3594,24 @@ Invoke-DrTestPowerShellModuleScope `
             'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire') {
         throw 'Single focused icon selector did not bind without launching.'
     }
+    Assert-Fails {
+        Invoke-RustTestBinary -Test ([pscustomobject]@{
+            file = 'not-launched.exe'; sha256 = ('0' * 64)
+        }) -Root $focusedBindingRoot -OutputRoot $focusedBindingRoot `
+            -RuntimeRoot $focusedBindingRoot -Index 3 -TimeoutSeconds 600 `
+            -OutputBudgetBytes 0 -FocusedRefreshTests
+    } 'requires one fixed exact case'
+    $refreshBindingResult = Invoke-RustTestBinary -Test ([pscustomobject]@{
+        file = 'not-launched.exe'; sha256 = ('0' * 64)
+    }) -Root $focusedBindingRoot -OutputRoot $focusedBindingRoot `
+        -RuntimeRoot $focusedBindingRoot -Index 4 -TimeoutSeconds 600 `
+        -OutputBudgetBytes 0 -FocusedRefreshTests `
+        -FocusedRefreshCase native_dates_follow_locale_and_timezone
+    if ($refreshBindingResult.failure_reason -cne 'suite_output_limit_exceeded' -or
+        $refreshBindingResult.test_name -cne
+            'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone') {
+        throw 'Single focused refresh selector did not bind without launching.'
+    }
     # The guest entrypoint must pass one fixed case at the actual helper call.
     $guestEntryPath = (Get-DrTestPowerShellModuleSpec -Kind guest).entry
     $guestEntryAst = [Management.Automation.Language.Parser]::ParseFile(
@@ -3582,9 +3632,13 @@ Invoke-DrTestPowerShellModuleScope `
                 [object] $Test, [string] $Root, [string] $OutputRoot,
                 [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
                 [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [switch] $FocusedRefreshTests,
                 [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
                     'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
-                [string] $FocusedIconCase, [long] $OutputBudgetBytes
+                [string] $FocusedIconCase,
+                [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
+                    'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
             )
             [pscustomobject]@{
                 focused = [bool]$FocusedIconTests
@@ -3606,6 +3660,7 @@ Invoke-DrTestPowerShellModuleScope `
         $TestTimeoutSeconds = 600
         $RefreshProfileOrder = ''
         $FocusedIconTests = $true
+        $FocusedRefreshTests = $false
         $testOutputBudgetBytes = [long]0
         $caseTimeoutSeconds = 600
         $focusedCaseArguments = @{ FocusedIconCase = 'close_and_forced_destroy_retire' }
@@ -3639,13 +3694,17 @@ Invoke-DrTestPowerShellModuleScope `
                 [object] $Test, [string] $Root, [string] $OutputRoot,
                 [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
                 [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [switch] $FocusedRefreshTests,
                 [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
                     'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
-                [string] $FocusedIconCase, [long] $OutputBudgetBytes
+                [string] $FocusedIconCase,
+                [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
+                    'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
             )
             $script:focusedLoopCalls.Add([pscustomobject]@{
                 index = $Index
-                case = $FocusedIconCase
+                case = if ($FocusedIconTests) { $FocusedIconCase } else { $FocusedRefreshCase }
                 file = $Test.file
                 sha256 = $Test.sha256
                 timeout = $TimeoutSeconds
@@ -3655,7 +3714,7 @@ Invoke-DrTestPowerShellModuleScope `
             $failed = $Index -eq $script:focusedLoopFailAt -or $malformed
             [pscustomobject]@{
                 status = if ($failed) { 'failed' } else { 'passed' }
-                test_name = 'windows::list_view::native_tests::icon_worker_' + $FocusedIconCase
+                test_name = $focusedFilter + $(if ($FocusedIconTests) { $FocusedIconCase } else { $FocusedRefreshCase })
                 file = $Test.file
                 sha256 = $Test.sha256
                 job_cleanup = $true
@@ -3684,6 +3743,11 @@ Invoke-DrTestPowerShellModuleScope `
         $RefreshProfileOrder = ''
         $FocusedIconTests = $true
         $FocusedIconCase = ''
+        $FocusedRefreshTests = $false
+        $FocusedRefreshCase = ''
+        $focusedTests = $true
+        $focusedCase = ''
+        $focusedFilter = 'windows::list_view::native_tests::icon_worker_'
         foreach ($failureAt in @(0, 2, -2)) {
             $script:focusedLoopFailAt = $failureAt
             $script:focusedLoopCalls = [Collections.Generic.List[object]]::new()
@@ -3741,6 +3805,38 @@ Invoke-DrTestPowerShellModuleScope `
                 throw 'The guest started a case after the shared suite deadline.'
             }
         }
+        $focusedNames = @(
+            'windows::list_view::native_tests::full_refresh_native_rows_and_proposals',
+            'windows::list_view::native_tests::full_refresh_native_fallback_and_apply_lock',
+            'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone',
+            'windows::list_view::native_tests::full_refresh_native_viewport_focus_and_close'
+        )
+        $verified.manifest.diagnostic.test_names = $focusedNames
+        $focusedFilter = 'windows::list_view::native_tests::full_refresh_'
+        $FocusedIconTests = $false
+        $FocusedRefreshTests = $true
+        foreach ($failureAt in @(0, 2)) {
+            $script:focusedLoopFailAt = $failureAt
+            $script:focusedLoopCalls = [Collections.Generic.List[object]]::new()
+            $result = [ordered]@{ tests = @(); failure_reason = $null }
+            $testResults = [Collections.Generic.List[object]]::new()
+            & $guestLoop ([long](32MB))
+            $expectedCount = if ($failureAt -eq 0) { 4 } else { 2 }
+            if ($script:focusedLoopCalls.Count -ne $expectedCount -or
+                $result.tests.Count -ne $expectedCount) {
+                throw 'The refresh cases did not stop at their first failure.'
+            }
+            for ($caseIndex = 0; $caseIndex -lt $expectedCount; $caseIndex++) {
+                $call = $script:focusedLoopCalls[$caseIndex]
+                if ($call.case -cne $focusedNames[$caseIndex].Substring($focusedFilter.Length) -or
+                    $call.index -ne ($caseIndex + 1) -or
+                    $call.timeout -lt 1 -or $call.timeout -gt 600 -or
+                    $call.budget -ne 8MB -or
+                    $result.tests[$caseIndex].test_name -cne $focusedNames[$caseIndex]) {
+                    throw 'The refresh case process differs from its fixed inventory or bound.'
+                }
+            }
+        }
     }
     finally {
         Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
@@ -3779,6 +3875,24 @@ Invoke-DrTestPowerShellModuleScope `
     if ($singleFailedSummary.outcome -cne 'FAILED' -or $singleFailedSummary.failed -ne 1) {
         throw 'Single focused icon failed summary lost its actual count.'
     }
+    $refreshSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out;' `
+        -Stderr '' -FocusedRefreshTests `
+        -FocusedRefreshCase native_dates_follow_locale_and_timezone
+    if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 357) {
+        throw 'Single focused refresh summary did not retain exact counts.'
+    }
+    Assert-Fails {
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 356 filtered out;' `
+            -Stderr '' -FocusedRefreshTests `
+            -FocusedRefreshCase native_dates_follow_locale_and_timezone
+    } 'exactly one unignored test'
+    Assert-Fails {
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out;' `
+            -Stderr '' -FocusedRefreshCase native_dates_follow_locale_and_timezone
+    } 'requires its fixed selector'
     Assert-Fails {
         Read-RustTestSummary `
             -Stdout 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 356 filtered out;' `

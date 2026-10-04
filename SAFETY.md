@@ -486,6 +486,39 @@ native-row staging only; it has no icon worker and cannot establish Shell
 latency, icon settlement, or production responsiveness. Those require the
 tracked-worker native cases and source-bound product observations.
 
+A synchronized full ListView refresh first checks the native row count against
+its retained rendered-row cache. It reserves missing cache capacity fallibly,
+then formats and owns one replacement row at a time. The model, issue-cache,
+icon-cache, and prior-row borrows end before each synchronous native message;
+the changed-column mask is copied before dispatch. Native row deletion and
+insertion remain individual operations. If native count, allocation, or any
+incremental write fails, preview synchronization is marked failed before a
+bounded full model snapshot is used for authoritative native rebuilding. A
+failed rebuild leaves Apply blocked and retains its prior cache for a later
+recovery attempt. Successful refreshes retain the existing asynchronous icon
+generation, completion, and demand accounting. Selection, independent focus,
+and both viewport axes are captured from the live control and restored after
+native changes without forcing a selected row into view. The detached refresh
+diagnostic reports normal one-row staging separately from full fallback
+staging and observes repeated timestamp inputs without changing date output.
+
+The focused native refresh regressions own a live hidden parent and ListView,
+publish the ordinary callback lease, and destroy every child before reclaiming
+the state. Each case runs in an exact-named bounded child process so WinRT and
+OLE lifetime caches cannot couple cases. The mixed-icon case attaches the
+existing populated two-slot test image list to its shared-image-list ListView
+and uses only validated indices 0 and 1. Its owner is declared before the
+window fixture and released only after confirmed child destruction, including
+error and unwind paths. Uncertain native teardown aborts the isolated child
+before the image list can be freed while attached. Test-only thread-local seams
+refuse a selected incremental cell update or rebuild before native dispatch on
+that valid HWND; they exercise authoritative fallback, retained preview failure,
+Apply blocking, and recovery without forged handles or process-wide hooks.
+The test date seam supplies explicit registered time zones and locale names to
+synchronous Win32 formatting without changing system settings. UTF-16 output
+buffers remain owned through their native calls, and the production date path
+continues to use the current user's time zone and locale.
+
 The ignored icon-delay diagnostic in `windows/list_view.rs` installs a subclass
 only on its test-owned HWND. Its boxed context remains on the owning UI thread
 through synchronous destruction; `WM_NCDESTROY` removes the exact subclass and

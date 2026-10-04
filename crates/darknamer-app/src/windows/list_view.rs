@@ -4,13 +4,16 @@ use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
     RestoreDC, SaveDC, SetDCBrushColor,
 };
+#[cfg(test)]
+use windows_sys::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION;
 use windows_sys::Win32::UI::Controls::{
-    I_IMAGENONE, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN, STATE_SYSTEM_PRESSED,
+    I_IMAGENONE, LVM_GETTOPINDEX, LVM_SCROLL, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN,
+    STATE_SYSTEM_PRESSED,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetScrollBarInfo, OBJID_HSCROLL, OBJID_VSCROLL, SCROLLBARINFO, WM_HSCROLL,
-    WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
-    WM_VSCROLL,
+    GetCursorPos, GetScrollBarInfo, GetScrollInfo, OBJID_HSCROLL, OBJID_VSCROLL, SB_HORZ,
+    SCROLLBARINFO, SCROLLINFO, SIF_POS, WM_HSCROLL, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_VSCROLL,
 };
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
@@ -1108,6 +1111,8 @@ pub(super) fn refresh(state: &mut AppState) {
 }
 
 pub(super) fn refresh_all_rows(state: &mut AppState) {
+    #[cfg(test)]
+    refresh_profile::record(|counters| counters.last_filetime = None);
     refresh_preview_count_cache(state);
     if state.icon_image_list.is_some()
         && let Some(shared) = &state.icon_shared
@@ -1116,58 +1121,34 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
         state.icon_delivery_batch.clear();
         state.icon_delivery_ack_count = 0;
     }
-    let rows = {
-        let model = &state.model;
-        let issue_cache = &state.preview_issue_cache;
-        let icon_cache = &mut state.icon_cache;
-        let icon_shared = state.icon_shared.as_deref();
-        model
-            .items()
-            .iter()
-            .enumerate()
-            .map(|(row, item)| {
-                rendered_row(
-                    icon_cache,
-                    icon_shared,
-                    state.rendered_rows.get(row),
-                    item,
-                    issue_cache.issue(row),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    #[cfg(test)]
-    refresh_profile::record(|counters| {
-        if !state.rendered_rows.is_empty() {
-            counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(rows.len());
-            let payload = rows
-                .iter()
-                .flat_map(|row| &row.values)
-                .map(|text| text.len() * 2)
-                .sum();
-            counters.logical_staged_payload_bytes_peak =
-                counters.logical_staged_payload_bytes_peak.max(payload);
-        }
-    });
     let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let selected = {
+    let (selected, focused, viewport) = {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
-        selected_indices(state.list_window)
+        (
+            selected_indices(state.list_window),
+            focused_index(state.list_window),
+            RefreshViewport::capture(state.list_window),
+        )
     };
-    let synchronized = if state.preview_synchronization.is_synchronized() {
-        apply_incremental_rows(state.list_window, &state.rendered_rows, &rows)
-            || rebuild_native_rows(state.list_window, &rows)
+    // SAFETY: scalar count query on the owned live ListView. A count mismatch
+    // requires an authoritative rebuild even if cached row values are equal.
+    let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
+    let synchronized = state.preview_synchronization.is_synchronized()
+        && native_count == state.rendered_rows.len() as isize
+        && apply_incremental_rows(state);
+    let synchronized = if synchronized {
+        true
     } else {
-        rebuild_native_rows(state.list_window, &rows)
+        state.mark_preview_sync_failed();
+        rebuild_rows_from_model(state)
     };
     if !synchronized {
         state.mark_preview_sync_failed();
         return;
     }
-    state.rendered_rows = rows;
     state.icon_unresolved_rows = state
         .rendered_rows
         .iter()
@@ -1193,10 +1174,160 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     {
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
-        select_rows(state.list_window, &selected);
+        restore_refresh_selection(state.list_window, &selected, focused, state.model.len());
     }
     update_primary_column_widths(state);
+    {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Selection);
+        viewport.restore(state.list_window, state.model.len());
+    }
     schedule_icon_poll(state);
+}
+
+#[derive(Clone, Copy)]
+struct RefreshViewport {
+    top: isize,
+    horizontal: Option<i32>,
+}
+
+impl RefreshViewport {
+    fn capture(window: HWND) -> Self {
+        // SAFETY: the owned ListView is live; the top-index message is scalar.
+        let top = unsafe { SendMessageW(window, LVM_GETTOPINDEX, 0, 0) };
+        let mut info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_POS,
+            ..SCROLLINFO::default()
+        };
+        // SAFETY: info has the documented size and writable position field.
+        let horizontal =
+            (unsafe { GetScrollInfo(window, SB_HORZ, &mut info) } != 0).then_some(info.nPos);
+        Self { top, horizontal }
+    }
+
+    fn restore(self, window: HWND, rows: usize) {
+        if rows != 0 {
+            let target = self.top.max(0).min((rows - 1) as isize);
+            // SAFETY: scalar top-index query on the same live ListView.
+            let current = unsafe { SendMessageW(window, LVM_GETTOPINDEX, 0, 0) };
+            if current != target {
+                let mut rect = RECT {
+                    left: LVIR_BOUNDS as i32,
+                    ..RECT::default()
+                };
+                // SAFETY: row zero exists and rect is writable for this
+                // synchronous bounds query.
+                if unsafe {
+                    SendMessageW(
+                        window,
+                        LVM_GETITEMRECT,
+                        0,
+                        (&mut rect as *mut RECT) as isize,
+                    )
+                } != 0
+                {
+                    let height = rect.bottom.saturating_sub(rect.top);
+                    if height > 0 {
+                        let dy = (target - current).saturating_mul(height as isize);
+                        // SAFETY: scalar pixel delta on the live report ListView.
+                        unsafe { SendMessageW(window, LVM_SCROLL, 0, dy) };
+                    }
+                }
+            }
+        }
+        if let Some(target) = self.horizontal
+            && let Some(current) = Self::capture(window).horizontal
+            && current != target
+        {
+            let dx = target.saturating_sub(current) as isize;
+            // SAFETY: signed pixel delta is passed by bit pattern through
+            // WPARAM; the live ListView retains no caller storage.
+            unsafe { SendMessageW(window, LVM_SCROLL, dx as usize, 0) };
+        }
+    }
+}
+
+fn restore_refresh_selection(
+    window: HWND,
+    selected: &[usize],
+    focused: Option<usize>,
+    rows: usize,
+) {
+    let current_selected = selected_indices(window);
+    if current_selected
+        .iter()
+        .copied()
+        .ne(selected.iter().copied().filter(|row| *row < rows))
+    {
+        let mut clear = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            ..LVITEMW::default()
+        };
+        // SAFETY: the special all-items index and writable state item clear
+        // only selection on this live ListView; focus is independent.
+        unsafe {
+            SendMessageW(
+                window,
+                LVM_SETITEMSTATE,
+                usize::MAX,
+                (&mut clear as *mut LVITEMW) as isize,
+            )
+        };
+        for row in selected.iter().copied().filter(|row| *row < rows) {
+            let mut item = LVITEMW {
+                stateMask: LVIS_SELECTED,
+                state: LVIS_SELECTED,
+                ..LVITEMW::default()
+            };
+            // SAFETY: row exists and item remains writable through the
+            // synchronous state update; no ensure-visible message is sent.
+            unsafe {
+                SendMessageW(
+                    window,
+                    LVM_SETITEMSTATE,
+                    row,
+                    (&mut item as *mut LVITEMW) as isize,
+                )
+            };
+        }
+    }
+    let target = focused.filter(|row| *row < rows);
+    if let Some(current) = focused_index(window)
+        && Some(current) != target
+    {
+        let mut item = LVITEMW {
+            stateMask: LVIS_FOCUSED,
+            ..LVITEMW::default()
+        };
+        // SAFETY: native reported current as a live focused row.
+        unsafe {
+            SendMessageW(
+                window,
+                LVM_SETITEMSTATE,
+                current,
+                (&mut item as *mut LVITEMW) as isize,
+            )
+        };
+    }
+    if let Some(target) = target
+        && focused_index(window) != Some(target)
+    {
+        let mut item = LVITEMW {
+            stateMask: LVIS_FOCUSED,
+            state: LVIS_FOCUSED,
+            ..LVITEMW::default()
+        };
+        // SAFETY: target remains a live in-range row through this call.
+        unsafe {
+            SendMessageW(
+                window,
+                LVM_SETITEMSTATE,
+                target,
+                (&mut item as *mut LVITEMW) as isize,
+            )
+        };
+    }
 }
 
 pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
@@ -1760,35 +1891,145 @@ thread_local! {
     static ICON_TEST_NATIVE_FAILURE_APPLY_BLOCKED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
+fn apply_incremental_rows(state: &mut AppState) -> bool {
     #[cfg(test)]
-    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
-    for row in (new.len()..old.len()).rev() {
-        // SAFETY: window is live and row is a current trailing item.
-        if unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) } == 0 {
+    if FAIL_NATIVE_INCREMENTAL_FOR_TEST.with(|slot| slot.replace(false)) {
+        return false;
+    }
+    let window = state.list_window;
+    let new_len = state.model.len();
+    let old_len = state.rendered_rows.len();
+    #[cfg(test)]
+    let previous_capacity = state.rendered_rows.capacity();
+    if new_len > old_len
+        && state
+            .rendered_rows
+            .try_reserve_exact(new_len - old_len)
+            .is_err()
+    {
+        return false;
+    }
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        let capacity = state.rendered_rows.capacity();
+        counters.rendered_vec_growth_events += usize::from(capacity > previous_capacity);
+        counters.rendered_vec_capacity_bytes_peak = counters
+            .rendered_vec_capacity_bytes_peak
+            .max(capacity * size_of::<RenderedRow>());
+    });
+    for row in (new_len..old_len).rev() {
+        let deleted = {
+            #[cfg(test)]
+            let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+            // SAFETY: window is live and row is a current trailing item.
+            unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) }
+        };
+        if deleted == 0 {
             return false;
         }
         #[cfg(test)]
         refresh_profile::record(|counters| counters.native_deletions += 1);
     }
-    let shared = old.len().min(new.len());
-    for row in 0..shared {
-        if !apply_rendered_row(window, row, &old[row], &new[row]) {
-            return false;
+    state.rendered_rows.truncate(new_len);
+    for row in 0..new_len {
+        // These borrows end before native dispatch. The owned row is the only
+        // transient full-row payload; prior identity still gates icon reuse.
+        let value = rendered_row(
+            &mut state.icon_cache,
+            state.icon_shared.as_deref(),
+            state.rendered_rows.get(row),
+            &state.model.items()[row],
+            state.preview_issue_cache.issue(row),
+        );
+        #[cfg(test)]
+        refresh_profile::record(|counters| {
+            let bytes = value.values.iter().map(|text| text.len() * 2).sum();
+            counters.normal_staged_rows_peak = counters.normal_staged_rows_peak.max(1);
+            counters.normal_logical_staged_payload_bytes_peak =
+                counters.normal_logical_staged_payload_bytes_peak.max(bytes);
+            if old_len != 0 {
+                counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(1);
+                counters.logical_staged_payload_bytes_peak =
+                    counters.logical_staged_payload_bytes_peak.max(bytes);
+            }
+        });
+        if row < state.rendered_rows.len() {
+            let mask = changed_column_mask(&state.rendered_rows[row], &value);
+            let applied = {
+                #[cfg(test)]
+                let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+                apply_rendered_row_with_mask(window, row, &value, mask)
+            };
+            if !applied {
+                return false;
+            }
+            state.rendered_rows[row] = value;
+        } else {
+            let inserted = {
+                #[cfg(test)]
+                let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+                insert_native_row(window, row, &value)
+            };
+            if !inserted {
+                return false;
+            }
+            state.rendered_rows.push(value);
         }
     }
-    for (row, value) in new.iter().enumerate().skip(old.len()) {
-        if !insert_native_row(window, row, value) {
-            return false;
-        }
+    if new_len == 0 {
+        state.rendered_rows.shrink_to_fit();
     }
     true
 }
 
+fn rebuild_rows_from_model(state: &mut AppState) -> bool {
+    let mut rows = Vec::new();
+    if rows.try_reserve_exact(state.model.len()).is_err() {
+        return false;
+    }
+    for (row, item) in state.model.items().iter().enumerate() {
+        rows.push(rendered_row(
+            &mut state.icon_cache,
+            state.icon_shared.as_deref(),
+            state.rendered_rows.get(row),
+            item,
+            state.preview_issue_cache.issue(row),
+        ));
+    }
+    #[cfg(test)]
+    refresh_profile::record(|counters| {
+        let payload = rows
+            .iter()
+            .flat_map(|row| &row.values)
+            .map(|text| text.len() * 2)
+            .sum();
+        counters.fallback_staged_rows_peak = counters.fallback_staged_rows_peak.max(rows.len());
+        counters.fallback_logical_staged_payload_bytes_peak = counters
+            .fallback_logical_staged_payload_bytes_peak
+            .max(payload);
+        if !state.rendered_rows.is_empty() {
+            counters.extra_staged_rows_peak = counters.extra_staged_rows_peak.max(rows.len());
+            counters.logical_staged_payload_bytes_peak =
+                counters.logical_staged_payload_bytes_peak.max(payload);
+        }
+        counters.rendered_vec_capacity_bytes_peak = counters
+            .rendered_vec_capacity_bytes_peak
+            .max(rows.capacity() * size_of::<RenderedRow>());
+    });
+    if !rebuild_native_rows(state.list_window, &rows) {
+        return false;
+    }
+    state.rendered_rows = rows;
+    true
+}
+
 fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &RenderedRow) -> bool {
+    apply_rendered_row_with_mask(window, row, new, changed_column_mask(old, new))
+}
+
+fn apply_rendered_row_with_mask(window: HWND, row: usize, new: &RenderedRow, mask: u8) -> bool {
     #[cfg(test)]
     refresh_profile::record(|counters| counters.native_rows_visited += 1);
-    let mask = changed_column_mask(old, new);
     if mask & 1 != 0 && !set_native_primary(window, row, new) {
         return false;
     }
@@ -1876,6 +2117,10 @@ fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
 }
 
 fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyText) -> bool {
+    #[cfg(test)]
+    if fail_native_refresh_cell_for_test() {
+        return false;
+    }
     let mut text = value.units().to_vec();
     text.push(0);
     let mut native = LVITEMW {
@@ -1904,6 +2149,10 @@ fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
     let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
     #[cfg(test)]
     refresh_profile::record(|counters| counters.full_rebuilds += 1);
+    #[cfg(test)]
+    if FAIL_NATIVE_REBUILD_FOR_TEST.with(Cell::get) {
+        return false;
+    }
     // SAFETY: window is live and the message carries no pointer.
     if unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) } == 0 {
         return false;
@@ -1911,6 +2160,29 @@ fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
     rows.iter()
         .enumerate()
         .all(|(row, value)| insert_native_row(window, row, value))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Reject the next native update before dispatch on a live test-owned HWND.
+    static FAIL_NATIVE_INCREMENTAL_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NATIVE_REBUILD_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NATIVE_CELL_AFTER_FOR_TEST: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fail_native_refresh_cell_for_test() -> bool {
+    FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| match slot.get() {
+        Some(0) => {
+            slot.set(None);
+            true
+        }
+        Some(remaining) => {
+            slot.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
 }
 
 #[cfg(test)]
@@ -1971,7 +2243,21 @@ fn format_filetime(value: u64) -> LegacyText {
     #[cfg(test)]
     let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Timestamps);
     #[cfg(test)]
-    refresh_profile::record(|counters| counters.timestamp_values += 1);
+    refresh_profile::record(|counters| {
+        counters.timestamp_values += 1;
+        if value != 0 && counters.last_filetime == Some(value) {
+            counters.repeated_nonzero_filetime_inputs += 1;
+        }
+        counters.last_filetime = (value != 0).then_some(value);
+    });
+    #[cfg(test)]
+    if let Some(formatted) = DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|(locale, zone)| format_filetime_with_environment(value, locale.as_ptr(), zone))
+    }) {
+        return formatted;
+    }
     let Some(system) = local_systemtime_from_filetime(value) else {
         return LegacyText::default();
     };
@@ -2032,6 +2318,82 @@ fn format_local_systemtime(system: &SYSTEMTIME) -> Option<String> {
     Some(format!("{date} {time}"))
 }
 
+#[cfg(test)]
+fn format_filetime_with_environment(
+    value: u64,
+    locale: *const u16,
+    zone: *const DYNAMIC_TIME_ZONE_INFORMATION,
+) -> LegacyText {
+    let Some(system) = local_systemtime_from_filetime_in_zone(value, zone) else {
+        return LegacyText::default();
+    };
+    if let Some(localized) = format_local_systemtime_in_locale(&system, locale) {
+        return LegacyText::from(localized);
+    }
+    LegacyText::from(format_timestamp_fallback(
+        [system.wYear, system.wMonth, system.wDay],
+        [system.wHour, system.wMinute, system.wSecond],
+    ))
+}
+
+#[cfg(test)]
+fn local_systemtime_from_filetime_in_zone(
+    value: u64,
+    zone: *const DYNAMIC_TIME_ZONE_INFORMATION,
+) -> Option<SYSTEMTIME> {
+    if value == 0 {
+        return None;
+    }
+    let filetime = FILETIME {
+        dwLowDateTime: value as u32,
+        dwHighDateTime: (value >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    // SAFETY: filetime is readable UTC input and utc remains writable through
+    // this synchronous representation conversion.
+    if unsafe { FileTimeToSystemTime(&filetime, &mut utc) } == 0 {
+        return None;
+    }
+    let mut local = SYSTEMTIME::default();
+    // SAFETY: zone is null for the current dynamic Windows time zone or points
+    // to a live test-owned zone; utc is readable and local writable.
+    if unsafe { SystemTimeToTzSpecificLocalTimeEx(zone, &utc, &mut local) } == 0 {
+        return None;
+    }
+    Some(local)
+}
+
+#[cfg(test)]
+fn format_local_systemtime_in_locale(system: &SYSTEMTIME, locale: *const u16) -> Option<String> {
+    let date = format_locale_part(|buffer, capacity| {
+        // SAFETY: locale is null for the user's default or points to a live
+        // test-owned name; system and the supplied output storage are valid.
+        unsafe {
+            GetDateFormatEx(
+                locale,
+                DATE_SHORTDATE,
+                system,
+                null(),
+                buffer,
+                capacity,
+                null(),
+            )
+        }
+    })?;
+    let time = format_locale_part(|buffer, capacity| {
+        // SAFETY: locale has the same lifetime as above; system and output
+        // storage follow the GetTimeFormatEx contract.
+        unsafe { GetTimeFormatEx(locale, 0, system, null(), buffer, capacity) }
+    })?;
+    Some(format!("{date} {time}"))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Explicit NLS inputs keep native date tests independent of OS settings.
+    static DATE_ENVIRONMENT_FOR_TEST: std::cell::RefCell<Option<(Vec<u16>, DYNAMIC_TIME_ZONE_INFORMATION)>> = const { std::cell::RefCell::new(None) };
+}
+
 fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<String> {
     let required = format(null_mut(), 0);
     let capacity = usize::try_from(required).ok()?;
@@ -2084,6 +2446,14 @@ mod refresh_profile {
         pub(super) full_rebuilds: usize,
         pub(super) extra_staged_rows_peak: usize,
         pub(super) logical_staged_payload_bytes_peak: usize,
+        pub(super) normal_staged_rows_peak: usize,
+        pub(super) normal_logical_staged_payload_bytes_peak: usize,
+        pub(super) fallback_staged_rows_peak: usize,
+        pub(super) fallback_logical_staged_payload_bytes_peak: usize,
+        pub(super) rendered_vec_growth_events: usize,
+        pub(super) rendered_vec_capacity_bytes_peak: usize,
+        pub(super) repeated_nonzero_filetime_inputs: usize,
+        pub(super) last_filetime: Option<u64>,
         times_ns: [u128; 7],
         maximum_shell_ns: u128,
     }
@@ -2165,7 +2535,7 @@ mod refresh_profile {
             assert_eq!(counters.maximum_shell_ns, 0);
             assert_eq!(counters.ui_shell_calls, 0);
             println!(
-                "{{\"kind\":\"refresh-stages-icon-async-test-build\",\"schema_version\":2,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{}}}",
+                "{{\"kind\":\"refresh-stages-icon-async-streaming-test-build\",\"schema_version\":3,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"normal_staged_rows_peak\":{},\"normal_logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{},\"rendered_vec_growth_events\":{},\"rendered_vec_capacity_bytes_peak\":{},\"repeated_nonzero_filetime_inputs\":{}}}",
                 counters.maximum_shell_ns,
                 counters.issue_count_input_rows_visited,
                 counters.native_rows_visited,
@@ -2182,6 +2552,13 @@ mod refresh_profile {
                 counters.full_rebuilds,
                 counters.extra_staged_rows_peak,
                 counters.logical_staged_payload_bytes_peak,
+                counters.normal_staged_rows_peak,
+                counters.normal_logical_staged_payload_bytes_peak,
+                counters.fallback_staged_rows_peak,
+                counters.fallback_logical_staged_payload_bytes_peak,
+                counters.rendered_vec_growth_events,
+                counters.rendered_vec_capacity_bytes_peak,
+                counters.repeated_nonzero_filetime_inputs,
             );
             counters
         }
@@ -2198,17 +2575,23 @@ mod refresh_profile {
 
 #[cfg(test)]
 mod native_tests {
+    use std::fs::File;
+    use std::io::Read;
     use std::process::Command;
+    use std::process::{Child, Stdio};
     use std::sync::Condvar;
     use std::sync::mpsc::{self, Sender};
     use std::time::{Duration, Instant};
 
     use super::super::visual_capture::capture_window_pixels;
     use super::*;
-    use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, SetLastError,
+    };
+    use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETTOPINDEX, LVM_SCROLL,
-        LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
+        LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         PM_REMOVE, PeekMessageW, SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
@@ -2216,6 +2599,32 @@ mod native_tests {
     };
 
     const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
+
+    fn registered_test_zone(key: &str) -> io::Result<DYNAMIC_TIME_ZONE_INFORMATION> {
+        let expected = wide(key);
+        let expected = &expected[..expected.len() - 1];
+        for index in 0..1024 {
+            let mut zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+            // SAFETY: zone is writable for this synchronous registry enumeration.
+            match unsafe { EnumDynamicTimeZoneInformation(index, &mut zone) } {
+                ERROR_SUCCESS => {
+                    let end = zone
+                        .TimeZoneKeyName
+                        .iter()
+                        .position(|unit| *unit == 0)
+                        .unwrap_or(zone.TimeZoneKeyName.len());
+                    if &zone.TimeZoneKeyName[..end] == expected {
+                        return Ok(zone);
+                    }
+                }
+                ERROR_NO_MORE_ITEMS => break,
+                error => return Err(io::Error::from_raw_os_error(error as i32)),
+            }
+        }
+        Err(io::Error::other(format!(
+            "test time zone {key} is unavailable"
+        )))
+    }
 
     #[test]
     fn failed_shell_lookup_caches_no_image_instead_of_unvalidated_index() {
@@ -2358,6 +2767,34 @@ mod native_tests {
         );
     }
 
+    struct RefreshTestOle {
+        winrt: Option<WinRtGuard>,
+    }
+
+    impl RefreshTestOle {
+        fn initialize() -> io::Result<Self> {
+            // SAFETY: null is reserved; Drop balances successful OLE setup on
+            // this native-test thread.
+            if unsafe { OleInitialize(null()) } < 0 {
+                return Err(io::Error::other("refresh test COM initialization failed"));
+            }
+            let mut apartment = Self { winrt: None };
+            apartment.winrt = WinRtGuard::initialize();
+            if apartment.winrt.is_none() {
+                return Err(io::Error::other("refresh test WinRT initialization failed"));
+            }
+            Ok(apartment)
+        }
+    }
+
+    impl Drop for RefreshTestOle {
+        fn drop(&mut self) {
+            drop(self.winrt.take());
+            // SAFETY: OLE initialization succeeded on this same test thread.
+            unsafe { OleUninitialize() };
+        }
+    }
+
     // The native fixture publishes the ordinary callback lease and owns all
     // children. Timing uses only safe Rust; these calls create/retire the HWNDs.
     struct RefreshTestApp {
@@ -2418,6 +2855,44 @@ mod native_tests {
             Ok(action(lease.state_mut()))
         }
 
+        fn attach_test_image_list(
+            &self,
+            image_list: icon_worker::BorrowedSystemImageList,
+        ) -> io::Result<()> {
+            self.with_state(|state| {
+                // SAFETY: the test owns this live ListView. Both calls carry
+                // only scalar image-list identities; the separate owner
+                // outlives the ListView's confirmed destruction.
+                let existing = unsafe {
+                    SendMessageW(state.list_window, LVM_GETIMAGELIST, LVSIL_SMALL as usize, 0)
+                };
+                if existing != 0 {
+                    return Err(io::Error::other(
+                        "refresh test ListView already has an image list",
+                    ));
+                }
+                // SAFETY: LVS_SHAREIMAGELISTS keeps ownership with this test;
+                // the borrowed scalar remains live until parent destruction.
+                unsafe {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_SETIMAGELIST,
+                        LVSIL_SMALL as usize,
+                        image_list.raw(),
+                    )
+                };
+                // SAFETY: scalar readback on the same live ListView.
+                let attached = unsafe {
+                    SendMessageW(state.list_window, LVM_GETIMAGELIST, LVSIL_SMALL as usize, 0)
+                };
+                if attached != image_list.raw() {
+                    return Err(io::Error::other("refresh test image list was not attached"));
+                }
+                state.icon_image_list = Some(image_list);
+                Ok(())
+            })?
+        }
+
         fn close(&mut self) -> io::Result<()> {
             if self.owner.is_null() {
                 return Ok(());
@@ -2453,9 +2928,12 @@ mod native_tests {
 
     impl Drop for RefreshTestApp {
         fn drop(&mut self) {
-            // Preserve the slot on uncertain native teardown instead of freeing
-            // resources still reachable by a native window.
-            let _ = self.close();
+            // A controlled image list may still be attached. Do not let its
+            // outer owner drop after uncertain native window destruction.
+            if let Err(error) = self.close() {
+                eprintln!("refresh test native teardown failed: {error}");
+                std::process::abort();
+            }
         }
     }
 
@@ -3978,6 +4456,799 @@ mod native_tests {
         counters
     }
 
+    fn distinct_refresh_rows() -> Vec<LegacyListItem> {
+        let base = 133_497_936_000_000_000_u64;
+        [
+            (
+                r"C:\refresh-fixture\normal",
+                "ordinary-00000.txt",
+                false,
+                0_u64,
+            ),
+            (r"C:\refresh-fixture\other", "ordinary-00001.png", false, 1),
+            (r"C:\refresh-fixture\normal", "ordinary-00002", false, 1_024),
+            (r"C:\refresh-fixture\other", "ordinary-00003", true, 4_096),
+            (
+                r"C:\refresh-fixture\normal",
+                "ordinary-00004.zip",
+                false,
+                12_345,
+            ),
+            (
+                r"C:\refresh-fixture\other",
+                "ordinary-00005.log",
+                false,
+                5_000_000_000,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (parent, name, is_directory, size))| {
+            let hour = index as u64 * 36_000_000_000;
+            LegacyListItem::new_with_actual_size(
+                format!("{parent}\\{name}"),
+                is_directory,
+                size.min(u32::MAX as u64) as u32,
+                size,
+                base + hour,
+                base + hour + 18_000_000_000,
+            )
+        })
+        .collect()
+    }
+
+    fn assert_model_native_rows(state: &AppState) {
+        assert!(state.preview_synchronization.is_synchronized());
+        assert_eq!(state.rendered_rows.len(), state.model.len());
+        assert!(
+            state.icon_shared.is_none(),
+            "this fixture has no icon worker"
+        );
+        // SAFETY: scalar count query on the live test-owned ListView.
+        let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
+        assert_eq!(native_count, state.model.len() as isize);
+        for (row, item) in state.model.items().iter().enumerate() {
+            let rendered = &state.rendered_rows[row];
+            let expected = [
+                item.current_name().clone(),
+                item.proposed_name().clone(),
+                item.root_path().clone(),
+                item.source_path().clone(),
+                LegacyText::from(format_iec_file_size(item.actual_size())),
+                format_filetime(item.modified()),
+                format_filetime(item.created()),
+                LegacyText::from(preview_status_label(
+                    state.preview_issue_cache.issue(row),
+                    item.planned_change_kind(),
+                )),
+            ];
+            assert_eq!(rendered.values, expected, "model row {row}");
+            assert_eq!(
+                rendered.icon_key,
+                icon_cache_key(item.current_name(), item.is_directory())
+            );
+            assert!(rendered.icon_resolved);
+            assert_eq!(
+                rendered.icon,
+                state
+                    .icon_cache
+                    .get(&rendered.icon_key)
+                    .copied()
+                    .unwrap_or(I_IMAGENONE)
+            );
+            for (column, value) in expected.iter().enumerate() {
+                let mut text = vec![0_u16; value.len() + 1];
+                let mut query = LVITEMW {
+                    iItem: row as i32,
+                    iSubItem: column as i32,
+                    pszText: text.as_mut_ptr(),
+                    cchTextMax: text.len() as i32,
+                    ..LVITEMW::default()
+                };
+                // SAFETY: query and UTF-16 buffer are writable through the
+                // synchronous text readback from this live ListView.
+                let copied = unsafe {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_GETITEMTEXTW,
+                        row,
+                        (&raw mut query) as isize,
+                    )
+                };
+                assert_eq!(copied, value.len() as isize, "row {row} column {column}");
+                assert_eq!(
+                    &text[..value.len()],
+                    value.units(),
+                    "row {row} column {column}"
+                );
+            }
+            let mut query = LVITEMW {
+                mask: LVIF_IMAGE,
+                iItem: row as i32,
+                ..LVITEMW::default()
+            };
+            // SAFETY: query is writable through the synchronous image readback.
+            let found = unsafe {
+                SendMessageW(
+                    state.list_window,
+                    LVM_GETITEMW,
+                    0,
+                    (&raw mut query) as isize,
+                )
+            };
+            assert_ne!(found, 0);
+            assert_eq!(query.iImage, rendered.icon, "model row {row} image");
+        }
+    }
+
+    fn assert_normal_refresh(state: &mut AppState, label: &str) -> refresh_profile::Counters {
+        assert!(state.preview_synchronization.is_synchronized());
+        // SAFETY: scalar count query on the live test-owned ListView.
+        let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
+        assert_eq!(native_count, state.rendered_rows.len() as isize);
+        let counters = measure_refresh(state, label, refresh_all_rows);
+        assert_model_native_rows(state);
+        assert_eq!(counters.full_rebuilds, 0, "{label}");
+        assert!(counters.normal_staged_rows_peak <= 1, "{label}");
+        assert_eq!(counters.fallback_staged_rows_peak, 0, "{label}");
+        assert_eq!(
+            counters.fallback_logical_staged_payload_bytes_peak, 0,
+            "{label}"
+        );
+        counters
+    }
+
+    struct NativeRefreshChild(Child);
+
+    impl Drop for NativeRefreshChild {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn forward_native_refresh_child_log(
+        case: &str,
+        stream: &str,
+        path: &Path,
+    ) -> io::Result<(usize, bool)> {
+        const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
+        const MAX_FORWARDED_LINES: usize = 4096;
+        let mut contents = Vec::new();
+        File::open(path)?
+            .take(MAX_CAPTURE_BYTES + 1)
+            .read_to_end(&mut contents)?;
+        let truncated = contents.len() as u64 > MAX_CAPTURE_BYTES;
+        contents.truncate(MAX_CAPTURE_BYTES as usize);
+        let output = String::from_utf8_lossy(&contents);
+        let completion = format!("DARKRENAMER_NATIVE_REFRESH_CHILD_COMPLETE:{case}");
+        let mut forwarded = 0;
+        let mut total_lines = 0;
+        let mut completions = 0;
+        for line in output.lines() {
+            total_lines += 1;
+            if line == completion {
+                completions += 1;
+            }
+            if forwarded < MAX_FORWARDED_LINES || line == completion {
+                eprintln!("[native-refresh-child:{case}:{stream}] {line}");
+                forwarded += 1;
+            }
+        }
+        if truncated || total_lines > MAX_FORWARDED_LINES {
+            eprintln!("[native-refresh-child:{case}:{stream}] output truncated");
+        }
+        Ok((completions, truncated))
+    }
+
+    fn isolated_native_refresh_case(
+        case: &'static str,
+        run: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_MODE: &str = "DARKRENAMER_TEST_NATIVE_REFRESH_CHILD";
+        const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
+        const DEADLINE: Duration = Duration::from_secs(60);
+        let exact_name = format!("windows::list_view::native_tests::full_refresh_{case}");
+        if let Some(requested) = std::env::var_os(CHILD_MODE) {
+            if requested != std::ffi::OsStr::new(&exact_name) {
+                return Err(io::Error::other("unexpected native-refresh child case").into());
+            }
+            run()?;
+            eprintln!("DARKRENAMER_NATIVE_REFRESH_CHILD_COMPLETE:{case}");
+            return Ok(());
+        }
+
+        // These cases exercise process-cached WinRT factories. Keep each real
+        // native fixture in one exact-named child, including its full teardown.
+        let directory = tempfile::Builder::new()
+            .prefix("darkrenamer-native-refresh-")
+            .tempdir()?;
+        let stdout_path = directory.path().join("stdout.txt");
+        let stderr_path = directory.path().join("stderr.txt");
+        let mut child = NativeRefreshChild(
+            Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg(&exact_name)
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env(CHILD_MODE, &exact_name)
+                .stdout(Stdio::from(File::create(&stdout_path)?))
+                .stderr(Stdio::from(File::create(&stderr_path)?))
+                .spawn()?,
+        );
+        let started = Instant::now();
+        let outcome = loop {
+            let captured = fs::metadata(&stdout_path).and_then(|stdout| {
+                fs::metadata(&stderr_path).map(|stderr| stdout.len().saturating_add(stderr.len()))
+            });
+            let captured = match captured {
+                Ok(captured) => captured,
+                Err(error) => {
+                    let _ = child.0.kill();
+                    let _ = child.0.wait();
+                    break Err(error);
+                }
+            };
+            if captured > 2 * MAX_CAPTURE_BYTES {
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                break Err(io::Error::other(
+                    "native-refresh child output exceeded 2 MiB",
+                ));
+            }
+            match child.0.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.0.kill();
+                    let _ = child.0.wait();
+                    break Err(error);
+                }
+            }
+            if started.elapsed() >= DEADLINE {
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                break Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "native-refresh child exceeded the 60-second deadline",
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        let (stdout_completions, stdout_truncated) =
+            forward_native_refresh_child_log(case, "stdout", &stdout_path)?;
+        let (stderr_completions, stderr_truncated) =
+            forward_native_refresh_child_log(case, "stderr", &stderr_path)?;
+        let status = outcome?;
+        if stdout_truncated || stderr_truncated {
+            return Err(io::Error::other("native-refresh child log was truncated").into());
+        }
+        if !status.success() {
+            return Err(
+                io::Error::other(format!("native-refresh child {case} failed: {status}")).into(),
+            );
+        }
+        if stdout_completions + stderr_completions != 1 {
+            return Err(io::Error::other(format!(
+                "native-refresh child {case} did not complete exactly once"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn run_native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = RefreshTestOle::initialize()?;
+        let image_list = icon_worker::OwnedTestImageList::new()?;
+        let mut app = RefreshTestApp::new()?;
+        app.attach_test_image_list(image_list.borrowed())?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            let parent = r"C:\refresh-fixture\normal";
+            assert_eq!(state.model.len(), 0);
+            refresh_all_rows(state);
+            assert_model_native_rows(state);
+            let rows = distinct_refresh_rows();
+            let source_icons = rows
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (item.source_path().clone(), (index % 2) as i32))
+                .collect::<Vec<_>>();
+            for (index, item) in rows.iter().enumerate() {
+                state.icon_cache.insert(
+                    icon_cache_key(item.current_name(), item.is_directory()),
+                    (index % 2) as i32,
+                );
+            }
+            assert_eq!(state.icon_cache.len(), rows.len());
+            state.model.append_batch_by(rows, compare_windows)?;
+            let assert_source_icons = |state: &AppState| {
+                assert_eq!(state.model.len(), source_icons.len());
+                for (index, (item, rendered)) in state
+                    .model
+                    .items()
+                    .iter()
+                    .zip(&state.rendered_rows)
+                    .enumerate()
+                {
+                    assert!(
+                        state.model.items()[..index]
+                            .iter()
+                            .all(|prior| prior.source_path() != item.source_path())
+                    );
+                    let mut matches = source_icons
+                        .iter()
+                        .filter(|(source, _)| source == item.source_path());
+                    assert_eq!(
+                        matches.next().map(|(_, icon)| *icon),
+                        Some(rendered.icon),
+                        "model row {index} source/icon mismatch"
+                    );
+                    assert!(matches.next().is_none(), "fixture source is ambiguous");
+                }
+            };
+            // The empty ListView and model were synchronized before insertion.
+            let first = assert_normal_refresh(state, "regression-first-insertion");
+            assert_eq!(first.normal_staged_rows_peak, 1);
+            assert!(first.normal_logical_staged_payload_bytes_peak > 0);
+            assert!(first.rendered_vec_growth_events > 0);
+            assert!(
+                first.rendered_vec_capacity_bytes_peak
+                    >= state.model.len() * size_of::<RenderedRow>()
+            );
+            assert_source_icons(state);
+            let unchanged = assert_normal_refresh(state, "regression-unchanged");
+            assert_eq!(unchanged.rendered_vec_growth_events, 0);
+            assert!(unchanged.rendered_vec_capacity_bytes_peak > 0);
+
+            assert!(
+                state
+                    .model
+                    .manual_change_changed(0, "unique-proposal.txt")?
+            );
+            refresh_proposal_rows(state, &[0]);
+            let before = state
+                .model
+                .items()
+                .iter()
+                .map(|item| item.current_name().clone())
+                .collect::<Vec<_>>();
+            assert!(
+                state
+                    .model
+                    .sort_by_changed(LegacySortMode::NameDescending, compare_windows)
+            );
+            let after = state
+                .model
+                .items()
+                .iter()
+                .map(|item| item.current_name().clone())
+                .collect::<Vec<_>>();
+            assert_ne!(after, before);
+            assert_normal_refresh(state, "regression-equal-length-reordered");
+            assert_source_icons(state);
+            state.model.append_batch_by(
+                refresh_fixture_rows(parent, "ordinary", 6, 2),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-added");
+            assert_eq!(state.model.remove_rows(&[2]), 1);
+            assert_normal_refresh(state, "regression-middle-removed");
+            assert_eq!(state.model.remove_rows(&[state.model.len() - 1]), 1);
+            assert_normal_refresh(state, "regression-trailing-removed");
+            state.model.append_batch_by(
+                refresh_fixture_rows(parent, "long", 0, 128),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-before-bulk-clear");
+            let removed = state.model.len();
+            assert!(state.model.clear());
+            let cleared = assert_normal_refresh(state, "regression-cleared");
+            assert_eq!(cleared.native_deletions, removed);
+            assert_eq!(cleared.full_rebuilds, 0);
+            state.model.append_batch_by(
+                refresh_fixture_rows(parent, "ordinary", 20, 4),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-repopulated");
+
+            let metadata = state.rendered_rows[0].values[2..7].to_vec();
+            assert_eq!(
+                state.model.items()[0].destination_parent(),
+                state.model.items()[1].destination_parent()
+            );
+            let duplicate = state.model.items()[1].current_name().clone();
+            assert!(state.model.manual_change_changed(0, duplicate)?);
+            refresh_proposal_rows(state, &[0]);
+            assert_eq!(
+                state.model.items()[0].planned_path(),
+                state.model.items()[1].planned_path()
+            );
+            assert_eq!(
+                state.preview_issue_cache.issue(0),
+                PreviewRowIssue::DuplicateDestination
+            );
+            assert_eq!(state.preview_issue_cache.issue(1), PreviewRowIssue::None);
+            assert_eq!(state.rendered_rows[0].values[2..7], metadata);
+            assert_model_native_rows(state);
+
+            let shared = LegacyText::from("shared-proposal.txt");
+            assert!(state.model.manual_change_changed(0, shared.clone())?);
+            refresh_proposal_rows(state, &[0]);
+            assert_eq!(state.preview_issue_cache.issue(0), PreviewRowIssue::None);
+            assert!(state.model.manual_change_changed(1, shared)?);
+            refresh_proposal_rows(state, &[1]);
+            assert_eq!(
+                state.model.items()[0].planned_path(),
+                state.model.items()[1].planned_path()
+            );
+            assert_eq!(
+                state.preview_issue_cache.issue(0),
+                PreviewRowIssue::DuplicateDestination
+            );
+            assert_eq!(
+                state.preview_issue_cache.issue(1),
+                PreviewRowIssue::DuplicateDestination
+            );
+            assert_model_native_rows(state);
+            state.model.reset_proposals()?;
+            refresh_proposal_rows(state, &[0, 1]);
+            assert_eq!(state.preview_issue_cache.issue(0), PreviewRowIssue::None);
+            assert_eq!(state.preview_issue_cache.issue(1), PreviewRowIssue::None);
+            let changed = state
+                .model
+                .prefix_complete_changed(&LegacyText::from("x_"))?;
+            refresh_proposal_rows(state, &changed);
+            assert_model_native_rows(state);
+            let changed = state.model.reset_proposals_changed()?;
+            refresh_proposal_rows(state, &changed);
+            assert_model_native_rows(state);
+            assert_eq!(state.rendered_rows[0].values[2..7], metadata);
+
+            for column in 0..4 {
+                state.shown_columns[column] = true;
+                update_column_visibility(state, column);
+            }
+            assert_normal_refresh(state, "regression-auxiliary-visible");
+            assert!(
+                state
+                    .rendered_rows
+                    .iter()
+                    .all(|row| { row.values[2..7].iter().all(|value| !value.is_empty()) })
+            );
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
+        isolated_native_refresh_case("native_rows_and_proposals", run_native_rows_and_proposals)
+    }
+
+    fn run_native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
+        struct ResetFault;
+        impl Drop for ResetFault {
+            fn drop(&mut self) {
+                FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(None));
+                FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(false));
+                FAIL_NATIVE_INCREMENTAL_FOR_TEST.with(|slot| slot.set(false));
+            }
+        }
+        let _reset = ResetFault;
+        let _ole = RefreshTestOle::initialize()?;
+        let mut app = RefreshTestApp::new()?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            refresh_all_rows(state);
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\fault", "ordinary", 0, 4),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-fault-initial");
+
+            let changed = state
+                .model
+                .prefix_complete_changed(&LegacyText::from("first_"))?;
+            assert_eq!(changed.len(), 4);
+            FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(Some(3)));
+            let recovered = measure_refresh(state, "regression-partial-rebuilt", refresh_all_rows);
+            assert_model_native_rows(state);
+            assert_eq!(recovered.full_rebuilds, 1);
+            assert_eq!(recovered.fallback_staged_rows_peak, 4);
+            assert!(recovered.normal_staged_rows_peak <= 1);
+            assert!(recovered.native_cells >= 3);
+
+            state
+                .model
+                .prefix_complete_changed(&LegacyText::from("second_"))?;
+            FAIL_NATIVE_CELL_AFTER_FOR_TEST.with(|slot| slot.set(Some(2)));
+            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(true));
+            let collection = refresh_profile::Collection::begin();
+            refresh_all_rows(state);
+            let failed = collection.finish("regression-partial-rebuild-failed", state.model.len());
+            assert_eq!(failed.full_rebuilds, 1);
+            assert_eq!(failed.fallback_staged_rows_peak, 4);
+            assert!(!state.preview_synchronization.is_synchronized());
+            assert_eq!(state.presentation(0).apply, ApplyPresentation::Blocked);
+            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(false));
+            let recovered =
+                measure_refresh(state, "regression-rebuild-after-failure", refresh_all_rows);
+            assert_model_native_rows(state);
+            assert_eq!(recovered.full_rebuilds, 1);
+
+            // The real control has fewer rows than the retained cache.
+            // SAFETY: row zero exists in this test-owned live ListView.
+            let deleted = unsafe { SendMessageW(state.list_window, LVM_DELETEITEM, 0, 0) };
+            assert_ne!(deleted, 0);
+            let mismatch =
+                measure_refresh(state, "regression-native-count-mismatch", refresh_all_rows);
+            assert_model_native_rows(state);
+            assert_eq!(mismatch.full_rebuilds, 1);
+            assert_eq!(mismatch.fallback_staged_rows_peak, 4);
+
+            state.mark_preview_sync_failed();
+            let unsynchronized = measure_refresh(
+                state,
+                "regression-explicitly-unsynchronized",
+                refresh_all_rows,
+            );
+            assert_model_native_rows(state);
+            assert_eq!(unsynchronized.full_rebuilds, 1);
+            assert_eq!(unsynchronized.fallback_staged_rows_peak, 4);
+
+            // Reject only the next incremental pass before native dispatch.
+            // The authoritative rebuild must then clear the real control.
+            FAIL_NATIVE_INCREMENTAL_FOR_TEST.with(|slot| slot.set(true));
+            assert!(state.model.clear());
+            let recovered = measure_refresh(
+                state,
+                "regression-incremental-clear-rebuilt",
+                refresh_all_rows,
+            );
+            assert_model_native_rows(state);
+            assert_eq!(recovered.native_deletions, 0);
+            assert_eq!(recovered.full_rebuilds, 1);
+            assert_eq!(recovered.fallback_staged_rows_peak, 0);
+
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\fault", "ordinary", 10, 4),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-after-incremental-clear-rebuild");
+            FAIL_NATIVE_INCREMENTAL_FOR_TEST.with(|slot| slot.set(true));
+            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(true));
+            assert!(state.model.clear());
+            let collection = refresh_profile::Collection::begin();
+            refresh_all_rows(state);
+            let failed = collection.finish("regression-incremental-clear-rebuild-failed", 0);
+            assert_eq!(failed.native_deletions, 0);
+            assert_eq!(failed.full_rebuilds, 1);
+            assert_eq!(failed.fallback_staged_rows_peak, 0);
+            assert!(!state.preview_synchronization.is_synchronized());
+            assert_eq!(state.rendered_rows.len(), 4);
+            // SAFETY: the test-owned ListView is still live and no native
+            // delete ran in either fault-injected path.
+            let native_count = unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) };
+            assert_eq!(native_count, 4);
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\fault", "ordinary", 20, 1),
+                compare_windows,
+            )?;
+            assert!(
+                state
+                    .model
+                    .manual_change_changed(0, "renamed-after-failed-clear.txt")?
+            );
+            refresh_preview_count_cache(state);
+            // A changed row would be Apply-ready without the retained
+            // synchronization failure, so this checks the actual gate.
+            assert_eq!(state.presentation(0).apply, ApplyPresentation::Blocked);
+            FAIL_NATIVE_REBUILD_FOR_TEST.with(|slot| slot.set(false));
+            let recovered = measure_refresh(
+                state,
+                "regression-incremental-clear-rebuild-after-failure",
+                refresh_all_rows,
+            );
+            assert_model_native_rows(state);
+            assert_eq!(recovered.full_rebuilds, 1);
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
+        isolated_native_refresh_case(
+            "native_fallback_and_apply_lock",
+            run_native_fallback_and_apply_lock,
+        )
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct RefreshViewport {
+        top: isize,
+        horizontal: Option<i32>,
+    }
+
+    impl RefreshViewport {
+        fn capture(window: HWND) -> Self {
+            // SAFETY: scalar top-index query against the live test-owned ListView.
+            let top = unsafe { SendMessageW(window, LVM_GETTOPINDEX, 0, 0) };
+            let mut info = SCROLLINFO {
+                cbSize: size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_POS,
+                ..SCROLLINFO::default()
+            };
+            // SAFETY: writable ScrollInfo for the synchronous native query.
+            let horizontal =
+                (unsafe { GetScrollInfo(window, SB_HORZ, &mut info) } != 0).then_some(info.nPos);
+            Self { top, horizontal }
+        }
+    }
+
+    fn run_native_dates_follow_locale_and_timezone() -> Result<(), Box<dyn std::error::Error>> {
+        struct ResetDateEnvironment;
+        impl Drop for ResetDateEnvironment {
+            fn drop(&mut self) {
+                DATE_ENVIRONMENT_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetDateEnvironment;
+        let _ole = RefreshTestOle::initialize()?;
+        let mut app = RefreshTestApp::new()?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            refresh_all_rows(state);
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\dates", "ordinary", 0, 2),
+                compare_windows,
+            )?;
+            let utc = registered_test_zone("UTC")?;
+            let utc_time = local_systemtime_from_filetime_in_zone(133_497_936_000_000_000, &utc)
+                .ok_or("registered UTC conversion failed")?;
+            assert_eq!(
+                (
+                    utc_time.wYear,
+                    utc_time.wMonth,
+                    utc_time.wDay,
+                    utc_time.wHour
+                ),
+                (2024, 1, 15, 12)
+            );
+            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+                *slot.borrow_mut() = Some((wide("en-US"), utc));
+            });
+            assert_normal_refresh(state, "regression-en-us-utc");
+            let utc_dates = state.rendered_rows[0].values[5..7].to_vec();
+            assert!(utc_dates.iter().all(|date| !date.is_empty()));
+
+            let tokyo = registered_test_zone("Tokyo Standard Time")?;
+            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+                *slot.borrow_mut() = Some((wide("en-US"), tokyo));
+            });
+            assert_eq!(
+                local_systemtime_from_filetime_in_zone(133_497_936_000_000_000, &tokyo)
+                    .ok_or("explicit time-zone conversion failed")?
+                    .wHour,
+                21
+            );
+            assert_normal_refresh(state, "regression-en-us-tokyo");
+            assert_ne!(state.rendered_rows[0].values[5..7], utc_dates);
+            let tokyo_dates = state.rendered_rows[0].values[5..7].to_vec();
+
+            DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+                *slot.borrow_mut() = Some((wide("ko-KR"), tokyo));
+            });
+            assert_normal_refresh(state, "regression-ko-kr-tokyo");
+            assert_ne!(state.rendered_rows[0].values[5..7], tokyo_dates);
+            assert!(
+                state.rendered_rows[0].values[5..7]
+                    .iter()
+                    .all(|date| !date.is_empty())
+            );
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_native_dates_follow_locale_and_timezone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        isolated_native_refresh_case(
+            "native_dates_follow_locale_and_timezone",
+            run_native_dates_follow_locale_and_timezone,
+        )
+    }
+
+    fn run_native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = RefreshTestOle::initialize()?;
+        let mut app = RefreshTestApp::new()?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            refresh_all_rows(state);
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\view", "ordinary", 0, 100),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-view-initial");
+            assert!(apply_native_control_theme(
+                state.list_window,
+                NativeThemeTarget::FileList,
+                ResolvedTheme::Dark,
+            ));
+            for column in 0..4 {
+                state.shown_columns[column] = true;
+                update_column_visibility(state, column);
+                // SAFETY: this live ListView owns the optional columns and
+                // receives only a scalar width for a horizontal overflow.
+                unsafe { SendMessageW(state.list_window, LVM_SETCOLUMNWIDTH, column + 3, 500) };
+            }
+            select_rows_with_focus(state.list_window, &[80, 81], Some(81));
+            let mut focus = LVITEMW {
+                stateMask: LVIS_FOCUSED,
+                state: LVIS_FOCUSED,
+                ..LVITEMW::default()
+            };
+            // SAFETY: row 79 exists and focus is writable storage through the
+            // synchronous state change on this test-owned ListView.
+            unsafe {
+                SendMessageW(
+                    state.list_window,
+                    LVM_SETITEMSTATE,
+                    79,
+                    (&mut focus as *mut LVITEMW) as isize,
+                )
+            };
+            // SAFETY: the live ListView accepts scalar vertical and horizontal
+            // scroll requests; row 20 exists in the 100-row fixture.
+            unsafe {
+                SendMessageW(state.list_window, LVM_ENSUREVISIBLE, 20, 0);
+                SendMessageW(state.list_window, LVM_SCROLL, 250, 0);
+            }
+            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
+            assert_eq!(focused_index(state.list_window), Some(79));
+            let before = RefreshViewport::capture(state.list_window);
+            assert!(
+                before.top > 0,
+                "fixture requires a nonzero vertical viewport"
+            );
+            assert!(
+                before.horizontal.unwrap_or_default() > 0,
+                "fixture requires a nonzero horizontal viewport"
+            );
+            assert_normal_refresh(state, "regression-view-normal");
+            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
+            assert_eq!(focused_index(state.list_window), Some(79));
+            assert_eq!(RefreshViewport::capture(state.list_window), before);
+
+            state.mark_preview_sync_failed();
+            let rebuilt = measure_refresh(state, "regression-view-fallback", refresh_all_rows);
+            assert_model_native_rows(state);
+            assert_eq!(rebuilt.full_rebuilds, 1);
+            assert_eq!(selected_indices(state.list_window), vec![80, 81]);
+            assert_eq!(focused_index(state.list_window), Some(79));
+            assert_eq!(RefreshViewport::capture(state.list_window), before);
+            assert!(apply_native_control_theme(
+                state.list_window,
+                NativeThemeTarget::FileList,
+                ResolvedTheme::NativeSystem,
+            ));
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
+        isolated_native_refresh_case(
+            "native_viewport_focus_and_close",
+            run_native_viewport_focus_and_close,
+        )
+    }
+
     #[test]
     #[ignore = "diagnostic: optimized native refresh attribution on the prepared VM"]
     fn profile_refresh_stages() -> Result<(), Box<dyn std::error::Error>> {
@@ -4014,12 +5285,18 @@ mod native_tests {
             )?;
             let small = measure_refresh(state, "ordinary-100", refresh_all_rows);
             assert_eq!(small.rows_formatted, 100);
+            assert_eq!(small.normal_staged_rows_peak, 1);
+            assert_eq!(small.fallback_staged_rows_peak, 0);
+            assert_eq!(small.repeated_nonzero_filetime_inputs, 199);
             state.model.append_batch_by(
                 refresh_fixture_rows(ordinary, "ordinary", 100, 900),
                 compare_windows,
             )?;
             let medium = measure_refresh(state, "ordinary-1000", refresh_all_rows);
             assert_eq!(medium.rows_formatted, 1000);
+            assert_eq!(medium.normal_staged_rows_peak, 1);
+            assert_eq!(medium.fallback_staged_rows_peak, 0);
+            assert_eq!(medium.repeated_nonzero_filetime_inputs, 1999);
             assert!(state.icon_shared.is_none());
             let collection = refresh_profile::Collection::begin();
             // Keep the historical ordinary-10000 operation shape. Model append
@@ -4043,6 +5320,9 @@ mod native_tests {
             assert_eq!(large.icon_request_submissions, 0);
             assert_eq!(large.icon_results_drained, 0);
             assert_eq!(large.native_insertions, 9000);
+            assert_eq!(large.normal_staged_rows_peak, 1);
+            assert_eq!(large.fallback_staged_rows_peak, 0);
+            assert_eq!(large.repeated_nonzero_filetime_inputs, 52_996);
             select_rows(state.list_window, &[4999]);
             let unchanged = measure_refresh(state, "ordinary-10000-unchanged", refresh_all_rows);
             assert_eq!(selected_indices(state.list_window), vec![4999]);
@@ -4050,6 +5330,9 @@ mod native_tests {
             assert_eq!(unchanged.native_cells, 0);
             assert_eq!(unchanged.native_insertions, 0);
             assert_eq!(unchanged.full_rebuilds, 0);
+            assert_eq!(unchanged.normal_staged_rows_peak, 1);
+            assert_eq!(unchanged.fallback_staged_rows_peak, 0);
+            assert_eq!(unchanged.repeated_nonzero_filetime_inputs, 19_999);
             assert!(state.model.manual_change_changed(4999, "manual.txt")?);
             let one = measure_refresh(state, "one-row-proposal-edit", |state| {
                 refresh_proposal_rows(state, &[4999])

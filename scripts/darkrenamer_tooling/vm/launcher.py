@@ -56,6 +56,13 @@ FOCUSED_ICON_CASES = (
     'close_and_forced_destroy_retire',
     'failures_and_message_loop_retire',
 )
+FOCUSED_REFRESH_FILTER = 'windows::list_view::native_tests::full_refresh_'
+FOCUSED_REFRESH_CASES = (
+    'native_rows_and_proposals',
+    'native_fallback_and_apply_lock',
+    'native_dates_follow_locale_and_timezone',
+    'native_viewport_focus_and_close',
+)
 REFRESH_PROFILE_ORDERS = ('hidden-visible', 'visible-hidden')
 REFRESH_PROFILE_PREFIX_SCENARIOS = (
     'ordinary-100', 'ordinary-1000', 'ordinary-10000',
@@ -79,8 +86,15 @@ REFRESH_PROFILE_V2_COUNTERS = tuple(name for name in REFRESH_PROFILE_COUNTERS
     'render_icon_cache_hits', 'render_icon_cache_misses',
     'icon_request_submissions', 'icon_results_drained',
 )
+REFRESH_PROFILE_V3_COUNTERS = REFRESH_PROFILE_V2_COUNTERS + (
+    'normal_staged_rows_peak', 'normal_logical_staged_payload_bytes_peak',
+    'fallback_staged_rows_peak', 'fallback_logical_staged_payload_bytes_peak',
+    'rendered_vec_growth_events', 'rendered_vec_capacity_bytes_peak',
+    'repeated_nonzero_filetime_inputs',
+)
 REFRESH_PROFILE_V1_KIND = 'refresh-stages-test-build'
 REFRESH_PROFILE_V2_KIND = 'refresh-stages-icon-async-test-build'
+REFRESH_PROFILE_V3_KIND = 'refresh-stages-icon-async-streaming-test-build'
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -294,10 +308,14 @@ def argument_parser():
                         help='Run the fixed two-pass optimized ListView refresh diagnostic.')
     parser.add_argument('--focused-icon-tests', action='store_true',
                         help='Run only the fixed native icon-worker functional tests.')
+    parser.add_argument('--focused-refresh-tests', action='store_true',
+                        help='Run only the four fixed native refresh functional tests.')
     parser.add_argument('--native-test-profile', choices=('debug', 'release'),
                         help='Build the fixed focused native tests in this profile.')
     parser.add_argument('--focused-icon-case', choices=FOCUSED_ICON_CASES,
                         help='Select one fixed native icon worker case for a diagnostic run.')
+    parser.add_argument('--focused-refresh-case', choices=FOCUSED_REFRESH_CASES,
+                        help='Select one fixed native refresh case for a diagnostic run.')
     return parser
 
 
@@ -319,21 +337,26 @@ def parse_arguments(argv=None):
             value is not None for value in candidate_values):
         parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
     args.candidate_mode = all(value is not None for value in candidate_values)
-    if args.native_test_profile and not args.focused_icon_tests:
-        parser.error('--native-test-profile requires --focused-icon-tests.')
+    if args.native_test_profile and not (args.focused_icon_tests or args.focused_refresh_tests):
+        parser.error('--native-test-profile requires one focused native test selector.')
     if args.focused_icon_case and not args.focused_icon_tests:
         parser.error('--focused-icon-case requires --focused-icon-tests.')
-    if args.focused_icon_tests:
+    if args.focused_refresh_case and not args.focused_refresh_tests:
+        parser.error('--focused-refresh-case requires --focused-refresh-tests.')
+    if args.focused_icon_tests and args.focused_refresh_tests:
+        parser.error('Only one fixed focused native test selector may be used.')
+    if args.focused_icon_tests or args.focused_refresh_tests:
+        label = 'Focused icon tests' if args.focused_icon_tests else 'Focused refresh tests'
         if (args.profile_refresh_stages or not args.native_test_profile or
                 args.candidate_mode or args.task_kind != 'core' or
                 args.acceptance_profile_id != V2_PROFILE_ID or
                 supplied('--test-timeout-seconds') or args.prepare_only):
-            parser.error('Focused icon tests require one explicit native profile and source-built v2 core mode.')
+            parser.error(label + ' require one explicit native profile and source-built v2 core mode.')
         if (args.desktop_mode != 'rdp' or
                 (supplied('--desktop-scale') and args.desktop_scale != 100) or
                 (supplied('--desktop-width') and args.desktop_width != 1366) or
                 (supplied('--desktop-height') and args.desktop_height != 768)):
-            parser.error('Focused icon tests require the prepared 1366x768 96-DPI RDP desktop.')
+            parser.error(label + ' require the prepared 1366x768 96-DPI RDP desktop.')
         args.test_timeout_seconds = 600
         args.desktop_scale = 100
         args.desktop_width = 1366
@@ -406,8 +429,8 @@ def parse_arguments(argv=None):
         parser.error('UI observer options require --task-kind ui.')
     if args.profile_refresh_stages and (ui_options or recovery_options or args.prepare_only):
         parser.error('The refresh diagnostic does not accept observer or prepare-only options.')
-    if args.focused_icon_tests and (ui_options or recovery_options):
-        parser.error('Focused icon tests do not accept observer options.')
+    if (args.focused_icon_tests or args.focused_refresh_tests) and (ui_options or recovery_options):
+        parser.error('Focused native tests do not accept observer options.')
     if args.candidate_mode:
         if not re.fullmatch(r'[0-9a-f]{40}', args.candidate_source_sha):
             parser.error('--candidate-source-sha must be a lowercase full Git SHA.')
@@ -558,6 +581,10 @@ def controller_task_arguments(root, args, path_converter=str):
         arguments += ['-FocusedIconTests']
         if args.focused_icon_case:
             arguments += ['-FocusedIconCase', args.focused_icon_case]
+    if getattr(args, 'focused_refresh_tests', False):
+        arguments += ['-FocusedRefreshTests']
+        if args.focused_refresh_case:
+            arguments += ['-FocusedRefreshCase', args.focused_refresh_case]
     if getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID:
         digest = getattr(args, 'acceptance_profile_sha256', None)
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
@@ -604,7 +631,9 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         '-ExpectedBundleManifestSha256', expected_bundle_manifest_sha256,
         *controller_task_arguments(root, args),
     ]
-    if getattr(args, 'profile_refresh_stages', False) or getattr(args, 'focused_icon_tests', False):
+    if (getattr(args, 'profile_refresh_stages', False) or
+            getattr(args, 'focused_icon_tests', False) or
+            getattr(args, 'focused_refresh_tests', False)):
         common += ['-SuiteTimeoutSeconds', '600']
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
@@ -629,7 +658,8 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
         + (' -SuiteTimeoutSeconds 600' if (getattr(args, 'profile_refresh_stages', False) or
-                                           getattr(args, 'focused_icon_tests', False)) else '')
+                                           getattr(args, 'focused_icon_tests', False) or
+                                           getattr(args, 'focused_refresh_tests', False)) else '')
         + ''.join(' ' + (value if value.startswith('-') else psquote(value))
                   for value in task_arguments)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
@@ -763,7 +793,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
             # The controller's default whole-suite budget is 2400 seconds; the
             # allowance covers natural OS-process exit and evidence collection.
             suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
-                                    getattr(args, 'focused_icon_tests', False))
+                                    getattr(args, 'focused_icon_tests', False) or
+                                    getattr(args, 'focused_refresh_tests', False))
                              else CONTROLLER_SUITE_TIMEOUT_SECONDS)
             deadline = (time.monotonic() + suite_timeout +
                         CONTROLLER_CLEANUP_ALLOWANCE_SECONDS)
@@ -832,7 +863,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
             raise subprocess.CalledProcessError(code, command)
         if (desktop and args.task_kind == 'core' and
                 not getattr(args, 'profile_refresh_stages', False) and
-                not getattr(args, 'focused_icon_tests', False)):
+                not getattr(args, 'focused_icon_tests', False) and
+                not getattr(args, 'focused_refresh_tests', False)):
             result = read_json_strict(
                 root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
@@ -1488,13 +1520,17 @@ def build_candidate_bundle(repo, root, args, tooling=None):
 
 
 def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_profile=None,
-                 focused_case=None):
+                 focused_case=None, focused_kind='icon'):
     repo = Path(repo)
     root = Path(root)
     if (refresh_profile and focused_profile is not None) or focused_profile not in (None, 'debug', 'release'):
         raise ValueError('A source-built bundle accepts one fixed native selector.')
-    if focused_case is not None and (focused_profile is None or focused_case not in FOCUSED_ICON_CASES):
-        raise ValueError('Focused icon selection must name one fixed native case.')
+    if focused_kind not in ('icon', 'refresh'):
+        raise ValueError('Unknown focused native test selector.')
+    focused_cases = FOCUSED_ICON_CASES if focused_kind == 'icon' else FOCUSED_REFRESH_CASES
+    focused_filter = FOCUSED_ICON_FILTER if focused_kind == 'icon' else FOCUSED_REFRESH_FILTER
+    if focused_case is not None and (focused_profile is None or focused_case not in focused_cases):
+        raise ValueError('Focused native selection must name one fixed case.')
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
         raise RuntimeError('Commit or preserve checkout changes before VM verification; results must bind a clean source SHA.')
     source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
@@ -1592,14 +1628,14 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         }
     elif focused_profile:
         manifest['diagnostic'] = {
-            'kind': 'focused-icon-tests', 'test_profile': focused_profile,
-            'test_filter': FOCUSED_ICON_FILTER,
+            'kind': 'focused-' + focused_kind + '-tests', 'test_profile': focused_profile,
+            'test_filter': focused_filter,
         }
         if focused_case:
-            manifest['diagnostic']['test_name'] = FOCUSED_ICON_FILTER + focused_case
+            manifest['diagnostic']['test_name'] = focused_filter + focused_case
         else:
             manifest['diagnostic']['test_names'] = [
-                FOCUSED_ICON_FILTER + case for case in FOCUSED_ICON_CASES]
+                focused_filter + case for case in focused_cases]
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     if tooling is not None:
         stage_verified_tooling(tooling, root)
@@ -1666,32 +1702,44 @@ def _verify_v2_result_owned_binding(result, transport):
 def verify_refresh_profile_records(output, order):
     records = []
     test_prefix = 'test ' + REFRESH_PROFILE_TEST + ' ... '
+    formats = {
+        REFRESH_PROFILE_V1_KIND: (None, REFRESH_PROFILE_COUNTERS),
+        REFRESH_PROFILE_V2_KIND: (2, REFRESH_PROFILE_V2_COUNTERS),
+        REFRESH_PROFILE_V3_KIND: (3, REFRESH_PROFILE_V3_COUNTERS),
+    }
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Refresh diagnostic emitted a duplicate field: ' + key)
+            value[key] = item
+        return value
+
     for line in output.splitlines():
         payload = line[len(test_prefix):] if line.startswith(test_prefix) else line
         if not payload.startswith('{'):
             continue
         try:
-            record = json.loads(payload)
+            record = json.loads(payload, object_pairs_hook=unique_object)
         except json.JSONDecodeError as error:
             raise ValueError('Refresh diagnostic emitted malformed JSON.') from error
-        if not isinstance(record, dict) or record.get('kind') not in {
-                REFRESH_PROFILE_V1_KIND, REFRESH_PROFILE_V2_KIND}:
+        if not isinstance(record, dict) or record.get('kind') not in formats:
             continue
-        v2 = record['kind'] == REFRESH_PROFILE_V2_KIND
-        counters = REFRESH_PROFILE_V2_COUNTERS if v2 else REFRESH_PROFILE_COUNTERS
-        if (not isinstance(record.get('scenario'), str) or
+        version, counters = formats[record['kind']]
+        async_record = version is not None
+        expected_fields = set(counters) | {'kind', 'scenario'}
+        if async_record:
+            expected_fields.update(('schema_version', 'icon_worker_attached'))
+        if (set(record) != expected_fields or
+                (async_record and (type(record.get('schema_version')) is not int or
+                                   record['schema_version'] != version or
+                                   record.get('icon_worker_attached') is not False)) or
+                not isinstance(record.get('scenario'), str) or
                 any(type(record.get(key)) is not int or record[key] < 0
                     for key in counters) or
                 record['timestamp_values'] != 2 * record['rows_formatted'] or
-                (v2 and (set(record) != (set(REFRESH_PROFILE_V2_COUNTERS) |
-                             {'kind', 'schema_version', 'icon_worker_attached', 'scenario'}) or
-                         type(record.get('schema_version')) is not int or
-                         record['schema_version'] != 2 or
-                         record.get('icon_worker_attached') is not False or
-                         any(name in record for name in
-                             ('shell_nested_ns', 'shell_max_ns', 'shell_calls',
-                              'cache_hits', 'cache_misses')) or
-                         record['ui_shell_nested_ns'] != 0 or
+                (async_record and (record['ui_shell_nested_ns'] != 0 or
                          record['ui_shell_max_ns'] != 0 or
                          record['ui_shell_calls'] != 0 or
                          record['icon_request_submissions'] != 0 or
@@ -1700,7 +1748,7 @@ def verify_refresh_profile_records(output, order):
                          record['rows_formatted'] or
                          record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
                          record['ui_shell_nested_ns'] != record['row_values_inclusive_ns'])) or
-                (not v2 and (record['cache_hits'] + record['cache_misses'] !=
+                (not async_record and (record['cache_hits'] + record['cache_misses'] !=
                              record['rows_formatted'] or
                              record['shell_calls'] != record['cache_misses'] or
                              record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
@@ -1725,6 +1773,22 @@ def verify_refresh_profile_records(output, order):
             0 if 'proposal-' in scenario else expected_rows)
         if record['rows'] != expected_rows or record['rows_formatted'] != expected_formatted:
             raise ValueError('Refresh diagnostic workload cardinality is invalid.')
+        if record['kind'] == REFRESH_PROFILE_V3_KIND:
+            has_formatted_rows = expected_formatted > 0
+            expected_repeats = (52996 if scenario == 'ordinary-10000' else
+                                max(0, 2 * expected_formatted - 1))
+            if (record['normal_staged_rows_peak'] != int(has_formatted_rows) or
+                    (record['normal_logical_staged_payload_bytes_peak'] > 0) !=
+                    has_formatted_rows or
+                    record['fallback_staged_rows_peak'] != 0 or
+                    record['fallback_logical_staged_payload_bytes_peak'] != 0 or
+                    record['rendered_vec_growth_events'] >
+                    record['native_row_insertions'] or
+                    (record['rendered_vec_capacity_bytes_peak'] < expected_rows
+                     if has_formatted_rows else
+                     record['rendered_vec_capacity_bytes_peak'] != 0) or
+                    record['repeated_nonzero_filetime_inputs'] != expected_repeats):
+                raise ValueError('Streaming refresh diagnostic counters are invalid.')
     return records
 
 
@@ -1797,17 +1861,33 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
 
 def verify_focused_icon_result(root, manifest, result, transport_kind,
                                   expected_vm_id, profile_sha256):
+    return verify_focused_native_result(root, manifest, result, transport_kind,
+                                        expected_vm_id, profile_sha256, kind='icon')
+
+
+def verify_focused_refresh_result(root, manifest, result, transport_kind,
+                                  expected_vm_id, profile_sha256):
+    return verify_focused_native_result(root, manifest, result, transport_kind,
+                                        expected_vm_id, profile_sha256, kind='refresh')
+
+
+def verify_focused_native_result(root, manifest, result, transport_kind,
+                                 expected_vm_id, profile_sha256, *, kind):
+    test_filter = FOCUSED_ICON_FILTER if kind == 'icon' else FOCUSED_REFRESH_FILTER
+    cases = FOCUSED_ICON_CASES if kind == 'icon' else FOCUSED_REFRESH_CASES
+    output_limit = (REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES if kind == 'refresh'
+                    else TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES)
     diagnostic = manifest.get('diagnostic')
     focused_name = diagnostic.get('test_name') if isinstance(diagnostic, dict) else None
     expected_names = ([focused_name] if focused_name is not None else
-                      [FOCUSED_ICON_FILTER + case for case in FOCUSED_ICON_CASES])
-    if (not isinstance(diagnostic, dict) or diagnostic.get('kind') != 'focused-icon-tests' or
+                      [test_filter + case for case in cases])
+    if (not isinstance(diagnostic, dict) or diagnostic.get('kind') != 'focused-' + kind + '-tests' or
             diagnostic.get('test_profile') not in ('debug', 'release') or
-            diagnostic.get('test_filter') != FOCUSED_ICON_FILTER or
+            diagnostic.get('test_filter') != test_filter or
             set(diagnostic) != ({'kind', 'test_profile', 'test_filter'} |
                                 ({'test_name'} if focused_name is not None else {'test_names'})) or
             (focused_name is not None and focused_name not in
-             {FOCUSED_ICON_FILTER + case for case in FOCUSED_ICON_CASES}) or
+             {test_filter + case for case in cases}) or
             (focused_name is None and diagnostic.get('test_names') != expected_names) or
             len(manifest.get('test_binaries', [])) != 1 or
             manifest['test_binaries'][0].get('name') != 'darknamer_app'):
@@ -1817,13 +1897,13 @@ def verify_focused_icon_result(root, manifest, result, transport_kind,
                 ('source_sha', 'source_state', 'target')) or
             result.get('diagnostic') != diagnostic or result.get('gui') is not None or
             result.get('status') not in ('passed', 'failed')):
-        raise ValueError('Focused icon result selection is invalid.')
+        raise ValueError('Focused native result selection is invalid.')
     rows = result.get('tests')
     if (not isinstance(rows, list) or not 1 <= len(rows) <= len(expected_names) or
             any(not isinstance(row, dict) for row in rows)):
-        raise ValueError('Focused icon result must contain a fixed case prefix.')
+        raise ValueError('Focused native result must contain a fixed case prefix.')
     if (focused_name is not None and len(rows) != 1):
-        raise ValueError('A selected focused icon case must have one native execution.')
+        raise ValueError('A selected focused native case must have one execution.')
     binary = manifest['test_binaries'][0]
     for artifact in (binary, manifest['application'], manifest['runner']):
         checked_artifact(root, artifact)
@@ -1836,50 +1916,50 @@ def verify_focused_icon_result(root, manifest, result, transport_kind,
                 row.get('test_name') != expected_name or row.get('job_cleanup') is not True or
                 type(row.get('exit_code')) is not int or
                 any(type(row.get(key)) is not int for key in ('passed', 'failed', 'ignored'))):
-            raise ValueError('Focused icon native test artifact, counts, or job cleanup is invalid.')
+            raise ValueError('Focused native test artifact, counts, or job cleanup is invalid.')
         for channel in ('stdout', 'stderr'):
             record = row.get(channel)
             if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
                     record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES or
-                    output_bytes > TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES - record['bytes']):
-                raise ValueError('Focused icon output exceeds its bound.')
+                    output_bytes > output_limit - record['bytes']):
+                raise ValueError('Focused native output exceeds its bound.')
             path = checked_artifact(root, record)
             if path.stat().st_size != record['bytes']:
-                raise ValueError('Focused icon output size differs from its record.')
+                raise ValueError('Focused native output size differs from its record.')
             output_bytes += record['bytes']
         output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
         summaries = re.findall(
             r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; '
             r'\d+ measured; (\d+) filtered out;', output, re.MULTILINE)
         if len(summaries) != 1:
-            raise ValueError('Focused icon native output has no unique libtest summary.')
+            raise ValueError('Focused native output has no unique libtest summary.')
         outcome, passed, failed, ignored, filtered = summaries[0]
         counts = (int(passed), int(failed), int(ignored))
         names = re.findall(r'(?m)^test (\S+) \.\.\. ', output)
         if (counts[0] + counts[1] != 1 or counts[2] != 0 or int(filtered) < 1 or
                 (outcome == 'ok') != (counts[1] == 0) or names != [expected_name] or
                 [row.get(key) for key in ('passed', 'failed', 'ignored')] != list(counts)):
-            raise ValueError('Focused icon selection or test counts are invalid.')
+            raise ValueError('Focused native selection or test counts are invalid.')
         case_passed = (outcome == 'ok' and row.get('status') == 'passed' and
                        row.get('exit_code') == 0 and row.get('failure_reason') is None)
         if not case_passed and (index != len(rows) or outcome != 'FAILED' or
                                 row.get('status') != 'failed' or
                                 row.get('failure_reason') != 'test_failed' or
                                 row['exit_code'] == 0):
-            raise ValueError('Focused icon execution status differs from its libtest result.')
+            raise ValueError('Focused native execution status differs from its libtest result.')
         if failed_case:
-            raise ValueError('Focused icon executed after a failed case.')
+            raise ValueError('Focused native case executed after a failed case.')
         failed_case = not case_passed
         passed_total += counts[0]
         failed_total += counts[1]
         filtered_total += int(filtered)
     succeeded = not failed_case and len(rows) == len(expected_names) and result['status'] == 'passed'
     if not succeeded and (not failed_case or result['status'] != 'failed'):
-        raise ValueError('Focused icon execution did not finish its fixed case inventory.')
+        raise ValueError('Focused native execution did not finish its fixed case inventory.')
     transport = result.get('transport')
     if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
             transport.get('status') != 'collected' or transport.get('guest_cleanup') is not True):
-        raise ValueError('Focused icon transport did not finish with clean collection.')
+        raise ValueError('Focused native transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
     _verify_v2_result_owned_binding(result, transport)
@@ -2086,14 +2166,16 @@ def main(repo, argv=None, tooling=None):
         return 0
     if args.profile_refresh_stages:
         return run_refresh_profile(repo, args, tooling)
-    if args.focused_icon_tests:
+    if args.focused_icon_tests or args.focused_refresh_tests:
+        focused_kind = 'icon' if args.focused_icon_tests else 'refresh'
+        focused_case = args.focused_icon_case if args.focused_icon_tests else args.focused_refresh_case
         root, defaults, pwsh = prepare_transport(repo, args)
         manifest = build_bundle(repo, root, tooling,
                                 focused_profile=args.native_test_profile,
-                                focused_case=args.focused_icon_case)
+                                focused_case=focused_case, focused_kind=focused_kind)
         args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
-        print('Executing fixed ' + args.native_test_profile + ' icon-worker ' +
-              (args.focused_icon_case or 'suite') +
+        print('Executing fixed ' + args.native_test_profile + ' ' + focused_kind + ' ' +
+              (focused_case or 'suite') +
               ' in the VM; evidence=' + str(root), flush=True)
         transport_ok = True
         try:
@@ -2104,9 +2186,9 @@ def main(repo, argv=None, tooling=None):
         if not result_path.is_file():
             raise RuntimeError('The focused VM run returned no test result; inspect its private transport evidence.')
         result = read_json_strict(result_path, maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
-        observed = verify_focused_icon_result(
+        observed = verify_focused_native_result(
             root, manifest, result, 'ssh' if args.ssh_host else 'powershell_direct',
-            args.expected_vm_id, args.acceptance_profile_sha256)
+            args.expected_vm_id, args.acceptance_profile_sha256, kind=focused_kind)
         print(('PASS' if transport_ok and observed['status'] == 'passed' else 'FAIL') +
               ': focused ' + observed['test_profile'] + ' native tests: ' +
               str(observed['passed']) + ' passed; ' + str(observed['failed']) + ' failed',

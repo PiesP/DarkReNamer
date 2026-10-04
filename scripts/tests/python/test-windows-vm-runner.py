@@ -73,19 +73,23 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
-    def refresh_profile_output(self, order='hidden-visible', *, v2=False):
+    def refresh_profile_output(self, order='hidden-visible', *, v2=False, v3=False):
+        if v2 and v3:
+            raise ValueError('A diagnostic fixture cannot mix two schemas.')
         long_paths = ('long-hidden', 'long-hidden-unchanged',
                       'long-visible', 'long-visible-unchanged')
         if order == 'visible-hidden':
             long_paths = long_paths[2:] + long_paths[:2]
         rows = []
         for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
-            row = {'kind': vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND,
+            row = {'kind': (vm.REFRESH_PROFILE_V3_KIND if v3 else
+                            vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND),
                    'scenario': scenario,
-                   **{name: 0 for name in (vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
+                   **{name: 0 for name in (vm.REFRESH_PROFILE_V3_COUNTERS if v3 else
+                                            vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
                                             vm.REFRESH_PROFILE_COUNTERS)}}
-            if v2:
-                row.update(schema_version=2, icon_worker_attached=False)
+            if v2 or v3:
+                row.update(schema_version=3 if v3 else 2, icon_worker_attached=False)
             count = 100 if scenario == 'ordinary-100' else (
                 1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
             formatted = 26500 if scenario == 'ordinary-10000' else (
@@ -93,10 +97,26 @@ class VmRunnerTests(unittest.TestCase):
             row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
                        row_values_inclusive_ns=20 if formatted else 0,
                        row_values_exclusive_ns=10 if formatted else 0,
-                       timestamps_nested_ns=(10 if v2 else 5) if formatted else 0)
-            if v2:
+                       timestamps_nested_ns=(10 if v2 or v3 else 5) if formatted else 0)
+            if v3:
+                row['native_row_insertions'] = (
+                    100 if scenario == 'ordinary-100' else
+                    900 if scenario == 'ordinary-1000' else
+                    9000 if scenario == 'ordinary-10000' else
+                    1000 if scenario.startswith('long-') and 'unchanged' not in scenario else 0)
+            if v2 or v3:
                 row.update(render_icon_cache_hits=max(0, formatted - 1),
                            render_icon_cache_misses=int(formatted > 0))
+                if v3:
+                    row.update(normal_staged_rows_peak=int(formatted > 0),
+                               normal_logical_staged_payload_bytes_peak=128 if formatted else 0,
+                               fallback_staged_rows_peak=0,
+                               fallback_logical_staged_payload_bytes_peak=0,
+                               rendered_vec_growth_events=int(row['native_row_insertions'] > 0),
+                               rendered_vec_capacity_bytes_peak=count * 128 if formatted else 0,
+                               repeated_nonzero_filetime_inputs=(
+                                   52996 if scenario == 'ordinary-10000' else
+                                   max(0, 2 * formatted - 1)))
             else:
                 row.update(cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
                            shell_calls=int(formatted > 0),
@@ -157,6 +177,83 @@ class VmRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'mixed historical'):
             vm.verify_refresh_profile_records(mixed, 'hidden-visible')
 
+    def test_streaming_refresh_profile_requires_exact_schema_and_detached_counts(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                self.refresh_profile_output(order, v3=True), order)), 11)
+
+        valid = self.refresh_profile_output(v3=True)
+        prefix = 'test ' + vm.REFRESH_PROFILE_TEST + ' ... '
+
+        def changed(**fields):
+            lines = valid.splitlines()
+            self.assertTrue(lines[1].startswith(prefix))
+            row = json.loads(lines[1][len(prefix):])
+            for key, value in fields.items():
+                if value is None:
+                    row.pop(key)
+                else:
+                    row[key] = value
+            lines[1] = prefix + json.dumps(row)
+            return '\n'.join(lines)
+
+        for key in vm.REFRESH_PROFILE_V3_COUNTERS:
+            with self.subTest(missing=key), self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(changed(**{key: None}), 'hidden-visible')
+        for malformed in (
+                changed(schema_version=2), changed(icon_worker_attached=True),
+                changed(ui_shell_calls=1), changed(icon_request_submissions=1),
+                changed(icon_results_drained=1), changed(shell_calls=0),
+                changed(normal_staged_rows_peak=-1), changed(normal_staged_rows_peak=True)):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(malformed, 'hidden-visible')
+        for malformed in (
+                changed(normal_staged_rows_peak=0),
+                changed(normal_staged_rows_peak=2),
+                changed(normal_logical_staged_payload_bytes_peak=0),
+                changed(fallback_staged_rows_peak=1),
+                changed(fallback_logical_staged_payload_bytes_peak=1),
+                changed(rendered_vec_growth_events=101),
+                changed(rendered_vec_capacity_bytes_peak=99),
+                changed(repeated_nonzero_filetime_inputs=198),
+                changed(repeated_nonzero_filetime_inputs=0),
+                changed(repeated_nonzero_filetime_inputs=201)):
+            with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+                vm.verify_refresh_profile_records(malformed, 'hidden-visible')
+
+        proposal_lines = valid.splitlines()
+        proposal_index = next(index for index, line in enumerate(proposal_lines)
+                              if '-proposal-' in line)
+        proposal = json.loads(proposal_lines[proposal_index])
+        proposal['rendered_vec_capacity_bytes_peak'] = 128
+        proposal_lines[proposal_index] = json.dumps(proposal)
+        with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+            vm.verify_refresh_profile_records('\n'.join(proposal_lines), 'hidden-visible')
+
+        batched_lines = valid.splitlines()
+        batched_index = next(index for index, line in enumerate(batched_lines)
+                             if '"scenario": "ordinary-10000"' in line)
+        batched = json.loads(batched_lines[batched_index])
+        batched['repeated_nonzero_filetime_inputs'] = 52999
+        batched_lines[batched_index] = json.dumps(batched)
+        with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+            vm.verify_refresh_profile_records('\n'.join(batched_lines), 'hidden-visible')
+
+        duplicate = valid.replace('"rows": 100', '"rows": 100, "rows": 100', 1)
+        with self.assertRaisesRegex(ValueError, 'duplicate field'):
+            vm.verify_refresh_profile_records(duplicate, 'hidden-visible')
+        for historical in (self.refresh_profile_output(),
+                           self.refresh_profile_output(v2=True)):
+            mixed = valid.replace(valid.splitlines()[1], historical.splitlines()[1], 1)
+            with self.assertRaisesRegex(ValueError, 'mixed historical'):
+                vm.verify_refresh_profile_records(mixed, 'hidden-visible')
+        for historical, extra in ((self.refresh_profile_output(), '"schema_version": 1'),
+                                  (self.refresh_profile_output(v2=True),
+                                   '"normal_staged_rows_peak": 1')):
+            injected = historical.replace('"rows": 100', extra + ', "rows": 100', 1)
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(injected, 'hidden-visible')
+
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
                                    '--profile-refresh-stages'])
@@ -214,6 +311,46 @@ class VmRunnerTests(unittest.TestCase):
              vm.FOCUSED_ICON_CASES[0]],
             ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
              '--native-test-profile', 'debug', '--focused-icon-case', 'arbitrary_test'],
+        ):
+            with self.subTest(invalid=invalid), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                vm.parse_arguments(invalid)
+
+    def test_focused_refresh_cli_selects_fixed_cases_and_rejects_mixed_modes(self):
+        for profile in ('debug', 'release'):
+            args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                       '--focused-refresh-tests',
+                                       '--native-test-profile', profile])
+            self.assertEqual(args.test_timeout_seconds, 600)
+            self.assertEqual((args.desktop_scale, args.desktop_width, args.desktop_height),
+                             (100, 1366, 768))
+            args.acceptance_profile_sha256 = 'a' * 64
+            command = vm.controller_invocation(self.root, args, pwsh='pwsh')
+            self.assertIn('-FocusedRefreshTests', command)
+            self.assertEqual(command[command.index('-SuiteTimeoutSeconds') + 1], '600')
+            for case in vm.FOCUSED_REFRESH_CASES:
+                selected = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                               '--focused-refresh-tests',
+                                               '--native-test-profile', profile,
+                                               '--focused-refresh-case', case])
+                selected.acceptance_profile_sha256 = 'a' * 64
+                options = vm.controller_task_arguments(self.root, selected)
+                self.assertEqual(options[options.index('-FocusedRefreshCase') + 1], case)
+        for invalid in (
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests'],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-case', vm.FOCUSED_REFRESH_CASES[0]],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--focused-refresh-case', 'arbitrary_test'],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--focused-icon-tests'],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--profile-refresh-stages'],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--acceptance-profile-id', vm.V1_PROFILE_ID],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--test-timeout-seconds', '601'],
+            ['--ssh-host', 'prepared-vm', '--focused-refresh-tests',
+             '--native-test-profile', 'release', '--desktop-scale', '200'],
         ):
             with self.subTest(invalid=invalid), redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit):
@@ -383,6 +520,61 @@ class VmRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'bundle is invalid'):
                 vm.verify_focused_icon_result(
                     self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+
+    def test_focused_refresh_result_requires_ordered_isolated_cases_and_v2_cleanup(self):
+        self.manifest['test_binaries'] = [dict(self.test, name='darknamer_app')]
+        self.manifest['runner'] = self.artifact('windows-vm-guest.ps1', b'runner')
+        names = [vm.FOCUSED_REFRESH_FILTER + case for case in vm.FOCUSED_REFRESH_CASES]
+        diagnostic = {'kind': 'focused-refresh-tests', 'test_profile': 'release',
+                      'test_filter': vm.FOCUSED_REFRESH_FILTER, 'test_names': names}
+        self.manifest['diagnostic'] = diagnostic
+
+        def row(index, *, failed=False):
+            name = names[index]
+            summary = ('FAILED. 0 passed; 1 failed' if failed else 'ok. 1 passed; 0 failed')
+            return dict(self.test, test_name=name,
+                        status='failed' if failed else 'passed', job_cleanup=True,
+                        exit_code=101 if failed else 0, passed=0 if failed else 1,
+                        failed=1 if failed else 0, ignored=0,
+                        failure_reason='test_failed' if failed else None,
+                        stdout=self.output_artifact('refresh-%d.stdout.txt' % index, (
+                            'running 1 test\ntest ' + name + ' ... ' +
+                            ('FAILED' if failed else 'ok') + '\n' +
+                            'test result: ' + summary +
+                            '; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n'
+                        ).encode()),
+                        stderr=self.output_artifact('refresh-%d.stderr.txt' % index, b''))
+
+        self.result.update(diagnostic=diagnostic, gui=None,
+                           tests=[row(index) for index in range(4)])
+        self.result['transport'].update(task_kind='core', status='collected')
+        with (mock.patch.object(vm, 'verify_controller_cleanup') as cleanup,
+              mock.patch.object(vm, '_verify_v2_result_owned_binding') as binding,
+              mock.patch.object(vm, 'verify_transport_binding')):
+            def verify():
+                return vm.verify_focused_refresh_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+
+            observed = verify()
+            self.assertEqual((observed['status'], observed['passed']), ('passed', 4))
+            cleanup.assert_called_once()
+            binding.assert_called_once()
+            self.result['tests'] = [row(0), row(1, failed=True)]
+            self.result['status'] = 'failed'
+            self.assertEqual((verify()['status'], verify()['failed']), ('failed', 1))
+            self.result['tests'] = [row(0), row(2, failed=True)]
+            with self.assertRaisesRegex(ValueError, 'artifact, counts'):
+                verify()
+            self.result['tests'] = [row(0), row(1), row(2), row(3)]
+            self.result['status'] = 'passed'
+            self.result['tests'][0]['stdout']['bytes'] = vm.REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES + 1
+            with self.assertRaisesRegex(ValueError, 'output exceeds'):
+                verify()
+            self.result['tests'][0]['stdout']['bytes'] = (
+                self.root / self.result['tests'][0]['stdout']['file']).stat().st_size
+            self.result['transport']['guest_cleanup'] = False
+            with self.assertRaisesRegex(ValueError, 'Focused native transport'):
+                verify()
 
     def test_single_focused_icon_case_requires_exact_name_and_one_execution(self):
         case = vm.FOCUSED_ICON_CASES[2]
@@ -1415,7 +1607,7 @@ class VmRunnerTests(unittest.TestCase):
                             source_values=None, outputs=None, target_directories=None,
                             target_permissions=None, reported_artifact_path=None,
                             reported_metadata_target=None, focused_profile=None,
-                            focused_case=None,
+                            focused_case=None, focused_kind='icon',
                             commands=None):
         outputs = outputs if outputs is not None else {}
         target_directories = target_directories if target_directories is not None else []
@@ -1463,7 +1655,7 @@ class VmRunnerTests(unittest.TestCase):
         with mock.patch.object(vm.subprocess, 'run', side_effect=run), \
              mock.patch.object(vm.subprocess, 'check_output', side_effect=check_output):
             return vm.build_bundle(repo, output, focused_profile=focused_profile,
-                                   focused_case=focused_case)
+                                   focused_case=focused_case, focused_kind=focused_kind)
 
     def test_focused_icon_bundle_builds_only_selected_app_library_profile(self):
         for profile in ('debug', 'release'):
@@ -1489,6 +1681,30 @@ class VmRunnerTests(unittest.TestCase):
                     focused_profile=profile, focused_case=vm.FOCUSED_ICON_CASES[2])
                 self.assertEqual(selected['diagnostic']['test_name'],
                                  vm.FOCUSED_ICON_FILTER + vm.FOCUSED_ICON_CASES[2])
+
+    def test_focused_refresh_bundle_builds_exact_app_library_inventory(self):
+        for profile in ('debug', 'release'):
+            with self.subTest(profile=profile):
+                repo, target, _, _, _ = self.source_build_inputs('-native-refresh-' + profile)
+                commands = []
+                manifest = self.build_source_bundle(
+                    repo, target, self.root / ('native-refresh-' + profile),
+                    focused_profile=profile, focused_kind='refresh', commands=commands)
+                self.assertEqual(manifest['diagnostic'], {
+                    'kind': 'focused-refresh-tests', 'test_profile': profile,
+                    'test_filter': vm.FOCUSED_REFRESH_FILTER,
+                    'test_names': [vm.FOCUSED_REFRESH_FILTER + case
+                                   for case in vm.FOCUSED_REFRESH_CASES]})
+                self.assertEqual([row['name'] for row in manifest['test_binaries']],
+                                 ['darknamer_app'])
+                self.assertIn('--lib', commands[0])
+                self.assertEqual('--release' in commands[0], profile == 'release')
+                selected = self.build_source_bundle(
+                    repo, target, self.root / ('native-refresh-single-' + profile),
+                    focused_profile=profile, focused_kind='refresh',
+                    focused_case=vm.FOCUSED_REFRESH_CASES[2])
+                self.assertEqual(selected['diagnostic']['test_name'],
+                                 vm.FOCUSED_REFRESH_FILTER + vm.FOCUSED_REFRESH_CASES[2])
 
     def test_source_bundle_manifest_uses_frozen_input_digests(self):
         repo, target, artifact, application, script_names = self.source_build_inputs()
