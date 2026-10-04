@@ -486,6 +486,18 @@ native-row staging only; it has no icon worker and cannot establish Shell
 latency, icon settlement, or production responsiveness. Those require the
 tracked-worker native cases and source-bound product observations.
 
+The focused native refresh regressions own a live hidden parent and ListView,
+publish the ordinary callback lease, and destroy every child before reclaiming
+the state. Each case runs in an exact-named bounded child process so WinRT and
+OLE lifetime caches cannot couple cases. Test-only thread-local seams refuse a
+selected incremental cell update or rebuild before native dispatch on that
+valid HWND; they exercise authoritative fallback, retained preview failure,
+Apply blocking, and recovery without forged handles or process-wide hooks.
+The test date seam supplies explicit registered time zones and locale names to
+synchronous Win32 formatting without changing system settings. UTF-16 output
+buffers remain owned through their native calls, and the production date path
+continues to use the current user's time zone and locale.
+
 The ignored icon-delay diagnostic in `windows/list_view.rs` installs a subclass
 only on its test-owned HWND. Its boxed context remains on the owning UI thread
 through synchronous destruction; `WM_NCDESTROY` removes the exact subclass and
