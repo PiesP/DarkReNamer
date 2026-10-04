@@ -8,6 +8,8 @@ pub mod admission;
 mod apply_progress;
 /// Bounded shell-icon cache key derivation.
 pub mod icon_cache;
+#[cfg(windows)]
+pub(crate) mod icon_requests;
 #[cfg(any(windows, test))]
 mod preview;
 /// Safe rename planning and execution foundation.

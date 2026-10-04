@@ -48,6 +48,7 @@ use darknamer_core::{
     LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText, ProposalMutationError,
     SortSemantics,
 };
+use icon_worker::{BorrowedSystemImageList, IconShared};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
     Win32WindowHandle, WindowHandle,
@@ -64,6 +65,7 @@ mod command_dispatch;
 mod command_rail;
 mod dialog;
 mod drag_drop;
+mod icon_worker;
 mod list_view;
 mod menu;
 mod popup_menu;
@@ -138,9 +140,9 @@ use list_view::changed_column_mask;
 use list_view::{
     LIST_VIEW_EXTENDED_STYLES, RenderedRow, handle_header_end_track, handle_list_custom_draw,
     handle_list_infotip, install_list_view_notification_subclass, native_list_header_height_px,
-    native_status_column_minimum_px, refresh, refresh_all_rows, refresh_changed_rows,
-    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
-    update_dpi_metrics, update_primary_column_widths,
+    native_status_column_minimum_px, poll_icon_work, refresh, refresh_all_rows,
+    refresh_changed_rows, refresh_proposal_rows, remove_list_view_notification_subclass,
+    schedule_icon_poll, update_column_visibility, update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use popup_menu::*;
@@ -179,9 +181,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
 #[cfg(test)]
@@ -244,8 +247,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SHFILEINFOW, SHGFI_SMALLICON,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SetWindowSubclass,
+    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SetWindowSubclass,
+};
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::{
+    SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON,
@@ -320,16 +326,22 @@ const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const WM_APP_POPUP_MENU_UPDATE: u32 = WM_APP + 0x52;
 const WM_APP_IMPORT_COMPLETE: u32 = WM_APP + 0x53;
+const WM_APP_ICON_WAKE: u32 = WM_APP + 0x54;
+const WM_APP_ICON_WORK: u32 = WM_APP + 0x55;
+const WM_APP_ICON_STATUS: u32 = WM_APP + 0x56;
+const WM_APP_ICON_CONTINUE: u32 = WM_APP + 0x57;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
 const DEFERRED_MESSAGE_TIMER_ID: usize = 0xD4A4;
+const ICON_POLL_TIMER_ID: usize = 0xD4A5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
     Available,
     Leased,
-    ReclaimPending,
+    ReclaimPendingLeased,
+    ReclaimPendingIdle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -346,8 +358,10 @@ enum ReclaimDisposition {
 /// confined to the UI thread.
 struct CallbackState<T, R = ()> {
     status: Cell<CallbackStateStatus>,
+    reclaim_held: Cell<bool>,
     menu_edge_color: Cell<Option<u32>>,
     retirement: UnsafeCell<Option<R>>,
+    icon_retirement: UnsafeCell<Option<Arc<IconShared>>>,
     value: UnsafeCell<T>,
 }
 
@@ -356,12 +370,44 @@ struct CallbackStateLease<T, R = ()> {
     _ui_thread_only: PhantomData<Rc<()>>,
 }
 
+/// A UI-thread run-scope owner for a window slot after its publication ends.
+/// Construct only while the slot is live; drop after all tracked work joins.
+struct CallbackReclaimHold<T, R = ()> {
+    slot: NonNull<CallbackState<T, R>>,
+    _ui_thread_only: PhantomData<Rc<()>>,
+}
+
+impl<T, R> CallbackReclaimHold<T, R> {
+    unsafe fn new(slot: *mut CallbackState<T, R>) -> Option<Self> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: the caller owns this still-live UI-thread slot. The hold
+        // retains its allocation after publication is removed.
+        if !unsafe { CallbackState::hold_reclaim(slot.as_ptr()) } {
+            return None;
+        }
+        Some(Self {
+            slot,
+            _ui_thread_only: PhantomData,
+        })
+    }
+}
+
+impl<T, R> Drop for CallbackReclaimHold<T, R> {
+    fn drop(&mut self) {
+        // SAFETY: this token owns the exact hold from construction, and its
+        // retained allocation remains live until this release completes.
+        unsafe { CallbackState::release_reclaim_hold(self.slot.as_ptr()) };
+    }
+}
+
 impl<T, R> CallbackState<T, R> {
     fn into_raw(value: T) -> *mut Self {
         Box::into_raw(Box::new(Self {
             status: Cell::new(CallbackStateStatus::Available),
+            reclaim_held: Cell::new(false),
             menu_edge_color: Cell::new(None),
             retirement: UnsafeCell::new(None),
+            icon_retirement: UnsafeCell::new(None),
             value: UnsafeCell::new(value),
         }))
     }
@@ -418,22 +464,85 @@ impl<T, R> CallbackState<T, R> {
         // SAFETY: the caller has unpublished this UI-thread-owned allocation,
         // so no new callback can acquire it. A pending outer lease keeps the
         // allocation live until `CallbackStateLease::drop`.
-        let previous = {
-            // SAFETY: the slot remains live until the state transition decides
-            // whether reclamation is immediate or deferred.
-            let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
-            status.replace(CallbackStateStatus::ReclaimPending)
+        // SAFETY: these disjoint Cells belong to the live UI-thread allocation.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
         };
-        match previous {
+        match status.get() {
             CallbackStateStatus::Available => {
-                // SAFETY: publication was cleared and no lease exists. This is
-                // the allocation's unique immediate reclamation path.
-                unsafe { drop(Box::from_raw(slot.as_ptr())) };
-                ReclaimDisposition::Reclaimed
+                if held.get() {
+                    status.set(CallbackStateStatus::ReclaimPendingIdle);
+                    ReclaimDisposition::Deferred
+                } else {
+                    // SAFETY: publication was cleared, and neither a lease nor
+                    // a run-scope hold can retain this exact allocation.
+                    unsafe { drop(Box::from_raw(slot.as_ptr())) };
+                    ReclaimDisposition::Reclaimed
+                }
             }
-            CallbackStateStatus::Leased | CallbackStateStatus::ReclaimPending => {
+            CallbackStateStatus::Leased => {
+                status.set(CallbackStateStatus::ReclaimPendingLeased);
                 ReclaimDisposition::Deferred
             }
+            CallbackStateStatus::ReclaimPendingLeased | CallbackStateStatus::ReclaimPendingIdle => {
+                ReclaimDisposition::Deferred
+            }
+        }
+    }
+
+    /// Retains an unpublished slot while a run-scope worker is still tracked.
+    /// The caller must release this hold after the worker has actually joined.
+    unsafe fn hold_reclaim(slot: *mut Self) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the caller owns the live UI-thread slot and touches only
+        // Cells disjoint from its possibly leased value.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
+        };
+        if held.get()
+            || !matches!(
+                status.get(),
+                CallbackStateStatus::Available | CallbackStateStatus::Leased
+            )
+        {
+            return false;
+        }
+        held.set(true);
+        true
+    }
+
+    /// Ends the run-scope hold after its worker has joined. A still-active
+    /// callback lease completes reclamation when that lease exits.
+    unsafe fn release_reclaim_hold(slot: *mut Self) -> ReclaimDisposition {
+        let Some(slot) = NonNull::new(slot) else {
+            return ReclaimDisposition::Deferred;
+        };
+        // SAFETY: the hold itself keeps this UI-thread allocation live until
+        // this method has decided whether it is the final owner.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
+        };
+        if !held.replace(false) {
+            return ReclaimDisposition::Deferred;
+        }
+        if status.get() == CallbackStateStatus::ReclaimPendingIdle {
+            // SAFETY: publication and the sole lease already ended; releasing
+            // this hold is the unique remaining Box reclamation path.
+            unsafe { drop(Box::from_raw(slot.as_ptr())) };
+            ReclaimDisposition::Reclaimed
+        } else {
+            ReclaimDisposition::Deferred
         }
     }
 
@@ -458,6 +567,32 @@ impl<T, R> CallbackState<T, R> {
         // only the sidecar UnsafeCell, never the possibly leased state value.
         unsafe { (&mut *(*slot.as_ptr()).retirement.get()).take() }
     }
+
+    /// A disjoint UI-thread sidecar remains accessible during an outer lease.
+    unsafe fn install_icon_retirement(slot: *mut Self, shared: Arc<IconShared>) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the run scope owns this live slot; no AppState value borrow
+        // reaches this disjoint sidecar, which is installed once before use.
+        let sidecar = unsafe { &mut *(*slot.as_ptr()).icon_retirement.get() };
+        if sidecar.is_some() {
+            return false;
+        }
+        *sidecar = Some(shared);
+        true
+    }
+
+    unsafe fn request_icon_retirement(slot: *mut Self) {
+        let Some(slot) = NonNull::new(slot) else {
+            return;
+        };
+        // SAFETY: the owning UI thread holds this allocation through callback
+        // exit or the run hold; the sidecar is disjoint from leased AppState.
+        if let Some(shared) = unsafe { &*(*slot.as_ptr()).icon_retirement.get() } {
+            shared.request_destroy_retire();
+        }
+    }
 }
 
 impl<T, R> CallbackStateLease<T, R> {
@@ -476,20 +611,29 @@ impl<T, R> CallbackStateLease<T, R> {
 
 impl<T, R> Drop for CallbackStateLease<T, R> {
     fn drop(&mut self) {
-        // SAFETY: the slot remains live for the duration of its sole lease.
-        let reclaim = {
-            // SAFETY: the slot remains live until this sole lease decides
-            // whether it must perform deferred reclamation.
-            let status = unsafe { &*std::ptr::addr_of!((*self.slot.as_ptr()).status) };
-            match status.replace(CallbackStateStatus::Available) {
-                CallbackStateStatus::Leased => false,
-                CallbackStateStatus::ReclaimPending => true,
-                CallbackStateStatus::Available => false,
+        // SAFETY: the slot remains live for its sole lease; both Cells are
+        // disjoint from the leased value and confined to this UI thread.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*self.slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*self.slot.as_ptr()).reclaim_held),
+            )
+        };
+        let reclaim = match status.get() {
+            CallbackStateStatus::Leased => {
+                status.set(CallbackStateStatus::Available);
+                false
             }
+            CallbackStateStatus::ReclaimPendingLeased if held.get() => {
+                status.set(CallbackStateStatus::ReclaimPendingIdle);
+                false
+            }
+            CallbackStateStatus::ReclaimPendingLeased => true,
+            CallbackStateStatus::Available | CallbackStateStatus::ReclaimPendingIdle => false,
         };
         if reclaim {
             // SAFETY: reclamation was requested after publication was cleared,
-            // and this is the sole lease ending, so exactly one owner remains.
+            // and both the hold and sole lease ended, so exactly one owner remains.
             unsafe { drop(Box::from_raw(self.slot.as_ptr())) };
         }
     }
@@ -583,6 +727,15 @@ struct AppState {
     next_appearance_dialog_id: u32,
     dwm_dark_frame_requested: bool,
     icon_cache: HashMap<IconCacheKey, i32>,
+    icon_shared: Option<Arc<IconShared>>,
+    icon_image_list: Option<BorrowedSystemImageList>,
+    icon_unresolved_rows: usize,
+    icon_scan_cursor: usize,
+    icon_reconcile_remaining: usize,
+    icon_demand_scan_remaining: usize,
+    icon_delivery_batch: Vec<(IconCacheKey, i32)>,
+    icon_delivery_ack_count: usize,
+    icon_continue_posted: bool,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
     // and every retained journal capability close before another launch.
@@ -700,12 +853,74 @@ impl AppState {
             next_appearance_dialog_id: 0,
             dwm_dark_frame_requested: false,
             icon_cache: HashMap::new(),
+            icon_shared: None,
+            icon_image_list: None,
+            icon_unresolved_rows: 0,
+            icon_scan_cursor: 0,
+            icon_reconcile_remaining: 0,
+            icon_demand_scan_remaining: 0,
+            icon_delivery_batch: Vec::new(),
+            icon_delivery_ack_count: 0,
+            icon_continue_posted: false,
             rendered_rows: Vec::new(),
         }
     }
 
     fn revision(&self) -> ModelRevision {
         ModelRevision::new(self.model_revision)
+    }
+
+    /// Pointer-free, O(1) observation on the UI thread. Selectors and version
+    /// are fixed for the source-bound native observer, not product controls.
+    fn icon_status_value(&self, selector: usize) -> Option<LRESULT> {
+        let shared = self.icon_shared.as_deref();
+        let revision_before = shared.map_or(0, IconShared::status_revision);
+        if revision_before & 1 != 0 {
+            return None;
+        }
+        let (queued, in_flight, completed) = shared.map_or((0, 0, 0), IconShared::status_counts);
+        let session = shared.map_or(0, IconShared::session);
+        let generation = shared.map_or(0, IconShared::generation);
+        let bootstrap = if self.icon_image_list.is_some() {
+            1
+        } else if shared.is_none_or(IconShared::is_unavailable) {
+            2
+        } else {
+            0
+        };
+        let settled = bootstrap != 0
+            && self.icon_unresolved_rows == 0
+            && self.icon_reconcile_remaining == 0
+            && self.icon_delivery_ack_count == 0
+            && queued + in_flight + completed == 0;
+        let value = match selector {
+            0 => 1,
+            1 => (session as u32) as LRESULT,
+            2 => ((session >> 32) as u32) as LRESULT,
+            3 => (generation as u32) as LRESULT,
+            4 => ((generation >> 32) as u32) as LRESULT,
+            5 => bootstrap,
+            6 => queued as LRESULT,
+            7 => in_flight as LRESULT,
+            8 => completed as LRESULT,
+            9 => self.icon_unresolved_rows as LRESULT,
+            10 => self.icon_scan_cursor as LRESULT,
+            11 => isize::from(u8::from(settled)),
+            12 => isize::from(u8::from(shared.is_some_and(IconShared::is_joined))),
+            13 => self.icon_reconcile_remaining as LRESULT,
+            14 => self.icon_delivery_ack_count as LRESULT,
+            15 => (revision_before as u32) as LRESULT,
+            16 => ((revision_before >> 32) as u32) as LRESULT,
+            17 => isize::from(u8::from(
+                self.icon_unresolved_rows == 0 || self.icon_demand_scan_remaining == 0,
+            )),
+            18 => self.icon_demand_scan_remaining as LRESULT,
+            19 => (self.model_revision as u32) as LRESULT,
+            20 => ((self.model_revision >> 32) as u32) as LRESULT,
+            21 => isize::from(u8::from(shared.is_none_or(IconShared::is_unavailable))),
+            _ => return None,
+        };
+        (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
     }
 
     fn resolved_appearance(&self) -> ResolvedUiAppearance {
@@ -1375,6 +1590,102 @@ mod tests {
         drop(outer);
         assert_eq!(state_drops.get(), 1);
         assert_eq!(retirement_drops.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn callback_state_run_hold_reclaims_after_both_possible_lease_release_orders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: every slot below is test-owned on this UI thread. A slot is
+        // unpublished before request_reclaim; the hold and sole lease retain
+        // it until the corresponding release, and no raw pointer is used after
+        // its final release.
+        unsafe {
+            for lease_first in [true, false] {
+                let drops = Rc::new(Cell::new(0));
+                let slot = CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(
+                    Rc::clone(&drops),
+                ));
+                assert!(CallbackState::hold_reclaim(slot));
+                let outer = CallbackState::try_lease(slot)
+                    .ok_or_else(|| io::Error::other("held callback lease was rejected"))?;
+                assert_eq!(
+                    CallbackState::request_reclaim(slot),
+                    ReclaimDisposition::Deferred
+                );
+                assert_eq!(
+                    CallbackState::request_reclaim(slot),
+                    ReclaimDisposition::Deferred
+                );
+                assert!(CallbackState::try_lease(slot).is_none());
+                if lease_first {
+                    drop(outer);
+                    assert_eq!(drops.get(), 0);
+                    assert!(CallbackState::try_lease(slot).is_none());
+                    assert_eq!(
+                        CallbackState::release_reclaim_hold(slot),
+                        ReclaimDisposition::Reclaimed
+                    );
+                } else {
+                    assert_eq!(
+                        CallbackState::release_reclaim_hold(slot),
+                        ReclaimDisposition::Deferred
+                    );
+                    assert_eq!(drops.get(), 0);
+                    assert!(CallbackState::try_lease(slot).is_none());
+                    drop(outer);
+                }
+                assert_eq!(drops.get(), 1);
+            }
+
+            let drops = Rc::new(Cell::new(0));
+            let slot =
+                CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(Rc::clone(&drops)));
+            assert!(CallbackState::hold_reclaim(slot));
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert!(CallbackState::try_lease(slot).is_none());
+            assert_eq!(drops.get(), 0);
+            assert_eq!(
+                CallbackState::release_reclaim_hold(slot),
+                ReclaimDisposition::Reclaimed
+            );
+            assert_eq!(drops.get(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn callback_state_unused_run_hold_can_end_while_published()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let drops = Rc::new(Cell::new(0));
+        let slot =
+            CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(Rc::clone(&drops)));
+        // SAFETY: this test owns the live UI-thread slot. Releasing the unused
+        // hold leaves it published; the sole lease ends before unpublication,
+        // and no pointer access follows final reclamation.
+        unsafe {
+            assert!(CallbackState::hold_reclaim(slot));
+            assert_eq!(
+                CallbackState::release_reclaim_hold(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert_eq!(drops.get(), 0);
+            let lease = CallbackState::try_lease(slot)
+                .ok_or_else(|| io::Error::other("published slot was not leaseable"))?;
+            drop(lease);
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Reclaimed
+            );
+        }
+        assert_eq!(drops.get(), 1);
         Ok(())
     }
 
@@ -3171,6 +3482,8 @@ mod tests {
         RenderedRow {
             values: core::array::from_fn(|column| LegacyText::from(format!("{label}-{column}"))),
             icon,
+            icon_key: IconCacheKey::FileWithoutExtension,
+            icon_resolved: true,
         }
     }
 

@@ -992,6 +992,72 @@ function Assert-ObserverAppearanceColumnPreference {
     }
     Get-LowerSha256 -Path $item.FullName
 }
+function Assert-ObserverAppearancePrivateAppDirectory {
+    param([Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $UserSid)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Appearance private app directory is unsafe.'
+    }
+    $actual = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($item.FullName))
+    if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $UserSid.Value -or
+        -not $actual.AreAccessRulesProtected) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+    $expected = @($UserSid.Value, 'S-1-5-18', 'S-1-5-32-544')
+    $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    if ($rules.Count -ne $expected.Count) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+    foreach ($rule in $rules) {
+        $sid = ([Security.Principal.SecurityIdentifier]$rule.IdentityReference).Value
+        if ($sid -cnotin $expected -or $rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $rule.InheritanceFlags -ne $inheritance -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw 'Appearance private app directory owner or DACL differs from production.'
+        }
+        $expected = @($expected | Where-Object { $_ -cne $sid })
+    }
+    if ($expected.Count -ne 0) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+}
+function New-ObserverAppearancePrivateAppDirectory {
+    param([Parameter(Mandatory)][string] $Parent)
+
+    $path = Join-Path $Parent 'DarkReNamer'
+    if (-not $IsWindows) {
+        # Ubuntu fixture tests cannot execute the Windows ACL API or the product.
+        return New-PrivateDirectory -Parent $Parent -Leaf 'DarkReNamer'
+    }
+    if (Test-Path -LiteralPath $path) {
+        throw 'Appearance private app directory already exists.'
+    }
+    $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($userSid)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($principal in @($userSid,
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+        [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $principal, [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    # The descriptor is supplied at creation so no inherited, unsafe interval exists.
+    [void][IO.FileSystemAclExtensions]::CreateDirectory($security, $path)
+    Assert-ObserverAppearancePrivateAppDirectory -Path $path -UserSid $userSid
+    $path
+}
 function New-ObserverAppearanceColumnPreference {
     param([Parameter(Mandatory)][string] $RuntimeRoot)
     $expectedLocalData = Join-Path $RuntimeRoot 'localappdata'
@@ -999,7 +1065,7 @@ function New-ObserverAppearanceColumnPreference {
         [IO.Path]::GetFullPath($expectedLocalData), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Appearance preference requires isolated LOCALAPPDATA.'
     }
-    $appRoot = New-PrivateDirectory -Parent $expectedLocalData -Leaf 'DarkReNamer'
+    $appRoot = New-ObserverAppearancePrivateAppDirectory -Parent $expectedLocalData
     $path = Join-Path $appRoot 'ui-columns-v1'
     if (Test-Path -LiteralPath $path) { throw 'Appearance column preference already exists.' }
     $bytes = Get-ObserverAppearanceColumnPreferenceBytes
@@ -2554,6 +2620,279 @@ function Invoke-ObserverAppearancePairScenario {
             -ProcessLifecycleObservations $ProcessLifecycleObservations -ObservationSink $ObservationSink)
         $ObservationSink['interactions'] = $interactions.ToArray()
         $ObservationSink
+    }
+    finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
+}
+
+function Get-ObserverIconStatusSnapshot {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $StartUtcTicks)
+
+    $value = [DarkReNamerIconStatusObserver]::ReadBound(
+        $Application.process, [IntPtr]$Application.main_handle, $StartUtcTicks)
+    [ordered]@{
+        version = 1
+        session = [string]$value.Session
+        generation = [string]$value.Generation
+        bootstrap = [int]$value.Bootstrap
+        queued = [int]$value.Queued
+        inflight = [int]$value.InFlight
+        undrained = [int]$value.Undrained
+        unresolved_rows = [int]$value.UnresolvedRows
+        cursor = [int]$value.Cursor
+        settled = $value.Settled -eq 1
+        worker_joined = $value.WorkerJoined -eq 1
+        reconcile_rows = [int]$value.ReconcileRows
+        batch_ack = [int]$value.BatchAck
+        status_revision = [string]$value.StatusRevision
+        demand_exhausted = $value.DemandExhausted -eq 1
+        demand_remaining = [int]$value.DemandRemaining
+        model_revision = [string]$value.ModelRevision
+        unavailable_or_retiring = $value.UnavailableOrRetiring -eq 1
+    }
+}
+
+function Get-ObserverIconChurnFileName {
+    param([Parameter(Mandatory)][ValidateRange(0,999)][int] $Index)
+
+    if ($Index -lt 598 -and $Index % 2 -eq 0) {
+        return 'extension-{0:D4}.e{1:D3}' -f $Index,[int]($Index / 2)
+    }
+    'recurring-{0:D4}.txt' -f $Index
+}
+
+function Test-ObserverIconTerminalSnapshot {
+    param([Parameter(Mandatory)][Collections.IDictionary] $Snapshot,
+        [Parameter(Mandatory)][int] $Rows)
+
+    if ($Snapshot.version -ne 1 -or [ulong]$Snapshot.session -eq 0 -or
+        $Snapshot.bootstrap -notin @(0,1,2) -or
+        $Snapshot.queued -lt 0 -or $Snapshot.inflight -gt 1 -or
+        $Snapshot.queued + $Snapshot.inflight + $Snapshot.undrained -gt 64 -or
+        $Snapshot.unresolved_rows -gt $Rows -or $Snapshot.cursor -gt $Rows -or
+        $Snapshot.reconcile_rows -gt $Rows -or $Snapshot.demand_remaining -gt $Rows -or
+        $Snapshot.batch_ack -gt 64 -or ([ulong]$Snapshot.status_revision -band 1) -ne 0) {
+        throw 'Icon status snapshot violates its bounded version-one contract.'
+    }
+    if ($Snapshot.bootstrap -eq 2) {
+        throw 'Icon image-list bootstrap failed; no-image fallback is not icon settlement.'
+    }
+    if ($Snapshot.unavailable_or_retiring) {
+        throw 'Icon worker became unavailable or retired before settlement; no-image fallback is not icon settlement.'
+    }
+    [ulong]$Snapshot.generation -gt 0 -and
+        $Snapshot.bootstrap -eq 1 -and $Snapshot.settled -eq $true -and
+        $Snapshot.worker_joined -eq $false -and
+        $Snapshot.demand_exhausted -eq $true -and $Snapshot.demand_remaining -eq 0 -and
+        $Snapshot.queued -eq 0 -and $Snapshot.inflight -eq 0 -and
+        $Snapshot.undrained -eq 0 -and $Snapshot.unresolved_rows -eq 0 -and
+        $Snapshot.reconcile_rows -eq 0 -and $Snapshot.batch_ack -eq 0
+}
+
+function Test-ObserverIconTransientStatusQueryError {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $outer = $ErrorRecord.Exception
+    $inner = $outer.InnerException
+    $outer -is [Management.Automation.MethodInvocationException] -and
+        $null -ne $inner -and $inner.GetType() -eq [InvalidOperationException] -and
+        $inner.Message -ceq 'Icon status query did not produce a stable published snapshot.'
+}
+
+function Wait-ObserverIconSettlementPhase {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $StartUtcTicks,
+        [Parameter(Mandatory)][long] $OpenTicks,
+        [Parameter(Mandatory)][double] $DataReadyMs,
+        [Parameter(Mandatory)][int] $Rows,
+        [Parameter(Mandatory)][DateTime] $OverallDeadline)
+
+    if ($OpenTicks -le 0 -or $OpenTicks -gt [Diagnostics.Stopwatch]::GetTimestamp() -or
+        $DataReadyMs -le 0) {
+        throw 'Icon settlement data-ready clock bracket is invalid.'
+    }
+    $first = $null
+    $candidate = $null
+    $polls = 0
+    $unstableQueries = 0
+    $peakPending = 0
+    $peakUnresolved = 0
+    while ((Get-Date) -lt $OverallDeadline) {
+        try {
+            $snapshot = Get-ObserverIconStatusSnapshot -Application $Application -StartUtcTicks $StartUtcTicks
+        }
+        catch {
+            if (-not (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_)) {
+                throw
+            }
+            $unstableQueries++
+            Start-Sleep -Milliseconds 100
+            continue
+        }
+        $observedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        if ($null -eq $first) { $first = $snapshot }
+        if ($snapshot.session -cne $first.session) { throw 'Icon status session changed during a fixed import.' }
+        if ($snapshot.model_revision -cne $first.model_revision) {
+            throw 'Icon arrival changed the model revision after data readiness.'
+        }
+        $polls++
+        $pending = $snapshot.queued + $snapshot.inflight + $snapshot.undrained
+        $peakPending = [Math]::Max($peakPending, $pending)
+        $peakUnresolved = [Math]::Max($peakUnresolved, $snapshot.unresolved_rows)
+        $terminal = Test-ObserverIconTerminalSnapshot -Snapshot $snapshot -Rows $Rows
+        if ($terminal) {
+            if ($null -ne $candidate -and
+                $snapshot.generation -ceq $candidate.generation -and
+                $snapshot.model_revision -ceq $candidate.model_revision) {
+                $settledMs = [Math]::Round(($observedTicks - $OpenTicks) * 1000.0 /
+                    [Diagnostics.Stopwatch]::Frequency, 3)
+                if ($settledMs -lt $DataReadyMs) {
+                    throw 'Icon-settled observation preceded the data-ready endpoint.'
+                }
+                return [ordered]@{
+                    data_ready_ms = $DataReadyMs
+                    icon_settled_observed_ms = $settledMs
+                    first_status = $first
+                    settled_status = $candidate
+                    confirmation_status = $snapshot
+                    poll_count = $polls
+                    unstable_query_attempts = $unstableQueries
+                    sampled_peak_pending = $peakPending
+                    sampled_peak_unresolved_rows = $peakUnresolved
+                }
+            }
+            $candidate = $snapshot
+        }
+        else { $candidate = $null }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'Icon settlement was not observed before the fixed diagnostic deadline.'
+}
+
+function Invoke-ObserverIconSettlementScenario {
+    param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][ValidateSet('async-status-v1', 'synchronous-row-count-upper-bound-v1')]
+        [string] $EndpointMethod,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(600, $WaitSeconds))
+    $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'icon-settlement-fixture'
+    $ordinary = New-PrivateDirectory -Parent $fixture -Leaf 'ordinary'
+    $churn = New-PrivateDirectory -Parent $fixture -Leaf 'churn'
+    $ordinaryPaths = [Collections.Generic.List[string]]::new()
+    $churnPaths = [Collections.Generic.List[string]]::new()
+    foreach ($index in 0..999) {
+        $plain = Join-Path $ordinary ('ordinary-{0:D4}.txt' -f $index)
+        [IO.File]::WriteAllText($plain, ('icon-ordinary-{0:D4}' -f $index), [Text.Encoding]::ASCII)
+        $ordinaryPaths.Add($plain)
+        $name = Get-ObserverIconChurnFileName -Index $index
+        $interleaved = Join-Path $churn $name
+        [IO.File]::WriteAllText($interleaved, ('icon-churn-{0:D4}' -f $index), [Text.Encoding]::ASCII)
+        $churnPaths.Add($interleaved)
+    }
+    $ordinaryList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.ToArray()) -Leaf 'icon-ordinary.txt'
+    $churnList = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$churnPaths.ToArray()) -Leaf 'icon-churn.txt'
+    $applicationPath = Join-Path $Verified.root $Verified.application.file
+    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+        throw 'Icon settlement executable differs from the staged candidate.'
+    }
+    $ObservationSink['mode'] = 'icon-settlement'
+    $ObservationSink['endpoint_method'] = $EndpointMethod
+    if ($EndpointMethod -ceq 'synchronous-row-count-upper-bound-v1') {
+        $ObservationSink['endpoint_coverage'] = 'source-derived-synchronous-lookup-completion-upper-bound'
+        $ObservationSink['baseline_product_source_sha'] = 'b152761010b16ef74e2a3765241a253778b88e0b'
+    }
+    $ObservationSink['plan'] = [ordered]@{
+        ordinary_rows = 1000; churn_rows = 1000; extension_classes = 300
+        poll_interval_ms = 100; maximum_seconds = 600
+    }
+    $application = $null
+    try {
+        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'icon settlement application' `
+            -ProcessLifecycleObservations $ProcessLifecycleObservations
+        [void](Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main `
+            -Process $application.process -ExpectedSession $SessionId)
+        $environment = Get-ObserverEnvironmentMetadata -Application $application
+        $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        if ($environment.physical_screen.width -ne 1366 -or $environment.physical_screen.height -ne 768 -or
+            $environment.hwnd_dpi -ne 96 -or $environment.text_scale_factor_percent -ne 100) {
+            throw 'Icon settlement display differs from the fixed request.'
+        }
+        $ObservationSink['environment'] = $environment
+        $ObservationSink['process_id'] = [int]$application.process.Id
+        $ObservationSink['process_start_utc_ticks'] = [long]$application.process.StartTime.ToUniversalTime().Ticks
+        $ObservationSink['executable_sha256'] = $Verified.application.sha256
+        $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Icon settlement list was not empty at launch.' }
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+            -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+            -Root $EvidenceRoot -Leaf 'icon-settlement-empty.png' -Label 'icon settlement empty list'))
+        $phases = [Collections.Generic.List[object]]::new()
+        $ObservationSink['phases'] = $phases
+        foreach ($step in @(
+            [ordered]@{ id='ordinary-cached'; file=$ordinaryList; names=@('ordinary-0000.txt','ordinary-0499.txt','ordinary-0999.txt') },
+            # The model sorts admitted source paths after reading the interleaved list.
+            [ordered]@{ id='interleaved-churn'; file=$churnList; names=@('extension-0000.e000','recurring-0401.txt','recurring-0999.txt') })) {
+            $timing = Import-GuiRegressionPathList -Application $application -PathsFile $step.file `
+                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -IncludeOpenTicks
+            $receipt = if ($EndpointMethod -ceq 'async-status-v1') {
+                Wait-ObserverIconSettlementPhase -Application $application `
+                    -StartUtcTicks $ObservationSink['process_start_utc_ticks'] -OpenTicks $timing.open_ticks `
+                    -DataReadyMs $timing.elapsed_ms -Rows 1000 -OverallDeadline $deadline
+            } else {
+                [ordered]@{
+                    data_ready_ms = $timing.elapsed_ms
+                    synchronous_lookup_completion_upper_bound_ms = $timing.elapsed_ms
+                }
+            }
+            $receipt['id'] = $step.id
+            $receipt['rows'] = 1000
+            $receipt['representative_names'] = @(0,499,999 | ForEach-Object {
+                [string]$grid.pattern.GetItem($_,0).Current.Name
+            })
+            for ($probe = 0; $probe -lt 3; $probe++) {
+                if ($receipt['representative_names'][$probe] -cne $step.names[$probe]) {
+                    throw "Icon settlement $($step.id) representative text differs."
+                }
+            }
+            $phases.Add($receipt)
+            [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+                [IntPtr]$application.main_handle, [uint32]$application.process.Id, [uint32]0x800E)
+            if ($grid.pattern.Current.RowCount -ne 0) { throw 'Icon settlement clear did not empty the list.' }
+        }
+        if ($EndpointMethod -ceq 'async-status-v1' -and
+            [ulong]$phases[1].settled_status.generation -le [ulong]$phases[0].settled_status.generation) {
+            throw 'Icon settlement clear/repopulate did not advance the request generation.'
+        }
+        $ObservationSink['phases'] = $phases.ToArray()
+        foreach ($group in @([ordered]@{ paths=$ordinaryPaths; prefix='icon-ordinary' },
+                           [ordered]@{ paths=$churnPaths; prefix='icon-churn' })) {
+            for ($index = 0; $index -lt 1000; $index++) {
+                if ([IO.File]::ReadAllText($group.paths[$index], [Text.Encoding]::ASCII) -cne
+                    ('{0}-{1:D4}' -f $group.prefix,$index)) {
+                    throw 'Icon settlement fixture bytes changed.'
+                }
+            }
+        }
+        $ObservationSink['disk_unchanged'] = $true
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $ObservationSink['journal_residue_count'] = 0
+        if ($EndpointMethod -ceq 'async-status-v1') {
+            $ObservationSink['worker_join_evidence'] = [ordered]@{
+                kind = 'source-contract-inference'; observed = $false
+            }
+        }
+        $ObservationSink['normal_exit_code'] = Close-AcceptanceApplication -Application $application `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+        $ObservationSink['appearance'] = 'light'
+        return $ObservationSink
     }
     finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
 }

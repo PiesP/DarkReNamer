@@ -73,27 +73,35 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
-    def refresh_profile_output(self, order='hidden-visible'):
+    def refresh_profile_output(self, order='hidden-visible', *, v2=False):
         long_paths = ('long-hidden', 'long-hidden-unchanged',
                       'long-visible', 'long-visible-unchanged')
         if order == 'visible-hidden':
             long_paths = long_paths[2:] + long_paths[:2]
         rows = []
         for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
-            row = {'kind': 'refresh-stages-test-build', 'scenario': scenario,
-                   **{name: 0 for name in vm.REFRESH_PROFILE_COUNTERS}}
+            row = {'kind': vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND,
+                   'scenario': scenario,
+                   **{name: 0 for name in (vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
+                                            vm.REFRESH_PROFILE_COUNTERS)}}
+            if v2:
+                row.update(schema_version=2, icon_worker_attached=False)
             count = 100 if scenario == 'ordinary-100' else (
                 1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
             formatted = 26500 if scenario == 'ordinary-10000' else (
                 0 if 'proposal-' in scenario else count)
             row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
-                       cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
-                       shell_calls=int(formatted > 0),
                        row_values_inclusive_ns=20 if formatted else 0,
                        row_values_exclusive_ns=10 if formatted else 0,
-                       timestamps_nested_ns=5 if formatted else 0,
-                       shell_nested_ns=5 if formatted else 0,
-                       shell_max_ns=5 if formatted else 0)
+                       timestamps_nested_ns=(10 if v2 else 5) if formatted else 0)
+            if v2:
+                row.update(render_icon_cache_hits=max(0, formatted - 1),
+                           render_icon_cache_misses=int(formatted > 0))
+            else:
+                row.update(cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
+                           shell_calls=int(formatted > 0),
+                           shell_nested_ns=5 if formatted else 0,
+                           shell_max_ns=5 if formatted else 0)
             rows.append(json.dumps(row))
         return ('running 1 test\ntest ' + vm.REFRESH_PROFILE_TEST +
                 ' ... ' + rows[0] + '\n' + '\n'.join(rows[1:]) +
@@ -123,6 +131,32 @@ class VmRunnerTests(unittest.TestCase):
                 self.refresh_profile_output().replace('"rows": 100', '"rows": 99', 1),
                 'hidden-visible')
 
+    def test_async_refresh_profile_has_separate_detached_attribution(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                self.refresh_profile_output(order, v2=True), order)), 11)
+        valid = self.refresh_profile_output(v2=True)
+        for old_key in ('shell_nested_ns', 'shell_max_ns', 'shell_calls',
+                        'cache_hits', 'cache_misses'):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(
+                    valid.replace('"schema_version": 2',
+                                  '"schema_version": 2, "' + old_key + '": 0', 1),
+                    'hidden-visible')
+        for source, replacement in (
+                ('"icon_worker_attached": false', '"icon_worker_attached": true'),
+                ('"ui_shell_calls": 0', '"ui_shell_calls": 1'),
+                ('"icon_request_submissions": 0', '"icon_request_submissions": 1'),
+                ('"render_icon_cache_misses": 1', '"render_icon_cache_misses": 2')):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(valid.replace(source, replacement, 1),
+                                                  'hidden-visible')
+        historical = self.refresh_profile_output()
+        mixed = valid.replace(
+            valid.splitlines()[1], historical.splitlines()[1], 1)
+        with self.assertRaisesRegex(ValueError, 'mixed historical'):
+            vm.verify_refresh_profile_records(mixed, 'hidden-visible')
+
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
                                    '--profile-refresh-stages'])
@@ -141,44 +175,100 @@ class VmRunnerTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 vm.parse_arguments(invalid)
 
-    def test_refresh_profile_runs_same_bundle_twice_and_stops_on_failure(self):
-        output = self.root / 'diagnostic'
-        args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
-                                   '--profile-refresh-stages', '--output', str(output)])
-        args.acceptance_profile_sha256 = 'a' * 64
-        calls = []
+    def test_focused_icon_cli_selects_one_profile_and_fixed_vm_bounds(self):
+        for profile in ('debug', 'release'):
+            args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                       '--focused-icon-tests',
+                                       '--native-test-profile', profile])
+            self.assertEqual(args.native_test_profile, profile)
+            self.assertEqual(args.test_timeout_seconds, 600)
+            self.assertEqual((args.desktop_scale, args.desktop_width, args.desktop_height),
+                             (100, 1366, 768))
+            args.acceptance_profile_sha256 = 'a' * 64
+            self.assertIn('-FocusedIconTests', vm.controller_task_arguments(self.root, args))
+            command = vm.controller_invocation(self.root, args, pwsh='pwsh')
+            self.assertIn('-FocusedIconTests', command)
+            self.assertNotIn('-RefreshProfileOrder', command)
+            self.assertEqual(command[command.index('-SuiteTimeoutSeconds') + 1], '600')
+            for case in vm.FOCUSED_ICON_CASES:
+                selected = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                               '--focused-icon-tests',
+                                               '--native-test-profile', profile,
+                                               '--focused-icon-case', case])
+                selected.acceptance_profile_sha256 = 'a' * 64
+                self.assertEqual(selected.focused_icon_case, case)
+                options = vm.controller_task_arguments(self.root, selected)
+                self.assertEqual(options[options.index('-FocusedIconCase') + 1], case)
+        for invalid in (
+            ['--ssh-host', 'prepared-vm', '--native-test-profile', 'debug'],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests'],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
+             '--native-test-profile', 'release', '--profile-refresh-stages'],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
+             '--native-test-profile', 'debug', '--task-kind', 'ui'],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
+             '--native-test-profile', 'debug', '--acceptance-profile-id', vm.V1_PROFILE_ID],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
+             '--native-test-profile', 'debug', '--test-timeout-seconds', '601'],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-case',
+             vm.FOCUSED_ICON_CASES[0]],
+            ['--ssh-host', 'prepared-vm', '--focused-icon-tests',
+             '--native-test-profile', 'debug', '--focused-icon-case', 'arbitrary_test'],
+        ):
+            with self.subTest(invalid=invalid), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                vm.parse_arguments(invalid)
 
-        def build(_repo, bundle, _tooling, *, refresh_profile):
-            self.assertTrue(refresh_profile)
-            bundle.mkdir()
-            (bundle / 'bundle.json').write_text('{}')
-            (bundle / 'binary.exe').write_bytes(b'one immutable binary')
-            return {'source_sha': 'b' * 40, 'test_binaries': [
-                {'name': 'darknamer_app', 'file': 'binary.exe',
-                 'sha256': vm.sha256(bundle / 'binary.exe')}],
-                'application': self.app}
+    def test_refresh_profile_passes_share_frozen_bundle_and_stop_on_first_failure(self):
+        for failure_pass, expected_statuses in (
+                (1, ['failed']), (2, ['passed', 'failed']),
+                (None, ['passed', 'passed'])):
+            with self.subTest(failure_pass=failure_pass):
+                output = self.root / ('diagnostic-' + str(failure_pass))
+                args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                           '--profile-refresh-stages', '--output', str(output)])
+                args.acceptance_profile_sha256 = 'a' * 64
+                calls = []
 
-        def controller(attempt, selected, *_unused):
-            calls.append((selected.refresh_profile_order,
-                          vm.sha256(attempt / 'binary.exe')))
-            if len(calls) == 2:
-                raise RuntimeError('second pass failed')
+                def build(_repo, bundle, _tooling, *, refresh_profile):
+                    self.assertTrue(refresh_profile)
+                    bundle.mkdir()
+                    (bundle / 'bundle.json').write_text('{}')
+                    (bundle / 'binary.exe').write_bytes(b'one immutable binary')
+                    (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
+                    return {'source_sha': 'b' * 40, 'test_binaries': [
+                        {'name': 'darknamer_app', 'file': 'binary.exe',
+                         'sha256': vm.sha256(bundle / 'binary.exe')}],
+                        'application': {'file': 'DarkReNamer.exe',
+                                        'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
 
-        with (mock.patch.object(vm, 'prepare_transport', return_value=(output, None, 'pwsh')),
-              mock.patch.object(vm, 'build_bundle', side_effect=build),
-              mock.patch.object(vm, 'clean_source_identity',
-                                return_value=(REPOSITORY_ROOT, 'b' * 40)),
-              mock.patch.object(vm, 'run_controller', side_effect=controller),
-              mock.patch.object(vm, 'verify_refresh_profile_result',
-                                return_value={'status': 'passed'}),
-              mock.patch.object(vm, 'read_json_strict', return_value={}),
-              redirect_stderr(io.StringIO())):
-            self.assertEqual(vm.run_refresh_profile(REPOSITORY_ROOT, args, None), 1)
-        self.assertEqual([row[0] for row in calls],
-                         list(vm.REFRESH_PROFILE_ORDERS))
-        self.assertEqual(calls[0][1], calls[1][1])
-        attempts = json.loads((output / 'attempts.json').read_text())
-        self.assertEqual([row['status'] for row in attempts], ['passed', 'failed'])
+                def controller(attempt, selected, *_unused):
+                    calls.append((selected.refresh_profile_order,
+                                  vm.sha256(attempt / 'binary.exe'),
+                                  vm.sha256(attempt / 'DarkReNamer.exe')))
+                    if len(calls) == failure_pass:
+                        raise RuntimeError('injected pass failure')
+
+                with (mock.patch.object(vm, 'prepare_transport', return_value=(output, None, 'pwsh')),
+                      mock.patch.object(vm, 'build_bundle', side_effect=build),
+                      mock.patch.object(vm, 'clean_source_identity',
+                                        return_value=(REPOSITORY_ROOT, 'b' * 40)),
+                      mock.patch.object(vm, 'run_controller', side_effect=controller),
+                      mock.patch.object(vm, 'verify_refresh_profile_result',
+                                        return_value={'status': 'passed'}),
+                      mock.patch.object(vm, 'read_json_strict', return_value={}),
+                      redirect_stderr(io.StringIO())):
+                    self.assertEqual(vm.run_refresh_profile(REPOSITORY_ROOT, args, None),
+                                     int(failure_pass is not None))
+                self.assertEqual([row[0] for row in calls],
+                                 list(vm.REFRESH_PROFILE_ORDERS[:len(expected_statuses)]))
+                for name, column in (('binary.exe', 1), ('DarkReNamer.exe', 2)):
+                    self.assertEqual({row[column] for row in calls},
+                                     {vm.sha256(output / 'bundle' / name)})
+                attempts = json.loads((output / 'attempts.json').read_text())
+                self.assertEqual([row['status'] for row in attempts], expected_statuses)
+                self.assertEqual(
+                    (output / 'pass-02-visible-hidden').exists(), failure_pass != 1)
 
     def test_fixed_refresh_profile_result_requires_exact_selection_and_output(self):
         stdout = self.output_artifact('test-001.stdout.txt',
@@ -209,6 +299,151 @@ class VmRunnerTests(unittest.TestCase):
                 vm.verify_refresh_profile_result(
                     self.root, self.manifest, self.result, 'hidden-visible',
                     'ssh', None, 'a' * 64)
+
+    def test_focused_icon_result_preserves_passed_and_failed_counts(self):
+        self.manifest['test_binaries'] = [dict(self.test, name='darknamer_app')]
+        self.manifest['runner'] = self.artifact('windows-vm-guest.ps1', b'runner')
+        diagnostic = {'kind': 'focused-icon-tests', 'test_profile': 'debug',
+                      'test_filter': vm.FOCUSED_ICON_FILTER,
+                      'test_names': [vm.FOCUSED_ICON_FILTER + case
+                                     for case in vm.FOCUSED_ICON_CASES]}
+        self.manifest['diagnostic'] = diagnostic
+        def case_row(index, *, failed=False):
+            name = diagnostic['test_names'][index]
+            outcome = 'FAILED' if failed else 'ok'
+            return dict(self.test, test_name=name,
+                        status='failed' if failed else 'passed', job_cleanup=True,
+                        exit_code=101 if failed else 0,
+                        passed=0 if failed else 1, failed=1 if failed else 0,
+                        ignored=0, failure_reason='test_failed' if failed else None,
+                        stdout=self.output_artifact('focused-%d.stdout.txt' % index, (
+                            'running 1 test\ntest ' + name + ' ... {"kind":"case"}\n' +
+                            ('FAILED\n' if failed else 'ok\n') +
+                            'test result: ' + outcome + '. ' +
+                            ('0 passed; 1 failed' if failed else '1 passed; 0 failed') +
+                            '; 0 ignored; 0 measured; 357 filtered out; '
+                            'finished in 0.01s\n').encode()),
+                        stderr=self.output_artifact('focused-%d.stderr.txt' % index, b''))
+        self.result.update(diagnostic=diagnostic, gui=None,
+                           tests=[case_row(index) for index in range(4)])
+        self.result['transport'].update(task_kind='core', status='collected')
+        with (mock.patch.object(vm, 'verify_controller_cleanup'),
+              mock.patch.object(vm, '_verify_v2_result_owned_binding'),
+              mock.patch.object(vm, 'verify_transport_binding')):
+            observed = vm.verify_focused_icon_result(
+                self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.assertEqual((observed['status'], observed['passed'], observed['failed']),
+                             ('passed', 4, 0))
+            self.result['tests'] = [case_row(0), case_row(1, failed=True)]
+            self.result['status'] = 'failed'
+            observed = vm.verify_focused_icon_result(
+                self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.assertEqual((observed['status'], observed['passed'], observed['failed']),
+                             ('failed', 1, 1))
+            self.result['tests'][0]['job_cleanup'] = False
+            with self.assertRaisesRegex(ValueError, 'job cleanup'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'][0]['job_cleanup'] = True
+            self.result['tests'][1]['sha256'] = 'b' * 64
+            with self.assertRaisesRegex(ValueError, 'artifact'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'][1]['sha256'] = self.test['sha256']
+            self.result['tests'][1]['failed'] = None
+            with self.assertRaisesRegex(ValueError, 'counts'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'][1]['failed'] = True
+            with self.assertRaisesRegex(ValueError, 'counts'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'][1] = case_row(1, failed=True)
+            self.result['tests'][1]['stdout'] = self.output_artifact(
+                'focused-1.stdout.txt', b'no libtest summary\n')
+            with self.assertRaisesRegex(ValueError, 'unique libtest summary'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'] = [case_row(0), case_row(2, failed=True)]
+            with self.assertRaisesRegex(ValueError, 'artifact, counts'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'] = [case_row(0)]
+            self.result['status'] = 'passed'
+            with self.assertRaisesRegex(ValueError, 'did not finish'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.result['tests'] = [case_row(0), case_row(1, failed=True), case_row(2)]
+            self.result['status'] = 'failed'
+            with self.assertRaisesRegex(ValueError, 'execution status'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+            self.manifest['diagnostic']['test_names'].reverse()
+            self.result['diagnostic'] = self.manifest['diagnostic']
+            with self.assertRaisesRegex(ValueError, 'bundle is invalid'):
+                vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+
+    def test_single_focused_icon_case_requires_exact_name_and_one_execution(self):
+        case = vm.FOCUSED_ICON_CASES[2]
+        name = vm.FOCUSED_ICON_FILTER + case
+        diagnostic = {'kind': 'focused-icon-tests', 'test_profile': 'release',
+                      'test_filter': vm.FOCUSED_ICON_FILTER, 'test_name': name}
+        self.manifest.update(
+            test_binaries=[dict(self.test, name='darknamer_app')],
+            runner=self.artifact('windows-vm-guest.ps1', b'runner'),
+            diagnostic=diagnostic)
+        self.result.update(diagnostic=diagnostic, gui=None, tests=[dict(
+            self.test, test_name=name, status='passed', job_cleanup=True, exit_code=0,
+            passed=1, failed=0, ignored=0,
+            stdout=self.output_artifact('single.stdout.txt', (
+                'running 1 test\ntest ' + name + ' ... ok\n'
+                'test result: ok. 1 passed; 0 failed; 0 ignored; '
+                '0 measured; 357 filtered out; finished in 0.01s\n').encode()),
+            stderr=self.output_artifact('single.stderr.txt', b''))])
+        self.result['transport'].update(task_kind='core', status='collected')
+        with (mock.patch.object(vm, 'verify_controller_cleanup'),
+              mock.patch.object(vm, '_verify_v2_result_owned_binding'),
+              mock.patch.object(vm, 'verify_transport_binding')):
+            def verify():
+                return vm.verify_focused_icon_result(
+                    self.root, self.manifest, self.result, 'ssh', None, 'a' * 64)
+
+            self.assertEqual((verify()['status'], verify()['passed']), ('passed', 1))
+            wrong_name = vm.FOCUSED_ICON_FILTER + vm.FOCUSED_ICON_CASES[0]
+            self.result['tests'][0]['stdout'] = self.output_artifact(
+                'single.stdout.txt', (
+                    'running 1 test\ntest ' + wrong_name + ' ... ok\n'
+                    'test result: ok. 1 passed; 0 failed; 0 ignored; '
+                    '0 measured; 357 filtered out; finished in 0.01s\n').encode())
+            with self.assertRaisesRegex(ValueError, 'selection or test counts'):
+                verify()
+            self.result['tests'][0].update(passed=2, failed=0)
+            self.result['tests'][0]['stdout'] = self.output_artifact(
+                'single.stdout.txt', (
+                    'running 2 tests\ntest ' + name + ' ... ok\n'
+                    'test ' + wrong_name + ' ... ok\n'
+                    'test result: ok. 2 passed; 0 failed; 0 ignored; '
+                    '0 measured; 356 filtered out; finished in 0.01s\n').encode())
+            with self.assertRaisesRegex(ValueError, 'selection or test counts'):
+                verify()
+            self.result['tests'][0].update(status='failed', exit_code=101,
+                                           passed=0, failed=1,
+                                           failure_reason='test_failed')
+            self.result['status'] = 'failed'
+            self.result['tests'][0]['stdout'] = self.output_artifact(
+                'single.stdout.txt', (
+                    'running 1 test\ntest ' + name + ' ... {"kind":"case"}\n'
+                    'thread panicked at date assertion\nFAILED\n'
+                    'test result: FAILED. 0 passed; 1 failed; 0 ignored; '
+                    '0 measured; 357 filtered out; finished in 0.01s\n').encode())
+            observed = verify()
+            self.assertEqual((observed['status'], observed['passed'], observed['failed']),
+                             ('failed', 0, 1))
+            self.manifest['diagnostic']['test_name'] = vm.FOCUSED_ICON_FILTER + 'not_allowed'
+            self.result['diagnostic'] = self.manifest['diagnostic']
+            with self.assertRaisesRegex(ValueError, 'bundle is invalid'):
+                verify()
 
     def powershell_function(self, name):
         pwsh = shutil.which('pwsh')
@@ -1179,29 +1414,34 @@ class VmRunnerTests(unittest.TestCase):
     def build_source_bundle(self, repo, target_directory, output, status_values=None,
                             source_values=None, outputs=None, target_directories=None,
                             target_permissions=None, reported_artifact_path=None,
-                            reported_metadata_target=None):
+                            reported_metadata_target=None, focused_profile=None,
+                            focused_case=None,
+                            commands=None):
         outputs = outputs if outputs is not None else {}
         target_directories = target_directories if target_directories is not None else []
         target_permissions = target_permissions if target_permissions is not None else []
 
         def run(command, **kwargs):
+            if commands is not None:
+                commands.append(command)
             target_root = Path(kwargs['env']['CARGO_TARGET_DIR'])
             target_directories.append(target_root)
             target_permissions.append(stat.S_IMODE(target_root.stat().st_mode))
             if command[1:3] == ['xwin', 'test']:
-                artifact = target_root / vm.TARGET / 'debug' / 'deps' / 'suite.exe'
+                profile = 'release' if focused_profile == 'release' else 'debug'
+                artifact = target_root / vm.TARGET / profile / 'deps' / 'suite.exe'
                 artifact.parent.mkdir(parents=True)
                 artifact.write_bytes(b'test executable bytes')
                 outputs['test'] = artifact
                 compiler_artifact = {
                     'reason': 'compiler-artifact', 'profile': {'test': True},
-                    'target': {'name': 'suite'},
+                    'target': {'name': 'darknamer_app' if focused_profile else 'suite'},
                     'executable': str(reported_artifact_path or artifact),
                 }
                 kwargs['stdout'].write(json.dumps(compiler_artifact) + '\n')
             elif command[1:3] == ['xwin', 'build']:
                 application = target_root / vm.TARGET / 'release' / 'DarkReNamer.exe'
-                application.parent.mkdir(parents=True)
+                application.parent.mkdir(parents=True, exist_ok=True)
                 application.write_bytes(b'application executable bytes')
                 outputs['application'] = application
             return subprocess.CompletedProcess(command, 0)
@@ -1222,7 +1462,33 @@ class VmRunnerTests(unittest.TestCase):
 
         with mock.patch.object(vm.subprocess, 'run', side_effect=run), \
              mock.patch.object(vm.subprocess, 'check_output', side_effect=check_output):
-            return vm.build_bundle(repo, output)
+            return vm.build_bundle(repo, output, focused_profile=focused_profile,
+                                   focused_case=focused_case)
+
+    def test_focused_icon_bundle_builds_only_selected_app_library_profile(self):
+        for profile in ('debug', 'release'):
+            with self.subTest(profile=profile):
+                repo, target, _, _, _ = self.source_build_inputs('-focused-' + profile)
+                commands = []
+                manifest = self.build_source_bundle(
+                    repo, target, self.root / ('focused-' + profile),
+                    focused_profile=profile, commands=commands)
+                self.assertEqual(manifest['diagnostic'], {
+                    'kind': 'focused-icon-tests', 'test_profile': profile,
+                    'test_filter': vm.FOCUSED_ICON_FILTER,
+                    'test_names': [vm.FOCUSED_ICON_FILTER + case
+                                   for case in vm.FOCUSED_ICON_CASES]})
+                self.assertEqual([row['name'] for row in manifest['test_binaries']],
+                                 ['darknamer_app'])
+                test_command = commands[0]
+                self.assertIn('--lib', test_command)
+                self.assertNotIn('--workspace', test_command)
+                self.assertEqual('--release' in test_command, profile == 'release')
+                selected = self.build_source_bundle(
+                    repo, target, self.root / ('selected-' + profile),
+                    focused_profile=profile, focused_case=vm.FOCUSED_ICON_CASES[2])
+                self.assertEqual(selected['diagnostic']['test_name'],
+                                 vm.FOCUSED_ICON_FILTER + vm.FOCUSED_ICON_CASES[2])
 
     def test_source_bundle_manifest_uses_frozen_input_digests(self):
         repo, target, artifact, application, script_names = self.source_build_inputs()

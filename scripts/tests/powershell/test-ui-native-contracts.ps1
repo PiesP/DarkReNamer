@@ -508,4 +508,66 @@ if (-not (0 -le $resetAt -and $resetAt -lt $beginAt -and $beginAt -lt $sendAt -a
     $sendAt -lt $endAt -and $endAt -lt $errorAt -and $errorAt -lt $resourcesAt)) {
     throw 'Performance native probe timestamp or last-error capture order changed.'
 }
+$iconStatus = [ordered]@{ version=1; session='41'; generation='2'; bootstrap=1;
+    queued=0; inflight=0; undrained=0; unresolved_rows=0; cursor=1000;
+    settled=$true; worker_joined=$false; reconcile_rows=0; batch_ack=0;
+    status_revision='8'; demand_exhausted=$true; demand_remaining=0; model_revision='2';
+    unavailable_or_retiring=$false }
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $true 'Stable icon terminal state'
+$iconStatus.unavailable_or_retiring = $true
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'unavailable or retired'
+$iconStatus.worker_joined = $true
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'unavailable or retired'
+$iconStatus.unavailable_or_retiring = $false
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $false 'Joined worker is not active terminal state'
+$iconStatus.worker_joined = $false
+$iconStatus.demand_remaining = 1
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $false 'Unexhausted icon demand'
+$iconStatus.demand_remaining = 0
+$iconStatus.queued = 65
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'bounded version-one contract'
+$churnNames = @(0..999 | ForEach-Object { Get-ObserverIconChurnFileName -Index $_ })
+Assert-Equal @($churnNames | ForEach-Object { [IO.Path]::GetExtension($_) } | Sort-Object -Unique).Count 300 'Interleaved extension-class count'
+Assert-Equal $churnNames[0] 'extension-0000.e000' 'First unique class'
+Assert-Equal $churnNames[1] 'recurring-0001.txt' 'Interleaved recurring class'
+Assert-Equal $churnNames[596] 'extension-0596.e298' 'Last unique class'
+Assert-Equal $churnNames[999] 'recurring-0999.txt' 'Last recurring class'
+$sortedChurnNames = [string[]]$churnNames.Clone()
+[Array]::Sort($sortedChurnNames, [StringComparer]::OrdinalIgnoreCase)
+Assert-Equal $sortedChurnNames[0] 'extension-0000.e000' 'First sorted churn row'
+Assert-Equal $sortedChurnNames[298] 'extension-0596.e298' 'Last sorted unique class'
+Assert-Equal $sortedChurnNames[299] 'recurring-0001.txt' 'First sorted recurring class'
+Assert-Equal $sortedChurnNames[499] 'recurring-0401.txt' 'Observed middle sorted churn row'
+Assert-Equal $sortedChurnNames[999] 'recurring-0999.txt' 'Last sorted churn row'
+Add-Type -TypeDefinition @'
+using System;
+public static class IconStatusExceptionFixture {
+    public static void Transient() {
+        throw new InvalidOperationException("Icon status query did not produce a stable published snapshot.");
+    }
+    public static void ForeignText() {
+        throw new InvalidOperationException("Icon status query timed out or failed.");
+    }
+    public static void ForeignType() {
+        throw new ArgumentException("Icon status query did not produce a stable published snapshot.");
+    }
+}
+'@
+foreach ($case in @(
+    @{ name='Transient'; expected=$true },
+    @{ name='ForeignText'; expected=$false },
+    @{ name='ForeignType'; expected=$false })) {
+    try { [IconStatusExceptionFixture]::($case.name)() }
+    catch {
+        Assert-Equal (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_) `
+            $case.expected "Exact wrapped icon query classification: $($case.name)"
+        continue
+    }
+    throw "Expected a wrapped C# failure: $($case.name)"
+}
+try { throw [InvalidOperationException]::new('Icon status query did not produce a stable published snapshot.') }
+catch {
+    Assert-Equal (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_) $false `
+        'Unwrapped message is not a trusted transient query'
+}
 Write-Output 'UI native/input behavior contracts passed.'

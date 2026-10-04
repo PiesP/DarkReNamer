@@ -357,10 +357,17 @@ Each pass emits stage timings and counts for ordinary 100/1,000/10,000-row
 refreshes, an unchanged 10,000-row refresh, proposal edits/resets, and long
 paths with auxiliary columns hidden and visible. The native test checks row
 counts, representative text in all eight ListView columns even when auxiliary
-columns are hidden, icons, and selection preservation. `row_values_inclusive_ns`
-contains `timestamps_nested_ns` and `shell_nested_ns`;
-`row_values_exclusive_ns` excludes both, so do not add the inclusive and nested
-times. `scenario_envelope_ns` may include fixture changes and assertions
+columns are hidden, icons, and selection preservation. The current test emits
+`refresh-stages-icon-async-test-build` schema 2 with
+`icon_worker_attached=false`: this is a detached UI staging measurement. Its
+`row_values_inclusive_ns` contains `timestamps_nested_ns` and
+`ui_shell_nested_ns`; `row_values_exclusive_ns` excludes both. The UI Shell
+timings and call count, plus icon submissions and drains, must be zero.
+`render_icon_cache_hits` and `render_icon_cache_misses` describe staging cache
+lookups, not worker Shell calls. Historical `refresh-stages-test-build` records
+retain their original synchronous Shell/cache meaning; the validator keeps
+the two schemas separate and rejects mixed records. Do not add inclusive and
+nested times. `scenario_envelope_ns` may include fixture changes and assertions
 outside the stage clocks; it is not a pure refresh duration.
 `logical_staged_payload_bytes_peak` counts UTF-16
 payloads staged by the refresh path; it is not process memory or an allocator
@@ -368,12 +375,39 @@ measurement. The test-only clocks and counters do not measure the production
 EXE's response time.
 
 The synthetic metadata snapshots exclude import read/decode, admission,
-delivery, and observer polling. Shell lookup remains synchronous, and this
-diagnostic's observed Shell calls do not establish a bound for a slow provider;
-moving lookup to a worker is outside this procedure. For sampled production
-timing and resource use, run the separate unchanged
+delivery, and observer polling. This detached native test does not measure
+worker Shell latency, icon settlement, or the production EXE's async path.
+For sampled production timing and resource use, run the separate unchanged
 [fixed performance sample](#fixed-performance-sample). Neither diagnostic is a
 release acceptance verdict.
+
+### Icon worker native functional tests
+
+After the icon worker's fixed native tests are present in a clean source commit,
+run each build profile on the prepared VM with a separate private output root:
+
+```bash
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-icon-tests --native-test-profile debug \
+  --output /absolute/private/new-icon-debug-attempt
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-icon-tests --native-test-profile release \
+  --output /absolute/private/new-icon-release-attempt
+```
+
+The selector requires source-built core mode, the prepared 1366×768 96-DPI
+managed RDP desktop, and the existing v2 owned-resource cleanup profile. It
+builds one app-library test executable for the selected profile and one
+production executable, then runs the four fixed non-ignored `icon_worker_*`
+cases in separate owned processes and Jobs using the same frozen executable
+bytes. The run has one 600-second suite deadline and the existing aggregate
+output bound. Each case must report its exact name and one executed test;
+execution stops at the first failed case and retains its actual libtest counts.
+For a single diagnostic case, add `--focused-icon-case` with one of the four
+fixed case suffixes reported by `--help`. This runs exactly one process. The
+regular native suite and the separate refresh-stage diagnostic retain their
+existing selections. These test-build observations do not measure production
+icon-settlement or replace the uninstrumented performance sample.
 
 ### VM-Automated campaign development
 
@@ -672,6 +706,83 @@ hypothesis and fixed count; two observations do not establish significance or
 tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
+
+### Icon settlement diagnostic
+
+After the native icon worker passes its functional checks, run the separate
+candidate-only production-EXE diagnostic on the prepared 1366×768, 96-DPI VM.
+Prepare a source-built bundle and pin its `application.sha256` as described in
+[the fixed performance sample](#fixed-performance-sample):
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic icon-settlement \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/native-bundle \
+  --expected-prepared-application-sha256 <frozen-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-icon-settlement-attempt
+```
+
+The `icon-settlement-v1-1366x768-96-text100` receipt uses its own
+`async-status-v1` endpoint method and raw scope. It imports 1,000 ordinary
+`.txt` rows, clears them, then imports 1,000 rows interleaving 299 unique
+extensions with recurring `.txt` (300 classes total). It records the existing
+Open-to-UIA-row-count data-ready endpoint separately from the later observed
+icon-settled endpoint. A pointer-free, versioned main-window scalar query is
+sampled every 100 ms within the existing 600-second observer limit. Settlement
+requires an attached system image list, zero unresolved rows, exhausted demand,
+empty queued/in-flight/completion/reconciliation state and the same full
+generation in consecutive stable snapshots. Both pre-close snapshots must also
+show a nonzero worker session, `unavailable_or_retiring=false`, and
+`worker_joined=false`. A missing query, failed bootstrap, retired or unavailable
+worker, changed session or deadline produces a failed attempt, not a baseline fallback.
+Terminal negative Shell results may legitimately remain no-image; settlement
+means no unresolved demand, not a visible glyph on every row.
+The verifier binds the source, prepared EXE, process ID and start time, exact
+normal exit, and the existing v2 owned Job and observer cleanup. An ordinary
+fast close may retire the HWND before an external joined-state sample; such a
+receipt labels worker join as a source-contract inference. Controlled native
+close tests provide the separate direct join proof.
+
+For the pre-worker synchronous source, use the same `icon-settlement`
+diagnostic, V2 owned-resource profile, prepared-bundle pin, display, and two
+fresh fixture phases, but select its separate baseline endpoint explicitly:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic icon-settlement \
+  --icon-endpoint-method synchronous-row-count-upper-bound-v1 \
+  --baseline-product-source-sha b152761010b16ef74e2a3765241a253778b88e0b \
+  --expected-run-source-sha <frozen-tooling-only-commit-sha> \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/native-baseline-bundle \
+  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-icon-baseline-attempt
+```
+
+The baseline has run ID
+`icon-settlement-sync-upper-bound-v1-1366x768-96-text100` and a distinct raw
+scope. Its `synchronous_lookup_completion_upper_bound_ms` equals the existing
+Open-to-UIA-row-count `data_ready_ms`. The pre-worker source finishes synchronous
+Shell icon lookup before adding each row, so RowCount is a source-derived upper
+bound for lookup completion. It does not observe actual icon visibility,
+workers, queues, or joins and emits no status snapshots or fabricated zero
+counters. The shared plan's 100-ms status poll applies only to the async method.
+The baseline method is never inferred when the async status query is
+missing. The command requires the original product reference and the exact
+clean tooling-only run SHA; the prepared EXE hash and source are pinned before
+VM execution. A separate source audit must establish that the tooling-only
+checkout's product Rust, Cargo and toolchain blobs match the original product
+reference; the manifest's asserted reference does not perform that audit.
+Compare the baseline upper bound and candidate observed endpoint descriptively,
+recording their different methods and any censored attempts. These samples do
+not establish a causal or statistical speed claim.
+
+Keep both endpoint methods separate from the unchanged A/B/B/A
+`performance-sample-v2` runs; the async settlement wait changes later workload and cache
+conditions. Neither diagnostic is a release acceptance verdict.
 
 The painting policy keeps control outlines, default outlines, and decorative
 hairlines one physical pixel. Focus inset, pressed displacement, and existing

@@ -9,7 +9,11 @@
         [string] $Stderr,
 
         [switch] $AllowZeroTests,
-        [switch] $RefreshProfile
+        [switch] $RefreshProfile,
+        [switch] $FocusedIconTests,
+        [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+            'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+        [string] $FocusedIconCase
     )
 
     $pattern = '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out;(?:[^\r\n]*)\r?$'
@@ -22,12 +26,27 @@
     $failed = [int]::Parse($summary.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
     $ignored = [int]::Parse($summary.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture)
     $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
-    if (-not $RefreshProfile -and $filtered -ne 0) {
+    if ($RefreshProfile -and $FocusedIconTests) {
+        throw 'A Rust test summary cannot use two selectors.'
+    }
+    if ($FocusedIconCase -and -not $FocusedIconTests) {
+        throw 'A single focused icon summary requires its fixed selector.'
+    }
+    if ($FocusedIconTests -and -not $FocusedIconCase) {
+        throw 'Focused icon summary requires one fixed exact case.'
+    }
+    if (-not $RefreshProfile -and -not $FocusedIconTests -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
     }
-    if ($RefreshProfile -and ($summary.Groups[1].Value -cne 'ok' -or
-        $passed -ne 1 -or $failed -ne 0 -or $ignored -ne 0 -or $filtered -lt 1)) {
-        throw 'The fixed refresh diagnostic must select exactly one passing ignored test.'
+    if ($RefreshProfile -and ($passed + $failed -ne 1 -or
+        $ignored -ne 0 -or $filtered -lt 1 -or
+        ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
+        throw 'The fixed refresh diagnostic must select exactly one ignored test.'
+    }
+    if ($FocusedIconTests -and ($passed + $failed -ne 1 -or
+        $ignored -ne 0 -or $filtered -lt 1 -or
+        ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
+        throw 'Focused icon selection must execute exactly one unignored test.'
     }
     if (-not $AllowZeroTests -and ($passed + $failed + $ignored) -eq 0) {
         throw 'A non-main Rust test harness reported zero tests.'
@@ -2099,9 +2118,17 @@ function Invoke-RustTestBinary {
         [Parameter(Mandatory)][int] $Index,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [ValidateSet('', 'hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+        [switch] $FocusedIconTests,
+        [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+            'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+        [string] $FocusedIconCase,
         [ValidateRange(0, 8388608)][long] $OutputBudgetBytes =
             $script:VmTestOutputAggregateLimitBytes
     )
+
+    if ([bool]$FocusedIconTests -ne [bool]$FocusedIconCase) {
+        throw 'Focused icon launch requires one fixed exact case.'
+    }
 
     $stdoutLeaf = 'test-{0:D3}.stdout.txt' -f $Index
     $stderrLeaf = 'test-{0:D3}.stderr.txt' -f $Index
@@ -2125,6 +2152,10 @@ function Invoke-RustTestBinary {
         cleanup_failure_reason = $null
         active_processes_at_primary_exit = $null
         process_job_snapshot = $null
+    }
+    if ($FocusedIconCase) {
+        $row['test_name'] =
+            'windows::list_view::native_tests::icon_worker_' + $FocusedIconCase
     }
     $processState = [pscustomobject]@{ process = $null }
     try {
@@ -2156,6 +2187,9 @@ function Invoke-RustTestBinary {
                 -Action {
                 $testArguments = if ($RefreshProfileOrder) {
                     '--exact windows::list_view::native_tests::profile_refresh_stages --ignored --nocapture --test-threads=1'
+                } elseif ($FocusedIconCase) {
+                    '--exact windows::list_view::native_tests::icon_worker_' +
+                        $FocusedIconCase + ' --nocapture --test-threads=1'
                 } else { '--nocapture --test-threads=1' }
                 $ownedProcess = Start-JobBoundProcess `
                     -FilePath $binaryPath `
@@ -2186,11 +2220,16 @@ function Invoke-RustTestBinary {
                 $stdoutText = [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)
                 $stderrText = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
                 try {
+                    $focusedCaseArguments = @{}
+                    if ($FocusedIconCase) {
+                        $focusedCaseArguments['FocusedIconCase'] = $FocusedIconCase
+                    }
                     $summary = Read-RustTestSummary `
                         -Stdout $stdoutText `
                         -Stderr $stderrText `
                         -AllowZeroTests:($Test.name -ceq 'DarkReNamer') `
-                        -RefreshProfile:([bool]$RefreshProfileOrder)
+                        -RefreshProfile:([bool]$RefreshProfileOrder) `
+                        -FocusedIconTests:$FocusedIconTests @focusedCaseArguments
                     $row.passed = $summary.passed
                     $row.failed = $summary.failed
                     $row.ignored = $summary.ignored

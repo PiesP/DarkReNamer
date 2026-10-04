@@ -133,6 +133,32 @@ try {
             [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localData, 'Process')
             $seed = New-ObserverAppearanceColumnPreference -RuntimeRoot $isolated
             Assert-Equal $seed.source 'isolated-persisted-user-settings' 'Appearance preference source'
+            if ($IsWindows) {
+                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                $appRoot = Join-Path $localData 'DarkReNamer'
+                Assert-ObserverAppearancePrivateAppDirectory -Path $appRoot -UserSid $userSid
+                Assert-Fails {
+                    New-ObserverAppearancePrivateAppDirectory -Parent $localData
+                } 'already exists'
+                $actual = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($appRoot))
+                Assert-Equal ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value) `
+                    $userSid.Value 'Appearance app directory current-user owner'
+                Assert-Equal $actual.AreAccessRulesProtected $true 'Appearance app directory protected DACL'
+
+                $unsafe = New-PrivateDirectory -Parent $localData -Leaf 'generic-unsafe-app-dir'
+                $unsafeSecurity = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($unsafe))
+                [void]$unsafeSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new('S-1-1-0'),
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                        [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow))
+                [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($unsafe), $unsafeSecurity)
+                Assert-Fails {
+                    Assert-ObserverAppearancePrivateAppDirectory -Path $unsafe -UserSid $userSid
+                } 'owner or DACL differs from production'
+            }
             Assert-Equal (Assert-ObserverAppearanceColumnPreference -Path $seed.path -ExpectedBytes $bytes) $seed.sha256 'Unchanged seeded preference'
             $changed = [byte[]]$bytes.Clone(); $changed[14] = 0
             [IO.File]::WriteAllBytes($seed.path, $changed)

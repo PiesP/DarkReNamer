@@ -361,7 +361,12 @@ The following bounded design dispositions retain existing behavior:
 - **CallbackState / CallbackStateLease: retain the current protocol.** A sole
   UI-thread lease rejects nested borrowing; destruction removes publication and
   defers exactly one reclamation until that lease ends. Retirement and color
-  sidecars remain disjoint from the leased value. An Rc-backed owner with
+  sidecars remain disjoint from the leased value. An optional UI-thread run hold
+  can defer reclamation further while a tracked worker is retiring: an
+  unpublished slot remains unleaseable after either the callback lease or hold
+  ends, and is freed exactly once after both end. This keeps the AppState's
+  last-dropped runtime lock alive until the worker has actually joined without
+  moving a native state pointer to that worker. An Rc-backed owner with
   RefCell::try_borrow_mut could replace borrowing/reclamation internals, but must
   also retain a strong owner before callback dispatch, remove publication before
   destruction, and keep sidecars independently accessible during a value borrow.
@@ -435,6 +440,35 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+`windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
+worker initializes and balances COM on that same STA, pumps its own message
+queue between Shell calls, and never receives `AppState`, HWND, model pointers,
+or file-mutation authority. `SHGetFileInfoW` reads only owned, terminated and
+MAX_PATH-bounded representative text; the returned process-shared system image
+list is validated read-only and carried as a scalar borrowed identity, never
+destroyed or written. The UI alone attaches that list and applies checked icon
+indices to current rows. A short wake gate serializes pointer-free posts against
+terminal thread-ID retirement, while its request mutex is never held across a
+Shell call. `WM_DESTROY` can revoke requests through a disjoint callback sidecar
+without borrowing an already leased `AppState`; the run-scope reclaim hold keeps
+the runtime lock alive until the sole JoinHandle is observed finished and joined.
+The UI keeps pumping during a blocked provider call; no hard Shell timeout is
+claimed.
+
+The native shutdown fixture owns one production popup window and its reclaim
+hold while a Shell class query, import read, Apply result, and settings save
+wait on independent test barriers. Its callback-free Apply timer is bound to
+that live HWND and retired by the same emergency finalizer as production. The
+fixture invokes the production message-loop-error handler directly; it does
+not represent an OS-issued `GetMessageW` error. Each barrier is released before
+the tracked icon join and before the window or runtime lock can be reclaimed.
+
+The ignored refresh-stage diagnostic keeps its original detached ListView
+fixture. Its versioned asynchronous-icon JSON measures UI text, issue and
+native-row staging only; it has no icon worker and cannot establish Shell
+latency, icon settlement, or production responsiveness. Those require the
+tracked-worker native cases and source-bound product observations.
+
 The ignored icon-delay diagnostic in `windows/list_view.rs` installs a subclass
 only on its test-owned HWND. Its boxed context remains on the owning UI thread
 through synchronous destruction; `WM_NCDESTROY` removes the exact subclass and
@@ -442,8 +476,8 @@ records retirement. A guard handles fallible probe-thread creation and retains
 the context on uncertain native cleanup. The independent thread receives only
 a copied HWND and performs a bounded `WM_NULL` probe; it finishes before the
 owner destroys the window. Callback failures are contained before crossing the
-native ABI. This test injects a fixed delay into the cache lookup seam, without
-installing a provider or changing production lookup behavior. Its timings are
+native ABI. This historical test injects a fixed delay into its test-only cache
+lookup seam, without installing a provider. Its timings are
 test-build diagnostics, separate from production executable measurements.
 
 Button and decorative separator painting uses pure bounded rectangles. Interactive

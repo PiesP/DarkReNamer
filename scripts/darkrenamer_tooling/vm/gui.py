@@ -70,6 +70,16 @@ RUNS = (
 )
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+ICON_SETTLEMENT_MODE = "icon-settlement"
+ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
+ICON_SETTLEMENT_METHOD = "async-status-v1"
+ICON_BASELINE_RUN_ID = "icon-settlement-sync-upper-bound-v1-1366x768-96-text100"
+ICON_BASELINE_METHOD = "synchronous-row-count-upper-bound-v1"
+ICON_BASELINE_PRODUCT_SOURCE_SHA = "b152761010b16ef74e2a3765241a253778b88e0b"
+ICON_SETTLEMENT_PLAN = {
+    "ordinary_rows": 1000, "churn_rows": 1000, "extension_classes": 300,
+    "poll_interval_ms": 100, "maximum_seconds": 600,
+}
 PERFORMANCE_ORDERS = ("hidden-visible", "visible-hidden")
 PERFORMANCE_PLAN = {
     "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
@@ -86,6 +96,18 @@ def performance_run(order: str = "hidden-visible") -> dict:
     return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
             "text_scale_percent": 100, "long_path_order": order}
+
+
+def icon_settlement_run(endpoint_method: str = ICON_SETTLEMENT_METHOD) -> dict:
+    require(endpoint_method in {ICON_SETTLEMENT_METHOD, ICON_BASELINE_METHOD},
+            "Icon settlement endpoint method is unsupported.")
+    return {"run_id": ICON_BASELINE_RUN_ID if endpoint_method == ICON_BASELINE_METHOD
+            else ICON_SETTLEMENT_RUN_ID, "mode": ICON_SETTLEMENT_MODE,
+            "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
+            "text_scale_percent": 100, "acceptance_profile_id": V2_PROFILE_ID,
+            "endpoint_method": endpoint_method,
+            **({"baseline_product_source_sha": ICON_BASELINE_PRODUCT_SOURCE_SHA}
+               if endpoint_method == ICON_BASELINE_METHOD else {})}
 
 
 def appearance_pair_run(width: int, height: int, dpi: int, *,
@@ -653,10 +675,16 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                    reference: dict | None = None,
                    prepared_application_sha256: str | None = None) -> dict:
     require(prepared_application_sha256 is None or
-            (run["mode"] == "performance-sample" and
+            (run["mode"] in {"performance-sample", ICON_SETTLEMENT_MODE} and
              SHA256.fullmatch(prepared_application_sha256) is not None),
             "Prepared bundle provenance is restricted to pinned performance runs.")
+    require(run["mode"] != ICON_SETTLEMENT_MODE or prepared_application_sha256 is not None,
+            "Icon settlement requires a pinned prepared executable.")
     _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
+    if run["mode"] == ICON_SETTLEMENT_MODE and run["endpoint_method"] == ICON_BASELINE_METHOD:
+        require(run["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA and
+                run["expected_run_source_sha"] == inputs["source_sha"],
+                "Synchronous baseline reference or exact frozen run source differs.")
     require(prepared_application_sha256 is None or
             inputs["artifacts"]["application"]["sha256"] == prepared_application_sha256,
             "Prepared application pin differs from copied run input.")
@@ -682,12 +710,18 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
             **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
                if run["mode"] == "performance-sample" else {}),
+            **({"settlement_plan": ICON_SETTLEMENT_PLAN,
+                "endpoint_method": run["endpoint_method"],
+                **({"baseline_product_source_sha": run["baseline_product_source_sha"]}
+                   if run["endpoint_method"] == ICON_BASELINE_METHOD else {})}
+               if run["mode"] == ICON_SETTLEMENT_MODE else {}),
         },
         "expected_guest_platform": "windows",
         "command": [
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
-            *(["--diagnostic", run["mode"]] if run["mode"] in {"appearance-pair", "performance-sample"} else []),
+            *(["--diagnostic", run["mode"]] if run["mode"] in
+              {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE} else []),
             *(["--performance-column-order", run["long_path_order"]]
               if run["mode"] == "performance-sample" else []),
             *(["--prepared-bundle-root", "<external-prepared-bundle-root>",
@@ -697,13 +731,18 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
             *(["--acceptance-profile-id", V2_PROFILE_ID] if run.get("acceptance_profile_id") == V2_PROFILE_ID else []),
+            *(["--icon-endpoint-method", ICON_BASELINE_METHOD,
+               "--baseline-product-source-sha", ICON_BASELINE_PRODUCT_SOURCE_SHA,
+               "--expected-run-source-sha", run["expected_run_source_sha"]]
+              if run["mode"] == ICON_SETTLEMENT_MODE and
+              run["endpoint_method"] == ICON_BASELINE_METHOD else []),
             *(["--configuration-set", "focused"] if run["mode"] == "appearance-pair"
               and run["run_id"] != APPEARANCE_PAIR_ID else []),
         ],
     }
     if reference is not None:
         result["full_context_reference"] = reference
-    if run["mode"] == "appearance-pair":
+    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE}:
         result["acceptance_profile_id"] = run.get("acceptance_profile_id", V1_PROFILE_ID)
         if result["acceptance_profile_id"] == V2_PROFILE_ID:
             require(run["acceptance_profile_sha256"] == inputs["acceptance_profile"]["sha256"],
@@ -763,7 +802,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceAppearance", run["appearance"],
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
-    if run["mode"] == "appearance-pair":
+    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE}:
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
                     "-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
         if run.get("acceptance_profile_id") == V2_PROFILE_ID:
@@ -774,7 +813,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                     manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
                     "V2 controller profile differs from its immutable staged manifest.")
             command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
-        if run["high_contrast"]:
+        if run["mode"] == "appearance-pair" and run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
     elif run["mode"] == "performance-sample":
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
@@ -802,10 +841,10 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS}:
+    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {ICON_SETTLEMENT_RUN_ID}:
         require(total_bytes <= 32 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == 1,
-                "Performance sample must stay within 32 MiB and one original PNG.")
+                "Performance diagnostic must stay within 32 MiB and one original PNG.")
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -896,7 +935,8 @@ def finalize_run(run_root: Path) -> None:
     require(not result_path.exists(), "Normalized run result already exists.")
     mode = manifest["request"]["mode"]
     normalized = (normalize_pair_result(run_root, input_sha256) if mode == "appearance-pair"
-                  else normalize_performance_result(run_root, input_sha256) if mode == "performance-sample"
+                  else normalize_performance_result(run_root, input_sha256) if mode in
+                  {"performance-sample", ICON_SETTLEMENT_MODE}
                   else normalize_run_result(run_root, input_sha256))
     write_json(result_path, normalized, exclusive=True)
 
@@ -950,7 +990,7 @@ def normalize_performance_result(run_root: Path, input_sha256: str) -> dict:
             "Performance observer process did not exit successfully.")
     artifacts = manifest["artifacts"]
     return {
-        "schema_version": 1, "diagnostic": "performance-sample", "run_id": manifest["run_id"],
+        "schema_version": 1, "diagnostic": manifest["request"]["mode"], "run_id": manifest["run_id"],
         "input_manifest_sha256": input_sha256,
         "collection_sha256": digest(run_root / "collection.json"),
         "cleanup_sha256": digest(output / "cleanup.json"),
@@ -1038,10 +1078,11 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
     ]
     runs = selected_runs if selected_runs is not None else (
         (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else
-        (performance_run(),) if diagnostic == "performance-sample" else RUNS)
+        (performance_run(),) if diagnostic == "performance-sample" else
+        (icon_settlement_run(),) if diagnostic == ICON_SETTLEMENT_MODE else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
-    if diagnostic in {"appearance-pair", "performance-sample"}:
+    if diagnostic in {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE}:
         command += ["--diagnostic", diagnostic]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
@@ -1056,7 +1097,10 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
-    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample"])
+    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE])
+    parser.add_argument("--icon-endpoint-method", choices=[ICON_BASELINE_METHOD])
+    parser.add_argument("--baseline-product-source-sha")
+    parser.add_argument("--expected-run-source-sha")
     parser.add_argument("--performance-column-order", choices=PERFORMANCE_ORDERS)
     parser.add_argument("--prepared-bundle-root", type=Path)
     parser.add_argument("--expected-prepared-application-sha256")
@@ -1073,22 +1117,38 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Desktop selection requires a diagnostic.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
-    require(args.acceptance_profile_id is None or args.diagnostic == "appearance-pair",
-            "Acceptance profile selection requires --diagnostic appearance-pair.")
+    require(args.acceptance_profile_id is None or args.diagnostic in {"appearance-pair", ICON_SETTLEMENT_MODE},
+            "Acceptance profile selection requires appearance-pair or icon-settlement.")
+    require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
+            "Icon settlement requires explicit V2 owned-resource profile selection.")
+    require(args.icon_endpoint_method is None or args.diagnostic == ICON_SETTLEMENT_MODE,
+            "Icon endpoint selection requires the icon-settlement diagnostic.")
+    baseline = args.icon_endpoint_method == ICON_BASELINE_METHOD
+    require((baseline and args.baseline_product_source_sha == ICON_BASELINE_PRODUCT_SOURCE_SHA and
+             isinstance(args.expected_run_source_sha, str) and
+             SOURCE_SHA.fullmatch(args.expected_run_source_sha) is not None) or
+            (not baseline and args.baseline_product_source_sha is None and
+             args.expected_run_source_sha is None),
+            "Synchronous baseline requires the original product reference and exact frozen run source.")
     require(args.performance_column_order is None or args.diagnostic == "performance-sample",
             "Long-path order selection requires --diagnostic performance-sample.")
     require((args.prepared_bundle_root is None) ==
             (args.expected_prepared_application_sha256 is None) and
-            (args.prepared_bundle_root is None or args.diagnostic == "performance-sample"),
+            (args.prepared_bundle_root is None or args.diagnostic in
+             {"performance-sample", ICON_SETTLEMENT_MODE}),
             "Prepared bundle and pinned application hash require the performance diagnostic together.")
+    require(args.diagnostic != ICON_SETTLEMENT_MODE or args.prepared_bundle_root is not None,
+            "Icon settlement requires a prepared bundle and pinned application hash.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
     selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
+                     (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
+                     if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
-    if args.diagnostic == "appearance-pair":
+    if args.diagnostic in {"appearance-pair", ICON_SETTLEMENT_MODE}:
         selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
         profile_digest = None
         if selected_profile == V2_PROFILE_ID:
@@ -1104,11 +1164,19 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
         selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
                                **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
                               for run in selected_runs)
+    if baseline:
+        selected_runs = tuple({**run, "expected_run_source_sha": args.expected_run_source_sha}
+                              for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
     prepared_manifest = None
     if args.prepared_bundle_root is not None:
         prepared_manifest = validate_prepared_bundle(
             repo, args.prepared_bundle_root, args.expected_prepared_application_sha256)
+    if baseline:
+        require(source_identity(repo)[0] == args.expected_run_source_sha and
+                prepared_manifest is not None and
+                prepared_manifest["source_sha"] == args.expected_run_source_sha,
+                "Synchronous baseline exact run source differs from the clean checkout or prepared bundle.")
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
     host = host_preflight()

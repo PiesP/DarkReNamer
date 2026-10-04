@@ -76,6 +76,14 @@ pub(crate) struct PreferencesWriter {
 }
 
 impl PreferencesWriter {
+    #[cfg(all(test, windows))]
+    pub(crate) fn spawn_with_for_test(
+        path: PathBuf,
+        save: impl Fn(&Path, &[ColumnState; COLUMN_COUNT]) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_with(path, || {}, Arc::new(save))
+    }
+
     pub(crate) fn spawn(
         path: PathBuf,
         wake: impl Fn() + Send + Sync + 'static,

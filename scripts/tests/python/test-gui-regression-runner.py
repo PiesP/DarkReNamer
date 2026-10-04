@@ -159,11 +159,100 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
                 )
 
-    def test_v2_profile_is_pair_only(self):
-        with self.assertRaisesRegex(ValueError, "requires --diagnostic appearance-pair"):
+    def test_v2_profile_requires_a_v2_aware_diagnostic(self):
+        with self.assertRaisesRegex(ValueError, "requires appearance-pair or icon-settlement"):
             runner.main(self.root, ["--connection-profile", str(self.root / "missing.json"),
                                     "--output-root", str(self.root / "unused"),
                                     "--acceptance-profile-id", runner.V2_PROFILE_ID])
+
+    def test_icon_settlement_has_new_method_prepared_pin_and_v2_profile(self):
+        run = {**runner.icon_settlement_run(), "acceptance_profile_sha256": "e" * 64}
+        pin = "a" * 64
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": pin}},
+                  "acceptance_profile": {"sha256": "e" * 64},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root, self.root, run, "f" * 64,
+                                             {}, {}, prepared_application_sha256=pin)
+        self.assertEqual(manifest["request"]["endpoint_method"], "async-status-v1")
+        self.assertEqual(manifest["request"]["settlement_plan"], runner.ICON_SETTLEMENT_PLAN)
+        self.assertEqual(manifest["run_id"], runner.ICON_SETTLEMENT_RUN_ID)
+        self.assertEqual(manifest["acceptance_profile_id"], runner.V2_PROFILE_ID)
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        self.assertEqual(manifest["prepared_bundle"]["application_sha256"], pin)
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            with self.assertRaisesRegex(ValueError, "requires a pinned prepared executable"):
+                runner.input_manifest(self.root, self.root, self.root, run, "f" * 64, {}, {})
+
+    def test_icon_settlement_rejects_unpinned_or_v1_selection_before_output(self):
+        base = ["--output-root", str(self.root / "icon-output"),
+                "--connection-profile", str(self.root / "missing.json"),
+                "--diagnostic", "icon-settlement"]
+        with self.assertRaisesRegex(ValueError, "explicit V2"):
+            runner.main(self.root, base)
+        with self.assertRaisesRegex(ValueError, "requires a prepared bundle"):
+            runner.main(self.root, base + ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        self.assertFalse((self.root / "icon-output").exists())
+
+    def test_synchronous_icon_baseline_requires_explicit_frozen_identity(self):
+        run = {**runner.icon_settlement_run(runner.ICON_BASELINE_METHOD),
+               "acceptance_profile_sha256": "e" * 64,
+               "expected_run_source_sha": "c" * 40}
+        pin = "a" * 64
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": pin}},
+                  "acceptance_profile": {"sha256": "e" * 64},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root, self.root, run, "f" * 64,
+                                             {}, {}, prepared_application_sha256=pin)
+        self.assertEqual(manifest["run_id"], runner.ICON_BASELINE_RUN_ID)
+        self.assertEqual(manifest["request"]["endpoint_method"], runner.ICON_BASELINE_METHOD)
+        self.assertEqual(manifest["request"]["baseline_product_source_sha"],
+                         runner.ICON_BASELINE_PRODUCT_SOURCE_SHA)
+        self.assertEqual(manifest["command"][-6:], [
+            "--icon-endpoint-method", runner.ICON_BASELINE_METHOD,
+            "--baseline-product-source-sha", runner.ICON_BASELINE_PRODUCT_SOURCE_SHA,
+            "--expected-run-source-sha", "c" * 40])
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            with self.assertRaisesRegex(ValueError, "exact frozen run source"):
+                runner.input_manifest(self.root, self.root, self.root,
+                                      {**run, "expected_run_source_sha": "d" * 40}, "f" * 64,
+                                      {}, {}, prepared_application_sha256=pin)
+        base = ["--output-root", str(self.root / "baseline-output"),
+                "--connection-profile", str(self.root / "missing.json"),
+                "--diagnostic", runner.ICON_SETTLEMENT_MODE,
+                "--acceptance-profile-id", runner.V2_PROFILE_ID,
+                "--icon-endpoint-method", runner.ICON_BASELINE_METHOD]
+        for options in ([],
+                        ["--baseline-product-source-sha", "d" * 40,
+                         "--expected-run-source-sha", "c" * 40],
+                        ["--baseline-product-source-sha", runner.ICON_BASELINE_PRODUCT_SOURCE_SHA]):
+            with self.assertRaisesRegex(ValueError, "original product reference and exact frozen run source"):
+                runner.main(self.root, base + options)
+        self.assertFalse((self.root / "baseline-output").exists())
+
+        config = self.root / "config"
+        config.mkdir()
+        self.write_json(config / runner.V2_PROFILE_FILE, {
+            "schema": "darkrenamer-vm-automated-profile-v2",
+            "profile_id": runner.V2_PROFILE_ID, "revision": 2})
+        complete = base + ["--baseline-product-source-sha", runner.ICON_BASELINE_PRODUCT_SOURCE_SHA,
+                           "--expected-run-source-sha", "c" * 40,
+                           "--prepared-bundle-root", str(self.root / "prepared"),
+                           "--expected-prepared-application-sha256", "a" * 64]
+        for checkout_sha, bundle_sha in (("d" * 40, "c" * 40),
+                                         ("c" * 40, "d" * 40)):
+            with mock.patch.object(runner, "validate_prepared_bundle",
+                                   return_value={"source_sha": bundle_sha}), \
+                 mock.patch.object(runner, "checked_new_root",
+                                   return_value=self.root / "baseline-output"), \
+                 mock.patch.object(runner, "source_identity",
+                                   return_value=(checkout_sha, "e" * 40)), \
+                 self.assertRaisesRegex(ValueError, "exact run source differs"):
+                runner.main(self.root, complete)
+        self.assertFalse((self.root / "baseline-output").exists())
 
     def test_focused_manifest_command_replays_without_desktop_overrides(self):
         inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,

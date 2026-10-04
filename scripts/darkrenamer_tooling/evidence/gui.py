@@ -27,6 +27,16 @@ REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
 PERFORMANCE_MODE = "performance-sample"
+ICON_SETTLEMENT_MODE = "icon-settlement"
+ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
+ICON_SETTLEMENT_METHOD = "async-status-v1"
+ICON_BASELINE_RUN_ID = "icon-settlement-sync-upper-bound-v1-1366x768-96-text100"
+ICON_BASELINE_METHOD = "synchronous-row-count-upper-bound-v1"
+ICON_BASELINE_PRODUCT_SOURCE_SHA = "b152761010b16ef74e2a3765241a253778b88e0b"
+ICON_SETTLEMENT_PLAN = {
+    "ordinary_rows": 1000, "churn_rows": 1000, "extension_classes": 300,
+    "poll_interval_ms": 100, "maximum_seconds": 600,
+}
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
 PERFORMANCE_ORDERS = ("hidden-visible", "visible-hidden")
 PERFORMANCE_PLAN = {
@@ -377,8 +387,13 @@ def validate_request(value: object) -> dict:
         fields.add("high_contrast")
     if isinstance(value, dict) and value.get("mode") == PERFORMANCE_MODE:
         fields.add("performance_plan")
+    if isinstance(value, dict) and value.get("mode") == ICON_SETTLEMENT_MODE:
+        fields.update({"settlement_plan", "endpoint_method"})
+        if value.get("endpoint_method") == ICON_BASELINE_METHOD:
+            fields.add("baseline_product_source_sha")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE}, "request.mode is invalid.")
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, ICON_SETTLEMENT_MODE},
+            "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
     checked_int(desktop["width"], 800, 8192, "request.desktop.width")
@@ -401,6 +416,14 @@ def validate_request(value: object) -> dict:
                 request["performance_plan"] == {**PERFORMANCE_PLAN,
                     "long_path_order": request["performance_plan"]["long_path_order"]},
                 "Performance request differs from its fixed plan.")
+    elif request["mode"] == ICON_SETTLEMENT_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                request["endpoint_method"] in {ICON_SETTLEMENT_METHOD, ICON_BASELINE_METHOD} and
+                (request["endpoint_method"] != ICON_BASELINE_METHOD or
+                 request["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA) and
+                request["settlement_plan"] == ICON_SETTLEMENT_PLAN,
+                "Icon settlement request differs from its fixed endpoint method or plan.")
     else:
         expected = FIXED_REQUESTS[request["mode"]]
         require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
@@ -435,7 +458,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
         required.add("full_context_reference")
     if isinstance(value, dict) and "prepared_bundle" in value:
         required.add("prepared_bundle")
-    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == PAIR_MODE:
+    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -460,9 +483,10 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] == PAIR_MODE:
-        require(manifest["acceptance_profile_id"] in {V1_PROFILE_ID, V2_PROFILE_ID},
-                "Appearance pair acceptance profile is unsupported.")
+    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
+        require(manifest["acceptance_profile_id"] in
+                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
+                "GUI diagnostic acceptance profile is unsupported.")
         if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
             profile_artifact = checked_artifact(run_root, manifest["acceptance_profile"], "acceptance profile")
             require(profile_artifact["file"] == "inputs/vm-automated-v2.json" and
@@ -478,7 +502,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] == PAIR_MODE:
+    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -488,6 +512,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
                     "Appearance acceptance profile command differs from its manifest.")
         else:
             require(selected == V1_PROFILE_ID, "Appearance V2 profile must be selected explicitly in the command.")
+    if request["mode"] == PAIR_MODE:
         run_id = manifest["run_id"]
         desktop = request["desktop"]
         requested = (request["appearance"], desktop["width"], desktop["height"], desktop["dpi"],
@@ -517,9 +542,31 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
                             "--diagnostic", PERFORMANCE_MODE, "--performance-column-order", order,
                             *prepared_args],
                 "Performance manifest identity or command is invalid.")
+    if request["mode"] == ICON_SETTLEMENT_MODE:
+        prepared = manifest.get("prepared_bundle")
+        require(prepared is not None, "Icon settlement requires pinned prepared-bundle provenance.")
+        prepared = exact_keys(prepared, {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              "icon settlement prepared bundle")
+        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                prepared["application_sha256"] == artifacts["application"]["sha256"],
+                "Icon settlement prepared executable differs from retained inputs.")
+        baseline = request["endpoint_method"] == ICON_BASELINE_METHOD
+        method_args = (["--icon-endpoint-method", ICON_BASELINE_METHOD,
+                        "--baseline-product-source-sha", ICON_BASELINE_PRODUCT_SOURCE_SHA,
+                        "--expected-run-source-sha", manifest["source_sha"]] if baseline else [])
+        require(manifest["run_id"] == (ICON_BASELINE_RUN_ID if baseline else ICON_SETTLEMENT_RUN_ID) and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", ICON_SETTLEMENT_MODE,
+                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--expected-prepared-application-sha256", prepared["application_sha256"],
+                            "--acceptance-profile-id", V2_PROFILE_ID, *method_args],
+                "Icon settlement manifest identity or command is invalid.")
     else:
-        require("prepared_bundle" not in manifest,
-                "Prepared bundle provenance is restricted to performance runs.")
+        if request["mode"] != PERFORMANCE_MODE:
+            require("prepared_bundle" not in manifest,
+                    "Prepared bundle provenance is restricted to performance runs.")
     if request["mode"] == "tooltip":
         require("full_context_reference" in manifest,
                 "The tooltip run requires a direct full-context reference.")
@@ -3092,13 +3139,260 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
             "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
 
+ICON_STATUS_FIELDS = {"version", "session", "generation", "bootstrap", "queued", "inflight",
+                      "undrained", "unresolved_rows", "cursor", "settled", "worker_joined",
+                      "reconcile_rows", "batch_ack", "status_revision", "demand_exhausted",
+                      "demand_remaining", "model_revision", "unavailable_or_retiring"}
+
+
+def validate_icon_status(value: object, rows: int, label: str) -> dict:
+    status = exact_keys(value, ICON_STATUS_FIELDS, label)
+    require(int_equals(status["version"], 1), f"{label} version differs from the frozen scalar seam.")
+    for name in ("session", "generation", "status_revision", "model_revision"):
+        require(isinstance(status[name], str) and status[name].isascii() and
+                status[name].isdigit() and len(status[name]) <= 20 and
+                int(status[name]) <= 2**64 - 1,
+                f"{label}.{name} is not a bounded unsigned decimal identity.")
+    require(int(status["session"]) > 0 and int(status["status_revision"]) % 2 == 0,
+            f"{label} session or seqlock revision is invalid.")
+    for name, maximum in (("bootstrap", 2), ("queued", 64), ("inflight", 1),
+                          ("undrained", 64), ("unresolved_rows", rows), ("cursor", rows),
+                          ("reconcile_rows", rows), ("batch_ack", 64),
+                          ("demand_remaining", rows)):
+        checked_int(status[name], 0, maximum, f"{label}.{name}")
+    require(all(type(status[name]) is bool for name in
+                ("settled", "worker_joined", "demand_exhausted", "unavailable_or_retiring")) and
+            status["queued"] + status["inflight"] + status["undrained"] <= 64,
+            f"{label} flags or combined request bound differ.")
+    return status
+
+
+def icon_terminal(status: dict) -> bool:
+    return (status["bootstrap"] == 1 and status["settled"] is True and
+            status["worker_joined"] is False and status["unavailable_or_retiring"] is False and
+            int(status["session"]) > 0 and
+            status["demand_exhausted"] is True and status["demand_remaining"] == 0 and
+            all(status[name] == 0 for name in ("queued", "inflight", "undrained",
+                "unresolved_rows", "reconcile_rows", "batch_ack")))
+
+
+def validate_icon_settlement_metrics(scenario: object) -> dict:
+    scenario = exact_keys(scenario, {"mode", "endpoint_method", "plan", "environment",
+        "process_id", "process_start_utc_ticks", "executable_sha256", "phases",
+        "disk_unchanged", "journal_residue_count", "worker_join_evidence",
+        "normal_exit_code", "appearance"}, "icon settlement scenario")
+    require(scenario["mode"] == ICON_SETTLEMENT_MODE and
+            scenario["endpoint_method"] == ICON_SETTLEMENT_METHOD and
+            scenario["plan"] == ICON_SETTLEMENT_PLAN and
+            scenario["appearance"] == "light", "Icon settlement method or plan differs.")
+    phases = scenario["phases"]
+    require(isinstance(phases, list) and len(phases) == 2,
+            "Icon settlement requires its two fixed import phases.")
+    endpoints = []
+    sessions = set()
+    generations = []
+    for index, phase in enumerate(phases):
+        phase = exact_keys(phase, {"id", "rows", "data_ready_ms", "icon_settled_observed_ms",
+            "first_status", "settled_status", "confirmation_status", "poll_count",
+            "unstable_query_attempts",
+            "sampled_peak_pending", "sampled_peak_unresolved_rows", "representative_names"},
+            f"icon phase {index}")
+        expected_id = ("ordinary-cached", "interleaved-churn")[index]
+        names = (["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"] if index == 0 else
+                 ["extension-0000.e000", "recurring-0401.txt", "recurring-0999.txt"])
+        require(phase["id"] == expected_id and int_equals(phase["rows"], 1000) and
+                phase["representative_names"] == names,
+                "Icon settlement phase identity, rows, or representative text differs.")
+        for name in ("data_ready_ms", "icon_settled_observed_ms"):
+            require(type(phase[name]) in (int, float) and math.isfinite(phase[name]) and
+                    0 < phase[name] <= 600000, f"Icon settlement {name} is invalid.")
+        require(phase["icon_settled_observed_ms"] >= phase["data_ready_ms"],
+                "Icon settlement preceded its data-ready endpoint.")
+        checked_int(phase["poll_count"], 2, 6000, "icon poll count")
+        checked_int(phase["unstable_query_attempts"], 0, 6000, "unstable icon query count")
+        require(phase["poll_count"] + phase["unstable_query_attempts"] <= 6000,
+                "Icon status polling exceeds the finite diagnostic envelope.")
+        checked_int(phase["sampled_peak_pending"], 0, 64, "sampled pending peak")
+        checked_int(phase["sampled_peak_unresolved_rows"], 0, 1000, "sampled unresolved peak")
+        first = validate_icon_status(phase["first_status"], 1000, "icon first status")
+        terminal = validate_icon_status(phase["settled_status"], 1000, "icon settled status")
+        confirmation = validate_icon_status(phase["confirmation_status"], 1000,
+                                            "icon confirmation status")
+        require(first["bootstrap"] != 2 and icon_terminal(terminal) and
+                icon_terminal(confirmation) and int(terminal["generation"]) > 0 and
+                terminal["session"] == confirmation["session"] == first["session"] and
+                terminal["generation"] == confirmation["generation"] and
+                terminal["model_revision"] == first["model_revision"] and
+                terminal["model_revision"] == confirmation["model_revision"] and
+                phase["sampled_peak_pending"] >= max(
+                    first["queued"] + first["inflight"] + first["undrained"],
+                    terminal["queued"] + terminal["inflight"] + terminal["undrained"]) and
+                phase["sampled_peak_unresolved_rows"] >= max(
+                    first["unresolved_rows"], terminal["unresolved_rows"]),
+                "Icon settlement did not prove a stable full-generation terminal state.")
+        sessions.add(terminal["session"])
+        generations.append(int(terminal["generation"]))
+        endpoints.append({"id": expected_id, "data_ready_ms": phase["data_ready_ms"],
+                          "icon_settled_observed_ms": phase["icon_settled_observed_ms"],
+                          "sampled_peak_pending": phase["sampled_peak_pending"]})
+    require(len(sessions) == 1 and generations[1] > generations[0],
+            "Icon settlement session or clear/repopulation generation differs.")
+    join = exact_keys(scenario["worker_join_evidence"], {"kind", "observed"},
+                      "icon worker join evidence")
+    require(join == {"kind": "source-contract-inference", "observed": False},
+            "Icon worker join was falsely labeled as directly observed.")
+    require(scenario["disk_unchanged"] is True and
+            int_equals(scenario["journal_residue_count"], 0) and
+            int_equals(scenario["normal_exit_code"], 0),
+            "Icon settlement fixture, journal, or normal exit differs.")
+    return {"endpoint_method": ICON_SETTLEMENT_METHOD, "phases": endpoints,
+            "baseline_icon_endpoint": "not-measured", "worker_join_evidence": join}
+
+
+def validate_icon_baseline_metrics(scenario: object) -> dict:
+    scenario = exact_keys(scenario, {"mode", "endpoint_method", "endpoint_coverage",
+        "baseline_product_source_sha", "plan", "environment", "process_id",
+        "process_start_utc_ticks", "executable_sha256", "phases", "disk_unchanged",
+        "journal_residue_count", "normal_exit_code", "appearance"},
+        "icon synchronous baseline scenario")
+    require(scenario["mode"] == ICON_SETTLEMENT_MODE and
+            scenario["endpoint_method"] == ICON_BASELINE_METHOD and
+            scenario["endpoint_coverage"] ==
+                "source-derived-synchronous-lookup-completion-upper-bound" and
+            scenario["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA and
+            scenario["plan"] == ICON_SETTLEMENT_PLAN and scenario["appearance"] == "light",
+            "Icon synchronous baseline method, source reference, or plan differs.")
+    phases = scenario["phases"]
+    require(isinstance(phases, list) and len(phases) == 2,
+            "Icon synchronous baseline requires its two fixed import phases.")
+    endpoints = []
+    for index, phase in enumerate(phases):
+        phase = exact_keys(phase, {"id", "rows", "data_ready_ms",
+            "synchronous_lookup_completion_upper_bound_ms", "representative_names"},
+            f"icon synchronous baseline phase {index}")
+        expected_id = ("ordinary-cached", "interleaved-churn")[index]
+        names = (["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"] if index == 0 else
+                 ["extension-0000.e000", "recurring-0401.txt", "recurring-0999.txt"])
+        ready = phase["data_ready_ms"]
+        require(phase["id"] == expected_id and int_equals(phase["rows"], 1000) and
+                phase["representative_names"] == names and
+                type(ready) in (int, float) and math.isfinite(ready) and 0 < ready <= 600000 and
+                type(phase["synchronous_lookup_completion_upper_bound_ms"]) in (int, float) and
+                phase["synchronous_lookup_completion_upper_bound_ms"] == ready,
+                "Icon synchronous baseline phase does not bind RowCount to its source upper bound.")
+        endpoints.append({"id": expected_id, "data_ready_ms": ready,
+                          "synchronous_lookup_completion_upper_bound_ms": ready})
+    require(scenario["disk_unchanged"] is True and
+            int_equals(scenario["journal_residue_count"], 0) and
+            int_equals(scenario["normal_exit_code"], 0),
+            "Icon synchronous baseline fixture, journal, or normal exit differs.")
+    return {"endpoint_method": ICON_BASELINE_METHOD,
+            "endpoint_coverage": scenario["endpoint_coverage"], "phases": endpoints,
+            "actual_icon_visibility_endpoint": "not-measured",
+            "worker_or_queue_endpoint": "not-measured"}
+
+
+def validate_icon_owned_transport(transport: dict, manifest: dict, raw: dict,
+                                  scenario: dict) -> None:
+    cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
+                                        profile_sha256=manifest["acceptance_profile_sha256"])
+    owned = cleanup["owned_resource_evidence"]
+    jobs = raw.get("process_job_cleanup")
+    require(isinstance(jobs, list) and len(jobs) == 1 and
+            typed_equal(jobs, owned["process_job_cleanup"]) and
+            typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]) and
+            int_equals(jobs[0]["pid"], scenario["process_id"]) and
+            str(jobs[0]["process_start_time_utc_ticks"]) == str(scenario["process_start_utc_ticks"]),
+            "Icon settlement result is not bound to one owned Job and observer lifetime.")
+
+
+def validate_icon_settlement_run(root: Path, run_id: str, source_sha: str) -> dict:
+    require(run_id in {ICON_SETTLEMENT_RUN_ID, ICON_BASELINE_RUN_ID},
+            "Icon settlement run id is invalid.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "Icon settlement run directory is missing or unsafe.")
+    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    require(manifest["request"]["mode"] == ICON_SETTLEMENT_MODE,
+            "Icon settlement request mode is missing.")
+    baseline = manifest["request"]["endpoint_method"] == ICON_BASELINE_METHOD
+    require(run_id == (ICON_BASELINE_RUN_ID if baseline else ICON_SETTLEMENT_RUN_ID),
+            "Icon settlement run id and declared endpoint method differ.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 32 * 1024 * 1024 and
+            sum(name.endswith(".png") for name in files) == 1,
+            "Icon settlement exceeds its fixed 32 MiB/one-PNG output budget.")
+    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    result, _ = read_json(run_root / "output", Path("run-result.json"), "icon settlement result")
+    result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
+        "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256",
+        "observer_sha256", "observer_result_sha256", "status", "exit_code"}, "icon settlement result")
+    artifacts = manifest["artifacts"]
+    require(int_equals(result["schema_version"], 1) and result["diagnostic"] == ICON_SETTLEMENT_MODE and
+            result["run_id"] == run_id and result["input_manifest_sha256"] == input_hash and
+            result["collection_sha256"] == sha256_bytes(collection_bytes) and
+            result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            result["source_sha"] == source_sha and
+            result["application_sha256"] == artifacts["application"]["sha256"] and
+            result["observer_sha256"] == artifacts["observer"]["sha256"] and
+            result["status"] == "review_required" and int_equals(result["exit_code"], 0),
+            "Icon settlement normalized identity or terminal status differs.")
+    transport = validate_transport_exit(run_root, files, 0)
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "icon settlement observer")
+    observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"),
+                                                "icon settlement observations")
+    require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) == files["acceptance-result.json"]["sha256"] and
+            sha256_bytes(observation_bytes) == files["acceptance-observations.json"]["sha256"] and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observation_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "Icon settlement protected observations are not source-bound.")
+    require(raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("status") == "review_required" and
+            nested(raw, "assertions", "overall") == "passed" and
+            nested(raw, "assertions", "scope") ==
+                ("icon-settlement-sync-upper-bound-v1" if baseline else
+                 "icon-settlement-async-status-v1") and
+            raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            nested(raw, "capture", "status") == "passed",
+            "Icon settlement observer identity, scope, or cleanup differs.")
+    scenario = observations.get("scenario")
+    metrics = (validate_icon_baseline_metrics(scenario) if baseline else
+               validate_icon_settlement_metrics(scenario))
+    validate_icon_owned_transport(transport, manifest, raw, scenario)
+    require(scenario.get("executable_sha256") == artifacts["application"]["sha256"] and
+            int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"]) and
+            nested(scenario, "environment", "main_window", "process_id") == scenario["process_id"] and
+            nested(scenario, "environment", "hwnd_dpi") == 96 and
+            nested(scenario, "environment", "text_scale_factor_percent") == 100,
+            "Icon settlement source executable, process, start time, or display binding differs.")
+    validate_performance_lifecycle(raw.get("process_lifecycles"), scenario,
+                                   artifacts["application"]["sha256"])
+    captures = raw.get("screenshots")
+    require("icon-settlement-empty.png" in files and
+            isinstance(captures, list) and len(captures) == 1 and
+            captures[0].get("file") == "icon-settlement-empty.png" and
+            captures[0].get("sha256") == files["icon-settlement-empty.png"]["sha256"],
+            "Icon settlement empty-list capture is missing or unbound.")
+    return {"run_id": run_id, "source_sha": source_sha,
+            "application_sha256": artifacts["application"]["sha256"],
+            "bundle_mode": "prepared", "process_id": scenario["process_id"],
+            **({"baseline_product_source_sha": ICON_BASELINE_PRODUCT_SOURCE_SHA} if baseline else {}),
+            "metrics": metrics, "full_four_run_regression": "not-run", "release_campaign": "not-run"}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", required=True, type=Path)
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -3118,6 +3412,18 @@ def main(repo: Path, argv=None) -> int:
         measured = validate_performance_run(root, args.runs[0], args.expected_source_sha)
         print(json.dumps({"schema_version": 1, "diagnostic": PERFORMANCE_MODE,
                           "status": "measured", "source_sha": args.expected_source_sha,
+                          "runs": [measured], "full_four_run_regression": "not-run",
+                          "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
+        return 0
+    if args.diagnostic == ICON_SETTLEMENT_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                len(args.runs) == 1 and args.runs[0] in
+                {ICON_SETTLEMENT_RUN_ID, ICON_BASELINE_RUN_ID},
+                "Icon settlement requires its single opt-in run and cannot complete acceptance.")
+        measured = validate_icon_settlement_run(root, args.runs[0], args.expected_source_sha)
+        print(json.dumps({"schema_version": 1, "diagnostic": ICON_SETTLEMENT_MODE,
+                          "status": ("upper-bound-observed" if args.runs[0] == ICON_BASELINE_RUN_ID
+                                     else "measured"), "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",
                           "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
         return 0

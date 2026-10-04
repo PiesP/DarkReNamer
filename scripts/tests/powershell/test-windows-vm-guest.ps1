@@ -200,6 +200,47 @@ $testFailure = $null
 try {
     $valid = New-Fixture -Name 'valid'
     Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    $focused = New-Fixture -Name 'focused-selection'
+    $focused.manifest.test_binaries[0].name = 'darknamer_app'
+    $focused.manifest.diagnostic = [ordered]@{
+        kind = 'focused-icon-tests'
+        test_profile = 'debug'
+        test_filter = 'windows::list_view::native_tests::icon_worker_'
+        test_names = @(
+            'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
+            'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
+            'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
+            'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+        )
+    }
+    Save-Manifest $focused
+    Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    $focused.manifest.diagnostic.test_filter = 'windows::list_view::native_tests::'
+    Save-Manifest $focused
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    } 'fixed focused icon selection is invalid'
+    $focused.manifest.diagnostic.test_filter = 'windows::list_view::native_tests::icon_worker_'
+    [array]::Reverse($focused.manifest.diagnostic.test_names)
+    Save-Manifest $focused
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    } 'fixed focused icon selection is invalid'
+    [array]::Reverse($focused.manifest.diagnostic.test_names)
+    $focused.manifest.diagnostic.test_profile = 'release'
+    Save-Manifest $focused
+    Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    [void]$focused.manifest.diagnostic.Remove('test_names')
+    $focused.manifest.diagnostic['test_name'] =
+        'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire'
+    Save-Manifest $focused
+    Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    $focused.manifest.diagnostic['test_name'] =
+        'windows::list_view::native_tests::icon_worker_not_allowed'
+    Save-Manifest $focused
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
+    } 'fixed focused icon selection is invalid'
     $leakedCommand = Get-Command Get-DrToolingVerifiedBundle -ErrorAction SilentlyContinue
     $leakedModules = @(Get-Module | Where-Object Name -Like 'DarkReNamer.*')
     if ($null -ne $leakedCommand) { throw "The public guest facade leaked loader command from $($leakedCommand.ModuleName)." }
@@ -3501,6 +3542,209 @@ Invoke-DrTestPowerShellModuleScope `
             throw 'Empty/default and declared diagnostic orders must bind without launching.'
         }
     }
+    $focusedBindingRoot = Join-Path $temporaryRoot ('focused-binding-' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $focusedBindingRoot)
+    Assert-Fails {
+        Invoke-RustTestBinary -Test ([pscustomobject]@{
+            file = 'not-launched.exe'; sha256 = ('0' * 64)
+        }) -Root $focusedBindingRoot -OutputRoot $focusedBindingRoot `
+            -RuntimeRoot $focusedBindingRoot -Index 1 -TimeoutSeconds 600 `
+            -OutputBudgetBytes 0 -FocusedIconTests
+    } 'requires one fixed exact case'
+    $singleBindingResult = Invoke-RustTestBinary -Test ([pscustomobject]@{
+        file = 'not-launched.exe'; sha256 = ('0' * 64)
+    }) -Root $focusedBindingRoot -OutputRoot $focusedBindingRoot `
+        -RuntimeRoot $focusedBindingRoot -Index 2 -TimeoutSeconds 600 `
+        -OutputBudgetBytes 0 -FocusedIconTests `
+        -FocusedIconCase close_and_forced_destroy_retire
+    if ($singleBindingResult.failure_reason -cne 'suite_output_limit_exceeded' -or
+        $singleBindingResult.test_name -cne
+            'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire') {
+        throw 'Single focused icon selector did not bind without launching.'
+    }
+    # The guest entrypoint must pass one fixed case at the actual helper call.
+    $guestEntryPath = (Get-DrTestPowerShellModuleSpec -Kind guest).entry
+    $guestEntryAst = [Management.Automation.Language.Parser]::ParseFile(
+        $guestEntryPath, [ref]$null, [ref]$null)
+    $guestCalls = @($guestEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Invoke-RustTestBinary'
+    }, $true))
+    if ($guestCalls.Count -ne 1) {
+        throw 'Expected one guest invocation of the native test helper.'
+    }
+    $guestCall = [scriptblock]::Create($guestCalls[0].Extent.Text)
+    $savedNativeHelper = (Get-Command Invoke-RustTestBinary).ScriptBlock
+    try {
+        function Invoke-RustTestBinary {
+            param(
+                [object] $Test, [string] $Root, [string] $OutputRoot,
+                [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
+                [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+                    'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+                [string] $FocusedIconCase, [long] $OutputBudgetBytes
+            )
+            [pscustomobject]@{
+                focused = [bool]$FocusedIconTests
+                has_case = $PSBoundParameters.ContainsKey('FocusedIconCase')
+                case = $FocusedIconCase
+            }
+        }
+        $verified = [pscustomobject]@{
+            root = $focusedBindingRoot
+            tests = @([pscustomobject]@{ file = 'not-launched.exe' })
+        }
+        $testInvocations = @([pscustomobject]@{
+            test = $verified.tests[0]
+            case = 'close_and_forced_destroy_retire'
+        })
+        $index = 0
+        $OutputRoot = $focusedBindingRoot
+        $effectiveRuntimeRoot = $focusedBindingRoot
+        $TestTimeoutSeconds = 600
+        $RefreshProfileOrder = ''
+        $FocusedIconTests = $true
+        $testOutputBudgetBytes = [long]0
+        $caseTimeoutSeconds = 600
+        $focusedCaseArguments = @{ FocusedIconCase = 'close_and_forced_destroy_retire' }
+        $selectedCall = & $guestCall
+        if (-not $selectedCall.has_case -or
+            $selectedCall.case -cne 'close_and_forced_destroy_retire') {
+            throw 'The guest failed to bind its selected fixed focused case.'
+        }
+        $focusedCaseArguments = @{ FocusedIconCase = 'arbitrary_test' }
+        Assert-Fails { & $guestCall } 'Cannot validate argument'
+    }
+    finally {
+        Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
+    }
+    $guestEntryText = [IO.File]::ReadAllText($guestEntryPath, [Text.Encoding]::UTF8)
+    $loopStart = $guestEntryText.IndexOf(
+        '    $testInvocations = [Collections.Generic.List[object]]::new()',
+        [StringComparison]::Ordinal)
+    $loopEnd = $guestEntryText.IndexOf(
+        '    $applicationArtifact = if ($candidateLane)', $loopStart,
+        [StringComparison]::Ordinal)
+    if ($loopStart -lt 0 -or $loopEnd -le $loopStart) {
+        throw 'The guest native execution loop could not be isolated for contract testing.'
+    }
+    $guestLoopText = $guestEntryText.Substring($loopStart, $loopEnd - $loopStart)
+    $guestLoop = [scriptblock]::Create(
+        'param([long] $remainingSuiteOutputBytes)' + "`n" + $guestLoopText)
+    try {
+        function Invoke-RustTestBinary {
+            param(
+                [object] $Test, [string] $Root, [string] $OutputRoot,
+                [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
+                [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+                    'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+                [string] $FocusedIconCase, [long] $OutputBudgetBytes
+            )
+            $script:focusedLoopCalls.Add([pscustomobject]@{
+                index = $Index
+                case = $FocusedIconCase
+                file = $Test.file
+                sha256 = $Test.sha256
+                timeout = $TimeoutSeconds
+                budget = $OutputBudgetBytes
+            })
+            $malformed = $Index -eq -$script:focusedLoopFailAt
+            $failed = $Index -eq $script:focusedLoopFailAt -or $malformed
+            [pscustomobject]@{
+                status = if ($failed) { 'failed' } else { 'passed' }
+                test_name = 'windows::list_view::native_tests::icon_worker_' + $FocusedIconCase
+                file = $Test.file
+                sha256 = $Test.sha256
+                job_cleanup = $true
+                passed = if ($failed) { 0 } else { 1 }
+                failed = if ($malformed) { $null } elseif ($failed) { 1 } else { 0 }
+                stdout = [pscustomobject]@{ bytes = 1 }
+                stderr = [pscustomobject]@{ bytes = 1 }
+            }
+        }
+        $focusedNames = @(
+            'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
+            'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
+            'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
+            'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+        )
+        $verified = [pscustomobject]@{
+            root = $focusedBindingRoot
+            tests = @([pscustomobject]@{ file = 'one-frozen.exe'; sha256 = ('a' * 64) })
+            manifest = [pscustomobject]@{
+                diagnostic = [pscustomobject]@{ test_names = $focusedNames }
+            }
+        }
+        $OutputRoot = $focusedBindingRoot
+        $effectiveRuntimeRoot = $focusedBindingRoot
+        $TestTimeoutSeconds = 600
+        $RefreshProfileOrder = ''
+        $FocusedIconTests = $true
+        $FocusedIconCase = ''
+        foreach ($failureAt in @(0, 2, -2)) {
+            $script:focusedLoopFailAt = $failureAt
+            $script:focusedLoopCalls = [Collections.Generic.List[object]]::new()
+            $result = [ordered]@{ tests = @(); failure_reason = $null }
+            $testResults = [Collections.Generic.List[object]]::new()
+            & $guestLoop ([long](8MB + 3))
+            $expectedCount = if ($failureAt -eq 0) { 4 } else { 2 }
+            if ($result.tests.Count -ne $expectedCount -or
+                $script:focusedLoopCalls.Count -ne $expectedCount) {
+                throw 'The guest did not execute the exact focused case prefix.'
+            }
+            if ($failureAt -eq -2 -and $null -ne $result.tests[1].failed) {
+                throw 'The malformed first failure fixture lost its null count.'
+            }
+            for ($caseIndex = 0; $caseIndex -lt $expectedCount; $caseIndex++) {
+                $call = $script:focusedLoopCalls[$caseIndex]
+                if ($call.case -cne $focusedNames[$caseIndex].Substring(
+                    'windows::list_view::native_tests::icon_worker_'.Length) -or
+                    $call.index -ne ($caseIndex + 1) -or
+                    $call.file -cne 'one-frozen.exe' -or $call.sha256 -cne ('a' * 64) -or
+                    $call.timeout -lt 1 -or $call.timeout -gt 600 -or
+                    $result.tests[$caseIndex].test_name -cne $focusedNames[$caseIndex]) {
+                    throw 'The guest case process does not match its frozen inventory.'
+                }
+            }
+            if ($script:focusedLoopCalls[0].budget -ne 8MB -or
+                $script:focusedLoopCalls[1].budget -ne 8MB -or
+                ($failureAt -eq 0 -and $script:focusedLoopCalls[2].budget -ne (8MB - 1))) {
+                throw 'The guest did not share its remaining suite output budget.'
+            }
+        }
+        $clockStatement = '$suiteClock = [Diagnostics.Stopwatch]::StartNew()'
+        if ($guestLoopText.IndexOf($clockStatement, [StringComparison]::Ordinal) -lt 0) {
+            throw 'The guest shared suite deadline is missing.'
+        }
+        foreach ($elapsedSeconds in @(599, 600)) {
+            $clockedLoop = [scriptblock]::Create(
+                'param([long] $remainingSuiteOutputBytes)' + "`n" +
+                $guestLoopText.Replace($clockStatement,
+                    ('$suiteClock = [pscustomobject]@{ Elapsed = [timespan]::FromSeconds(' +
+                        $elapsedSeconds + ') }')))
+            $script:focusedLoopFailAt = 0
+            $script:focusedLoopCalls = [Collections.Generic.List[object]]::new()
+            $result = [ordered]@{ tests = @(); failure_reason = $null }
+            $testResults = [Collections.Generic.List[object]]::new()
+            & $clockedLoop ([long](8MB + 3))
+            if ($elapsedSeconds -eq 599) {
+                if ($script:focusedLoopCalls.Count -ne 4 -or
+                    @($script:focusedLoopCalls | Where-Object timeout -ne 1).Count -ne 0) {
+                    throw 'The guest did not cap every case by the remaining suite deadline.'
+                }
+            }
+            elseif ($script:focusedLoopCalls.Count -ne 0 -or
+                $result.failure_reason -cne 'suite_timeout') {
+                throw 'The guest started a case after the shared suite deadline.'
+            }
+        }
+    }
+    finally {
+        Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
+    }
 
     $refreshSummary = Read-RustTestSummary `
         -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
@@ -3508,14 +3752,68 @@ Invoke-DrTestPowerShellModuleScope `
     if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
         throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
     }
+    $failedRefreshSummary = Read-RustTestSummary `
+        -Stdout 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out;' `
+        -Stderr '' -RefreshProfile
+    if ($failedRefreshSummary.outcome -cne 'FAILED' -or
+        $failedRefreshSummary.passed -ne 0 -or $failedRefreshSummary.failed -ne 1 -or
+        $failedRefreshSummary.ignored -ne 0 -or $failedRefreshSummary.filtered -ne 2) {
+        throw 'The fixed refresh diagnostic lost parseable failed-test counts.'
+    }
+    Assert-Fails {
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out;' `
+            -Stderr '' -FocusedIconTests
+    } 'requires one fixed exact case'
+    $singleSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out;' `
+        -Stderr '' -FocusedIconTests `
+        -FocusedIconCase close_and_forced_destroy_retire
+    if ($singleSummary.passed -ne 1 -or $singleSummary.filtered -ne 357) {
+        throw 'Single focused icon summary did not retain exact counts.'
+    }
+    $singleFailedSummary = Read-RustTestSummary `
+        -Stdout 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 357 filtered out;' `
+        -Stderr '' -FocusedIconTests `
+        -FocusedIconCase close_and_forced_destroy_retire
+    if ($singleFailedSummary.outcome -cne 'FAILED' -or $singleFailedSummary.failed -ne 1) {
+        throw 'Single focused icon failed summary lost its actual count.'
+    }
+    Assert-Fails {
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 356 filtered out;' `
+            -Stderr '' -FocusedIconTests `
+            -FocusedIconCase close_and_forced_destroy_retire
+    } 'exactly one unignored test'
+    Assert-Fails {
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out;' `
+            -Stderr '' -FocusedIconCase close_and_forced_destroy_retire
+    } 'requires its fixed selector'
+    foreach ($invalid in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
+        'test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalid -Stderr '' -FocusedIconTests `
+                -FocusedIconCase close_and_forced_destroy_retire
+        } 'exactly one unignored test'
+    }
+    Assert-Fails {
+        Read-RustTestSummary -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;' `
+            -Stderr '' -RefreshProfile -FocusedIconTests
+    } 'cannot use two selectors'
     foreach ($invalid in @(
         'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;',
         'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
-        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;'
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;',
+        'test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;'
     )) {
         Assert-Fails {
             Read-RustTestSummary -Stdout $invalid -Stderr '' -RefreshProfile
-        } 'must select exactly one passing ignored test'
+        } 'must select exactly one ignored test'
     }
     Assert-Fails {
         Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' -Stderr ''

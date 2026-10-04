@@ -307,7 +307,8 @@ function Import-GuiRegressionPathList {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [object] $Grid,
-        [switch] $MeasureCommandReadiness
+        [switch] $MeasureCommandReadiness,
+        [switch] $IncludeOpenTicks
     )
     if ($null -eq $Grid) {
         $Grid = Get-ObserverGrid -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -330,6 +331,7 @@ function Import-GuiRegressionPathList {
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
     $nativeOpen = Resolve-AcceptanceNativeOpen -Dialog $dialog -Process $Application.process -ExpectedSession $SessionId
+    $openTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
@@ -342,6 +344,7 @@ function Import-GuiRegressionPathList {
     if ($Grid.pattern.Current.RowCount -ne $ExpectedRows) {
         throw "Path admission did not reach $ExpectedRows rows before the bounded deadline."
     }
+    $rowObservedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $rowObservedMs = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
     $readinessMs = $null
     if ($MeasureCommandReadiness) {
@@ -356,7 +359,9 @@ function Import-GuiRegressionPathList {
         $readinessMs = [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3)
     }
     [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
-        command_ready_after_rows_ms = $readinessMs }
+        command_ready_after_rows_ms = $readinessMs;
+        open_ticks = $(if ($IncludeOpenTicks) { $openTicks } else { $null });
+        row_observed_ticks = $(if ($IncludeOpenTicks) { $rowObservedTicks } else { $null }) }
 }
 function Set-ObserverSelectedRow {
     param(
