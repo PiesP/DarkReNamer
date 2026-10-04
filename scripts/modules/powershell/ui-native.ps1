@@ -118,6 +118,26 @@ public static class DarkReNamerVmAcceptanceNative {
         public int Bottom;
     }
 
+    public sealed class PerformanceCommandDiagnostic {
+        public uint CommandId { get; set; }
+        public string ScenarioPhase { get; set; }
+        public long? NativeReturn { get; set; }
+        public long? MessageResult { get; set; }
+        public int? ErrorCode { get; set; }
+        public double? ElapsedMs { get; set; }
+        public string Status { get; set; }
+    }
+
+    [ThreadStatic] private static PerformanceCommandDiagnostic lastPerformanceCommandDiagnostic;
+    public static PerformanceCommandDiagnostic LastPerformanceCommandDiagnostic {
+        get { return lastPerformanceCommandDiagnostic; }
+    }
+
+    public static string ClassifyPerformanceCommandSend(bool sent, int errorCode) {
+        return sent ? "success" : errorCode == 1460 ? "timeout" :
+            errorCode != 0 ? "native_error" : "failure_unknown";
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Point { public int X; public int Y; }
 
@@ -673,13 +693,38 @@ public static class DarkReNamerVmAcceptanceNative {
     }
 
     public static void SendBoundPerformanceCommand(IntPtr window, uint expectedProcessId, uint command) {
+        SendBoundPerformanceCommand(window, expectedProcessId, command, "unspecified");
+    }
+
+    public static void SendBoundPerformanceCommand(
+        IntPtr window, uint expectedProcessId, uint command, string scenarioPhase) {
+        lastPerformanceCommandDiagnostic = null;
+        if (String.IsNullOrEmpty(scenarioPhase) || scenarioPhase.Length > 64)
+            throw new ArgumentException("Invalid performance command phase.");
+        PerformanceCommandDiagnostic diagnostic = new PerformanceCommandDiagnostic {
+            CommandId = command, ScenarioPhase = scenarioPhase, Status = "pre_send_rejected"
+        };
+        lastPerformanceCommandDiagnostic = diagnostic;
         uint processId;
         if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId ||
             !IsMenuCommandEnabled(window, command))
             throw new InvalidOperationException("Performance command target or menu state is invalid.");
         IntPtr result;
-        if (SendMessageTimeoutW(window, 0x0111, new IntPtr(command), IntPtr.Zero, 3, 5000, out result) == IntPtr.Zero)
-            throw new InvalidOperationException("Performance menu command timed out.");
+        long begun = System.Diagnostics.Stopwatch.GetTimestamp();
+        SetLastErrorNative(0);
+        IntPtr nativeReturn = SendMessageTimeoutW(window, 0x0111, new IntPtr(command), IntPtr.Zero, 3, 5000, out result);
+        int errorCode = Marshal.GetLastWin32Error();
+        long ended = System.Diagnostics.Stopwatch.GetTimestamp();
+        bool sent = nativeReturn != IntPtr.Zero;
+        diagnostic.NativeReturn = nativeReturn.ToInt64();
+        diagnostic.MessageResult = sent ? result.ToInt64() : (long?)null;
+        diagnostic.ErrorCode = errorCode;
+        diagnostic.ElapsedMs = (ended - begun) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        diagnostic.Status = ClassifyPerformanceCommandSend(sent, errorCode);
+        if (!sent)
+            throw new InvalidOperationException("Performance menu command send failed: " +
+                diagnostic.Status + " (error " + errorCode + ", command " + command +
+                ", phase " + scenarioPhase + ").");
     }
 
     private static void EnumerateWindowsChecked(EnumWindowsCallback callback) {

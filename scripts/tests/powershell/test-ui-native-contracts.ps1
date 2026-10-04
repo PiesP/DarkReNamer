@@ -45,6 +45,7 @@ function Get-NativeFixtureMember {
 }
 $members = foreach ($signature in @(
     'public sealed class HighContrastSnapshot', 'public sealed class ClipboardSnapshot',
+    'public sealed class PerformanceCommandDiagnostic',
     'private struct NativeScrollInfo', 'private struct HIGHCONTRAST',
     'private struct KEYBDINPUT', 'private struct MOUSEINPUT', 'private struct INPUTUNION {', 'private struct INPUT {',
     'private static uint[] EnumerateClipboardFormats', 'private static string ReadClipboardUnicodeText',
@@ -53,8 +54,12 @@ $members = foreach ($signature in @(
     'public static string ClearClipboardIfOwned', 'private static void Send(',
     'public static void KeyDown(', 'public static void KeyUp(', 'public static void Tap(',
     'public static void TapExtended(', 'public static int[] TryReadScrollInfo(',
-    'public static HighContrastSnapshot GetHighContrastSnapshot('
+    'public static HighContrastSnapshot GetHighContrastSnapshot(',
+    'public static PerformanceCommandDiagnostic LastPerformanceCommandDiagnostic',
+    'public static string ClassifyPerformanceCommandSend(',
+    'public static void SendBoundPerformanceCommand(IntPtr window'
 )) { Get-NativeFixtureMember $signature }
+$members += Get-NativeFixtureMember "public static void SendBoundPerformanceCommand(`n        IntPtr window"
 # Keep the production resource policy and retained storage, rather than a replica
 # counter. Reflection below observes their state after executing the real body.
 $fields = [regex]::Matches($nativeSource,
@@ -70,6 +75,28 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 public static class DarkReNamerVmAcceptanceNative {
     public static List<string> Calls = new List<string>();
+    [ThreadStatic] private static PerformanceCommandDiagnostic lastPerformanceCommandDiagnostic;
+    public static bool PerformanceTargetValid = true, PerformanceMenuEnabled = true;
+    public static long PerformanceNativeReturn = 1, PerformanceMessageResult;
+    public static int PerformanceErrorCode, PerformanceSendCalls;
+    private static uint GetWindowThreadProcessId(IntPtr window, out uint processId) {
+        Calls.Add("command-target"); processId = 7;
+        return PerformanceTargetValid && window == new IntPtr(101) ? 1u : 0u;
+    }
+    public static bool IsMenuCommandEnabled(IntPtr window, uint command) {
+        Calls.Add("command-menu"); return PerformanceMenuEnabled;
+    }
+    private static IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result) {
+        Calls.Add("command-send"); PerformanceSendCalls++;
+        if (window != new IntPtr(101) || message != 0x0111 || wParam != new IntPtr(0x800E) ||
+            lParam != IntPtr.Zero || flags != 3 || timeoutMs != 5000 ||
+            Marshal.GetLastWin32Error() != 0)
+            throw new InvalidOperationException("performance command ABI or cleared error changed");
+        result = new IntPtr(PerformanceMessageResult);
+        Marshal.SetLastPInvokeError(PerformanceErrorCode);
+        return new IntPtr(PerformanceNativeReturn);
+    }
     public static string Failure = "";
     public static int FailInputCall, FailInputCall2, InputCalls;
     public static List<string> Inputs = new List<string>();
@@ -213,6 +240,88 @@ namespace Windows.Automation {
 }
 '@
 Add-Type -TypeDefinition $nativeFixture
+
+$commandSource = Get-NativeFixtureMember "public static void SendBoundPerformanceCommand(`n        IntPtr window"
+$clearErrorAt = $commandSource.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
+$nativeSendAt = $commandSource.IndexOf('IntPtr nativeReturn = SendMessageTimeoutW(', [StringComparison]::Ordinal)
+$nativeErrorAt = $commandSource.IndexOf('int errorCode = Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
+$sendEndAt = $commandSource.IndexOf('long ended = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
+if (-not (0 -le $clearErrorAt -and $clearErrorAt -lt $nativeSendAt -and
+    $nativeSendAt -lt $nativeErrorAt -and $nativeErrorAt -lt $sendEndAt)) {
+    throw 'Performance command native-error capture order changed.'
+}
+if ($nativeSource -notmatch '(?s)\[DllImport\("user32\.dll", SetLastError = true\)\]\s+private static extern IntPtr SendMessageTimeoutW') {
+    throw 'Performance command native send lost its SetLastError boundary.'
+}
+foreach ($case in @(
+    @{ native=1; message=0; error=0; status='success'; expected='success' },
+    @{ native=0; message=17; error=1460; status='timeout'; expected='timeout' },
+    @{ native=0; message=17; error=5; status='native_error'; expected='native_error' },
+    @{ native=0; message=17; error=0; status='failure_unknown'; expected='failure_unknown' }
+)) {
+    [DarkReNamerVmAcceptanceNative]::Calls.Clear()
+    [DarkReNamerVmAcceptanceNative]::PerformanceSendCalls = 0
+    [DarkReNamerVmAcceptanceNative]::PerformanceNativeReturn = $case.native
+    [DarkReNamerVmAcceptanceNative]::PerformanceMessageResult = $case.message
+    [DarkReNamerVmAcceptanceNative]::PerformanceErrorCode = $case.error
+    $sendAction = { [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+        [IntPtr]101, [uint32]7, [uint32]0x800E, 'full-preview-clear') }
+    if ($case.status -ceq 'success') { & $sendAction }
+    else { Assert-Fails $sendAction $case.expected }
+    $receipt = [DarkReNamerVmAcceptanceNative]::LastPerformanceCommandDiagnostic
+    Assert-Equal $receipt.Status $case.status 'Performance send classification'
+    Assert-Equal $receipt.NativeReturn $case.native 'Native send return'
+    Assert-Equal $receipt.CommandId ([uint32]0x800E) 'Command identity'
+    Assert-Equal $receipt.ScenarioPhase 'full-preview-clear' 'Command phase'
+    Assert-Equal $receipt.ErrorCode $case.error 'Immediate native error'
+    Assert-Equal $receipt.MessageResult $(if ($case.native -eq 0) { $null } else { 0 }) 'Separate message result'
+    if ($null -eq $receipt.ElapsedMs -or $receipt.ElapsedMs -lt 0) { throw 'Command elapsed time is absent or invalid.' }
+    Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') 'command-target,command-menu,command-send' 'One validated send'
+    Assert-Equal ([DarkReNamerVmAcceptanceNative]::PerformanceSendCalls) 1 'No automatic resend'
+}
+[DarkReNamerVmAcceptanceNative]::PerformanceTargetValid = $false
+[DarkReNamerVmAcceptanceNative]::PerformanceSendCalls = 0
+Assert-Fails { [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+    [IntPtr]101, [uint32]7, [uint32]0x800E, 'pre-send') } 'target or menu state is invalid'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::LastPerformanceCommandDiagnostic.Status) 'pre_send_rejected' 'Pre-send validation remains distinct'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::PerformanceSendCalls) 0 'Invalid target was never sent'
+[DarkReNamerVmAcceptanceNative]::PerformanceTargetValid = $true
+Assert-Fails { [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+    [IntPtr]101, [uint32]7, [uint32]0x800E, '') } 'Invalid performance command phase'
+if ($null -ne [DarkReNamerVmAcceptanceNative]::LastPerformanceCommandDiagnostic) { throw 'Invalid phase reused a previous command observation.' }
+
+$commandSends = [Collections.Generic.List[object]]::new()
+$boundApplication = [pscustomobject]@{ main_handle = 101; process = [pscustomobject]@{ Id = 7 } }
+[DarkReNamerVmAcceptanceNative]::PerformanceNativeReturn = 0
+[DarkReNamerVmAcceptanceNative]::PerformanceErrorCode = 1460
+[DarkReNamerVmAcceptanceNative]::PerformanceSendCalls = 0
+Assert-Fails {
+    foreach ($command in @(0x800E,0x8020)) {
+        Invoke-ObserverBoundPerformanceCommand -Application $boundApplication `
+            -CommandId $command -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
+    }
+} 'timeout'
+Assert-Equal $commandSends.Count 1 'Failed command written to bounded observations'
+Assert-Equal $commandSends[0].status 'timeout' 'Failed command receipt preserved'
+Assert-Equal $commandSends[0].command_id ([long]0x800E) 'Failure receipt command ID'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::PerformanceSendCalls) 1 'First failed command stopped scenario'
+[DarkReNamerVmAcceptanceNative]::PerformanceNativeReturn = 1
+[DarkReNamerVmAcceptanceNative]::PerformanceMessageResult = 0
+[DarkReNamerVmAcceptanceNative]::PerformanceErrorCode = 0
+[DarkReNamerVmAcceptanceNative]::PerformanceSendCalls = 0
+$commandSends.Clear()
+foreach ($index in 1..19) {
+    Invoke-ObserverBoundPerformanceCommand -Application $boundApplication `
+        -CommandId 0x800E -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
+}
+Assert-Equal $commandSends.Count 19 'Complete visible-hidden command sequence fits the receipt bound'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::PerformanceSendCalls) 19 'All bounded commands sent once'
+Invoke-ObserverBoundPerformanceCommand -Application $boundApplication `
+    -CommandId 0x800E -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
+Assert-Fails { Invoke-ObserverBoundPerformanceCommand -Application $boundApplication `
+    -CommandId 0x800E -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends } 'observation limit exceeded'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::PerformanceSendCalls) 20 'Observation limit prevents an unrecorded send'
+[DarkReNamerVmAcceptanceNative]::Calls.Clear()
 
 $scroll = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo([IntPtr]101, 2)
 Assert-Equal ($scroll -join ',') '-3,99,8,17,19' 'SCROLLINFO projection'
