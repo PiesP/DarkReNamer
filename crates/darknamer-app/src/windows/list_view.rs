@@ -3193,9 +3193,18 @@ mod native_tests {
                 refresh_all_rows(state);
                 assert_eq!(state.icon_unresolved_rows, 2);
             }
+            let queue_deadline = Instant::now() + Duration::from_secs(2);
             entered_rx
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(queue_deadline.saturating_duration_since(Instant::now()))
                 .map_err(|_| io::Error::other("first class query did not block"))?;
+            // The second render may find the request lock busy while the first
+            // class enters the worker. Pump its normal UI demand retry before
+            // checking the queue, while the first class remains gate-held.
+            pump_icon_test_until(
+                window,
+                queue_deadline.saturating_duration_since(Instant::now()),
+                || guardian.shared.pending_count() == 2,
+            )?;
             assert_eq!(guardian.shared.pending_count(), 2);
             assert_ui_ack_while_icon_blocked(window)?;
             let outer_lease = try_app_state(window)
