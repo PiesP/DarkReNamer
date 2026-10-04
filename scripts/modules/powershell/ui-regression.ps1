@@ -276,6 +276,23 @@ function Assert-GuiRegressionInvocationBinding {
             throw 'Performance sample differs from its fixed immutable plan.'
         }
     }
+    elseif ($RegressionMode -ceq 'icon-settlement') {
+        $expectedPlan = [ordered]@{ ordinary_rows=1000; churn_rows=1000; extension_classes=300;
+            poll_interval_ms=100; maximum_seconds=600 }
+        $actualPlan = $ManifestInput.request.PSObject.Properties['settlement_plan']
+        if ($null -eq $actualPlan -or
+            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+            $ManifestInput.request.endpoint_method -cne 'async-status-v1' -or
+            $ManifestInput.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
+            $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
+            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
+            $ManifestInput.request.desktop.width -ne 1366 -or
+            $ManifestInput.request.desktop.height -ne 768 -or
+            $ManifestInput.request.desktop.dpi -ne 96) {
+            throw 'Icon settlement differs from its fixed profile, method, or plan.'
+        }
+    }
     elseif ($null -ne $ManifestInput.request.PSObject.Properties['performance_plan']) {
         throw 'Performance plan is restricted to performance-sample.'
     }
@@ -707,6 +724,20 @@ function Invoke-GuiRegressionAcceptance {
                     -ProcessLifecycleObservations $processLifecycleObservations `
                     -ObservationSink $scenarioSink
             }
+            elseif ($RegressionMode -eq 'icon-settlement') {
+                $scenarioSink = [ordered]@{}
+                $observations.scenario = $scenarioSink
+                $result.assertions.scenario = $scenarioSink
+                $scenario = Invoke-ObserverIconSettlementScenario `
+                    -Verified $verified `
+                    -RuntimeRoot $effectiveRuntimeRoot `
+                    -EvidenceRoot $resolved.output_root `
+                    -SessionId $session `
+                    -WaitSeconds $TimeoutSeconds `
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations `
+                    -ObservationSink $scenarioSink
+            }
             elseif ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
                     -Verified $verified `
@@ -755,14 +786,17 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample')) { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample')) { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','icon-settlement')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
         }
         elseif ($RegressionMode -eq 'performance-sample') {
             $result.assertions['scope'] = 'performance-sample-p1-p3-v2'
+        }
+        elseif ($RegressionMode -eq 'icon-settlement') {
+            $result.assertions['scope'] = 'icon-settlement-async-status-v1'
         }
         $result.assertions.overall = 'passed'
         $result.status = 'review_required'

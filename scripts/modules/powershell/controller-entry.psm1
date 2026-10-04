@@ -1084,7 +1084,7 @@ function Invoke-DrWindowsVmController {
     [string] $FocusedIconCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
