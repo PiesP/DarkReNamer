@@ -2467,5 +2467,108 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             evidence.validate_performance_metrics(scenario)
 
 
+class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
+    @staticmethod
+    def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0):
+        return {"version": 1, "session": "41", "generation": str(generation),
+                "bootstrap": bootstrap, "queued": pending, "inflight": 0,
+                "undrained": 0, "unresolved_rows": 0, "cursor": 1000,
+                "settled": settled, "worker_joined": False, "reconcile_rows": 0,
+                "batch_ack": 0, "status_revision": "8", "demand_exhausted": demand_remaining == 0,
+                "demand_remaining": demand_remaining, "model_revision": str(generation)}
+
+    def scenario(self):
+        phases = []
+        for index, names in enumerate((
+                ["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"],
+                ["extension-0000.e000", "recurring-0499.txt", "recurring-0999.txt"])):
+            generation = index + 2
+            phases.append({"id": ("ordinary-cached", "interleaved-churn")[index],
+                           "rows": 1000, "data_ready_ms": 25.0,
+                           "icon_settled_observed_ms": 125.0,
+                           "first_status": self.status(generation, settled=False, pending=2),
+                           "settled_status": self.status(generation),
+                           "confirmation_status": self.status(generation),
+                           "poll_count": 3, "unstable_query_attempts": 0,
+                           "sampled_peak_pending": 2,
+                           "sampled_peak_unresolved_rows": 0,
+                           "representative_names": names})
+        return {"mode": evidence.ICON_SETTLEMENT_MODE,
+                "endpoint_method": evidence.ICON_SETTLEMENT_METHOD,
+                "plan": deepcopy(evidence.ICON_SETTLEMENT_PLAN),
+                "environment": {}, "process_id": 3001,
+                "process_start_utc_ticks": "134041000000000000",
+                "executable_sha256": "a" * 64, "phases": phases,
+                "disk_unchanged": True, "journal_residue_count": 0,
+                "worker_join_evidence": {"kind": "source-contract-inference", "observed": False},
+                "normal_exit_code": 0, "appearance": "light"}
+
+    def test_async_endpoint_requires_full_stable_generation_and_distinct_method(self):
+        scenario = self.scenario()
+        metrics = evidence.validate_icon_settlement_metrics(scenario)
+        self.assertEqual(metrics["baseline_icon_endpoint"], "not-measured")
+        for change in (
+                lambda s: s.__setitem__("endpoint_method", "synchronous-row-count-upper-bound"),
+                lambda s: s["phases"][0]["settled_status"].__setitem__("bootstrap", 2),
+                lambda s: s["phases"][0]["confirmation_status"].__setitem__("demand_remaining", 1),
+                lambda s: s["phases"][1]["settled_status"].__setitem__("generation", "2"),
+                lambda s: s["phases"][0]["first_status"].__setitem__("queued", 65),
+                lambda s: s["phases"][0]["first_status"].__setitem__("status_revision", "7"),
+                lambda s: s["worker_join_evidence"].update(kind="observed", observed=True)):
+            damaged = self.scenario()
+            change(damaged)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_icon_settlement_metrics(damaged)
+
+    def test_prepared_manifest_and_v2_owned_single_process_are_bound(self):
+        run = self.fixture.build(evidence.ICON_SETTLEMENT_RUN_ID, "standard")
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        profile_hash = digest(profile)
+        (run / "inputs" / "vm-automated-v2.json").write_bytes(profile)
+        manifest["acceptance_profile_id"] = evidence.V2_PROFILE_ID
+        manifest["acceptance_profile_sha256"] = profile_hash
+        manifest["acceptance_profile"] = {"file": "inputs/vm-automated-v2.json",
+                                          "bytes": len(profile), "sha256": profile_hash}
+        manifest["request"] = {"mode": evidence.ICON_SETTLEMENT_MODE,
+            "appearance": "light", "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100, "endpoint_method": evidence.ICON_SETTLEMENT_METHOD,
+            "settlement_plan": deepcopy(evidence.ICON_SETTLEMENT_PLAN)}
+        app_hash = manifest["artifacts"]["application"]["sha256"]
+        manifest["prepared_bundle"] = {"origin": "external-prepared-source-built-bundle",
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "application_sha256": app_hash}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+            "--output-root", "<external-output-root>", "--connection-profile",
+            "<private-connection-profile>", "--diagnostic", evidence.ICON_SETTLEMENT_MODE,
+            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+            "--expected-prepared-application-sha256", app_hash,
+            "--acceptance-profile-id", evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        evidence.validate_input_manifest(run, SOURCE)
+        bad = deepcopy(manifest)
+        bad["prepared_bundle"]["application_sha256"] = "f" * 64
+        write_json(manifest_path, bad)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_input_manifest(run, SOURCE)
+
+        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash)
+        owned = cleanup["owned_resource_evidence"]
+        raw = {"process_job_cleanup": owned["process_job_cleanup"],
+               "observer_lifecycle": owned["task_execution"]["observer_lifecycle"]}
+        scenario = self.scenario()
+        evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest, raw, scenario)
+        for mutate in (
+                lambda r, s: s.__setitem__("process_start_utc_ticks", "134041000000000001"),
+                lambda r, s: r.__setitem__("process_job_cleanup", []),
+                lambda r, s: r.__setitem__("observer_lifecycle", {})):
+            copied_raw, copied_scenario = deepcopy(raw), deepcopy(scenario)
+            mutate(copied_raw, copied_scenario)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest,
+                                                       copied_raw, copied_scenario)
+
+
 if __name__ == "__main__":
     unittest.main()

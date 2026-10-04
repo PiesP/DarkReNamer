@@ -701,6 +701,50 @@ tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
 
+### Icon settlement diagnostic
+
+After the native icon worker passes its functional checks, run the separate
+candidate-only production-EXE diagnostic on the prepared 1366×768, 96-DPI VM.
+Prepare a source-built bundle and pin its `application.sha256` as described in
+[the fixed performance sample](#fixed-performance-sample):
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic icon-settlement \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/native-bundle \
+  --expected-prepared-application-sha256 <frozen-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-icon-settlement-attempt
+```
+
+The `icon-settlement-v1-1366x768-96-text100` receipt uses its own
+`async-status-v1` endpoint method and raw scope. It imports 1,000 ordinary
+`.txt` rows, clears them, then imports 1,000 rows interleaving 299 unique
+extensions with recurring `.txt` (300 classes total). It records the existing
+Open-to-UIA-row-count data-ready endpoint separately from the later observed
+icon-settled endpoint. A pointer-free, versioned main-window scalar query is
+sampled every 100 ms within the existing 600-second observer limit. Settlement
+requires an attached system image list, zero unresolved rows, exhausted demand,
+empty queued/in-flight/completion/reconciliation state and the same full
+generation in consecutive stable snapshots. A missing query, failed bootstrap,
+changed session or deadline produces a failed attempt, not a baseline fallback.
+Terminal negative Shell results may legitimately remain no-image; settlement
+means no unresolved demand, not a visible glyph on every row.
+The verifier binds the source, prepared EXE, process ID and start time, exact
+normal exit, and the existing v2 owned Job and observer cleanup. An ordinary
+fast close may retire the HWND before an external joined-state sample; such a
+receipt labels worker join as a source-contract inference. Controlled native
+close tests provide the separate direct join proof.
+
+The pre-worker synchronous source completes its Shell icon calls during row
+construction, so its expected-row-count observation is only a source-derived
+upper bound for icon completion, with different precision. This candidate-only
+diagnostic does not measure a baseline icon endpoint or establish an
+icon-settlement speedup. Keep it separate from the unchanged A/B/B/A
+`performance-sample-v2` runs; settlement waits change later workload and cache
+conditions. Neither diagnostic is a release acceptance verdict.
+
 The painting policy keeps control outlines, default outlines, and decorative
 hairlines one physical pixel. Focus inset, pressed displacement, and existing
 separator slots/padding scale in DIP. Adjacent buttons share one outline seam;

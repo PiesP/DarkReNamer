@@ -508,4 +508,20 @@ if (-not (0 -le $resetAt -and $resetAt -lt $beginAt -and $beginAt -lt $sendAt -a
     $sendAt -lt $endAt -and $endAt -lt $errorAt -and $errorAt -lt $resourcesAt)) {
     throw 'Performance native probe timestamp or last-error capture order changed.'
 }
+$iconStatus = [ordered]@{ version=1; session='41'; generation='2'; bootstrap=1;
+    queued=0; inflight=0; undrained=0; unresolved_rows=0; cursor=1000;
+    settled=$true; worker_joined=$false; reconcile_rows=0; batch_ack=0;
+    status_revision='8'; demand_exhausted=$true; demand_remaining=0; model_revision='2' }
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $true 'Stable icon terminal state'
+$iconStatus.demand_remaining = 1
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $false 'Unexhausted icon demand'
+$iconStatus.demand_remaining = 0
+$iconStatus.queued = 65
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'bounded version-one contract'
+$churnNames = @(0..999 | ForEach-Object { Get-ObserverIconChurnFileName -Index $_ })
+Assert-Equal @($churnNames | ForEach-Object { [IO.Path]::GetExtension($_) } | Sort-Object -Unique).Count 300 'Interleaved extension-class count'
+Assert-Equal $churnNames[0] 'extension-0000.e000' 'First unique class'
+Assert-Equal $churnNames[1] 'recurring-0001.txt' 'Interleaved recurring class'
+Assert-Equal $churnNames[596] 'extension-0596.e298' 'Last unique class'
+Assert-Equal $churnNames[999] 'recurring-0999.txt' 'Last recurring class'
 Write-Output 'UI native/input behavior contracts passed.'

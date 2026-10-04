@@ -159,11 +159,41 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
                 )
 
-    def test_v2_profile_is_pair_only(self):
-        with self.assertRaisesRegex(ValueError, "requires --diagnostic appearance-pair"):
+    def test_v2_profile_requires_a_v2_aware_diagnostic(self):
+        with self.assertRaisesRegex(ValueError, "requires appearance-pair or icon-settlement"):
             runner.main(self.root, ["--connection-profile", str(self.root / "missing.json"),
                                     "--output-root", str(self.root / "unused"),
                                     "--acceptance-profile-id", runner.V2_PROFILE_ID])
+
+    def test_icon_settlement_has_new_method_prepared_pin_and_v2_profile(self):
+        run = {**runner.icon_settlement_run(), "acceptance_profile_sha256": "e" * 64}
+        pin = "a" * 64
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": pin}},
+                  "acceptance_profile": {"sha256": "e" * 64},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root, self.root, run, "f" * 64,
+                                             {}, {}, prepared_application_sha256=pin)
+        self.assertEqual(manifest["request"]["endpoint_method"], "async-status-v1")
+        self.assertEqual(manifest["request"]["settlement_plan"], runner.ICON_SETTLEMENT_PLAN)
+        self.assertEqual(manifest["run_id"], runner.ICON_SETTLEMENT_RUN_ID)
+        self.assertEqual(manifest["acceptance_profile_id"], runner.V2_PROFILE_ID)
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        self.assertEqual(manifest["prepared_bundle"]["application_sha256"], pin)
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            with self.assertRaisesRegex(ValueError, "requires a pinned prepared executable"):
+                runner.input_manifest(self.root, self.root, self.root, run, "f" * 64, {}, {})
+
+    def test_icon_settlement_rejects_unpinned_or_v1_selection_before_output(self):
+        base = ["--output-root", str(self.root / "icon-output"),
+                "--connection-profile", str(self.root / "missing.json"),
+                "--diagnostic", "icon-settlement"]
+        with self.assertRaisesRegex(ValueError, "explicit V2"):
+            runner.main(self.root, base)
+        with self.assertRaisesRegex(ValueError, "requires a prepared bundle"):
+            runner.main(self.root, base + ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        self.assertFalse((self.root / "icon-output").exists())
 
     def test_focused_manifest_command_replays_without_desktop_overrides(self):
         inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,

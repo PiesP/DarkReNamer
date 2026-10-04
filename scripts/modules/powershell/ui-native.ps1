@@ -1399,5 +1399,84 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     }
     public void Dispose() { if (!stopped) Stop(); }
 }
+
+// Pointer-free, versioned WM_APP status query against the exact owned main HWND.
+// No process memory or application object crosses this diagnostic boundary.
+public sealed class DarkReNamerIconStatusSnapshot {
+    public ulong Session, Generation, StatusRevision, ModelRevision;
+    public uint Bootstrap, Queued, InFlight, Undrained, UnresolvedRows, Cursor;
+    public uint Settled, WorkerJoined, ReconcileRows, BatchAck, DemandExhausted, DemandRemaining;
+}
+
+public static class DarkReNamerIconStatusObserver {
+    private const uint StatusMessage = 0x8056; // WM_APP + 0x56, version 1.
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
+
+    private static uint Scalar(IntPtr window, int selector) {
+        IntPtr result;
+        if (SendMessageTimeoutW(window, StatusMessage, new IntPtr(selector), IntPtr.Zero,
+                                3, 50, out result) == IntPtr.Zero)
+            throw new InvalidOperationException("Icon status query timed out or failed.");
+        long value = result.ToInt64();
+        if (value == -1) throw new InvalidOperationException("Icon status query is unpublished or unstable.");
+        if (value < 0 || value > uint.MaxValue)
+            throw new InvalidOperationException("Icon status query returned a non-scalar value.");
+        return checked((uint)value);
+    }
+
+    private static ulong Pair(IntPtr window, int lowSelector) {
+        uint low = Scalar(window, lowSelector);
+        uint high = Scalar(window, lowSelector + 1);
+        return ((ulong)high << 32) | low;
+    }
+
+    public static DarkReNamerIconStatusSnapshot ReadBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Icon status target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Icon status HWND does not belong to the owned process.");
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                ulong before = Pair(window, 15);
+                if ((before & 1) != 0) continue;
+                if (Scalar(window, 0) != 1)
+                    throw new InvalidOperationException("Unsupported icon status query version.");
+                ulong modelBefore = Pair(window, 19);
+                DarkReNamerIconStatusSnapshot value = new DarkReNamerIconStatusSnapshot {
+                    Session = Pair(window, 1), Generation = Pair(window, 3),
+                    Bootstrap = Scalar(window, 5), Queued = Scalar(window, 6),
+                    InFlight = Scalar(window, 7), Undrained = Scalar(window, 8),
+                    UnresolvedRows = Scalar(window, 9), Cursor = Scalar(window, 10),
+                    Settled = Scalar(window, 11), WorkerJoined = Scalar(window, 12),
+                    ReconcileRows = Scalar(window, 13), BatchAck = Scalar(window, 14),
+                    DemandExhausted = Scalar(window, 17), DemandRemaining = Scalar(window, 18),
+                };
+                ulong modelAfter = Pair(window, 19);
+                ulong after = Pair(window, 15);
+                if (before != after || (after & 1) != 0 || modelBefore != modelAfter) continue;
+                if (value.Bootstrap > 2 || value.Settled > 1 || value.WorkerJoined > 1 ||
+                    value.DemandExhausted > 1)
+                    throw new InvalidOperationException("Icon status scalar flags are invalid.");
+                if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+                    GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+                    throw new InvalidOperationException("Icon status target changed during query.");
+                value.ModelRevision = modelAfter;
+                value.StatusRevision = after;
+                return value;
+            }
+            catch (InvalidOperationException error) {
+                if (error.Message != "Icon status query is unpublished or unstable.") throw;
+            }
+        }
+        throw new InvalidOperationException("Icon status query did not produce a stable published snapshot.");
+    }
+}
 '@
 }
