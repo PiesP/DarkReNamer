@@ -923,6 +923,60 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             [path.name for path in (full, standard, text_scale, tooltip)],
         )
 
+    def test_text_scale_raw_normalization_requires_same_profile_text100_reference(self):
+        fixture_script = Path(__file__).with_name("test-gui-regression-evidence.py")
+        spec = importlib.util.spec_from_file_location("gui_evidence_fixture", fixture_script)
+        fixture_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture_module)
+        profile_bytes = (Path(__file__).parents[3] / "config" / runner.V2_PROFILE_FILE).read_bytes()
+        profile_hash = hashlib.sha256(profile_bytes).hexdigest()
+
+        def select_v2(run, fixture):
+            (run / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile_bytes)
+            manifest_path = run / "input-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest.update({
+                "acceptance_profile_id": runner.V2_PROFILE_ID,
+                "acceptance_profile_sha256": profile_hash,
+                "acceptance_profile": {"file": f"inputs/{runner.V2_PROFILE_FILE}",
+                                       "bytes": len(profile_bytes), "sha256": profile_hash},
+            })
+            self.write_json(manifest_path, manifest)
+            fixture.refresh(run)
+
+        for selected, family, other in ((runner.V1_PROFILE_ID, runner.RUNS, runner.V2_RUNS),
+                                        (runner.V2_PROFILE_ID, runner.V2_RUNS, runner.RUNS)):
+            with self.subTest(profile=selected):
+                root = self.root / selected
+                root.mkdir()
+                fixture = fixture_module.Fixture(root)
+                standard = fixture.build(family[1]["run_id"], "standard")
+                text_scale = fixture.build(family[2]["run_id"], "text-scale")
+                if selected == runner.V2_PROFILE_ID:
+                    select_v2(standard, fixture)
+                    select_v2(text_scale, fixture)
+                input_hash = runner.digest(text_scale / "input-manifest.json")
+                normalized = runner.normalize_run_result(text_scale, input_hash)
+                self.assertEqual(normalized["assertions"]["overall"], "passed")
+                self.assertTrue(normalized["assertions"]["semantics"]["input_text_enlarged"])
+
+                opposite = fixture.build(other[1]["run_id"], "standard")
+                if selected == runner.V1_PROFILE_ID:
+                    select_v2(opposite, fixture)
+                absent = standard.with_name(standard.name + "-retained")
+                standard.rename(absent)
+                with self.assertRaisesRegex(ValueError, "selected profile is missing"):
+                    runner.normalize_run_result(text_scale, input_hash)
+                absent.rename(standard)
+
+                manifest_path = standard / "input-manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                manifest["acceptance_profile_id"] = (runner.V1_PROFILE_ID if selected == runner.V2_PROFILE_ID
+                                                     else runner.V2_PROFILE_ID)
+                self.write_json(manifest_path, manifest)
+                with self.assertRaisesRegex(ValueError, "source or profile"):
+                    runner.normalize_run_result(text_scale, input_hash)
+
 
 if __name__ == "__main__":
     unittest.main()
