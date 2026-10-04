@@ -917,6 +917,7 @@ impl AppState {
             18 => self.icon_demand_scan_remaining as LRESULT,
             19 => (self.model_revision as u32) as LRESULT,
             20 => ((self.model_revision >> 32) as u32) as LRESULT,
+            21 => isize::from(u8::from(shared.is_none_or(IconShared::is_unavailable))),
             _ => return None,
         };
         (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
