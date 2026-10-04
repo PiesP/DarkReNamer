@@ -205,7 +205,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "2823d643fd6cba8be9cc06939693916570b1654aee4df970b431cebe07b2fa62",
+      "sha256": "769e4b4d62d66cb389f9284683375f6779e32ab770065e99d851af82a7cd1fb0",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -421,7 +421,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "1c20a3458f96e4307f76b7286cc1b3ac4e42210f2d6a43581efd1a551f37cecc",
+      "sha256": "1d4d678f96d4e89bc710178ac587f5e6da8dea6c9a28ddc724b8afe6a86e43ce",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -619,7 +619,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "51a77e5041841a67925c3c941e08882ed8108e97a6c0cd5eef13c66f2b29e7b0",
+      "sha256": "43315789a8747b5dc89c79ba2b46f62053d086f232671a3479355eb150038bb3",
       "dependencies": []
     },
     {
@@ -628,7 +628,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "7fb1dbed8812f0535eb0596c974c98a5a972d921837b6a86dda09ec0b01618c4",
+      "sha256": "cf37a3150720a8b2504ef3b5287f3f74a802e43935f665e291be61b8b0b870c4",
       "dependencies": []
     },
     {

@@ -745,12 +745,43 @@ fast close may retire the HWND before an external joined-state sample; such a
 receipt labels worker join as a source-contract inference. Controlled native
 close tests provide the separate direct join proof.
 
-The pre-worker synchronous source completes its Shell icon calls during row
-construction, so its expected-row-count observation is only a source-derived
-upper bound for icon completion, with different precision. This candidate-only
-diagnostic does not measure a baseline icon endpoint or establish an
-icon-settlement speedup. Keep it separate from the unchanged A/B/B/A
-`performance-sample-v2` runs; settlement waits change later workload and cache
+For the pre-worker synchronous source, use the same `icon-settlement`
+diagnostic, V2 owned-resource profile, prepared-bundle pin, display, and two
+fresh fixture phases, but select its separate baseline endpoint explicitly:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic icon-settlement \
+  --icon-endpoint-method synchronous-row-count-upper-bound-v1 \
+  --baseline-product-source-sha b152761010b16ef74e2a3765241a253778b88e0b \
+  --expected-run-source-sha <frozen-tooling-only-commit-sha> \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/native-baseline-bundle \
+  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-icon-baseline-attempt
+```
+
+The baseline has run ID
+`icon-settlement-sync-upper-bound-v1-1366x768-96-text100` and a distinct raw
+scope. Its `synchronous_lookup_completion_upper_bound_ms` equals the existing
+Open-to-UIA-row-count `data_ready_ms`. The pre-worker source finishes synchronous
+Shell icon lookup before adding each row, so RowCount is a source-derived upper
+bound for lookup completion. It does not observe actual icon visibility,
+workers, queues, or joins and emits no status snapshots or fabricated zero
+counters. The shared plan's 100-ms status poll applies only to the async method.
+The baseline method is never inferred when the async status query is
+missing. The command requires the original product reference and the exact
+clean tooling-only run SHA; the prepared EXE hash and source are pinned before
+VM execution. A separate source audit must establish that the tooling-only
+checkout's product Rust, Cargo and toolchain blobs match the original product
+reference; the manifest's asserted reference does not perform that audit.
+Compare the baseline upper bound and candidate observed endpoint descriptively,
+recording their different methods and any censored attempts. These samples do
+not establish a causal or statistical speed claim.
+
+Keep both endpoint methods separate from the unchanged A/B/B/A
+`performance-sample-v2` runs; the async settlement wait changes later workload and cache
 conditions. Neither diagnostic is a release acceptance verdict.
 
 The painting policy keeps control outlines, default outlines, and decorative

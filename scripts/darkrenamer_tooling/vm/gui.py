@@ -73,6 +73,9 @@ PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
+ICON_BASELINE_RUN_ID = "icon-settlement-sync-upper-bound-v1-1366x768-96-text100"
+ICON_BASELINE_METHOD = "synchronous-row-count-upper-bound-v1"
+ICON_BASELINE_PRODUCT_SOURCE_SHA = "b152761010b16ef74e2a3765241a253778b88e0b"
 ICON_SETTLEMENT_PLAN = {
     "ordinary_rows": 1000, "churn_rows": 1000, "extension_classes": 300,
     "poll_interval_ms": 100, "maximum_seconds": 600,
@@ -95,10 +98,16 @@ def performance_run(order: str = "hidden-visible") -> dict:
             "text_scale_percent": 100, "long_path_order": order}
 
 
-def icon_settlement_run() -> dict:
-    return {"run_id": ICON_SETTLEMENT_RUN_ID, "mode": ICON_SETTLEMENT_MODE,
+def icon_settlement_run(endpoint_method: str = ICON_SETTLEMENT_METHOD) -> dict:
+    require(endpoint_method in {ICON_SETTLEMENT_METHOD, ICON_BASELINE_METHOD},
+            "Icon settlement endpoint method is unsupported.")
+    return {"run_id": ICON_BASELINE_RUN_ID if endpoint_method == ICON_BASELINE_METHOD
+            else ICON_SETTLEMENT_RUN_ID, "mode": ICON_SETTLEMENT_MODE,
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
-            "text_scale_percent": 100, "acceptance_profile_id": V2_PROFILE_ID}
+            "text_scale_percent": 100, "acceptance_profile_id": V2_PROFILE_ID,
+            "endpoint_method": endpoint_method,
+            **({"baseline_product_source_sha": ICON_BASELINE_PRODUCT_SOURCE_SHA}
+               if endpoint_method == ICON_BASELINE_METHOD else {})}
 
 
 def appearance_pair_run(width: int, height: int, dpi: int, *,
@@ -672,6 +681,10 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
     require(run["mode"] != ICON_SETTLEMENT_MODE or prepared_application_sha256 is not None,
             "Icon settlement requires a pinned prepared executable.")
     _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
+    if run["mode"] == ICON_SETTLEMENT_MODE and run["endpoint_method"] == ICON_BASELINE_METHOD:
+        require(run["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA and
+                run["expected_run_source_sha"] == inputs["source_sha"],
+                "Synchronous baseline reference or exact frozen run source differs.")
     require(prepared_application_sha256 is None or
             inputs["artifacts"]["application"]["sha256"] == prepared_application_sha256,
             "Prepared application pin differs from copied run input.")
@@ -698,7 +711,9 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
                if run["mode"] == "performance-sample" else {}),
             **({"settlement_plan": ICON_SETTLEMENT_PLAN,
-                "endpoint_method": ICON_SETTLEMENT_METHOD}
+                "endpoint_method": run["endpoint_method"],
+                **({"baseline_product_source_sha": run["baseline_product_source_sha"]}
+                   if run["endpoint_method"] == ICON_BASELINE_METHOD else {})}
                if run["mode"] == ICON_SETTLEMENT_MODE else {}),
         },
         "expected_guest_platform": "windows",
@@ -716,6 +731,11 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
             *(["--acceptance-profile-id", V2_PROFILE_ID] if run.get("acceptance_profile_id") == V2_PROFILE_ID else []),
+            *(["--icon-endpoint-method", ICON_BASELINE_METHOD,
+               "--baseline-product-source-sha", ICON_BASELINE_PRODUCT_SOURCE_SHA,
+               "--expected-run-source-sha", run["expected_run_source_sha"]]
+              if run["mode"] == ICON_SETTLEMENT_MODE and
+              run["endpoint_method"] == ICON_BASELINE_METHOD else []),
             *(["--configuration-set", "focused"] if run["mode"] == "appearance-pair"
               and run["run_id"] != APPEARANCE_PAIR_ID else []),
         ],
@@ -1078,6 +1098,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
     parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE])
+    parser.add_argument("--icon-endpoint-method", choices=[ICON_BASELINE_METHOD])
+    parser.add_argument("--baseline-product-source-sha")
+    parser.add_argument("--expected-run-source-sha")
     parser.add_argument("--performance-column-order", choices=PERFORMANCE_ORDERS)
     parser.add_argument("--prepared-bundle-root", type=Path)
     parser.add_argument("--expected-prepared-application-sha256")
@@ -1098,6 +1121,15 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Acceptance profile selection requires appearance-pair or icon-settlement.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
             "Icon settlement requires explicit V2 owned-resource profile selection.")
+    require(args.icon_endpoint_method is None or args.diagnostic == ICON_SETTLEMENT_MODE,
+            "Icon endpoint selection requires the icon-settlement diagnostic.")
+    baseline = args.icon_endpoint_method == ICON_BASELINE_METHOD
+    require((baseline and args.baseline_product_source_sha == ICON_BASELINE_PRODUCT_SOURCE_SHA and
+             isinstance(args.expected_run_source_sha, str) and
+             SOURCE_SHA.fullmatch(args.expected_run_source_sha) is not None) or
+            (not baseline and args.baseline_product_source_sha is None and
+             args.expected_run_source_sha is None),
+            "Synchronous baseline requires the original product reference and exact frozen run source.")
     require(args.performance_column_order is None or args.diagnostic == "performance-sample",
             "Long-path order selection requires --diagnostic performance-sample.")
     require((args.prepared_bundle_root is None) ==
@@ -1111,7 +1143,8 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
     selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
-                     (icon_settlement_run(),) if args.diagnostic == ICON_SETTLEMENT_MODE else
+                     (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
+                     if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
                      if args.diagnostic == "appearance-pair" else RUNS)
@@ -1131,11 +1164,19 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
         selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
                                **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
                               for run in selected_runs)
+    if baseline:
+        selected_runs = tuple({**run, "expected_run_source_sha": args.expected_run_source_sha}
+                              for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
     prepared_manifest = None
     if args.prepared_bundle_root is not None:
         prepared_manifest = validate_prepared_bundle(
             repo, args.prepared_bundle_root, args.expected_prepared_application_sha256)
+    if baseline:
+        require(source_identity(repo)[0] == args.expected_run_source_sha and
+                prepared_manifest is not None and
+                prepared_manifest["source_sha"] == args.expected_run_source_sha,
+                "Synchronous baseline exact run source differs from the clean checkout or prepared bundle.")
     profile, profile_sha256 = load_connection_profile(args.connection_profile)
     source_identity(repo)
     host = host_preflight()

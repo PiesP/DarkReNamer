@@ -2505,6 +2505,37 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
                 "worker_join_evidence": {"kind": "source-contract-inference", "observed": False},
                 "normal_exit_code": 0, "appearance": "light"}
 
+    def baseline_scenario(self):
+        scenario = self.scenario()
+        scenario["endpoint_method"] = evidence.ICON_BASELINE_METHOD
+        scenario["endpoint_coverage"] = "source-derived-synchronous-lookup-completion-upper-bound"
+        scenario["baseline_product_source_sha"] = evidence.ICON_BASELINE_PRODUCT_SOURCE_SHA
+        del scenario["worker_join_evidence"]
+        for phase in scenario["phases"]:
+            ready = phase["data_ready_ms"]
+            for name in ("icon_settled_observed_ms", "first_status", "settled_status",
+                         "confirmation_status", "poll_count", "unstable_query_attempts",
+                         "sampled_peak_pending", "sampled_peak_unresolved_rows"):
+                del phase[name]
+            phase["synchronous_lookup_completion_upper_bound_ms"] = ready
+        return scenario
+
+    def test_synchronous_baseline_is_only_a_row_count_upper_bound(self):
+        metrics = evidence.validate_icon_baseline_metrics(self.baseline_scenario())
+        self.assertEqual(metrics["actual_icon_visibility_endpoint"], "not-measured")
+        self.assertEqual(metrics["worker_or_queue_endpoint"], "not-measured")
+        for change in (
+                lambda s: s["phases"][0].__setitem__(
+                    "synchronous_lookup_completion_upper_bound_ms", 24.0),
+                lambda s: s["phases"][0].__setitem__("settled_status", self.status(2)),
+                lambda s: s.__setitem__("worker_join_evidence", {}),
+                lambda s: s.__setitem__("baseline_product_source_sha", "c" * 40),
+                lambda s: s.__setitem__("endpoint_method", evidence.ICON_SETTLEMENT_METHOD)):
+            damaged = self.baseline_scenario()
+            change(damaged)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_icon_baseline_metrics(damaged)
+
     def test_async_endpoint_requires_full_stable_generation_and_distinct_method(self):
         scenario = self.scenario()
         metrics = evidence.validate_icon_settlement_metrics(scenario)
@@ -2577,6 +2608,48 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
             with self.assertRaises(evidence.EvidenceError):
                 evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest,
                                                        copied_raw, copied_scenario)
+
+    def test_synchronous_baseline_manifest_requires_explicit_method_and_original_ref(self):
+        run = self.fixture.build(evidence.ICON_BASELINE_RUN_ID, "standard")
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        profile_hash = digest(profile)
+        (run / "inputs" / "vm-automated-v2.json").write_bytes(profile)
+        manifest["acceptance_profile_id"] = evidence.V2_PROFILE_ID
+        manifest["acceptance_profile_sha256"] = profile_hash
+        manifest["acceptance_profile"] = {"file": "inputs/vm-automated-v2.json",
+                                          "bytes": len(profile), "sha256": profile_hash}
+        manifest["request"] = {"mode": evidence.ICON_SETTLEMENT_MODE,
+            "appearance": "light", "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100, "endpoint_method": evidence.ICON_BASELINE_METHOD,
+            "baseline_product_source_sha": evidence.ICON_BASELINE_PRODUCT_SOURCE_SHA,
+            "settlement_plan": deepcopy(evidence.ICON_SETTLEMENT_PLAN)}
+        app_hash = manifest["artifacts"]["application"]["sha256"]
+        manifest["prepared_bundle"] = {"origin": "external-prepared-source-built-bundle",
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "application_sha256": app_hash}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+            "--output-root", "<external-output-root>", "--connection-profile",
+            "<private-connection-profile>", "--diagnostic", evidence.ICON_SETTLEMENT_MODE,
+            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+            "--expected-prepared-application-sha256", app_hash,
+            "--acceptance-profile-id", evidence.V2_PROFILE_ID,
+            "--icon-endpoint-method", evidence.ICON_BASELINE_METHOD,
+            "--baseline-product-source-sha", evidence.ICON_BASELINE_PRODUCT_SOURCE_SHA,
+            "--expected-run-source-sha", SOURCE]
+        write_json(manifest_path, manifest)
+        evidence.validate_input_manifest(run, SOURCE)
+        for mutation in (
+                lambda m: m["request"].pop("baseline_product_source_sha"),
+                lambda m: m["request"].__setitem__("baseline_product_source_sha", "c" * 40),
+                lambda m: m["command"].__delitem__(slice(-6, None)),
+                lambda m: m["command"].__setitem__(-1, "c" * 40)):
+            damaged = deepcopy(manifest)
+            mutation(damaged)
+            write_json(manifest_path, damaged)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_input_manifest(run, SOURCE)
 
 
 if __name__ == "__main__":
