@@ -4999,7 +4999,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if ($FocusedIconTests) {
         $expectedFocusedNames = if ($FocusedIconCase) {
-            @('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)
+            ,@('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)
         } else { @($manifest.diagnostic.test_names) }
         for ($caseIndex = 0; $caseIndex -lt @($result.tests).Count; $caseIndex++) {
             if ($result.tests[$caseIndex].test_name -cne $expectedFocusedNames[$caseIndex] -or
