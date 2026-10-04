@@ -7,7 +7,9 @@ import argparse
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 from tooling_test_paths import REPOSITORY_ROOT
 import subprocess
 import tempfile
@@ -420,6 +422,120 @@ class CampaignRunnerTests(unittest.TestCase):
         with patch.object(runner, "read_frozen_file", side_effect=mutate), \
                 self.assertRaisesRegex(ValueError, "changed"):
             runner.package_evidence(package, self.root / "changed.zip")
+
+    def test_archive_is_private_during_write_and_after_publication(self) -> None:
+        package = self.root / "private-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        archive_path = self.root / "private.zip"
+        original = runner.read_frozen_file
+        observed = []
+
+        def inspect_temporary(path, frozen):
+            temporary, = self.root.glob(".private.zip.*.tmp")
+            observed.append(stat.S_IMODE(temporary.stat().st_mode))
+            return original(path, frozen)
+
+        previous_umask = os.umask(0)
+        try:
+            with patch.object(runner, "read_frozen_file", side_effect=inspect_temporary):
+                runner.package_evidence(package, archive_path)
+        finally:
+            os.umask(previous_umask)
+        self.assertTrue(observed)
+        self.assertEqual(set(observed), {0o600})
+        self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
+        self.assertEqual(list(self.root.glob(".private.zip.*.tmp")), [])
+
+    def test_archive_write_failure_removes_private_temporary_without_publication(self) -> None:
+        package = self.root / "failed-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        archive_path = self.root / "failed.zip"
+
+        def fail_during_write(_path, _frozen):
+            temporary, = self.root.glob(".failed.zip.*.tmp")
+            self.assertEqual(stat.S_IMODE(temporary.stat().st_mode), 0o600)
+            raise RuntimeError("injected archive write failure")
+
+        with patch.object(runner, "read_frozen_file", side_effect=fail_during_write), \
+                self.assertRaisesRegex(RuntimeError, "injected archive write failure"):
+            runner.package_evidence(package, archive_path)
+        self.assertFalse(archive_path.exists())
+        self.assertEqual(list(self.root.glob(".failed.zip.*.tmp")), [])
+
+    def test_archive_rejects_permission_change_during_write(self) -> None:
+        package = self.root / "changed-mode-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        archive_path = self.root / "changed-mode.zip"
+        original = runner.read_frozen_file
+
+        def expose_temporary(path, frozen):
+            temporary, = self.root.glob(".changed-mode.zip.*.tmp")
+            temporary.chmod(0o644)
+            return original(path, frozen)
+
+        with patch.object(runner, "read_frozen_file", side_effect=expose_temporary), \
+                self.assertRaisesRegex(ValueError, "changed while writing"):
+            runner.package_evidence(package, archive_path)
+        self.assertFalse(archive_path.exists())
+        self.assertEqual(list(self.root.glob(".changed-mode.zip.*.tmp")), [])
+
+    def test_archive_temporary_name_collision_preserves_existing_file(self) -> None:
+        package = self.root / "temporary-collision-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        temporary = self.root / ".temporary-collision.zip.fixed.tmp"
+        temporary.write_bytes(b"existing temporary")
+
+        class FixedToken:
+            hex = "fixed"
+
+        with patch.object(runner.uuid, "uuid4", return_value=FixedToken()), \
+                self.assertRaises(FileExistsError):
+            runner.package_evidence(package, self.root / "temporary-collision.zip")
+        self.assertEqual(temporary.read_bytes(), b"existing temporary")
+        self.assertFalse((self.root / "temporary-collision.zip").exists())
+
+    def test_archive_rejects_permission_change_during_publication(self) -> None:
+        package = self.root / "publish-mode-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        archive_path = self.root / "publish-mode.zip"
+        original_link = os.link
+
+        def expose_published_archive(source, destination):
+            original_link(source, destination)
+            Path(destination).chmod(0o644)
+
+        with patch.object(runner.os, "link", side_effect=expose_published_archive), \
+                self.assertRaisesRegex(ValueError, "remain private after publication"):
+            runner.package_evidence(package, archive_path)
+        self.assertFalse(archive_path.exists())
+        self.assertEqual(list(self.root.glob(".publish-mode.zip.*.tmp")), [])
+
+    def test_archive_publication_cannot_replace_existing_file(self) -> None:
+        package = self.root / "collision-package"
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        archive_path = self.root / "collision.zip"
+
+        def occupy_destination(_source, destination):
+            Path(destination).write_bytes(b"existing archive")
+            raise FileExistsError("injected publication collision")
+
+        with patch.object(runner.os, "link", side_effect=occupy_destination), \
+                self.assertRaisesRegex(FileExistsError, "injected publication collision"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual(archive_path.read_bytes(), b"existing archive")
+        self.assertEqual(list(self.root.glob(".collision.zip.*.tmp")), [])
 
     def test_output_and_archive_must_be_fresh(self) -> None:
         self.output.mkdir()

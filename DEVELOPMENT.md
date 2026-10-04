@@ -478,6 +478,18 @@ the immutable candidate EXE and records its exact handoff identity. Its native
 backend preparation retains source-bound test binaries, the complete actual
 stdout/stderr transcripts, result and transport records, and cleanup evidence.
 
+Create campaign output and archive destinations on a local POSIX filesystem under
+an owner-only (`0700`) directory before running the campaign. Keep this parent
+private through packaging and upload; mode bits on files do not prevent a writer
+to the parent directory from substituting names. Do not use a shared or
+Windows-mounted destination whose permissions do not enforce this boundary.
+The packager exclusively creates its temporary archive with owner-only (`0600`)
+permissions before writing any raw observations, and retains that mode when
+publishing the final archive without replacement. No later `chmod` is needed to
+establish initial file privacy. These prospective protections do not establish
+creation-time privacy for historical archives, including v0.1.5's archive whose
+permissions were restricted only after creation.
+
 The campaign ZIP is private raw input, not a release verdict. It contains the
 complete indexed observations and failed records without normalizing producer
 summaries into passes. The repository owner uploads it as the sole asset of the
