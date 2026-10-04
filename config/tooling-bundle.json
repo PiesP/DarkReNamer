@@ -824,7 +824,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "70e8cc36d59cd66438f2e890dfbff8941436b40103eadb0660566dbd023b511d",
+      "sha256": "9f3279c74d1c288648b280dd5b2db8f4394abaf5fcd3cdf90960b2a89fcba172",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

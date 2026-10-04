@@ -3677,3 +3677,57 @@ foreach ($call in $applicationStartCalls) {
         throw 'The controller accepted a duplicated cleanup identity.'
     }
 }
+
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerPath, [ref]$tokens, [ref]$errors
+    )
+    if ($errors.Count -ne 0) {
+        throw 'The controller entrypoint must parse before its focused result check is exercised.'
+    }
+    $checks = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Clauses.Count -eq 1 -and
+            $node.Clauses[0].Item1.Extent.Text -ceq '$FocusedIconTests' -and
+            $node.Extent.Text.Contains('Focused icon case result differs from its frozen inventory.')
+    }, $true))
+    if ($checks.Count -ne 1) {
+        throw 'Expected one controller focused result inventory check.'
+    }
+    $checkFocusedResults = [scriptblock]::Create($checks[0].Extent.Text)
+    $focusedNames = @(
+        'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive'
+        'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results'
+        'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire'
+        'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+    )
+    $binary = [pscustomobject]@{ file = 'darknamer_app.exe'; sha256 = 'a' * 64 }
+    $manifest = [pscustomobject]@{
+        diagnostic = [pscustomobject]@{ test_names = $focusedNames }
+        test_binaries = @($binary)
+    }
+    $FocusedIconTests = $true
+    $FocusedIconCase = 'close_and_forced_destroy_retire'
+    $result = [pscustomobject]@{
+        tests = @([pscustomobject]@{
+            test_name = $focusedNames[2]
+            file = $binary.file
+            sha256 = $binary.sha256
+        })
+    }
+    & $checkFocusedResults
+    $result.tests[0].test_name = $focusedNames[1]
+    Assert-Fails -Action { & $checkFocusedResults } -Expected 'Focused icon case result differs'
+
+    $FocusedIconCase = ''
+    $result.tests = @(
+        foreach ($name in $focusedNames) {
+            [pscustomobject]@{ test_name = $name; file = $binary.file; sha256 = $binary.sha256 }
+        }
+    )
+    & $checkFocusedResults
+}
