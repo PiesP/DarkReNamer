@@ -48,6 +48,13 @@ starting another operation may wait until the import worker finishes. A result
 read after cancellation is discarded rather than applied to the list. Do not
 move, edit, or delete a journal or lock file to clear a waiting state.
 
+File icons load separately from list text. Names and proposals remain usable
+while icons are pending; Apply does not wait for icons. If an icon lookup is
+pending when you close the window, the window stays open until that lookup
+finishes. There is no fixed close deadline for a blocked provider.
+The status message `아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다.`
+means that the app is finishing an icon lookup before closing.
+
 ## Set or reset a target folder
 
 Use **편집 > 대상 폴더 > 모든 파일의 대상 폴더 지정...** (Edit > Target folder
