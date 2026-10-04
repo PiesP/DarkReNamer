@@ -4488,6 +4488,11 @@ mod native_tests {
             refresh_all_rows(state);
             assert_model_native_rows(state);
             let rows = distinct_refresh_rows();
+            let source_icons = rows
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (item.source_path().clone(), (index % 2) as i32))
+                .collect::<Vec<_>>();
             for (index, item) in rows.iter().enumerate() {
                 state.icon_cache.insert(
                     icon_cache_key(item.current_name(), item.is_directory()),
@@ -4496,21 +4501,34 @@ mod native_tests {
             }
             assert_eq!(state.icon_cache.len(), rows.len());
             state.model.append_batch_by(rows, compare_windows)?;
+            let assert_source_icons = |state: &AppState| {
+                assert_eq!(state.model.len(), source_icons.len());
+                for (index, (item, rendered)) in state
+                    .model
+                    .items()
+                    .iter()
+                    .zip(&state.rendered_rows)
+                    .enumerate()
+                {
+                    assert!(
+                        state.model.items()[..index]
+                            .iter()
+                            .all(|prior| prior.source_path() != item.source_path())
+                    );
+                    let mut matches = source_icons
+                        .iter()
+                        .filter(|(source, _)| source == item.source_path());
+                    assert_eq!(
+                        matches.next().map(|(_, icon)| *icon),
+                        Some(rendered.icon),
+                        "model row {index} source/icon mismatch"
+                    );
+                    assert!(matches.next().is_none(), "fixture source is ambiguous");
+                }
+            };
             // The empty ListView and model were synchronized before insertion.
             assert_normal_refresh(state, "regression-first-insertion");
-            assert_eq!(
-                state
-                    .rendered_rows
-                    .iter()
-                    .take(6)
-                    .map(|row| row.icon)
-                    .collect::<Vec<_>>(),
-                vec![0, 1, 0, 1, 0, 1]
-            );
-            assert_eq!(
-                state.rendered_rows[0].values[0],
-                LegacyText::from("ordinary-00000.txt")
-            );
+            assert_source_icons(state);
             assert_normal_refresh(state, "regression-unchanged");
 
             assert!(
@@ -4538,10 +4556,7 @@ mod native_tests {
                 .collect::<Vec<_>>();
             assert_ne!(after, before);
             assert_normal_refresh(state, "regression-equal-length-reordered");
-            assert_eq!(
-                state.rendered_rows[0].values[0],
-                LegacyText::from("ordinary-00005.log")
-            );
+            assert_source_icons(state);
             state.model.append_batch_by(
                 refresh_fixture_rows(parent, "ordinary", 6, 2),
                 compare_windows,
