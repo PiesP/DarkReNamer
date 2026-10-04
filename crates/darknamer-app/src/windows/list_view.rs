@@ -4347,7 +4347,7 @@ mod native_tests {
         const CHILD_MODE: &str = "DARKRENAMER_TEST_NATIVE_REFRESH_CHILD";
         const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
         const DEADLINE: Duration = Duration::from_secs(60);
-        let exact_name = format!("windows::list_view::native_tests::{case}");
+        let exact_name = format!("windows::list_view::native_tests::full_refresh_{case}");
         if let Some(requested) = std::env::var_os(CHILD_MODE) {
             if requested != std::ffi::OsStr::new(&exact_name) {
                 return Err(io::Error::other("unexpected native-refresh child case").into());
@@ -4594,7 +4594,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case("native_rows_and_proposals", run_native_rows_and_proposals)
     }
 
@@ -4723,7 +4723,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_fallback_and_apply_lock",
             run_native_fallback_and_apply_lock,
@@ -4818,7 +4818,8 @@ mod native_tests {
     }
 
     #[test]
-    fn native_dates_follow_locale_and_timezone() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_dates_follow_locale_and_timezone()
+    -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_dates_follow_locale_and_timezone",
             run_native_dates_follow_locale_and_timezone,
@@ -4904,7 +4905,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_viewport_focus_and_close",
             run_native_viewport_focus_and_close,
