@@ -2483,7 +2483,7 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
         phases = []
         for index, names in enumerate((
                 ["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"],
-                ["extension-0000.e000", "recurring-0499.txt", "recurring-0999.txt"])):
+                ["extension-0000.e000", "recurring-0401.txt", "recurring-0999.txt"])):
             generation = index + 2
             phases.append({"id": ("ordinary-cached", "interleaved-churn")[index],
                            "rows": 1000, "data_ready_ms": 25.0,

@@ -3199,7 +3199,7 @@ def validate_icon_settlement_metrics(scenario: object) -> dict:
             f"icon phase {index}")
         expected_id = ("ordinary-cached", "interleaved-churn")[index]
         names = (["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"] if index == 0 else
-                 ["extension-0000.e000", "recurring-0499.txt", "recurring-0999.txt"])
+                 ["extension-0000.e000", "recurring-0401.txt", "recurring-0999.txt"])
         require(phase["id"] == expected_id and int_equals(phase["rows"], 1000) and
                 phase["representative_names"] == names,
                 "Icon settlement phase identity, rows, or representative text differs.")
@@ -3272,7 +3272,7 @@ def validate_icon_baseline_metrics(scenario: object) -> dict:
             f"icon synchronous baseline phase {index}")
         expected_id = ("ordinary-cached", "interleaved-churn")[index]
         names = (["ordinary-0000.txt", "ordinary-0499.txt", "ordinary-0999.txt"] if index == 0 else
-                 ["extension-0000.e000", "recurring-0499.txt", "recurring-0999.txt"])
+                 ["extension-0000.e000", "recurring-0401.txt", "recurring-0999.txt"])
         ready = phase["data_ready_ms"]
         require(phase["id"] == expected_id and int_equals(phase["rows"], 1000) and
                 phase["representative_names"] == names and
