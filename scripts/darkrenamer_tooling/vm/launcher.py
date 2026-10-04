@@ -73,6 +73,14 @@ REFRESH_PROFILE_COUNTERS = (
     'full_rebuilds', 'extra_staged_rows_peak',
     'logical_staged_payload_bytes_peak',
 )
+REFRESH_PROFILE_V2_COUNTERS = tuple(name for name in REFRESH_PROFILE_COUNTERS
+    if name not in {'shell_nested_ns', 'shell_max_ns', 'shell_calls', 'cache_hits', 'cache_misses'}) + (
+    'ui_shell_nested_ns', 'ui_shell_max_ns', 'ui_shell_calls',
+    'render_icon_cache_hits', 'render_icon_cache_misses',
+    'icon_request_submissions', 'icon_results_drained',
+)
+REFRESH_PROFILE_V1_KIND = 'refresh-stages-test-build'
+REFRESH_PROFILE_V2_KIND = 'refresh-stages-icon-async-test-build'
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -1666,19 +1674,42 @@ def verify_refresh_profile_records(output, order):
             record = json.loads(payload)
         except json.JSONDecodeError as error:
             raise ValueError('Refresh diagnostic emitted malformed JSON.') from error
-        if not isinstance(record, dict) or record.get('kind') != 'refresh-stages-test-build':
+        if not isinstance(record, dict) or record.get('kind') not in {
+                REFRESH_PROFILE_V1_KIND, REFRESH_PROFILE_V2_KIND}:
             continue
+        v2 = record['kind'] == REFRESH_PROFILE_V2_KIND
+        counters = REFRESH_PROFILE_V2_COUNTERS if v2 else REFRESH_PROFILE_COUNTERS
         if (not isinstance(record.get('scenario'), str) or
                 any(type(record.get(key)) is not int or record[key] < 0
-                    for key in REFRESH_PROFILE_COUNTERS) or
+                    for key in counters) or
                 record['timestamp_values'] != 2 * record['rows_formatted'] or
-                record['cache_hits'] + record['cache_misses'] != record['rows_formatted'] or
-                record['shell_calls'] != record['cache_misses'] or
-                record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
-                record['shell_nested_ns'] != record['row_values_inclusive_ns'] or
-                record['shell_max_ns'] > record['shell_nested_ns']):
+                (v2 and (set(record) != (set(REFRESH_PROFILE_V2_COUNTERS) |
+                             {'kind', 'schema_version', 'icon_worker_attached', 'scenario'}) or
+                         type(record.get('schema_version')) is not int or
+                         record['schema_version'] != 2 or
+                         record.get('icon_worker_attached') is not False or
+                         any(name in record for name in
+                             ('shell_nested_ns', 'shell_max_ns', 'shell_calls',
+                              'cache_hits', 'cache_misses')) or
+                         record['ui_shell_nested_ns'] != 0 or
+                         record['ui_shell_max_ns'] != 0 or
+                         record['ui_shell_calls'] != 0 or
+                         record['icon_request_submissions'] != 0 or
+                         record['icon_results_drained'] != 0 or
+                         record['render_icon_cache_hits'] + record['render_icon_cache_misses'] !=
+                         record['rows_formatted'] or
+                         record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
+                         record['ui_shell_nested_ns'] != record['row_values_inclusive_ns'])) or
+                (not v2 and (record['cache_hits'] + record['cache_misses'] !=
+                             record['rows_formatted'] or
+                             record['shell_calls'] != record['cache_misses'] or
+                             record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
+                             record['shell_nested_ns'] != record['row_values_inclusive_ns'] or
+                             record['shell_max_ns'] > record['shell_nested_ns']))):
             raise ValueError('Refresh diagnostic scenario counters are invalid.')
         records.append(record)
+    if len({record['kind'] for record in records}) > 1:
+        raise ValueError('Refresh diagnostic mixed historical and async test-build records.')
     long_paths = ('long-hidden', 'long-hidden-unchanged',
                   'long-visible', 'long-visible-unchanged')
     if order == 'visible-hidden':

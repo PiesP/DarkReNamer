@@ -73,27 +73,35 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
-    def refresh_profile_output(self, order='hidden-visible'):
+    def refresh_profile_output(self, order='hidden-visible', *, v2=False):
         long_paths = ('long-hidden', 'long-hidden-unchanged',
                       'long-visible', 'long-visible-unchanged')
         if order == 'visible-hidden':
             long_paths = long_paths[2:] + long_paths[:2]
         rows = []
         for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
-            row = {'kind': 'refresh-stages-test-build', 'scenario': scenario,
-                   **{name: 0 for name in vm.REFRESH_PROFILE_COUNTERS}}
+            row = {'kind': vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND,
+                   'scenario': scenario,
+                   **{name: 0 for name in (vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
+                                            vm.REFRESH_PROFILE_COUNTERS)}}
+            if v2:
+                row.update(schema_version=2, icon_worker_attached=False)
             count = 100 if scenario == 'ordinary-100' else (
                 1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
             formatted = 26500 if scenario == 'ordinary-10000' else (
                 0 if 'proposal-' in scenario else count)
             row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
-                       cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
-                       shell_calls=int(formatted > 0),
                        row_values_inclusive_ns=20 if formatted else 0,
                        row_values_exclusive_ns=10 if formatted else 0,
-                       timestamps_nested_ns=5 if formatted else 0,
-                       shell_nested_ns=5 if formatted else 0,
-                       shell_max_ns=5 if formatted else 0)
+                       timestamps_nested_ns=(10 if v2 else 5) if formatted else 0)
+            if v2:
+                row.update(render_icon_cache_hits=max(0, formatted - 1),
+                           render_icon_cache_misses=int(formatted > 0))
+            else:
+                row.update(cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
+                           shell_calls=int(formatted > 0),
+                           shell_nested_ns=5 if formatted else 0,
+                           shell_max_ns=5 if formatted else 0)
             rows.append(json.dumps(row))
         return ('running 1 test\ntest ' + vm.REFRESH_PROFILE_TEST +
                 ' ... ' + rows[0] + '\n' + '\n'.join(rows[1:]) +
@@ -122,6 +130,32 @@ class VmRunnerTests(unittest.TestCase):
             vm.verify_refresh_profile_records(
                 self.refresh_profile_output().replace('"rows": 100', '"rows": 99', 1),
                 'hidden-visible')
+
+    def test_async_refresh_profile_has_separate_detached_attribution(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                self.refresh_profile_output(order, v2=True), order)), 11)
+        valid = self.refresh_profile_output(v2=True)
+        for old_key in ('shell_nested_ns', 'shell_max_ns', 'shell_calls',
+                        'cache_hits', 'cache_misses'):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(
+                    valid.replace('"schema_version": 2',
+                                  '"schema_version": 2, "' + old_key + '": 0', 1),
+                    'hidden-visible')
+        for source, replacement in (
+                ('"icon_worker_attached": false', '"icon_worker_attached": true'),
+                ('"ui_shell_calls": 0', '"ui_shell_calls": 1'),
+                ('"icon_request_submissions": 0', '"icon_request_submissions": 1'),
+                ('"render_icon_cache_misses": 1', '"render_icon_cache_misses": 2')):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(valid.replace(source, replacement, 1),
+                                                  'hidden-visible')
+        historical = self.refresh_profile_output()
+        mixed = valid.replace(
+            valid.splitlines()[1], historical.splitlines()[1], 1)
+        with self.assertRaisesRegex(ValueError, 'mixed historical'):
+            vm.verify_refresh_profile_records(mixed, 'hidden-visible')
 
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
