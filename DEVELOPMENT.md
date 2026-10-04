@@ -357,16 +357,25 @@ Each pass emits stage timings and counts for ordinary 100/1,000/10,000-row
 refreshes, an unchanged 10,000-row refresh, proposal edits/resets, and long
 paths with auxiliary columns hidden and visible. The native test checks row
 counts, representative text in all eight ListView columns even when auxiliary
-columns are hidden, icons, and selection preservation. The current test emits
-`refresh-stages-icon-async-test-build` schema 2 with
+columns are hidden, icons, and selection preservation. The current streaming
+test emits `refresh-stages-icon-async-streaming-test-build` schema 3 with
 `icon_worker_attached=false`: this is a detached UI staging measurement. Its
 `row_values_inclusive_ns` contains `timestamps_nested_ns` and
 `ui_shell_nested_ns`; `row_values_exclusive_ns` excludes both. The UI Shell
 timings and call count, plus icon submissions and drains, must be zero.
 `render_icon_cache_hits` and `render_icon_cache_misses` describe staging cache
-lookups, not worker Shell calls. Historical `refresh-stages-test-build` records
-retain their original synchronous Shell/cache meaning; the validator keeps
-the two schemas separate and rejects mixed records. Do not add inclusive and
+lookups, not worker Shell calls. Schema 3 adds separate peaks for one-row normal
+staging and full-vector fallback staging, retained rendered-vector capacity
+bytes and growth events, and repeated nonzero FILETIME inputs. For the fixed
+eligible workloads, normal staging owns at most one transient row and fallback
+staging is zero. The repeated-input counter resets on each refresh and counts
+adjacent identical nonzero values; it is a test-only input count, not evidence
+of date caching. Vector capacity bytes describe the backing allocation, not
+allocator or process peak memory. The native apply/rebuild clock excludes row
+formatting. Historical `refresh-stages-icon-async-test-build` schema 2 retains
+its original detached icon meaning, and `refresh-stages-test-build` schema 1
+retains its synchronous Shell/cache meaning. The validator keeps all three
+schemas separate and rejects mixed records. Do not add inclusive and
 nested times. `scenario_envelope_ns` may include fixture changes and assertions
 outside the stage clocks; it is not a pure refresh duration.
 `logical_staged_payload_bytes_peak` counts UTF-16
