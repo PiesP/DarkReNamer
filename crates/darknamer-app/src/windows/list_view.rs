@@ -1174,11 +1174,14 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
         .filter(|row| !row.icon_resolved)
         .count();
     state.icon_scan_cursor = 0;
-    state.icon_reconcile_remaining = if state.icon_delivery_ack_count != 0 {
-        state.rendered_rows.len()
-    } else {
-        0
-    };
+    // Keep a pinned batch until its next ACK, but no current row needs a
+    // reconciliation sweep when every rendered icon is already resolved.
+    state.icon_reconcile_remaining =
+        if state.icon_unresolved_rows != 0 && state.icon_delivery_ack_count != 0 {
+            state.rendered_rows.len()
+        } else {
+            0
+        };
     // Terminal no-image rows need no demand pass even with a nonempty model.
     state.icon_demand_scan_remaining = if state.icon_unresolved_rows == 0 {
         0
