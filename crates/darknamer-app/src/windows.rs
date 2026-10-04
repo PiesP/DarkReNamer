@@ -48,6 +48,7 @@ use darknamer_core::{
     LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText, ProposalMutationError,
     SortSemantics,
 };
+use icon_worker::{BorrowedSystemImageList, IconShared};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
     Win32WindowHandle, WindowHandle,
@@ -64,6 +65,7 @@ mod command_dispatch;
 mod command_rail;
 mod dialog;
 mod drag_drop;
+mod icon_worker;
 mod list_view;
 mod menu;
 mod popup_menu;
@@ -138,9 +140,9 @@ use list_view::changed_column_mask;
 use list_view::{
     LIST_VIEW_EXTENDED_STYLES, RenderedRow, handle_header_end_track, handle_list_custom_draw,
     handle_list_infotip, install_list_view_notification_subclass, native_list_header_height_px,
-    native_status_column_minimum_px, refresh, refresh_all_rows, refresh_changed_rows,
-    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
-    update_dpi_metrics, update_primary_column_widths,
+    native_status_column_minimum_px, poll_icon_work, refresh, refresh_all_rows,
+    refresh_changed_rows, refresh_proposal_rows, remove_list_view_notification_subclass,
+    schedule_icon_poll, update_column_visibility, update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use popup_menu::*;
@@ -179,9 +181,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
 #[cfg(test)]
@@ -244,8 +247,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SHFILEINFOW, SHGFI_SMALLICON,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SetWindowSubclass,
+    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SetWindowSubclass,
+};
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::{
+    SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON,
@@ -320,10 +326,15 @@ const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const WM_APP_POPUP_MENU_UPDATE: u32 = WM_APP + 0x52;
 const WM_APP_IMPORT_COMPLETE: u32 = WM_APP + 0x53;
+const WM_APP_ICON_WAKE: u32 = WM_APP + 0x54;
+const WM_APP_ICON_WORK: u32 = WM_APP + 0x55;
+const WM_APP_ICON_STATUS: u32 = WM_APP + 0x56;
+const WM_APP_ICON_CONTINUE: u32 = WM_APP + 0x57;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
 const DEFERRED_MESSAGE_TIMER_ID: usize = 0xD4A4;
+const ICON_POLL_TIMER_ID: usize = 0xD4A5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -350,6 +361,7 @@ struct CallbackState<T, R = ()> {
     reclaim_held: Cell<bool>,
     menu_edge_color: Cell<Option<u32>>,
     retirement: UnsafeCell<Option<R>>,
+    icon_retirement: UnsafeCell<Option<Arc<IconShared>>>,
     value: UnsafeCell<T>,
 }
 
@@ -395,6 +407,7 @@ impl<T, R> CallbackState<T, R> {
             reclaim_held: Cell::new(false),
             menu_edge_color: Cell::new(None),
             retirement: UnsafeCell::new(None),
+            icon_retirement: UnsafeCell::new(None),
             value: UnsafeCell::new(value),
         }))
     }
@@ -554,6 +567,32 @@ impl<T, R> CallbackState<T, R> {
         // only the sidecar UnsafeCell, never the possibly leased state value.
         unsafe { (&mut *(*slot.as_ptr()).retirement.get()).take() }
     }
+
+    /// A disjoint UI-thread sidecar remains accessible during an outer lease.
+    unsafe fn install_icon_retirement(slot: *mut Self, shared: Arc<IconShared>) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the run scope owns this live slot; no AppState value borrow
+        // reaches this disjoint sidecar, which is installed once before use.
+        let sidecar = unsafe { &mut *(*slot.as_ptr()).icon_retirement.get() };
+        if sidecar.is_some() {
+            return false;
+        }
+        *sidecar = Some(shared);
+        true
+    }
+
+    unsafe fn request_icon_retirement(slot: *mut Self) {
+        let Some(slot) = NonNull::new(slot) else {
+            return;
+        };
+        // SAFETY: the owning UI thread holds this allocation through callback
+        // exit or the run hold; the sidecar is disjoint from leased AppState.
+        if let Some(shared) = unsafe { &*(*slot.as_ptr()).icon_retirement.get() } {
+            shared.request_destroy_retire();
+        }
+    }
 }
 
 impl<T, R> CallbackStateLease<T, R> {
@@ -688,6 +727,15 @@ struct AppState {
     next_appearance_dialog_id: u32,
     dwm_dark_frame_requested: bool,
     icon_cache: HashMap<IconCacheKey, i32>,
+    icon_shared: Option<Arc<IconShared>>,
+    icon_image_list: Option<BorrowedSystemImageList>,
+    icon_unresolved_rows: usize,
+    icon_scan_cursor: usize,
+    icon_reconcile_remaining: usize,
+    icon_demand_scan_remaining: usize,
+    icon_delivery_batch: Vec<(IconCacheKey, i32)>,
+    icon_delivery_ack_count: usize,
+    icon_continue_posted: bool,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
     // and every retained journal capability close before another launch.
@@ -805,12 +853,73 @@ impl AppState {
             next_appearance_dialog_id: 0,
             dwm_dark_frame_requested: false,
             icon_cache: HashMap::new(),
+            icon_shared: None,
+            icon_image_list: None,
+            icon_unresolved_rows: 0,
+            icon_scan_cursor: 0,
+            icon_reconcile_remaining: 0,
+            icon_demand_scan_remaining: 0,
+            icon_delivery_batch: Vec::new(),
+            icon_delivery_ack_count: 0,
+            icon_continue_posted: false,
             rendered_rows: Vec::new(),
         }
     }
 
     fn revision(&self) -> ModelRevision {
         ModelRevision::new(self.model_revision)
+    }
+
+    /// Pointer-free, O(1) observation on the UI thread. Selectors and version
+    /// are fixed for the source-bound native observer, not product controls.
+    fn icon_status_value(&self, selector: usize) -> Option<LRESULT> {
+        let shared = self.icon_shared.as_deref();
+        let revision_before = shared.map_or(0, IconShared::status_revision);
+        if revision_before & 1 != 0 {
+            return None;
+        }
+        let (queued, in_flight, completed) = shared.map_or((0, 0, 0), IconShared::status_counts);
+        let session = shared.map_or(0, IconShared::session);
+        let generation = shared.map_or(0, IconShared::generation);
+        let bootstrap = if self.icon_image_list.is_some() {
+            1
+        } else if shared.is_none_or(IconShared::is_unavailable) {
+            2
+        } else {
+            0
+        };
+        let settled = bootstrap != 0
+            && self.icon_unresolved_rows == 0
+            && self.icon_reconcile_remaining == 0
+            && self.icon_delivery_ack_count == 0
+            && queued + in_flight + completed == 0;
+        let value = match selector {
+            0 => 1,
+            1 => (session as u32) as LRESULT,
+            2 => ((session >> 32) as u32) as LRESULT,
+            3 => (generation as u32) as LRESULT,
+            4 => ((generation >> 32) as u32) as LRESULT,
+            5 => bootstrap,
+            6 => queued as LRESULT,
+            7 => in_flight as LRESULT,
+            8 => completed as LRESULT,
+            9 => self.icon_unresolved_rows as LRESULT,
+            10 => self.icon_scan_cursor as LRESULT,
+            11 => isize::from(u8::from(settled)),
+            12 => isize::from(u8::from(shared.is_some_and(IconShared::is_joined))),
+            13 => self.icon_reconcile_remaining as LRESULT,
+            14 => self.icon_delivery_ack_count as LRESULT,
+            15 => (revision_before as u32) as LRESULT,
+            16 => ((revision_before >> 32) as u32) as LRESULT,
+            17 => isize::from(u8::from(
+                self.icon_unresolved_rows == 0 || self.icon_demand_scan_remaining == 0,
+            )),
+            18 => self.icon_demand_scan_remaining as LRESULT,
+            19 => (self.model_revision as u32) as LRESULT,
+            20 => ((self.model_revision >> 32) as u32) as LRESULT,
+            _ => return None,
+        };
+        (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
     }
 
     fn resolved_appearance(&self) -> ResolvedUiAppearance {
@@ -3372,6 +3481,8 @@ mod tests {
         RenderedRow {
             values: core::array::from_fn(|column| LegacyText::from(format!("{label}-{column}"))),
             icon,
+            icon_key: IconCacheKey::FileWithoutExtension,
+            icon_resolved: true,
         }
     }
 
