@@ -13,6 +13,10 @@ param(
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400,
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $FocusedIconTests,
+    [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+        'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+    [string] $FocusedIconCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
     [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
@@ -46,7 +50,7 @@ if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v
     throw 'Unsupported VM acceptance profile identity.'
 }
 
-$ToolingManifestSha256 = '192447c241c7cb095762d89c7135a317613a181390a4e71145743ce0fcbb948b'
+$ToolingManifestSha256 = 'a47276efb1e5d0c14194cc8076e02a0e1077882fad8e70e3a822557763c05242'
 $ToolingLoaderSha256 = '62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a'
 
 function Get-DrBootstrapSha256 {

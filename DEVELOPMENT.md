@@ -375,6 +375,34 @@ timing and resource use, run the separate unchanged
 [fixed performance sample](#fixed-performance-sample). Neither diagnostic is a
 release acceptance verdict.
 
+### Icon worker native functional tests
+
+After the icon worker's fixed native tests are present in a clean source commit,
+run each build profile on the prepared VM with a separate private output root:
+
+```bash
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-icon-tests --native-test-profile debug \
+  --output /absolute/private/new-icon-debug-attempt
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-icon-tests --native-test-profile release \
+  --output /absolute/private/new-icon-release-attempt
+```
+
+The selector requires source-built core mode, the prepared 1366×768 96-DPI
+managed RDP desktop, and the existing v2 owned-resource cleanup profile. It
+builds one app-library test executable for the selected profile and one
+production executable, then runs the four fixed non-ignored `icon_worker_*`
+cases in separate owned processes and Jobs using the same frozen executable
+bytes. The run has one 600-second suite deadline and the existing aggregate
+output bound. Each case must report its exact name and one executed test;
+execution stops at the first failed case and retains its actual libtest counts.
+For a single diagnostic case, add `--focused-icon-case` with one of the four
+fixed case suffixes reported by `--help`. This runs exactly one process. The
+regular native suite and the separate refresh-stage diagnostic retain their
+existing selections. These test-build observations do not measure production
+icon-settlement or replace the uninstrumented performance sample.
+
 ### VM-Automated campaign development
 
 The campaign runner, native VM backend runner, independent evidence validator,

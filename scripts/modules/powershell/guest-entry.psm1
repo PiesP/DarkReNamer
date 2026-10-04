@@ -37,6 +37,10 @@ function Invoke-DrWindowsVmGuest {
     [int] $TestTimeoutSeconds = 300,
 
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $FocusedIconTests,
+    [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+        'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+    [string] $FocusedIconCase,
 
     [string] $OutputRoot,
 
@@ -123,6 +127,12 @@ if ($null -eq $verified) {
     }
 }
 $refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+if ($refreshProfile -and $FocusedIconTests) {
+    throw 'A core test run cannot select both refresh diagnostic modes.'
+}
+if ($FocusedIconCase -and -not $FocusedIconTests) {
+    throw 'A single focused icon case requires its fixed test selector.'
+}
 if ($refreshProfile) {
     if ($verified.manifest.schema_version -ne 1 -or
         $verified.manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
@@ -130,6 +140,21 @@ if ($refreshProfile) {
         $verified.tests.Count -ne 1 -or $TestTimeoutSeconds -ne 600 -or
         $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
         throw 'The guest refresh diagnostic selection is invalid.'
+    }
+}
+elseif ($FocusedIconTests) {
+    if ($verified.manifest.schema_version -ne 1 -or
+        $verified.manifest.diagnostic.kind -cne 'focused-icon-tests' -or
+        $verified.manifest.diagnostic.test_profile -cnotin @('debug', 'release') -or
+        $verified.manifest.diagnostic.test_filter -cne 'windows::list_view::native_tests::icon_worker_' -or
+        ($FocusedIconCase -and $verified.manifest.diagnostic.test_name -cne
+            ('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)) -or
+        (-not $FocusedIconCase -and
+            ($null -ne $verified.manifest.diagnostic.PSObject.Properties['test_name'] -or
+             $null -eq $verified.manifest.diagnostic.PSObject.Properties['test_names'])) -or
+        $verified.tests.Count -ne 1 -or $TestTimeoutSeconds -ne 600 -or
+        $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
+        throw 'The guest focused icon selection is invalid.'
     }
 }
 elseif ($null -ne $verified.manifest.PSObject.Properties['diagnostic']) {
@@ -231,6 +256,21 @@ if ($refreshProfile) {
         test_profile = 'release'
     }
 }
+elseif ($FocusedIconTests) {
+    $result['diagnostic'] = [ordered]@{
+        kind = 'focused-icon-tests'
+        test_filter = 'windows::list_view::native_tests::icon_worker_'
+        test_profile = $verified.manifest.diagnostic.test_profile
+    }
+    if ($FocusedIconCase) {
+        $result['diagnostic']['test_name'] =
+            'windows::list_view::native_tests::icon_worker_' + $FocusedIconCase
+    }
+    else {
+        $result['diagnostic']['test_names'] =
+            @($verified.manifest.diagnostic.test_names)
+    }
+}
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     $result.failure_reason = 'unsupported_platform'
     Initialize-TrustedResultWriter -Root $verified.root
@@ -291,20 +331,49 @@ try {
     $testResults = [Collections.Generic.List[object]]::new()
     $remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes
     if ($refreshProfile) { $remainingSuiteOutputBytes = [long](32MB) }
-    for ($index = 0; $index -lt $verified.tests.Count; $index++) {
+    $testInvocations = [Collections.Generic.List[object]]::new()
+    if ($FocusedIconTests -and -not $FocusedIconCase) {
+        foreach ($name in $verified.manifest.diagnostic.test_names) {
+            $testInvocations.Add([pscustomobject]@{
+                test = $verified.tests[0]
+                case = $name.Substring('windows::list_view::native_tests::icon_worker_'.Length)
+            })
+        }
+    }
+    else {
+        foreach ($test in $verified.tests) {
+            $testInvocations.Add([pscustomobject]@{ test = $test; case = $FocusedIconCase })
+        }
+    }
+    $suiteClock = [Diagnostics.Stopwatch]::StartNew()
+    for ($index = 0; $index -lt $testInvocations.Count; $index++) {
+        $focusedCaseArguments = @{}
+        if ($testInvocations[$index].case) {
+            $focusedCaseArguments['FocusedIconCase'] = $testInvocations[$index].case
+        }
+        $caseTimeoutSeconds = $TestTimeoutSeconds
+        if ($FocusedIconTests -and -not $FocusedIconCase) {
+            $caseTimeoutSeconds = [Math]::Min(
+                $TestTimeoutSeconds, 600 - [int][Math]::Ceiling($suiteClock.Elapsed.TotalSeconds))
+            if ($caseTimeoutSeconds -lt 1) {
+                $result.failure_reason = 'suite_timeout'
+                break
+            }
+        }
         $testOutputBudgetBytes = [Math]::Min(
             [long]$script:VmTestOutputAggregateLimitBytes,
             $remainingSuiteOutputBytes
         )
         $testResult = Invoke-RustTestBinary `
-            -Test $verified.tests[$index] `
+            -Test $testInvocations[$index].test `
             -Root $verified.root `
             -OutputRoot $OutputRoot `
             -RuntimeRoot $effectiveRuntimeRoot `
             -Index ($index + 1) `
-            -TimeoutSeconds $TestTimeoutSeconds `
+            -TimeoutSeconds $caseTimeoutSeconds `
             -RefreshProfileOrder $RefreshProfileOrder `
-            -OutputBudgetBytes $testOutputBudgetBytes
+            -FocusedIconTests:$FocusedIconTests `
+            -OutputBudgetBytes $testOutputBudgetBytes @focusedCaseArguments
         $testOutputBytes = [long]0
         foreach ($channel in @('stdout', 'stderr')) {
             if ($testResult.$channel) {
@@ -317,13 +386,15 @@ try {
         $remainingSuiteOutputBytes -= $testOutputBytes
         $testResults.Add($testResult)
         $result.tests = $testResults.ToArray()
+        if ($FocusedIconTests -and -not $FocusedIconCase -and
+            $testResult.status -cne 'passed') { break }
     }
     $applicationArtifact = if ($candidateLane) {
         $verified.manifest.product.application
     } else {
         $verified.manifest.application
     }
-    if (-not $refreshProfile) {
+    if (-not $refreshProfile -and -not $FocusedIconTests) {
         $result.gui = Invoke-GuiSmoke `
             -Application $applicationArtifact `
             -Root $verified.root `
@@ -337,8 +408,11 @@ try {
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
     if ($testFailures.Count -eq 0 -and
-        (($refreshProfile -and $result.tests.Count -eq 1 -and $null -eq $result.gui) -or
-         (-not $refreshProfile -and $result.gui.status -ceq 'passed' -and
+        ((($refreshProfile -or $FocusedIconTests) -and
+          $result.tests.Count -eq $testInvocations.Count -and $null -eq $result.gui -and
+          $null -eq $result.failure_reason) -or
+         (-not $refreshProfile -and -not $FocusedIconTests -and
+          $result.gui.status -ceq 'passed' -and
           ($candidateLane -or $result.tests.Count -gt 0)))) {
         $result.status = 'passed'
     }
