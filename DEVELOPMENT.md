@@ -409,6 +409,34 @@ regular native suite and the separate refresh-stage diagnostic retain their
 existing selections. These test-build observations do not measure production
 icon-settlement or replace the uninstrumented performance sample.
 
+### Refresh native functional tests
+
+Run the four fixed refresh cases from one clean source commit on the prepared VM,
+with a new private output directory for each build profile:
+
+```bash
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-refresh-tests --native-test-profile debug \
+  --output /absolute/private/new-refresh-debug-attempt
+python3 -I scripts/test-windows-vm.py --ssh-host configured-vm-alias \
+  --focused-refresh-tests --native-test-profile release \
+  --output /absolute/private/new-refresh-release-attempt
+```
+
+This selector requires source-built core mode, the prepared 1366×768 96-DPI
+managed RDP desktop, and the v2 owned-resource cleanup profile. It builds one
+app-library test binary for the selected profile and one production executable,
+then runs `native_rows_and_proposals`, `native_fallback_and_apply_lock`,
+`native_dates_follow_locale_and_timezone`, and `native_viewport_focus_and_close`
+as exact, non-ignored tests in separate owned processes and Jobs. The frozen
+binary is reused across all four cases. Each case must report its exact name
+and one executed test. The shared suite deadline is 600 seconds, with a 32 MiB
+aggregate output bound; execution stops on the first failed case and retains
+the actual libtest counts and v2 cleanup evidence. Add `--focused-refresh-case`
+with one of those four suffixes for one diagnostic process. These functional
+tests do not replace the ignored refresh-stage timing diagnostic or the
+separate production performance sample.
+
 ### VM-Automated campaign development
 
 The campaign runner, native VM backend runner, independent evidence validator,

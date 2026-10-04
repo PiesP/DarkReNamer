@@ -3692,8 +3692,8 @@ foreach ($call in $applicationStartCalls) {
         param($node)
         $node -is [Management.Automation.Language.IfStatementAst] -and
             $node.Clauses.Count -eq 1 -and
-            $node.Clauses[0].Item1.Extent.Text -ceq '$FocusedIconTests' -and
-            $node.Extent.Text.Contains('Focused icon case result differs from its frozen inventory.')
+            $node.Clauses[0].Item1.Extent.Text -ceq '$focusedTests' -and
+            $node.Extent.Text.Contains('Focused native case result differs from its frozen inventory.')
     }, $true))
     if ($checks.Count -ne 1) {
         throw 'Expected one controller focused result inventory check.'
@@ -3712,6 +3712,9 @@ foreach ($call in $applicationStartCalls) {
     }
     $FocusedIconTests = $true
     $FocusedIconCase = 'close_and_forced_destroy_retire'
+    $focusedTests = $true
+    $focusedCase = $FocusedIconCase
+    $focusedFilter = 'windows::list_view::native_tests::icon_worker_'
     $result = [pscustomobject]@{
         tests = @([pscustomobject]@{
             test_name = $focusedNames[2]
@@ -3721,13 +3724,29 @@ foreach ($call in $applicationStartCalls) {
     }
     & $checkFocusedResults
     $result.tests[0].test_name = $focusedNames[1]
-    Assert-Fails -Action { & $checkFocusedResults } -Expected 'Focused icon case result differs'
+    Assert-Fails -Action { & $checkFocusedResults } -Expected 'Focused native case result differs'
 
     $FocusedIconCase = ''
+    $focusedCase = ''
     $result.tests = @(
         foreach ($name in $focusedNames) {
             [pscustomobject]@{ test_name = $name; file = $binary.file; sha256 = $binary.sha256 }
         }
     )
     & $checkFocusedResults
+    $focusedNames = @(
+        'windows::list_view::native_tests::full_refresh_native_rows_and_proposals'
+        'windows::list_view::native_tests::full_refresh_native_fallback_and_apply_lock'
+        'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone'
+        'windows::list_view::native_tests::full_refresh_native_viewport_focus_and_close'
+    )
+    $manifest.diagnostic.test_names = $focusedNames
+    $focusedFilter = 'windows::list_view::native_tests::full_refresh_'
+    $focusedCase = 'native_dates_follow_locale_and_timezone'
+    $result.tests = @([pscustomobject]@{
+        test_name = $focusedNames[2]; file = $binary.file; sha256 = $binary.sha256
+    })
+    & $checkFocusedResults
+    $result.tests[0].test_name = $focusedNames[1]
+    Assert-Fails -Action { & $checkFocusedResults } -Expected 'Focused native case result differs'
 }

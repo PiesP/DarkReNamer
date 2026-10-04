@@ -11,9 +11,13 @@
         [switch] $AllowZeroTests,
         [switch] $RefreshProfile,
         [switch] $FocusedIconTests,
+        [switch] $FocusedRefreshTests,
         [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
             'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
-        [string] $FocusedIconCase
+        [string] $FocusedIconCase,
+        [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
+            'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
+        [string] $FocusedRefreshCase
     )
 
     $pattern = '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out;(?:[^\r\n]*)\r?$'
@@ -26,7 +30,8 @@
     $failed = [int]::Parse($summary.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
     $ignored = [int]::Parse($summary.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture)
     $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
-    if ($RefreshProfile -and $FocusedIconTests) {
+    $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
+    if (($RefreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests)) {
         throw 'A Rust test summary cannot use two selectors.'
     }
     if ($FocusedIconCase -and -not $FocusedIconTests) {
@@ -35,7 +40,13 @@
     if ($FocusedIconTests -and -not $FocusedIconCase) {
         throw 'Focused icon summary requires one fixed exact case.'
     }
-    if (-not $RefreshProfile -and -not $FocusedIconTests -and $filtered -ne 0) {
+    if ($FocusedRefreshCase -and -not $FocusedRefreshTests) {
+        throw 'A single focused refresh summary requires its fixed selector.'
+    }
+    if ($FocusedRefreshTests -and -not $FocusedRefreshCase) {
+        throw 'Focused refresh summary requires one fixed exact case.'
+    }
+    if (-not $RefreshProfile -and -not $focusedTests -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
     }
     if ($RefreshProfile -and ($passed + $failed -ne 1 -or
@@ -43,10 +54,10 @@
         ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
         throw 'The fixed refresh diagnostic must select exactly one ignored test.'
     }
-    if ($FocusedIconTests -and ($passed + $failed -ne 1 -or
+    if ($focusedTests -and ($passed + $failed -ne 1 -or
         $ignored -ne 0 -or $filtered -lt 1 -or
         ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
-        throw 'Focused icon selection must execute exactly one unignored test.'
+        throw 'Focused native selection must execute exactly one unignored test.'
     }
     if (-not $AllowZeroTests -and ($passed + $failed + $ignored) -eq 0) {
         throw 'A non-main Rust test harness reported zero tests.'
@@ -2119,15 +2130,23 @@ function Invoke-RustTestBinary {
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [ValidateSet('', 'hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
         [switch] $FocusedIconTests,
+        [switch] $FocusedRefreshTests,
         [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
             'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
         [string] $FocusedIconCase,
+        [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
+            'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
+        [string] $FocusedRefreshCase,
         [ValidateRange(0, 8388608)][long] $OutputBudgetBytes =
             $script:VmTestOutputAggregateLimitBytes
     )
 
     if ([bool]$FocusedIconTests -ne [bool]$FocusedIconCase) {
         throw 'Focused icon launch requires one fixed exact case.'
+    }
+    if ([bool]$FocusedRefreshTests -ne [bool]$FocusedRefreshCase -or
+        ($FocusedIconTests -and $FocusedRefreshTests)) {
+        throw 'Focused refresh launch requires one fixed exact case.'
     }
 
     $stdoutLeaf = 'test-{0:D3}.stdout.txt' -f $Index
@@ -2156,6 +2175,10 @@ function Invoke-RustTestBinary {
     if ($FocusedIconCase) {
         $row['test_name'] =
             'windows::list_view::native_tests::icon_worker_' + $FocusedIconCase
+    }
+    if ($FocusedRefreshCase) {
+        $row['test_name'] =
+            'windows::list_view::native_tests::full_refresh_' + $FocusedRefreshCase
     }
     $processState = [pscustomobject]@{ process = $null }
     try {
@@ -2190,6 +2213,9 @@ function Invoke-RustTestBinary {
                 } elseif ($FocusedIconCase) {
                     '--exact windows::list_view::native_tests::icon_worker_' +
                         $FocusedIconCase + ' --nocapture --test-threads=1'
+                } elseif ($FocusedRefreshCase) {
+                    '--exact windows::list_view::native_tests::full_refresh_' +
+                        $FocusedRefreshCase + ' --nocapture --test-threads=1'
                 } else { '--nocapture --test-threads=1' }
                 $ownedProcess = Start-JobBoundProcess `
                     -FilePath $binaryPath `
@@ -2224,12 +2250,16 @@ function Invoke-RustTestBinary {
                     if ($FocusedIconCase) {
                         $focusedCaseArguments['FocusedIconCase'] = $FocusedIconCase
                     }
+                    if ($FocusedRefreshCase) {
+                        $focusedCaseArguments['FocusedRefreshCase'] = $FocusedRefreshCase
+                    }
                     $summary = Read-RustTestSummary `
                         -Stdout $stdoutText `
                         -Stderr $stderrText `
                         -AllowZeroTests:($Test.name -ceq 'DarkReNamer') `
                         -RefreshProfile:([bool]$RefreshProfileOrder) `
-                        -FocusedIconTests:$FocusedIconTests @focusedCaseArguments
+                        -FocusedIconTests:$FocusedIconTests `
+                        -FocusedRefreshTests:$FocusedRefreshTests @focusedCaseArguments
                     $row.passed = $summary.passed
                     $row.failed = $summary.failed
                     $row.ignored = $summary.ignored
