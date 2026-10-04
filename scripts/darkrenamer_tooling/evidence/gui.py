@@ -3455,7 +3455,7 @@ def validate_focused_clear_run(root: Path, run_id: str, source_sha: str,
     roles = tuple(row["role"] for row in record.get("modules", []))
     require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
              "powershell-guest-entry"}.issubset(roles) and
-            record == trusted_tooling_inventory(tooling_repo, manifest["tooling_source_sha"], roles) and
+            record == {"schema_version": 1, **trusted_tooling_inventory(tooling_repo, manifest["tooling_source_sha"], roles)} and
             set(staged_tooling_files(run_root / "inputs")) ==
                 {RECORD_NAME, "tooling-bundle.json", *(row["file"] for row in record["modules"])} and
             subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=tooling_repo,

@@ -692,7 +692,7 @@ def stage_focused_preserved_bundle(repo: Path, original: Path, active: Path, too
     roles = tuple(row["role"] for row in record["modules"])
     require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
              "powershell-guest-entry"}.issubset(roles) and
-            record == trusted_tooling_inventory(repo, source_sha, roles) and
+            record == {"schema_version": 1, **trusted_tooling_inventory(repo, source_sha, roles)} and
             set(staged_tooling_files(active)) == {
                 "tooling-record.json", "tooling-bundle.json",
                 *(row["file"] for row in record["modules"])},
@@ -832,7 +832,7 @@ def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
                                          "Focused current tooling record"))
         roles = tuple(row["role"] for row in record["modules"])
         require(harness.get("tooling_record") == bundle_artifact(RECORD_NAME) and
-                record == trusted_tooling_inventory(repo, source_sha, roles),
+                record == {"schema_version": 1, **trusted_tooling_inventory(repo, source_sha, roles)},
                 "Focused staged tooling record differs from the current Git closure.")
         names = [*artifacts.values(), "DarkReNamer.exe", "original-bundle.json", "Cargo.lock",
                  *staged_tooling_files(bundle)]

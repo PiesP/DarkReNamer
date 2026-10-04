@@ -2793,7 +2793,7 @@ class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
         with mock.patch.object(evidence, "FOCUSED_PRODUCT_SOURCE_SHA", SOURCE), \
              mock.patch.object(evidence, "FOCUSED_ORIGINAL_BUNDLE_SHA256", self.original_hash), \
              mock.patch.object(evidence, "FOCUSED_APPLICATION_SHA256", self.application_hash), \
-             mock.patch.object(evidence, "trusted_tooling_inventory", return_value=self.tooling_record), \
+             mock.patch.object(evidence, "trusted_tooling_inventory", return_value={k: v for k, v in self.tooling_record.items() if k != "schema_version"}), \
              mock.patch.object(evidence, "verify_focused_product_inventory", return_value=TREE), \
              mock.patch.object(evidence, "staged_tooling_files", return_value=[
                  "tooling-record.json", "tooling-bundle.json",
