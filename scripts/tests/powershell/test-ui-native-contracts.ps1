@@ -532,4 +532,11 @@ Assert-Equal $churnNames[0] 'extension-0000.e000' 'First unique class'
 Assert-Equal $churnNames[1] 'recurring-0001.txt' 'Interleaved recurring class'
 Assert-Equal $churnNames[596] 'extension-0596.e298' 'Last unique class'
 Assert-Equal $churnNames[999] 'recurring-0999.txt' 'Last recurring class'
+$sortedChurnNames = [string[]]$churnNames.Clone()
+[Array]::Sort($sortedChurnNames, [StringComparer]::OrdinalIgnoreCase)
+Assert-Equal $sortedChurnNames[0] 'extension-0000.e000' 'First sorted churn row'
+Assert-Equal $sortedChurnNames[298] 'extension-0596.e298' 'Last sorted unique class'
+Assert-Equal $sortedChurnNames[299] 'recurring-0001.txt' 'First sorted recurring class'
+Assert-Equal $sortedChurnNames[499] 'recurring-0401.txt' 'Observed middle sorted churn row'
+Assert-Equal $sortedChurnNames[999] 'recurring-0999.txt' 'Last sorted churn row'
 Write-Output 'UI native/input behavior contracts passed.'

@@ -2762,7 +2762,8 @@ function Invoke-ObserverIconSettlementScenario {
         $ObservationSink['phases'] = $phases
         foreach ($step in @(
             [ordered]@{ id='ordinary-cached'; file=$ordinaryList; names=@('ordinary-0000.txt','ordinary-0499.txt','ordinary-0999.txt') },
-            [ordered]@{ id='interleaved-churn'; file=$churnList; names=@('extension-0000.e000','recurring-0499.txt','recurring-0999.txt') })) {
+            # The model sorts admitted source paths after reading the interleaved list.
+            [ordered]@{ id='interleaved-churn'; file=$churnList; names=@('extension-0000.e000','recurring-0401.txt','recurring-0999.txt') })) {
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $step.file `
                 -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -IncludeOpenTicks
             $receipt = if ($EndpointMethod -ceq 'async-status-v1') {
