@@ -2695,6 +2695,8 @@ function Wait-ObserverIconSettlementPhase {
 
 function Invoke-ObserverIconSettlementScenario {
     param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][ValidateSet('async-status-v1', 'synchronous-row-count-upper-bound-v1')]
+        [string] $EndpointMethod,
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][int] $SessionId,
@@ -2725,7 +2727,11 @@ function Invoke-ObserverIconSettlementScenario {
         throw 'Icon settlement executable differs from the staged candidate.'
     }
     $ObservationSink['mode'] = 'icon-settlement'
-    $ObservationSink['endpoint_method'] = 'async-status-v1'
+    $ObservationSink['endpoint_method'] = $EndpointMethod
+    if ($EndpointMethod -ceq 'synchronous-row-count-upper-bound-v1') {
+        $ObservationSink['endpoint_coverage'] = 'source-derived-synchronous-lookup-completion-upper-bound'
+        $ObservationSink['baseline_product_source_sha'] = 'b152761010b16ef74e2a3765241a253778b88e0b'
+    }
     $ObservationSink['plan'] = [ordered]@{
         ordinary_rows = 1000; churn_rows = 1000; extension_classes = 300
         poll_interval_ms = 100; maximum_seconds = 600
@@ -2759,9 +2765,16 @@ function Invoke-ObserverIconSettlementScenario {
             [ordered]@{ id='interleaved-churn'; file=$churnList; names=@('extension-0000.e000','recurring-0499.txt','recurring-0999.txt') })) {
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $step.file `
                 -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -IncludeOpenTicks
-            $receipt = Wait-ObserverIconSettlementPhase -Application $application `
-                -StartUtcTicks $ObservationSink['process_start_utc_ticks'] -OpenTicks $timing.open_ticks `
-                -DataReadyMs $timing.elapsed_ms -Rows 1000 -OverallDeadline $deadline
+            $receipt = if ($EndpointMethod -ceq 'async-status-v1') {
+                Wait-ObserverIconSettlementPhase -Application $application `
+                    -StartUtcTicks $ObservationSink['process_start_utc_ticks'] -OpenTicks $timing.open_ticks `
+                    -DataReadyMs $timing.elapsed_ms -Rows 1000 -OverallDeadline $deadline
+            } else {
+                [ordered]@{
+                    data_ready_ms = $timing.elapsed_ms
+                    synchronous_lookup_completion_upper_bound_ms = $timing.elapsed_ms
+                }
+            }
             $receipt['id'] = $step.id
             $receipt['rows'] = 1000
             $receipt['representative_names'] = @(0,499,999 | ForEach-Object {
@@ -2777,7 +2790,8 @@ function Invoke-ObserverIconSettlementScenario {
                 [IntPtr]$application.main_handle, [uint32]$application.process.Id, [uint32]0x800E)
             if ($grid.pattern.Current.RowCount -ne 0) { throw 'Icon settlement clear did not empty the list.' }
         }
-        if ([ulong]$phases[1].settled_status.generation -le [ulong]$phases[0].settled_status.generation) {
+        if ($EndpointMethod -ceq 'async-status-v1' -and
+            [ulong]$phases[1].settled_status.generation -le [ulong]$phases[0].settled_status.generation) {
             throw 'Icon settlement clear/repopulate did not advance the request generation.'
         }
         $ObservationSink['phases'] = $phases.ToArray()
@@ -2793,8 +2807,10 @@ function Invoke-ObserverIconSettlementScenario {
         $ObservationSink['disk_unchanged'] = $true
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $ObservationSink['journal_residue_count'] = 0
-        $ObservationSink['worker_join_evidence'] = [ordered]@{
-            kind = 'source-contract-inference'; observed = $false
+        if ($EndpointMethod -ceq 'async-status-v1') {
+            $ObservationSink['worker_join_evidence'] = [ordered]@{
+                kind = 'source-contract-inference'; observed = $false
+            }
         }
         $ObservationSink['normal_exit_code'] = Close-AcceptanceApplication -Application $application `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
