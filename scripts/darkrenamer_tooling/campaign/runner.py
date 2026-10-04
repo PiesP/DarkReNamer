@@ -629,24 +629,64 @@ def package_evidence(root: Path, archive_path: Path, *,
             sum(frozen["size"] for _path, frozen in files.values()) + len(index_bytes) <= MAX_TOTAL_BYTES,
             "Evidence index or aggregate bytes exceed their bound.")
     temporary = archive_path.parent / ("." + archive_path.name + "." + uuid.uuid4().hex + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        with ZipFile(temporary, "x", compression=ZIP_STORED, allowZip64=False) as archive:
-            for name, (path, frozen) in sorted(files.items()):
-                archive.writestr(zip_info(name), read_frozen_file(path, frozen))
-            archive.writestr(zip_info("evidence-index.json"), index_bytes)
+        output = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    published = False
+    try:
+        with output:
+            os.fchmod(output.fileno(), 0o600)
+            created = os.fstat(output.fileno())
+            require(stat.S_ISREG(created.st_mode) and
+                    stat.S_IMODE(created.st_mode) == 0o600 and created.st_nlink == 1,
+                    "Evidence archive temporary file must be private.")
+            with ZipFile(output, "w", compression=ZIP_STORED, allowZip64=False) as archive:
+                for name, (path, frozen) in sorted(files.items()):
+                    archive.writestr(zip_info(name), read_frozen_file(path, frozen))
+                archive.writestr(zip_info("evidence-index.json"), index_bytes)
+            written = os.fstat(output.fileno())
+            require((written.st_dev, written.st_ino) == (created.st_dev, created.st_ino) and
+                    stat.S_IMODE(written.st_mode) == 0o600 and written.st_nlink == 1,
+                    "Evidence archive temporary file changed while writing.")
         for path, frozen in files.values():
             require(frozen_file(path) == frozen, "Evidence changed after archive creation.")
         temporary_frozen = frozen_file(temporary, MAX_TOTAL_BYTES)
+        require((temporary_frozen["device"], temporary_frozen["inode"]) ==
+                (created.st_dev, created.st_ino),
+                "Evidence archive temporary file changed before publication.")
         require(temporary_frozen["size"] <= MAX_TOTAL_BYTES,
                 "Evidence archive exceeds its total byte bound.")
         os.link(temporary, archive_path)
+        published = True
+        frozen_archive = frozen_file(archive_path, MAX_TOTAL_BYTES)
+        published_metadata = os.lstat(archive_path)
+        require(stat.S_ISREG(published_metadata.st_mode) and
+                (published_metadata.st_dev, published_metadata.st_ino) ==
+                (created.st_dev, created.st_ino) and
+                stat.S_IMODE(published_metadata.st_mode) == 0o600,
+                "Evidence archive must remain private after publication.")
+        require(frozen_archive == temporary_frozen,
+                "Evidence archive changed while being published.")
+        return {"file": str(archive_path), "sha256": frozen_archive["sha256"],
+                "size": frozen_archive["size"]}
+    except BaseException:
+        if published:
+            try:
+                published_metadata = os.lstat(archive_path)
+            except FileNotFoundError:
+                pass
+            else:
+                if (published_metadata.st_dev, published_metadata.st_ino) == \
+                        (created.st_dev, created.st_ino):
+                    archive_path.unlink()
+        raise
     finally:
         temporary.unlink(missing_ok=True)
-    frozen_archive = frozen_file(archive_path, MAX_TOTAL_BYTES)
-    require(frozen_archive == temporary_frozen,
-            "Evidence archive changed while being published.")
-    return {"file": str(archive_path), "sha256": frozen_archive["sha256"],
-            "size": frozen_archive["size"]}
 
 
 def candidate_from_args(args) -> Candidate:
