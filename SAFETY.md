@@ -444,8 +444,10 @@ refdata. These presentation exceptions do not grant rename or journal authority.
 worker initializes and balances COM on that same STA, pumps its own message
 queue between Shell calls, and never receives `AppState`, HWND, model pointers,
 or file-mutation authority. `SHGetFileInfoW` reads only owned, terminated and
-MAX_PATH-bounded representative text; the returned process-shared system image
-list is validated read-only and carried as a scalar borrowed identity, never
+MAX_PATH-bounded representative text; bootstrap supplies a short synthetic
+filename and `FILE_ATTRIBUTE_NORMAL` with `SHGFI_USEFILEATTRIBUTES` so the Shell
+does not access a file. The returned process-shared system image list is
+validated read-only and carried as a scalar borrowed identity, never
 destroyed or written. The UI alone attaches that list and applies checked icon
 indices to current rows. A short wake gate serializes pointer-free posts against
 terminal thread-ID retirement, while its request mutex is never held across a
