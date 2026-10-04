@@ -81,6 +81,8 @@ pub(super) struct IconShared {
     unavailable: AtomicBool,
     wake_enabled: AtomicBool,
     ui_wake_pending: AtomicBool,
+    #[cfg(test)]
+    lose_next_ui_wake: AtomicBool,
     ui_thread_id: u32,
     work_wake: Mutex<WorkWake>,
     pending: AtomicUsize,
@@ -105,6 +107,8 @@ impl IconShared {
             unavailable: AtomicBool::new(false),
             wake_enabled: AtomicBool::new(true),
             ui_wake_pending: AtomicBool::new(false),
+            #[cfg(test)]
+            lose_next_ui_wake: AtomicBool::new(false),
             ui_thread_id,
             work_wake: Mutex::new(WorkWake::default()),
             pending: AtomicUsize::new(1),
@@ -179,6 +183,10 @@ impl IconShared {
         if self.wake_enabled.load(Ordering::Acquire)
             && !self.ui_wake_pending.swap(true, Ordering::AcqRel)
         {
+            #[cfg(test)]
+            if self.lose_next_ui_wake.swap(false, Ordering::AcqRel) {
+                return;
+            }
             // SAFETY: run owns this UI thread through terminal join. The
             // thread message carries no HWND or pointer; a live-window timer
             // covers a failed post or a modal loop consuming it.
@@ -306,6 +314,16 @@ impl IconShared {
             // SAFETY: the test holds the same gate that terminal teardown uses
             // before a worker thread ID can be reused. WM_QUIT is pointer-free.
             && unsafe { PostThreadMessageW(wake.thread_id, WM_QUIT, 0, 0) } != 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn lose_next_ui_wake_for_test(&self) {
+        self.lose_next_ui_wake.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_ui_wake_loss_pending(&self) -> bool {
+        self.lose_next_ui_wake.load(Ordering::Acquire)
     }
 
     pub(super) fn owner_destroyed(&self) -> bool {

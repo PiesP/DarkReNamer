@@ -1597,9 +1597,10 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
     {
         0
     } else {
-        state.rendered_rows.len().min(256)
+        state.icon_demand_scan_remaining.min(256)
     };
     let mut productive = had_completions;
+    let mut admission_busy = false;
     for _ in 0..visits {
         let row_index = state.icon_scan_cursor;
         state.icon_scan_cursor = (row_index + 1) % state.rendered_rows.len();
@@ -1646,13 +1647,14 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
             row.icon_resolved = true;
             state.icon_unresolved_rows -= 1;
             productive = true;
-        } else if !reconciling
-            && matches!(
-                shared.submit(row.icon_key.clone()),
-                icon_worker::IconSubmit::State(crate::icon_requests::SubmitDisposition::Queued)
-            )
-        {
-            productive = true;
+        } else if !reconciling {
+            match shared.submit(row.icon_key.clone()) {
+                icon_worker::IconSubmit::State(crate::icon_requests::SubmitDisposition::Queued) => {
+                    productive = true
+                }
+                icon_worker::IconSubmit::Busy => admission_busy = true,
+                _ => {}
+            }
         }
     }
     if shared.owner_destroyed() {
@@ -1672,10 +1674,24 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
     if shared.owner_destroyed() {
         return;
     }
+    let mut retry_after_exhaustion = false;
     if state.icon_unresolved_rows == 0 {
         state.icon_demand_scan_remaining = 0;
+    } else if state.icon_reconcile_remaining == 0
+        && state.icon_demand_scan_remaining == 0
+        && shared.pending_count() == 0
+    {
+        // One bounded pass can observe a transient busy submit. Retry from
+        // the slower fallback timer when no request can free capacity.
+        state.icon_demand_scan_remaining = state.rendered_rows.len();
+        retry_after_exhaustion = true;
     }
-    if (productive || state.icon_reconcile_remaining != 0)
+    let demand_can_advance = state.icon_demand_scan_remaining != 0
+        && (shared.pending_count() < crate::icon_requests::MAX_PENDING_ICON_REQUESTS
+            || shared.is_unavailable());
+    if !admission_busy
+        && !retry_after_exhaustion
+        && (productive || state.icon_reconcile_remaining != 0 || demand_can_advance)
         && state.icon_unresolved_rows != 0
         && !state.icon_continue_posted
     {
@@ -1694,6 +1710,10 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
 }
 
 fn set_native_icon(window: HWND, row: usize, icon: i32) -> bool {
+    #[cfg(test)]
+    if ICON_TEST_FAIL_NEXT_NATIVE_SET.with(|failure| failure.replace(false)) {
+        return false;
+    }
     let mut native = LVITEMW {
         mask: LVIF_IMAGE,
         iItem: i32::try_from(row).unwrap_or(i32::MAX),
@@ -1710,6 +1730,11 @@ fn set_native_icon(window: HWND, row: usize, icon: i32) -> bool {
             (&mut native as *mut LVITEMW) as isize,
         ) != 0
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ICON_TEST_FAIL_NEXT_NATIVE_SET: Cell<bool> = const { Cell::new(false) };
 }
 
 fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
@@ -2159,8 +2184,8 @@ mod native_tests {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_GETITEMW, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
-        LVM_SETTEXTCOLOR,
+        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETTOPINDEX, LVM_SCROLL,
+        LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         PM_REMOVE, PeekMessageW, SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
@@ -2631,6 +2656,43 @@ mod native_tests {
         Ok(())
     }
 
+    fn icon_view_state(
+        owner: HWND,
+        list: HWND,
+    ) -> io::Result<(Vec<usize>, bool, isize, i32, isize, ResolvedTheme)> {
+        let mut horizontal = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_POS,
+            ..SCROLLINFO::default()
+        };
+        // SAFETY: the test owns this live ListView and exact writable ABI
+        // storage for its scalar horizontal scroll position.
+        if unsafe { GetScrollInfo(list, SB_HORZ, &mut horizontal) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let theme = try_app_state(owner)
+            .ok_or_else(|| io::Error::other("icon view state unavailable"))?
+            .state()
+            .resolved_appearance()
+            .theme;
+        // SAFETY: these are synchronous scalar queries on the live test list.
+        let (focused, top, background) = unsafe {
+            (
+                SendMessageW(list, LVM_GETITEMSTATE, 501, LVIS_FOCUSED as isize),
+                SendMessageW(list, LVM_GETTOPINDEX, 0, 0),
+                SendMessageW(list, LVM_GETBKCOLOR, 0, 0),
+            )
+        };
+        Ok((
+            selected_indices(list),
+            focused & LVIS_FOCUSED as isize != 0,
+            top,
+            horizontal.nPos,
+            background,
+            theme,
+        ))
+    }
+
     #[test]
     fn icon_worker_bootstrap_and_miss_keep_ui_responsive() -> io::Result<()> {
         with_icon_native_window(|window| {
@@ -2699,6 +2761,7 @@ mod native_tests {
                 miss_entered.load(Ordering::Acquire)
             })?;
             assert_ui_ack_while_icon_blocked(window)?;
+            guardian.shared.lose_next_ui_wake_for_test();
             miss_gate.release();
             pump_icon_test_until(window, Duration::from_secs(10), || {
                 try_app_state(window).is_some_and(|lease| {
@@ -2707,6 +2770,7 @@ mod native_tests {
                         && guardian.shared.pending_count() == 0
                 })
             })?;
+            assert!(!guardian.shared.test_ui_wake_loss_pending());
             let lease = try_app_state(window)
                 .ok_or_else(|| io::Error::other("icon test state disappeared"))?;
             assert_native_refresh_values(lease.state());
@@ -2759,6 +2823,37 @@ mod native_tests {
                     lease.state().icon_unresolved_rows == 0 && guardian.shared.pending_count() == 0
                 })
             })?;
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("icon test state unavailable"))?;
+                let state = lease.state_mut();
+                assert_eq!(
+                    state.model.append(LegacyListItem::new(
+                        r"C:\icon-test\native-fault.fault",
+                        false,
+                        0,
+                        0,
+                        0,
+                    )),
+                    Ok(true)
+                );
+                refresh_all_rows(state);
+                assert_eq!(state.icon_unresolved_rows, 1);
+                ICON_TEST_FAIL_NEXT_NATIVE_SET.with(|failure| failure.set(true));
+            }
+            pump_icon_test_until(window, Duration::from_secs(10), || {
+                try_app_state(window).is_some_and(|lease| {
+                    lease.state().preview_synchronization.is_synchronized()
+                        && lease.state().icon_unresolved_rows == 0
+                        && guardian.shared.pending_count() == 0
+                })
+            })?;
+            assert!(!ICON_TEST_FAIL_NEXT_NATIVE_SET.with(Cell::get));
+            {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("icon test state disappeared"))?;
+                assert_native_refresh_values(lease.state());
+            }
             // SAFETY: this exact live production owner handles the ordinary
             // close message after the AppState lease has ended.
             unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
@@ -2890,6 +2985,43 @@ mod native_tests {
                 .map_err(|_| io::Error::other("class query did not enter the worker"))?;
             assert_eq!(guardian.shared.pending_count(), 64);
             assert_ui_ack_while_icon_blocked(window)?;
+            let list = try_app_state(window)
+                .ok_or_else(|| io::Error::other("icon test state unavailable"))?
+                .state()
+                .list_window;
+            select_rows(list, &[500]);
+            let mut focus = LVITEMW {
+                stateMask: LVIS_FOCUSED,
+                state: LVIS_FOCUSED,
+                ..LVITEMW::default()
+            };
+            // SAFETY: the live ListView receives one writable state item;
+            // focus on row 501 deliberately remains outside selection.
+            assert_ne!(
+                // SAFETY: focus storage remains live through this synchronous
+                // native state change on the test-owned ListView.
+                unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_SETITEMSTATE,
+                        501,
+                        (&mut focus as *mut LVITEMW) as isize,
+                    )
+                },
+                0
+            );
+            // SAFETY: these scalar operations create nonzero horizontal and
+            // vertical viewport positions before icon-only reconciliation.
+            unsafe {
+                SendMessageW(list, LVM_SETCOLUMNWIDTH, 0, 900);
+                SendMessageW(list, LVM_SCROLL, 160, 0);
+                SendMessageW(list, LVM_ENSUREVISIBLE, 5000, 0);
+            }
+            let view_before = icon_view_state(window, list)?;
+            assert_eq!(view_before.0, vec![500]);
+            assert!(view_before.1, "unselected row did not retain focus");
+            assert!(view_before.2 > 0, "vertical viewport did not move");
+            assert!(view_before.3 > 0, "horizontal viewport did not move");
             gate.release();
             pump_icon_test_until(window, Duration::from_secs(45), || {
                 try_app_state(window).is_some_and(|lease| {
@@ -2909,6 +3041,7 @@ mod native_tests {
             assert_eq!(state.rendered_rows[10_001].icon, I_IMAGENONE);
             assert_native_refresh_values(state);
             drop(lease);
+            assert_eq!(icon_view_state(window, list)?, view_before);
             {
                 let mut lease = try_app_state(window)
                     .ok_or_else(|| io::Error::other("icon test state unavailable"))?;
@@ -3128,6 +3261,140 @@ mod native_tests {
         })
     }
 
+    #[derive(Clone, Copy)]
+    enum IconTerminalCause {
+        BootstrapFailure,
+        WorkerQuit,
+    }
+
+    fn assert_live_rows_settle_after_icon_terminal(cause: IconTerminalCause) -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(root.path(), false, |window| {
+            let slot = app_state_slot(window);
+            // SAFETY: this production slot remains held until the worker is
+            // terminal, including any nested native callback during settling.
+            let _hold = unsafe { CallbackReclaimHold::new(slot) }
+                .ok_or_else(|| io::Error::other("terminal icon hold failed"))?;
+            let gate = IconTestGate::held();
+            let worker_gate = gate.clone();
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let class_calls = Arc::new(AtomicUsize::new(0));
+            let worker_class_calls = Arc::clone(&class_calls);
+            let mut guardian = icon_worker::IconRunGuardian::start_with(
+                // SAFETY: this scalar identifies the current test UI thread.
+                unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+                move || {
+                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    Some(
+                        move |key: &crate::icon_requests::RequestKey<IconCacheKey>| match key {
+                            crate::icon_requests::RequestKey::Bootstrap => {
+                                let _ = entered_tx.send(());
+                                worker_gate.wait();
+                                if matches!(cause, IconTerminalCause::BootstrapFailure) {
+                                    icon_worker::IconResult::Bootstrap(None)
+                                } else {
+                                    shell.query(key)
+                                }
+                            }
+                            crate::icon_requests::RequestKey::Class(_) => {
+                                worker_class_calls.fetch_add(1, Ordering::AcqRel);
+                                shell.query(key)
+                            }
+                        },
+                    )
+                },
+            )?;
+            let _release = ReleaseIconGate(gate.clone());
+            install_icon_test_guardian(window, &guardian)?;
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("terminal icon state unavailable"))?;
+                let state = lease.state_mut();
+                state
+                    .model
+                    .append_batch_by(
+                        refresh_fixture_rows(r"C:\icon-terminal", "held", 0, 2),
+                        compare_windows,
+                    )
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                refresh_all_rows(state);
+                assert_eq!(state.icon_unresolved_rows, 2);
+                assert_native_refresh_values(state);
+            }
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| io::Error::other("terminal bootstrap did not block"))?;
+            gate.release();
+            if matches!(cause, IconTerminalCause::WorkerQuit) {
+                pump_icon_test_until(window, Duration::from_secs(5), || {
+                    try_app_state(window).is_some_and(|lease| {
+                        lease.state().icon_image_list.is_some()
+                            && lease.state().icon_unresolved_rows == 0
+                            && guardian.shared.pending_count() == 0
+                    })
+                })?;
+                assert!(guardian.shared.post_quit_for_test());
+                pump_icon_test_until(window, Duration::from_secs(5), || guardian.poll_join())?;
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("post-bootstrap icon state unavailable"))?;
+                let state = lease.state_mut();
+                assert!(state.model.clear());
+                refresh_all_rows(state);
+                state
+                    .model
+                    .append_batch_by(
+                        [
+                            LegacyListItem::new(
+                                r"C:\icon-after-quit\first.afterquit",
+                                false,
+                                0,
+                                0,
+                                0,
+                            ),
+                            LegacyListItem::new(
+                                r"C:\icon-after-quit\second.afterquit",
+                                false,
+                                0,
+                                0,
+                                0,
+                            ),
+                        ],
+                        compare_windows,
+                    )
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                refresh_all_rows(state);
+                assert!(state.icon_image_list.is_some());
+            }
+            pump_icon_test_until(window, Duration::from_secs(5), || {
+                guardian.poll_join();
+                try_app_state(window).is_some_and(|lease| {
+                    let state = lease.state();
+                    guardian.shared.is_joined()
+                        && guardian.shared.is_unavailable()
+                        && guardian.shared.pending_count() == 0
+                        && state.icon_unresolved_rows == 0
+                        && state
+                            .rendered_rows
+                            .iter()
+                            .all(|row| row.icon_resolved && row.icon == I_IMAGENONE)
+                })
+            })?;
+            if matches!(cause, IconTerminalCause::BootstrapFailure) {
+                assert_eq!(class_calls.load(Ordering::Acquire), 0);
+            }
+            let lease = try_app_state(window)
+                .ok_or_else(|| io::Error::other("terminal icon state disappeared"))?;
+            assert_eq!(lease.state().icon_demand_scan_remaining, 0);
+            assert_eq!(lease.state().icon_status_value(11), Some(1));
+            assert_eq!(lease.state().icon_status_value(21), Some(1));
+            if matches!(cause, IconTerminalCause::WorkerQuit) {
+                assert_eq!(lease.state().icon_status_value(5), Some(1));
+            }
+            assert_native_refresh_values(lease.state());
+            Ok(())
+        })
+    }
+
     #[test]
     fn icon_worker_failures_and_message_loop_retire() -> io::Result<()> {
         with_icon_native_window(|window| {
@@ -3197,50 +3464,10 @@ mod native_tests {
                 assert_eq!(state.icon_status_value(11), Some(1));
                 assert_eq!(state.icon_status_value(12), Some(1));
             }
-            // A failed bootstrap and a worker WM_QUIT are separate terminal
-            // causes. Neither may leave a live handle or retryable requests.
-            // SAFETY: this scalar identifies the current test UI thread.
-            let ui_thread = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
-            let mut bootstrap_failed = icon_worker::IconRunGuardian::start_with(ui_thread, || {
-                Some(
-                    |key: &crate::icon_requests::RequestKey<IconCacheKey>| match key {
-                        crate::icon_requests::RequestKey::Bootstrap => {
-                            icon_worker::IconResult::Bootstrap(None)
-                        }
-                        crate::icon_requests::RequestKey::Class(_) => {
-                            icon_worker::IconResult::Class {
-                                list: None,
-                                index: I_IMAGENONE,
-                            }
-                        }
-                    },
-                )
-            })?;
-            pump_icon_test_until(window, Duration::from_secs(5), || {
-                bootstrap_failed.poll_join()
-            })?;
-            assert!(bootstrap_failed.shared.is_unavailable());
-            assert_eq!(bootstrap_failed.shared.pending_count(), 0);
-
-            let mut quit = icon_worker::IconRunGuardian::start_with(ui_thread, || {
-                let mut shell = icon_worker::ShellLookup::initialize()?;
-                Some(move |key: &crate::icon_requests::RequestKey<IconCacheKey>| shell.query(key))
-            })?;
-            pump_icon_test_until(window, Duration::from_secs(5), || {
-                quit.shared.snapshot_completions().is_some_and(|batch| {
-                    batch.iter().any(|completion| {
-                        matches!(
-                            completion.result,
-                            icon_worker::IconResult::Bootstrap(Some(_))
-                        )
-                    })
-                })
-            })?;
-            assert!(quit.shared.post_quit_for_test());
-            pump_icon_test_until(window, Duration::from_secs(5), || quit.poll_join())?;
-            assert!(quit.shared.is_unavailable());
-            assert_eq!(quit.shared.pending_count(), 0);
-            assert!(quit.shared.is_joined());
+            // Keep OLE/WinRT initialized on this UI thread while exercising
+            // both other terminal causes on separate real production owners.
+            assert_live_rows_settle_after_icon_terminal(IconTerminalCause::BootstrapFailure)?;
+            assert_live_rows_settle_after_icon_terminal(IconTerminalCause::WorkerQuit)?;
             Ok(())
         })
     }
