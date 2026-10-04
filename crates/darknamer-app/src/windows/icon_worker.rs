@@ -401,16 +401,17 @@ impl ShellLookup {
         match key {
             RequestKey::Bootstrap => {
                 let mut info = SHFILEINFOW::default();
-                let empty = [0_u16];
-                // SAFETY: the empty terminated UTF-16 path and writable info
-                // outlive this synchronous call on the COM-initialized worker.
+                let representative: Vec<u16> = "icon.txt\0".encode_utf16().collect();
+                // SAFETY: the short terminated UTF-16 representative and
+                // writable info outlive this synchronous call on the
+                // COM-initialized worker. USEFILEATTRIBUTES avoids file access.
                 let raw = unsafe {
                     SHGetFileInfoW(
-                        empty.as_ptr(),
-                        0,
+                        representative.as_ptr(),
+                        FILE_ATTRIBUTE_NORMAL,
                         &mut info,
                         size_of::<SHFILEINFOW>() as u32,
-                        SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
+                        SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
                     )
                 };
                 self.image_list = BorrowedSystemImageList::validate(raw);

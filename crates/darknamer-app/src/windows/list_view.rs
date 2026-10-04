@@ -2537,7 +2537,7 @@ mod native_tests {
         let deadline = Instant::now() + timeout;
         let mut message = MSG::default();
         loop {
-            if condition() {
+            if condition() && Instant::now() < deadline {
                 return Ok(());
             }
             // SAFETY: this test owns the UI thread queue and writable MSG.
@@ -2556,13 +2556,27 @@ mod native_tests {
                     }
                 }
             }
+            // A completion dispatched above counts only when observed before
+            // the deadline; do not wait for another loop or accept a late ACK.
+            if condition() && Instant::now() < deadline {
+                return Ok(());
+            }
             if Instant::now() >= deadline {
                 let progress = try_app_state(window).map(|lease| {
                     let state = lease.state();
-                    let pending = state.icon_shared.as_ref().map_or(0, |shared| shared.pending_count());
+                    let pending = state
+                        .icon_shared
+                        .as_ref()
+                        .map_or(0, |shared| shared.pending_count());
+                    let unavailable = state
+                        .icon_shared
+                        .as_ref()
+                        .is_none_or(|shared| shared.is_unavailable());
                     format!(
-                        "rows={} unresolved={} pending={} reconcile={} batch={} demand={} cursor={}",
+                        "rows={} image_list={} unavailable={} unresolved={} pending={} reconcile={} batch={} demand={} cursor={}",
                         state.rendered_rows.len(),
+                        state.icon_image_list.is_some(),
+                        unavailable,
                         state.icon_unresolved_rows,
                         pending,
                         state.icon_reconcile_remaining,
@@ -2782,6 +2796,12 @@ mod native_tests {
             bootstrap_gate.release();
             pump_icon_test_until(window, Duration::from_secs(5), || {
                 miss_entered.load(Ordering::Acquire)
+            })
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "bootstrap-to-miss wait: {error}; miss_entered={}",
+                    miss_entered.load(Ordering::Acquire)
+                ))
             })?;
             assert_ui_ack_while_icon_blocked(window)?;
             guardian.shared.lose_next_ui_wake_for_test();
@@ -2792,6 +2812,12 @@ mod native_tests {
                         && lease.state().icon_unresolved_rows == 0
                         && guardian.shared.pending_count() == 0
                 })
+            })
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "miss-to-settlement wait: {error}; miss_entered={}",
+                    miss_entered.load(Ordering::Acquire)
+                ))
             })?;
             assert!(!guardian.shared.test_ui_wake_loss_pending());
             let lease = try_app_state(window)
@@ -3193,9 +3219,18 @@ mod native_tests {
                 refresh_all_rows(state);
                 assert_eq!(state.icon_unresolved_rows, 2);
             }
+            let queue_deadline = Instant::now() + Duration::from_secs(2);
             entered_rx
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(queue_deadline.saturating_duration_since(Instant::now()))
                 .map_err(|_| io::Error::other("first class query did not block"))?;
+            // The second render may find the request lock busy while the first
+            // class enters the worker. Pump its normal UI demand retry before
+            // checking the queue, while the first class remains gate-held.
+            pump_icon_test_until(
+                window,
+                queue_deadline.saturating_duration_since(Instant::now()),
+                || guardian.shared.pending_count() == 2,
+            )?;
             assert_eq!(guardian.shared.pending_count(), 2);
             assert_ui_ack_while_icon_blocked(window)?;
             let outer_lease = try_app_state(window)
