@@ -992,6 +992,72 @@ function Assert-ObserverAppearanceColumnPreference {
     }
     Get-LowerSha256 -Path $item.FullName
 }
+function Assert-ObserverAppearancePrivateAppDirectory {
+    param([Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $UserSid)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Appearance private app directory is unsafe.'
+    }
+    $actual = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($item.FullName))
+    if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $UserSid.Value -or
+        -not $actual.AreAccessRulesProtected) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+    $expected = @($UserSid.Value, 'S-1-5-18', 'S-1-5-32-544')
+    $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    if ($rules.Count -ne $expected.Count) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+    foreach ($rule in $rules) {
+        $sid = ([Security.Principal.SecurityIdentifier]$rule.IdentityReference).Value
+        if ($sid -cnotin $expected -or $rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $rule.InheritanceFlags -ne $inheritance -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw 'Appearance private app directory owner or DACL differs from production.'
+        }
+        $expected = @($expected | Where-Object { $_ -cne $sid })
+    }
+    if ($expected.Count -ne 0) {
+        throw 'Appearance private app directory owner or DACL differs from production.'
+    }
+}
+function New-ObserverAppearancePrivateAppDirectory {
+    param([Parameter(Mandatory)][string] $Parent)
+
+    $path = Join-Path $Parent 'DarkReNamer'
+    if (-not $IsWindows) {
+        # Ubuntu fixture tests cannot execute the Windows ACL API or the product.
+        return New-PrivateDirectory -Parent $Parent -Leaf 'DarkReNamer'
+    }
+    if (Test-Path -LiteralPath $path) {
+        throw 'Appearance private app directory already exists.'
+    }
+    $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($userSid)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($principal in @($userSid,
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+        [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $principal, [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    # The descriptor is supplied at creation so no inherited, unsafe interval exists.
+    [void][IO.FileSystemAclExtensions]::CreateDirectory($security, $path)
+    Assert-ObserverAppearancePrivateAppDirectory -Path $path -UserSid $userSid
+    $path
+}
 function New-ObserverAppearanceColumnPreference {
     param([Parameter(Mandatory)][string] $RuntimeRoot)
     $expectedLocalData = Join-Path $RuntimeRoot 'localappdata'
@@ -999,7 +1065,7 @@ function New-ObserverAppearanceColumnPreference {
         [IO.Path]::GetFullPath($expectedLocalData), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Appearance preference requires isolated LOCALAPPDATA.'
     }
-    $appRoot = New-PrivateDirectory -Parent $expectedLocalData -Leaf 'DarkReNamer'
+    $appRoot = New-ObserverAppearancePrivateAppDirectory -Parent $expectedLocalData
     $path = Join-Path $appRoot 'ui-columns-v1'
     if (Test-Path -LiteralPath $path) { throw 'Appearance column preference already exists.' }
     $bytes = Get-ObserverAppearanceColumnPreferenceBytes
