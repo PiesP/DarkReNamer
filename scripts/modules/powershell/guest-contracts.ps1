@@ -301,14 +301,51 @@ function Resolve-VerifiedBundle {
         $runner = $manifest.runner
         $testBinaryRows = @($manifest.test_binaries)
         if ($null -ne $diagnostic) {
-            Assert-ExactProperties -Value $diagnostic.Value -Names @(
-                'kind', 'test_profile', 'test_name', 'orders') -Label 'bundle.json diagnostic'
-            if ($diagnostic.Value.kind -cne 'profile-refresh-stages' -or
-                $diagnostic.Value.test_profile -cne 'release' -or
-                $diagnostic.Value.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
-                (@($diagnostic.Value.orders) -join ',') -cne 'hidden-visible,visible-hidden' -or
-                $testBinaryRows.Count -ne 1 -or $testBinaryRows[0].name -cne 'darknamer_app') {
-                throw 'bundle.json fixed refresh diagnostic is invalid.'
+            if ($diagnostic.Value.kind -ceq 'profile-refresh-stages') {
+                Assert-ExactProperties -Value $diagnostic.Value -Names @(
+                    'kind', 'test_profile', 'test_name', 'orders') -Label 'bundle.json diagnostic'
+                if ($diagnostic.Value.test_profile -cne 'release' -or
+                    $diagnostic.Value.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
+                    (@($diagnostic.Value.orders) -join ',') -cne 'hidden-visible,visible-hidden') {
+                    throw 'bundle.json fixed refresh diagnostic is invalid.'
+                }
+            }
+            elseif ($diagnostic.Value.kind -ceq 'focused-icon-tests') {
+                $selectedCase = $diagnostic.Value.PSObject.Properties['test_name']
+                Assert-ExactProperties -Value $diagnostic.Value -Names (@(
+                    'kind', 'test_profile', 'test_filter'
+                ) + @(if ($null -ne $selectedCase) { 'test_name' } else { 'test_names' })) -Label 'bundle.json diagnostic'
+                $fixedNames = @(
+                    'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
+                    'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
+                    'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
+                    'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+                )
+                $validNames = $true
+                if ($null -eq $selectedCase) {
+                    $validNames = $null -ne $diagnostic.Value.PSObject.Properties['test_names'] -and
+                        $diagnostic.Value.test_names -is [array] -and
+                        $diagnostic.Value.test_names.Count -eq $fixedNames.Count
+                }
+                if ($null -eq $selectedCase -and $validNames) {
+                    for ($nameIndex = 0; $nameIndex -lt $fixedNames.Count; $nameIndex++) {
+                        if ($diagnostic.Value.test_names[$nameIndex] -isnot [string] -or
+                            $diagnostic.Value.test_names[$nameIndex] -cne $fixedNames[$nameIndex]) {
+                            $validNames = $false
+                            break
+                        }
+                    }
+                }
+                if ($diagnostic.Value.test_profile -cnotin @('debug', 'release') -or
+                    $diagnostic.Value.test_filter -cne 'windows::list_view::native_tests::icon_worker_' -or
+                    ($null -ne $selectedCase -and $selectedCase.Value -cnotin $fixedNames) -or
+                    ($null -eq $selectedCase -and -not $validNames)) {
+                    throw 'bundle.json fixed focused icon selection is invalid.'
+                }
+            }
+            else { throw 'bundle.json diagnostic kind is invalid.' }
+            if ($testBinaryRows.Count -ne 1 -or $testBinaryRows[0].name -cne 'darknamer_app') {
+                throw 'bundle.json selected native tests require one app library binary.'
             }
         }
         $candidateArtifacts = @()

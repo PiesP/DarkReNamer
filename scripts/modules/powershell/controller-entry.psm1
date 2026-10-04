@@ -1078,6 +1078,10 @@ function Invoke-DrWindowsVmController {
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400,
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $FocusedIconTests,
+    [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+        'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+    [string] $FocusedIconCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
     [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample')]
@@ -1142,10 +1146,21 @@ $taskSelection = Resolve-ControllerTaskSelection `
     -HasRecoveryFixtureCount $PSBoundParameters.ContainsKey('RecoveryFixtureCount') `
     -TimeoutSeconds $TestTimeoutSeconds
 $refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+if ($refreshProfile -and $FocusedIconTests) {
+    throw 'A core test run cannot select both refresh diagnostic modes.'
+}
+if ($FocusedIconCase -and -not $FocusedIconTests) {
+    throw 'A single focused icon case requires its fixed test selector.'
+}
 if ($refreshProfile -and ($taskSelection.kind -cne 'core' -or
     $TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 600 -or
     $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
     throw 'Refresh profiling requires the fixed core diagnostic and v2 bounds.'
+}
+if ($FocusedIconTests -and ($taskSelection.kind -cne 'core' -or
+    $TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 600 -or
+    $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
+    throw 'Focused icon tests require fixed core v2 bounds.'
 }
 if ($refreshProfile) { $coreTestOutputAggregateMaximumBytes = 32MB }
 
@@ -1294,6 +1309,41 @@ try {
                 @($manifest.test_binaries).Count -ne 1 -or
                 $manifest.test_binaries[0].name -cne 'darknamer_app') {
                 throw 'Refresh diagnostic bundle identity is invalid.'
+            }
+        }
+        elseif ($FocusedIconTests) {
+            $fixedFocusedNames = @(
+                'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
+                'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
+                'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
+                'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+            )
+            $manifestNamesMatch = $true
+            if (-not $FocusedIconCase) {
+                $manifestNamesMatch = $null -ne $manifest.diagnostic.PSObject.Properties['test_names'] -and
+                    $manifest.diagnostic.test_names -is [array] -and
+                    $manifest.diagnostic.test_names.Count -eq $fixedFocusedNames.Count
+            }
+            if (-not $FocusedIconCase -and $manifestNamesMatch) {
+                for ($nameIndex = 0; $nameIndex -lt $fixedFocusedNames.Count; $nameIndex++) {
+                    if ($manifest.diagnostic.test_names[$nameIndex] -isnot [string] -or
+                        $manifest.diagnostic.test_names[$nameIndex] -cne $fixedFocusedNames[$nameIndex]) {
+                        $manifestNamesMatch = $false
+                        break
+                    }
+                }
+            }
+            if ($manifest.diagnostic.kind -cne 'focused-icon-tests' -or
+                $manifest.diagnostic.test_profile -cnotin @('debug', 'release') -or
+                $manifest.diagnostic.test_filter -cne 'windows::list_view::native_tests::icon_worker_' -or
+                ($FocusedIconCase -and $manifest.diagnostic.test_name -cne
+                    ('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)) -or
+                (-not $FocusedIconCase -and
+                    ($null -ne $manifest.diagnostic.PSObject.Properties['test_name'] -or
+                     -not $manifestNamesMatch)) -or
+                @($manifest.test_binaries).Count -ne 1 -or
+                $manifest.test_binaries[0].name -cne 'darknamer_app') {
+                throw 'Focused icon bundle identity is invalid.'
             }
         }
         elseif ($null -ne $manifest.PSObject.Properties['diagnostic']) {
@@ -4709,8 +4759,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
-    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder)
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$FocusedIconTests),$FocusedIconCase -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$focusedIcon,$focusedCase)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
         $powerShell = Get-DrVmTrustedPowerShellPath
@@ -4738,6 +4788,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtimeRoot + '"'
         if ($v2) { $arguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
         if ($refreshOrder) { $arguments += ' -RefreshProfileOrder ' + $refreshOrder }
+        if ($focusedIcon) { $arguments += ' -FocusedIconTests' }
+        if ($focusedCase) { $arguments += ' -FocusedIconCase ' + $focusedCase }
         $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
@@ -4881,7 +4933,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
-        (-not $refreshProfile -and
+        (-not $refreshProfile -and -not $FocusedIconTests -and
          ($result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup))) {
         throw 'Guest process jobs were not empty and closed before result collection.'
     }
@@ -4889,6 +4941,46 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $result.diagnostic.order -cne $RefreshProfileOrder -or
         @($result.tests).Count -ne 1 -or $null -ne $result.gui)) {
         throw 'Refresh diagnostic result selection is invalid.'
+    }
+    $resultNamesMatch = $true
+    if ($FocusedIconTests -and -not $FocusedIconCase) {
+        $resultNamesMatch = $null -ne $result.diagnostic.PSObject.Properties['test_names'] -and
+            $result.diagnostic.test_names -is [array] -and
+            $result.diagnostic.test_names.Count -eq $fixedFocusedNames.Count
+        if ($resultNamesMatch) {
+            for ($nameIndex = 0; $nameIndex -lt $fixedFocusedNames.Count; $nameIndex++) {
+                if ($result.diagnostic.test_names[$nameIndex] -isnot [string] -or
+                    $result.diagnostic.test_names[$nameIndex] -cne $fixedFocusedNames[$nameIndex]) {
+                    $resultNamesMatch = $false
+                    break
+                }
+            }
+        }
+    }
+    if ($FocusedIconTests -and ($result.diagnostic.kind -cne 'focused-icon-tests' -or
+        $result.diagnostic.test_profile -cne $manifest.diagnostic.test_profile -or
+        $result.diagnostic.test_filter -cne $manifest.diagnostic.test_filter -or
+        ($FocusedIconCase -and $result.diagnostic.test_name -cne
+            ('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)) -or
+        (-not $FocusedIconCase -and
+            ($null -ne $result.diagnostic.PSObject.Properties['test_name'] -or
+             -not $resultNamesMatch)) -or
+        @($result.tests).Count -lt 1 -or
+        @($result.tests).Count -gt $(if ($FocusedIconCase) { 1 } else { 4 }) -or
+        $null -ne $result.gui)) {
+        throw 'Focused icon result selection is invalid.'
+    }
+    if ($FocusedIconTests) {
+        $expectedFocusedNames = if ($FocusedIconCase) {
+            @('windows::list_view::native_tests::icon_worker_' + $FocusedIconCase)
+        } else { @($manifest.diagnostic.test_names) }
+        for ($caseIndex = 0; $caseIndex -lt @($result.tests).Count; $caseIndex++) {
+            if ($result.tests[$caseIndex].test_name -cne $expectedFocusedNames[$caseIndex] -or
+                $result.tests[$caseIndex].file -cne $manifest.test_binaries[0].file -or
+                $result.tests[$caseIndex].sha256 -cne $manifest.test_binaries[0].sha256) {
+                throw 'Focused icon case result differs from its frozen inventory.'
+            }
+        }
     }
     $processJobsClosed = $true
     $outputs = @()
