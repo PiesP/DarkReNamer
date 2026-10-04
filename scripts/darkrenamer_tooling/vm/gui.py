@@ -1089,6 +1089,13 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
             command += ["-AcceptanceHighContrast"]
     elif run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE}:
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
+    if run["mode"] == FOCUSED_CLEAR_MODE:
+        manifest = read_json(run_root / "input-manifest.json")
+        bundle_manifest = ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024,
+                                        "Focused controller bundle manifest")
+        require(manifest["bundle_manifest"]["sha256"] == digest(bundle_manifest),
+                "Focused controller bundle differs from its immutable input manifest.")
+        command += ["-ExpectedBundleManifestSha256", manifest["bundle_manifest"]["sha256"]]
     return command
 
 

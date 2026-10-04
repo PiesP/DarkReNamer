@@ -375,6 +375,12 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["tooling_source_sha"], "c" * 40)
         self.assertEqual(manifest["prepared_bundle"]["origin"],
                          "preserved-source-built-product-current-tooling")
+        bundle_root = self.root / "bundle"
+        bundle_root.mkdir()
+        (bundle_root / "bundle.json").write_bytes(b"frozen focused fixture")
+        manifest["bundle_manifest"]["sha256"] = runner.digest(bundle_root / "bundle.json")
+        (self.root / "run").mkdir()
+        self.write_json(self.root / "run" / "input-manifest.json", manifest)
         with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "run", run,
@@ -384,6 +390,15 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                          runner.FOCUSED_CLEAR_MODE)
         self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
         self.assertNotIn("-AcceptanceProfileId", command)
+        self.assertEqual(command[command.index("-ExpectedBundleManifestSha256") + 1],
+                         manifest["bundle_manifest"]["sha256"])
+        (bundle_root / "bundle.json").write_bytes(b"changed bundle")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+             self.assertRaisesRegex(ValueError, "Focused controller bundle differs"):
+            runner.controller_command(
+                self.root, bundle_root, self.root / "run", run,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "fixture-sid"})
         output = self.root / "run" / "output"
         output.mkdir(parents=True)
         (output / "performance-empty.png").write_bytes(b"fixture")
