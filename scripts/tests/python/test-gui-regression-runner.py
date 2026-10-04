@@ -159,11 +159,59 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"},
                 )
 
-    def test_v2_profile_requires_a_v2_aware_diagnostic(self):
-        with self.assertRaisesRegex(ValueError, "requires appearance-pair or icon-settlement"):
+    def test_fixed_gui_v2_uses_distinct_ids_and_requires_frozen_profile(self):
+        self.assertEqual([run["run_id"] for run in runner.V2_RUNS],
+                         [f"{run['run_id']}-owned-v2" for run in runner.RUNS])
+        self.assertEqual([run["mode"] for run in runner.V2_RUNS],
+                         [run["mode"] for run in runner.RUNS])
+        with self.assertRaisesRegex(ValueError, "V2 acceptance profile must be an ordinary file"):
             runner.main(self.root, ["--connection-profile", str(self.root / "missing.json"),
                                     "--output-root", str(self.root / "unused"),
                                     "--acceptance-profile-id", runner.V2_PROFILE_ID])
+
+    def test_fixed_gui_v2_stages_and_rechecks_profile_before_controller(self):
+        profile = b'{"schema":"darkrenamer-vm-automated-profile-v2"}\n'
+        profile_hash = hashlib.sha256(profile).hexdigest()
+        run_root = self.root / "fixed"
+        (run_root / "inputs").mkdir(parents=True)
+        (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile)
+        (self.root / "config").mkdir()
+        (self.root / "config" / runner.V2_PROFILE_FILE).write_bytes(profile)
+        run = {**runner.V2_RUNS[0], "acceptance_profile_id": runner.V2_PROFILE_ID,
+               "acceptance_profile_sha256": profile_hash}
+        inputs = {"bundle_manifest": {}, "artifacts": {}, "source_sha": "a" * 40,
+                  "source_tree": "b" * 40,
+                  "acceptance_profile": {"file": f"inputs/{runner.V2_PROFILE_FILE}",
+                                         "bytes": len(profile), "sha256": profile_hash}}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "bundle", run_root,
+                                             run, "c" * 64, {}, {})
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        self.assertEqual(manifest["acceptance_profile_sha256"], profile_hash)
+        self.write_json(run_root / "input-manifest.json", manifest)
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", run_root, run,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1], runner.V2_PROFILE_ID)
+        self.assertEqual(command[command.index("-AcceptanceProfileSha256") + 1], profile_hash)
+        self.assertNotIn("-TestTimeoutSeconds", command)
+        (self.root / "config" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            with self.assertRaisesRegex(ValueError, "changed after its immutable staging"):
+                runner.controller_command(
+                    self.root, self.root / "bundle", run_root, run,
+                    {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                    {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
+        (self.root / "config" / runner.V2_PROFILE_FILE).write_bytes(profile)
+        (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            with self.assertRaisesRegex(ValueError, "immutable staged manifest"):
+                runner.controller_command(
+                    self.root, self.root / "bundle", run_root, run,
+                    {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                    {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
 
     def test_icon_settlement_has_new_method_prepared_pin_and_v2_profile(self):
         run = {**runner.icon_settlement_run(), "acceptance_profile_sha256": "e" * 64}

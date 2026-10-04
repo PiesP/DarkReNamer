@@ -68,6 +68,7 @@ RUNS = (
         "text_scale_percent": 100,
     },
 )
+V2_RUNS = tuple({**run, "run_id": f"{run['run_id']}-owned-v2"} for run in RUNS)
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
 ICON_SETTLEMENT_MODE = "icon-settlement"
@@ -742,7 +743,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
     }
     if reference is not None:
         result["full_context_reference"] = reference
-    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE}:
+    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
         result["acceptance_profile_id"] = run.get("acceptance_profile_id", V1_PROFILE_ID)
         if result["acceptance_profile_id"] == V2_PROFILE_ID:
             require(run["acceptance_profile_sha256"] == inputs["acceptance_profile"]["sha256"],
@@ -802,9 +803,10 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceAppearance", run["appearance"],
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
-    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE}:
-        command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200",
-                    "-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
+    if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
+        if run["mode"] in {"appearance-pair", ICON_SETTLEMENT_MODE}:
+            command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
+        command += ["-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
         if run.get("acceptance_profile_id") == V2_PROFILE_ID:
             manifest = read_json(run_root / "input-manifest.json")
             staged = ordinary_file(run_root / "inputs" / V2_PROFILE_FILE, 1024 * 1024, "Staged V2 profile")
@@ -812,6 +814,11 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                     manifest.get("acceptance_profile_sha256") == run["acceptance_profile_sha256"] == digest(staged) and
                     manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
                     "V2 controller profile differs from its immutable staged manifest.")
+            if run["mode"] in {"full-context", "standard", "text-scale", "tooltip"}:
+                source_profile = ordinary_file(repo / "config" / V2_PROFILE_FILE, 1024 * 1024,
+                                               "Source V2 profile")
+                require(digest(source_profile) == run["acceptance_profile_sha256"],
+                        "Fixed GUI V2 profile changed after its immutable staging.")
             command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
         if run["mode"] == "appearance-pair" and run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
@@ -1088,6 +1095,8 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
             command += ["--configuration-set", "focused"]
     else:
         command += ["--require-complete-set"]
+        if runs[0].get("acceptance_profile_id") == V2_PROFILE_ID:
+            command += ["--acceptance-profile-id", V2_PROFILE_ID]
     completed = subprocess.run(command, cwd=repo, check=True, capture_output=True)
     report = json.loads(completed.stdout)
     write_json(output_root / "validation-result.json", report, exclusive=True)
@@ -1117,8 +1126,8 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Desktop selection requires a diagnostic.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
-    require(args.acceptance_profile_id is None or args.diagnostic in {"appearance-pair", ICON_SETTLEMENT_MODE},
-            "Acceptance profile selection requires appearance-pair or icon-settlement.")
+    require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", ICON_SETTLEMENT_MODE},
+            "Acceptance profile selection requires fixed GUI, appearance-pair or icon-settlement.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
             "Icon settlement requires explicit V2 owned-resource profile selection.")
     require(args.icon_endpoint_method is None or args.diagnostic == ICON_SETTLEMENT_MODE,
@@ -1147,8 +1156,10 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                      if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
                      (appearance_pair_run(args.desktop_width, args.desktop_height, args.desktop_dpi),)
-                     if args.diagnostic == "appearance-pair" else RUNS)
-    if args.diagnostic in {"appearance-pair", ICON_SETTLEMENT_MODE}:
+                     if args.diagnostic == "appearance-pair" else
+                     V2_RUNS if args.acceptance_profile_id == V2_PROFILE_ID else RUNS)
+    if (args.diagnostic is None and args.acceptance_profile_id == V2_PROFILE_ID or
+            args.diagnostic in {"appearance-pair", ICON_SETTLEMENT_MODE}):
         selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
         profile_digest = None
         if selected_profile == V2_PROFILE_ID:
@@ -1192,7 +1203,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
         run_root = runs_root / run["run_id"]
         run_root.mkdir()
         if run["mode"] == "tooltip":
-            reference = reference_for(runs_root / RUNS[0]["run_id"])
+            reference = reference_for(runs_root / selected_runs[0]["run_id"])
         manifest_document = input_manifest(
             repo, bundle, run_root, run, profile_sha256, host, guest, reference,
             args.expected_prepared_application_sha256 if prepared_manifest is not None else None)

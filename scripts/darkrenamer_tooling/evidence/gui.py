@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
@@ -187,6 +188,7 @@ FIXED_RUN_IDS = {
     "text-scale": "03-standard-light-800x600-96-text150",
     "tooltip": "04-tooltip-dark-1366x768-144-text100",
 }
+FIXED_V2_RUN_IDS = {mode: f"{run_id}-owned-v2" for mode, run_id in FIXED_RUN_IDS.items()}
 MODE_SEMANTICS = {
     "full-context": FULL_CONTEXT_SEMANTICS,
     "standard": STANDARD_SEMANTICS,
@@ -447,7 +449,8 @@ def validate_reference(value: object, run_id: str) -> dict:
     return reference
 
 
-def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[dict, bytes]:
+def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
+                            expected_profile_sha256: str | None = None) -> tuple[dict, bytes]:
     value, data = read_json(run_root, Path("input-manifest.json"), "input manifest")
     required = {
         "schema_version", "run_id", "source_sha", "source_tree", "bundle_manifest",
@@ -458,7 +461,11 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
         required.add("full_context_reference")
     if isinstance(value, dict) and "prepared_bundle" in value:
         required.add("prepared_bundle")
-    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
+    fixed_v2 = isinstance(value, dict) and isinstance(value.get("request"), dict) and (
+        value["request"].get("mode") in RUN_MODES and
+        value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
+    if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
+            value["request"].get("mode") in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2):
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -483,9 +490,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
+    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
+                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE or fixed_v2 else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
         if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
             profile_artifact = checked_artifact(run_root, manifest["acceptance_profile"], "acceptance profile")
@@ -496,13 +503,16 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
             require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v2" and
                     profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 2),
                     "Appearance V2 profile definition is invalid.")
+            if fixed_v2:
+                require(expected_profile_sha256 == profile_artifact["sha256"],
+                        "Fixed GUI V2 profile differs from the selected source blob.")
     validate_host_platform(manifest["host_preflight"], "input manifest host_preflight")
     validate_guest_platform(manifest["guest_preflight"], "input manifest guest_preflight")
     command = manifest["command"]
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE}:
+    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -512,6 +522,11 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str) -> tuple[d
                     "Appearance acceptance profile command differs from its manifest.")
         else:
             require(selected == V1_PROFILE_ID, "Appearance V2 profile must be selected explicitly in the command.")
+    if fixed_v2:
+        require(command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--acceptance-profile-id", V2_PROFILE_ID],
+                "Fixed GUI V2 command must explicitly select its bound profile.")
     if request["mode"] == PAIR_MODE:
         run_id = manifest["run_id"]
         desktop = request["desktop"]
@@ -1072,6 +1087,45 @@ def validate_semantics(result: dict, mode: str) -> None:
         require(value is True, f"Semantic assertion did not pass: {name}")
 
 
+def validate_fixed_v2_transport(run_root: Path, collection_files: dict[str, dict],
+                                manifest: dict, result: dict, raw: dict) -> None:
+    transport = validate_transport_exit(run_root, collection_files, result["exit_code"])
+    cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
+                                        profile_sha256=manifest["acceptance_profile_sha256"])
+    owned = cleanup["owned_resource_evidence"]
+    jobs = raw.get("process_job_cleanup")
+    require(isinstance(jobs, list) and jobs and typed_equal(jobs, owned["process_job_cleanup"]) and
+            typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]),
+            "Fixed GUI V2 candidate Job or observer lifetime differs from the owned cleanup receipt.")
+    mode = manifest["request"]["mode"]
+    lifecycles = raw.get("process_lifecycles")
+    count = 3 if mode == "full-context" else 1
+    require(type(lifecycles) is list and len(lifecycles) == len(jobs) == count,
+            "Fixed GUI V2 candidate lifecycle count is incomplete.")
+    identities = set()
+    for index, row in enumerate(lifecycles):
+        wrapped = exact_keys(row, {"process_lifecycle"}, f"fixed GUI process lifecycle {index}")
+        life = exact_keys(wrapped["process_lifecycle"], {
+            "pid", "session_id", "start_time_utc_ticks", "executable_path", "executable_sha256",
+            "start_observed", "exit_observed", "exit_method", "exit_code",
+        }, f"fixed GUI process lifecycle {index}")
+        pid, ticks = life["pid"], life["start_time_utc_ticks"]
+        require(type(pid) is int and pid > 0 and type(ticks) is str and
+                re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None and
+                type(life["session_id"]) is int and
+                life["session_id"] == owned["runner_session_id"] and
+                type(life["executable_path"]) is str and life["executable_path"] and
+                life["executable_sha256"] == manifest["artifacts"]["application"]["sha256"] and
+                life["start_observed"] is True and life["exit_observed"] is True and
+                life["exit_method"] == "normal-close" and int_equals(life["exit_code"], 0),
+                "Fixed GUI V2 candidate process did not have a bound normal lifetime.")
+        identities.add((pid, ticks))
+    require(len(identities) == count and identities ==
+            {(job["pid"], job["process_start_time_utc_ticks"]) for job in jobs} and
+            result["actual"]["target"]["process_id"] in {pid for pid, _ in identities},
+            "Fixed GUI V2 candidate lifetimes differ from the declared closed Jobs or observed target.")
+
+
 def validate_run_result(
     run_root: Path,
     manifest: dict,
@@ -1146,9 +1200,12 @@ def validate_run_result(
             "Requested and actual text scale differ.")
     require(type(result["exit_code"]) is int and result["exit_code"] == 0,
             "Observer exit_code must be integer zero.")
-    validate_transport_exit(run_root, collection_files, result["exit_code"])
     validate_semantics(result, request["mode"])
     raw = validate_raw_result(run_root, manifest, result, collection_files)
+    if manifest.get("acceptance_profile_id") == V2_PROFILE_ID:
+        validate_fixed_v2_transport(run_root, collection_files, manifest, result, raw)
+    else:
+        validate_transport_exit(run_root, collection_files, result["exit_code"])
     return result, data, raw
 
 
@@ -1340,11 +1397,13 @@ def validate_text_metrics(run_root: Path, input_hash: str, collection_files: dic
     return result
 
 
-def validate_direct_reference(root: Path, current: dict, expected_source_sha: str) -> None:
+def validate_direct_reference(root: Path, current: dict, expected_source_sha: str,
+                              expected_profile_sha256: str | None = None) -> None:
     reference = current["manifest"]["full_context_reference"]
     target_id = reference["run_id"]
     require(SAFE_LEAF.fullmatch(target_id) is not None, "Reference target is unsafe.")
-    target = validate_run(root, target_id, expected_source_sha, allow_reference=False)
+    target = validate_run(root, target_id, expected_source_sha, allow_reference=False,
+                          expected_profile_sha256=expected_profile_sha256)
     require(target["manifest"]["request"]["mode"] == "full-context",
             "Referenced run is not a full-context run.")
     require(target["input_hash"] == reference["input_manifest_sha256"],
@@ -1356,6 +1415,11 @@ def validate_direct_reference(root: Path, current: dict, expected_source_sha: st
     require(target["manifest"]["artifacts"]["application"]["sha256"] ==
             current["manifest"]["artifacts"]["application"]["sha256"],
             "Referenced run uses another executable.")
+    require(target["manifest"].get("acceptance_profile_id", V1_PROFILE_ID) ==
+            current["manifest"].get("acceptance_profile_id", V1_PROFILE_ID) and
+            target["manifest"].get("acceptance_profile_sha256") ==
+            current["manifest"].get("acceptance_profile_sha256"),
+            "Referenced run uses another acceptance profile.")
     require(target["result"]["status"] == "review_required" and
             target["result"]["assertions"]["overall"] == "passed",
             "Referenced full-context run did not pass its machine assertions.")
@@ -1364,7 +1428,8 @@ def validate_direct_reference(root: Path, current: dict, expected_source_sha: st
             "Referenced full-context semantic scope is incomplete.")
 
 
-def validate_run(root: Path, run_id: str, expected_source_sha: str, *, allow_reference: bool = True) -> dict:
+def validate_run(root: Path, run_id: str, expected_source_sha: str, *, allow_reference: bool = True,
+                 expected_profile_sha256: str | None = None) -> dict:
     require(SAFE_LEAF.fullmatch(run_id) is not None, "Run id is unsafe.")
     run_root = root / run_id
     try:
@@ -1372,7 +1437,8 @@ def validate_run(root: Path, run_id: str, expected_source_sha: str, *, allow_ref
     except FileNotFoundError as error:
         raise EvidenceError(f"Run directory is missing: {run_id}") from error
     require(stat.S_ISDIR(info.st_mode) and not run_root.is_symlink(), "Run directory must not be a symlink.")
-    manifest, input_bytes = validate_input_manifest(run_root, expected_source_sha)
+    manifest, input_bytes = validate_input_manifest(run_root, expected_source_sha,
+                                                    expected_profile_sha256=expected_profile_sha256)
     input_hash = sha256_bytes(input_bytes)
     cleanup, cleanup_bytes = validate_cleanup(run_root, input_hash)
     collection, collection_bytes, collection_files = validate_collection(run_root, input_hash)
@@ -1403,7 +1469,7 @@ def validate_run(root: Path, run_id: str, expected_source_sha: str, *, allow_ref
     }
     if mode == "tooltip":
         require(allow_reference, "A referenced full-context run cannot contain another reference.")
-        validate_direct_reference(root, current, expected_source_sha)
+        validate_direct_reference(root, current, expected_source_sha, expected_profile_sha256)
     return current
 
 
@@ -3392,16 +3458,18 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
+    parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
 
 def main(repo: Path, argv=None) -> int:
-    del repo
     args = parse_arguments(argv)
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
+    require(args.acceptance_profile_id is None or args.diagnostic is None,
+            "Fixed GUI profile selection cannot be used for a diagnostic.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
     if args.diagnostic == PERFORMANCE_MODE:
@@ -3452,15 +3520,30 @@ def main(repo: Path, argv=None) -> int:
         }, ensure_ascii=False, indent=2))
         return 0
     require(args.configuration_set is None, "Focused configurations require appearance-pair diagnostic mode.")
-    runs = [validate_run(root, run_id, args.expected_source_sha) for run_id in args.runs]
+    selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
+    profile_sha256 = None
+    if selected_profile == V2_PROFILE_ID:
+        blob = subprocess.run(["git", "show", f"{args.expected_source_sha}:config/vm-automated-v2.json"],
+                              cwd=repo, capture_output=True, check=False)
+        require(blob.returncode == 0 and 0 < len(blob.stdout) <= MAX_JSON_BYTES,
+                "Fixed GUI V2 profile blob is unavailable at the selected source SHA.")
+        profile_sha256 = sha256_bytes(blob.stdout)
+    runs = [validate_run(root, run_id, args.expected_source_sha,
+                         expected_profile_sha256=profile_sha256) for run_id in args.runs]
+    require(all(run["manifest"].get("acceptance_profile_id", V1_PROFILE_ID) == selected_profile
+                for run in runs), "Fixed GUI validation selection differs from run profiles.")
     modes = [run["manifest"]["request"]["mode"] for run in runs]
     require(len(modes) == len(set(modes)), "Validated runs contain duplicate modes.")
     if {"standard", "text-scale"} <= set(modes):
         validate_text_pair(runs)
     if args.require_complete_set:
         require(set(modes) == RUN_MODES, "Complete validation requires exactly the four representative modes.")
-        require(all(run["manifest"]["run_id"] == FIXED_RUN_IDS[run["manifest"]["request"]["mode"]]
+        fixed_ids = FIXED_V2_RUN_IDS if selected_profile == V2_PROFILE_ID else FIXED_RUN_IDS
+        require(all(run["manifest"]["run_id"] == fixed_ids[run["manifest"]["request"]["mode"]]
                     for run in runs), "Complete validation run ids do not match the fixed four-cell leaves.")
+        if selected_profile == V2_PROFILE_ID:
+            require(all(run["manifest"].get("acceptance_profile_sha256") == profile_sha256
+                        for run in runs), "Complete validation mixes V2 profile blobs.")
         require(len({run["manifest"]["source_tree"] for run in runs}) == 1,
                 "Complete validation runs use different source trees.")
         require(len({run["manifest"]["artifacts"]["application"]["sha256"] for run in runs}) == 1,
