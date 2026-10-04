@@ -1640,6 +1640,11 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
                 }
                 if !applied {
                     state.mark_preview_sync_failed();
+                    #[cfg(test)]
+                    ICON_TEST_NATIVE_FAILURE_APPLY_BLOCKED.with(|observed| {
+                        observed
+                            .set(state.presentation(0).apply == crate::ApplyPresentation::Blocked);
+                    });
                     break;
                 }
             }
@@ -1735,6 +1740,7 @@ fn set_native_icon(window: HWND, row: usize, icon: i32) -> bool {
 #[cfg(test)]
 thread_local! {
     static ICON_TEST_FAIL_NEXT_NATIVE_SET: Cell<bool> = const { Cell::new(false) };
+    static ICON_TEST_NATIVE_FAILURE_APPLY_BLOCKED: Cell<bool> = const { Cell::new(false) };
 }
 
 fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
@@ -2837,8 +2843,14 @@ mod native_tests {
                     )),
                     Ok(true)
                 );
+                state
+                    .model
+                    .prefix_complete(&LegacyText::from("test-"))
+                    .map_err(|error| io::Error::other(error.to_string()))?;
                 refresh_all_rows(state);
                 assert_eq!(state.icon_unresolved_rows, 1);
+                assert_eq!(state.presentation(0).apply, crate::ApplyPresentation::Ready);
+                ICON_TEST_NATIVE_FAILURE_APPLY_BLOCKED.with(|observed| observed.set(false));
                 ICON_TEST_FAIL_NEXT_NATIVE_SET.with(|failure| failure.set(true));
             }
             pump_icon_test_until(window, Duration::from_secs(10), || {
@@ -2849,6 +2861,7 @@ mod native_tests {
                 })
             })?;
             assert!(!ICON_TEST_FAIL_NEXT_NATIVE_SET.with(Cell::get));
+            assert!(ICON_TEST_NATIVE_FAILURE_APPLY_BLOCKED.with(Cell::get));
             {
                 let lease = try_app_state(window)
                     .ok_or_else(|| io::Error::other("icon test state disappeared"))?;
@@ -3036,9 +3049,19 @@ mod native_tests {
             assert!(state.icon_cache.len() <= 256);
             assert_eq!(calls.load(Ordering::Acquire), 10_001);
             assert_eq!(bad_calls.load(Ordering::Acquire), 1);
-            assert_eq!(state.rendered_rows[0].icon, 0);
-            assert_eq!(state.rendered_rows[10_000].icon, I_IMAGENONE);
-            assert_eq!(state.rendered_rows[10_001].icon, I_IMAGENONE);
+            let bad_key = icon_cache_key(&LegacyText::from("case.BAD"), false);
+            let mut no_image_rows = 0;
+            for (item, row) in state.model.items().iter().zip(&state.rendered_rows) {
+                let expected =
+                    if icon_cache_key(item.current_name(), item.is_directory()) == bad_key {
+                        no_image_rows += 1;
+                        I_IMAGENONE
+                    } else {
+                        0
+                    };
+                assert_eq!(row.icon, expected, "{}", item.current_name());
+            }
+            assert_eq!(no_image_rows, 2);
             assert_native_refresh_values(state);
             drop(lease);
             assert_eq!(icon_view_state(window, list)?, view_before);
