@@ -487,6 +487,14 @@ class Fixture:
         raw_path = output / "acceptance-result.json"
         raw = json.loads(raw_path.read_text())
         raw["source_sha"] = manifest["source_sha"]
+        if manifest["request"]["mode"] == evidence.FOCUSED_CLEAR_MODE:
+            active = json.loads((run / "inputs" / "bundle.json").read_text())
+            raw.pop("source_sha")
+            raw["schema_version"] = 2
+            raw["lane"] = raw.get("lane", active["lane"])
+            raw["product"] = raw.get("product", active["product"])
+            raw["harness"] = raw.get("harness", active["harness"])
+            raw["observer_role"] = raw.get("observer_role", "ui")
         raw["application"]["sha256"] = manifest["artifacts"]["application"]["sha256"]
         raw["runner_sha256"] = manifest["artifacts"]["runner"]["sha256"]
         raw["acceptance_script_sha256"] = manifest["artifacts"]["observer"]["sha256"]
@@ -2609,6 +2617,271 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         cycle["elapsed_ms"] = cycle["import_elapsed_ms"] - 0.1
         with self.assertRaisesRegex(evidence.EvidenceError, "full-operation timing"):
             evidence.validate_performance_metrics(scenario)
+
+
+class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
+    TOOLING_SOURCE = "c" * 40
+    TOOLING_TREE = "d" * 40
+
+    @cached_property
+    def focused_run(self):
+        run = self.fixture.build(evidence.FOCUSED_CLEAR_RUN_ID, "standard")
+        output = run / "output"
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        names = {"application": "DarkReNamer.exe", "launcher": "run-gui-regression.py",
+                 "builder": "test-windows-vm.py", "controller": "run-windows-vm-tests.ps1",
+                 "runner": "windows-vm-guest.ps1", "observer": "windows-vm-acceptance.ps1",
+                 "lockfile": "Cargo.lock"}
+        for key, name in names.items():
+            row = manifest["artifacts"][key]
+            (run / row["file"]).rename(run / "inputs" / name)
+            row["file"] = "inputs/" + name
+        self.original_harness_bytes = {
+            "scripts/" + names[key]: (run / "inputs" / names[key]).read_bytes()
+            for key in ("launcher", "builder", "controller", "runner", "observer")}
+        original = {"schema_version": 1, "source_sha": SOURCE, "source_state": "clean",
+                    "target": "x86_64-pc-windows-msvc",
+                    "application": {"file": "DarkReNamer.exe",
+                                    "sha256": manifest["artifacts"]["application"]["sha256"]},
+                    "cargo_lock_sha256": manifest["artifacts"]["lockfile"]["sha256"],
+                    "test_binaries": [{"file": "original-test.exe", "sha256": "e" * 64}]}
+        write_json(run / "inputs" / "original-bundle.json", original)
+        self.original_hash = digest((run / "inputs" / "original-bundle.json").read_bytes())
+        self.application_hash = manifest["artifacts"]["application"]["sha256"]
+        self.tooling_record = {"schema_version": 1, "manifest": {}, "modules": [
+            {"role": role, "file": role + ".py"} for role in
+            ("vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
+             "powershell-guest-entry", "evidence-gui")]}
+        write_json(run / "inputs" / "tooling-record.json", self.tooling_record)
+        tooling_hash = digest((run / "inputs" / "tooling-record.json").read_bytes())
+        def active_row(name):
+            data = (run / "inputs" / name).read_bytes()
+            return {"file": name, "sha256": digest(data)}
+        active = {"schema_version": 2, "lane": evidence.FOCUSED_PRESERVED_LANE,
+                  "target": original["target"], "test_binaries": [],
+                  "product": {"source_sha": SOURCE, "source_tree": TREE,
+                      "source_state": "clean", "application": active_row("DarkReNamer.exe"),
+                      "provenance": {"kind": "preserved-source-built-bundle",
+                          "reference_source_sha": evidence.FOCUSED_PRODUCT_REFERENCE_SHA,
+                          "original_bundle_manifest": active_row("original-bundle.json"),
+                          "non_tooling_entries_sha256": evidence.FOCUSED_PRODUCT_ENTRIES_SHA256,
+                          "non_tooling_entries_count": 104,
+                          "cargo_lock_sha256": original["cargo_lock_sha256"]}},
+                  "harness": {"source_sha": self.TOOLING_SOURCE,
+                      "source_tree": self.TOOLING_TREE, "source_state": "clean",
+                      "launcher": active_row("run-gui-regression.py"),
+                      "builder": active_row("test-windows-vm.py"),
+                      "controller": active_row("run-windows-vm-tests.ps1"),
+                      "runner": active_row("windows-vm-guest.ps1"),
+                      "observers": {"ui": active_row("windows-vm-acceptance.ps1")},
+                      "tooling_record": active_row("tooling-record.json")}}
+        write_json(run / "inputs" / "bundle.json", active)
+        manifest["bundle_manifest"] = {"file": "inputs/bundle.json",
+            "bytes": (run / "inputs" / "bundle.json").stat().st_size,
+            "sha256": digest((run / "inputs" / "bundle.json").read_bytes())}
+        manifest["tooling_source_sha"] = self.TOOLING_SOURCE
+        manifest["tooling_source_tree"] = self.TOOLING_TREE
+        manifest["request"] = {"mode": evidence.FOCUSED_CLEAR_MODE, "appearance": "light",
+            "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100,
+            "focused_clear_plan": deepcopy(evidence.FOCUSED_CLEAR_PLAN)}
+        app_hash = manifest["artifacts"]["application"]["sha256"]
+        manifest["prepared_bundle"] = {"origin": "preserved-source-built-product-current-tooling",
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "application_sha256": app_hash,
+            "original_bundle_manifest_sha256": self.original_hash,
+            "tooling_record_sha256": tooling_hash,
+            "product_source_sha": SOURCE, "tooling_source_sha": self.TOOLING_SOURCE}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+            "--output-root", "<external-output-root>", "--connection-profile",
+            "<private-connection-profile>", "--diagnostic", evidence.FOCUSED_CLEAR_MODE,
+            "--preserved-product-bundle-root", "<external-preserved-product-bundle-root>",
+            "--expected-original-bundle-sha256", self.original_hash,
+            "--expected-product-source-sha", SOURCE,
+            "--expected-tooling-source-sha", self.TOOLING_SOURCE,
+            "--expected-prepared-application-sha256", app_hash]
+        write_json(manifest_path, manifest)
+        (output / "screen.png").rename(output / "performance-empty.png")
+        (output / "text-raster-metrics.json").unlink()
+        raw_path = output / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        scenario = PerformanceSampleEvidenceTests.sample_scenario(self)
+        for field in ("columns", "long_representatives", "extension_representatives"):
+            scenario.pop(field)
+        scenario["plan"] = deepcopy(evidence.FOCUSED_CLEAR_PLAN)
+        scenario["timings"] = scenario["timings"][:4]
+        scenario["clear_row_counts"] = [0]
+        phases = ("empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
+                  "single-row", "full-preview", "post")
+        scenario["samples"] = [row for row in scenario["samples"] if row["phase"] in phases]
+        scenario["phase_summary"] = [{"phase": phase,
+            "sample_count": sum(row["phase"] == phase for row in scenario["samples"]),
+            "max_sample_gap_ms": max((row["sample_gap_ms"] for row in scenario["samples"]
+                                      if row["phase"] == phase), default=0),
+            "max_resource_collection_ms": max((row["resource_collection_ms"]
+                for row in scenario["samples"] if row["phase"] == phase), default=0)}
+            for phase in phases]
+        scenario.update(mode=evidence.FOCUSED_CLEAR_MODE, appearance="light",
+            process_id=4242, process_start_utc_ticks=134041000000000000,
+            executable_sha256=app_hash, executable_bytes=849408,
+            first_clear={"stage": "verified-empty", "command_id": 0x800E,
+                "process_id": 4242, "main_handle": 1001, "pre_clear_rows": 10000,
+                "preview_reset": [f"ordinary-{index:05d}.txt"
+                                  for index in (0, 2499, 4999, 7499, 9999)],
+                "post_clear_rows": 0},
+            command_sends=[{"command_id": 0x800E, "scenario_phase": "full-preview-clear",
+                "native_return": 1, "message_result": 0, "error_code": 0,
+                "elapsed_ms": 4.5, "status": "success"}])
+        scenario["environment"] = {"hwnd_dpi": 96, "text_scale_factor_percent": 100,
+            "main_window": {"hwnd": 1001, "process_id": 4242}}
+        raw["assertions"] = {"overall": "passed", "scope": evidence.FOCUSED_CLEAR_SCOPE,
+                             "scenario": scenario}
+        raw["keyboard"]["status"] = "not_run"
+        raw["accessibility"]["status"] = "not_run"
+        raw["process_cleanup"] = True
+        raw["process_lifecycles"] = [{"process_lifecycle": {
+            "pid": 4242, "start_time_utc_ticks": str(scenario["process_start_utc_ticks"]),
+            "executable_sha256": app_hash, "start_observed": True,
+            "exit_observed": True, "exit_method": "normal-close", "exit_code": 0}}]
+        raw["screenshots"] = [{"file": "performance-empty.png",
+            "sha256": digest((output / "performance-empty.png").read_bytes())}]
+        write_json(raw_path, raw)
+        transport_path = output / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["raw_cleanup"] = clean_controller_cleanup()
+        write_json(transport_path, transport)
+        self.refresh_focused(run)
+        return run
+
+    def refresh_focused(self, run):
+        self.fixture.refresh(run)
+        output = run / "output"
+        manifest = json.loads((run / "input-manifest.json").read_text())
+        raw_bytes = (output / "acceptance-result.json").read_bytes()
+        result = {"schema_version": 1, "diagnostic": evidence.FOCUSED_CLEAR_MODE,
+            "run_id": run.name, "input_manifest_sha256": digest((run / "input-manifest.json").read_bytes()),
+            "collection_sha256": digest((run / "collection.json").read_bytes()),
+            "cleanup_sha256": digest((output / "cleanup.json").read_bytes()),
+            "source_sha": manifest["source_sha"],
+            "application_sha256": manifest["artifacts"]["application"]["sha256"],
+            "observer_sha256": manifest["artifacts"]["observer"]["sha256"],
+            "observer_result_sha256": digest(raw_bytes), "status": "review_required",
+            "exit_code": 0}
+        write_json(output / "run-result.json", result)
+
+    def validate(self):
+        run = self.focused_run
+        def tree_command(command, **_kwargs):
+            text_output = _kwargs.get("text", False)
+            if command[1] == "rev-parse":
+                value = (self.TOOLING_TREE if command[2] == "HEAD^{tree}" else TREE) + "\n"
+            elif command[1] == "ls-tree":
+                path = command[-1]
+                data = self.original_harness_bytes[path]
+                value = f"100644 blob {hashlib.sha1(data).hexdigest()}\t{path}\n"
+            elif command[1] == "cat-file":
+                by_oid = {hashlib.sha1(data).hexdigest(): data
+                          for data in self.original_harness_bytes.values()}
+                value = str(len(by_oid[command[-1]])) + "\n"
+            elif command[1] == "show":
+                path = command[-1].split(":", 1)[1]
+                value = self.original_harness_bytes[path]
+            else:
+                raise AssertionError("Unexpected focused Git command: " + repr(command))
+            return value if text_output or isinstance(value, bytes) else value.encode()
+        with mock.patch.object(evidence, "FOCUSED_PRODUCT_SOURCE_SHA", SOURCE), \
+             mock.patch.object(evidence, "FOCUSED_ORIGINAL_BUNDLE_SHA256", self.original_hash), \
+             mock.patch.object(evidence, "FOCUSED_APPLICATION_SHA256", self.application_hash), \
+             mock.patch.object(evidence, "trusted_tooling_inventory", return_value={k: v for k, v in self.tooling_record.items() if k != "schema_version"}), \
+             mock.patch.object(evidence, "verify_focused_product_inventory", return_value=TREE), \
+             mock.patch.object(evidence, "staged_tooling_files", return_value=[
+                 "tooling-record.json", "tooling-bundle.json",
+                 *(row["file"] for row in self.tooling_record["modules"])]), \
+             mock.patch.object(evidence.subprocess, "check_output", side_effect=tree_command):
+            return evidence.validate_focused_clear_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+
+    def test_focused_run_is_observed_without_full_batch_metrics(self):
+        result = self.validate()
+        self.assertEqual(result["bundle_mode"], "preserved-product-current-tooling")
+        self.assertEqual(result["performance_batch"], "not-run")
+        self.assertEqual(result["observation"]["first_clear_status"], "success")
+        with self.assertRaisesRegex(evidence.EvidenceError, "Performance run id is invalid"):
+            evidence.validate_performance_run(self.root, self.focused_run.name, SOURCE)
+
+    def test_self_consistent_altered_harness_is_rejected_by_git_blob(self):
+        run = self.focused_run
+        script_path = run / "inputs" / "run-windows-vm-tests.ps1"
+        script_path.write_bytes(script_path.read_bytes() + b"\nchanged after source commit\n")
+        changed_hash = digest(script_path.read_bytes())
+        active_path = run / "inputs" / "bundle.json"
+        active = json.loads(active_path.read_text())
+        active["harness"]["controller"]["sha256"] = changed_hash
+        write_json(active_path, active)
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["controller"]["sha256"] = changed_hash
+        manifest["artifacts"]["controller"]["bytes"] = script_path.stat().st_size
+        manifest["bundle_manifest"]["sha256"] = digest(active_path.read_bytes())
+        manifest["bundle_manifest"]["bytes"] = active_path.stat().st_size
+        manifest["prepared_bundle"]["bundle_manifest_sha256"] = manifest["bundle_manifest"]["sha256"]
+        write_json(manifest_path, manifest)
+        raw_path = run / "output" / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["harness"] = active["harness"]
+        write_json(raw_path, raw)
+        self.refresh_focused(run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "selected tooling Git blob"):
+            self.validate()
+
+    def test_missing_binding_first_clear_lifecycle_and_cleanup_are_rejected(self):
+        cases = (
+            ("prepared", lambda m, t, r: m["prepared_bundle"].__setitem__("application_sha256", "f" * 64),
+             "preserved product provenance"),
+            ("tooling-source", lambda m, t, r: m.__setitem__("tooling_source_sha", "f" * 40),
+             "preserved product provenance"),
+            ("origin", lambda m, t, r: m["prepared_bundle"].__setitem__(
+                "origin", "external-prepared-source-built-bundle"),
+             "preserved product provenance"),
+            ("lane", lambda m, t, r: r.__setitem__("lane", "candidate-gui-only"),
+             "Focused observer source"),
+            ("original", lambda m, t, r: m["prepared_bundle"].__setitem__(
+                "original_bundle_manifest_sha256", "f" * 64), "preserved product provenance"),
+            ("plan", lambda m, t, r: m["request"]["focused_clear_plan"].__setitem__(
+                "stop_after_first_clear", 1), "fixed plan"),
+            ("preview", lambda m, t, r: r["assertions"]["scenario"]["full_preview_rows"].pop(),
+             "preview/reset observations"),
+            ("first-clear", lambda m, t, r: r["assertions"]["scenario"].pop("first_clear"),
+             "focused first clear"),
+            ("command", lambda m, t, r: r["assertions"]["scenario"]["command_sends"][0].__setitem__(
+                "status", "timeout"), "successful bounded native send"),
+            ("normal-exit", lambda m, t, r: r["process_lifecycles"][0]["process_lifecycle"].__setitem__(
+                "exit_method", "forced-termination"), "exact process lifecycle"),
+            ("jobs", lambda m, t, r: t["raw_cleanup"].__setitem__("process_jobs_closed", False),
+             "closed process jobs"),
+            ("guest", lambda m, t, r: t.__setitem__("guest_cleanup", False),
+             "transport guest cleanup"),
+            ("scope", lambda m, t, r: r["assertions"].__setitem__("scope",
+                "performance-sample-p1-p3-v2"), "scope, or cleanup"),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                self.reset_fixture()
+                self.__dict__.pop("focused_run", None)
+                run = self.focused_run
+                manifest_path = run / "input-manifest.json"
+                transport_path = run / "output" / "transport.json"
+                raw_path = run / "output" / "acceptance-result.json"
+                manifest = json.loads(manifest_path.read_text())
+                transport = json.loads(transport_path.read_text())
+                raw = json.loads(raw_path.read_text())
+                mutate(manifest, transport, raw)
+                write_json(manifest_path, manifest)
+                write_json(transport_path, transport)
+                write_json(raw_path, raw)
+                self.refresh_focused(run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
 
 
 class IconSettlementEvidenceTests(SyntheticFixtureTestCase):

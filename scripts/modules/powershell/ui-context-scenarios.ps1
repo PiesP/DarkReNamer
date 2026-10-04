@@ -1599,6 +1599,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
+        [switch] $StopAfterFirstClear,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
@@ -1651,10 +1652,16 @@ function Invoke-ObserverPerformanceSampleScenario {
     $commandSends = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
-    $ObservationSink['plan'] = [ordered]@{
-        ordinary_rows = @(100,1000,10000); long_path_rows = 1000; extension_classes = 300
-        add_remove_reset_cycles = 3; idle_seconds = 30; sample_interval_ms = 200
-        long_path_order = $LongPathOrder
+    $ObservationSink['plan'] = if ($StopAfterFirstClear) {
+        [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
+            sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
+            stop_after_first_clear=$true; full_performance_sample=$false }
+    } else {
+        [ordered]@{
+            ordinary_rows = @(100,1000,10000); long_path_rows = 1000; extension_classes = 300
+            add_remove_reset_cycles = 3; idle_seconds = 30; sample_interval_ms = 200
+            long_path_order = $LongPathOrder
+        }
     }
     $ObservationSink['timing_definitions'] = [ordered]@{
         import = 'native Open invocation to observed expected ListView row count; includes observer polling'
@@ -1780,10 +1787,37 @@ function Invoke-ObserverPerformanceSampleScenario {
         $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$fullElapsedMs;
             command_elapsed_ms=$prefix.elapsed_ms; rows=10000;
             observed_rows=[int]$grid.pattern.Current.RowCount })
-        Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
-            -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
-        if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance list clear did not remove all rows.' }
+        if ($StopAfterFirstClear) {
+            $ObservationSink['first_clear'] = [ordered]@{
+                stage = 'before-send'; command_id = 32782
+                process_id = [int]$application.process.Id
+                main_handle = [long]$application.main_handle
+                pre_clear_rows = [int]$grid.pattern.Current.RowCount
+                preview_reset = @($ObservationSink['full_preview_rows'] | ForEach-Object { $_.reset })
+                post_clear_rows = $null
+            }
+            if ($ObservationSink['first_clear'].pre_clear_rows -ne 10000) {
+                throw 'Focused clear did not begin with 10000 rows.'
+            }
+        }
+        try {
+            Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
+                -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
+        }
+        catch {
+            if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'send-failed' }
+            throw
+        }
+        if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'sent' }
+        $clearedRows = [int]$grid.pattern.Current.RowCount
+        if ($StopAfterFirstClear) {
+            $ObservationSink['first_clear'].post_clear_rows = $clearedRows
+            $ObservationSink['first_clear'].stage = 'after-send'
+        }
+        if ($clearedRows -ne 0) { throw 'Performance list clear did not remove all rows.' }
+        if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'verified-empty' }
         $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
+        if (-not $StopAfterFirstClear) {
         $longModes = if ($LongPathOrder -eq 'visible-hidden') { @('long-visible','long-hidden') }
             else { @('long-hidden','long-visible') }
         $columnsVisible = $false
@@ -1879,6 +1913,7 @@ function Invoke-ObserverPerformanceSampleScenario {
                 import_command_ready_after_rows_ms=$cycleTiming.command_ready_after_rows_ms;
                 rows=1000; observed_rows=$cycleObservedRows })
         }
+        }
         $sampler.SetPhase('post')
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
@@ -1892,7 +1927,8 @@ function Invoke-ObserverPerformanceSampleScenario {
                 resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
         })
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
-            'single-row','full-preview') + @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3','post')
+            'single-row','full-preview') + $(if ($StopAfterFirstClear) { @() }
+                else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
         $ObservationSink['phase_summary'] = @(Get-ObserverPerformancePhaseSummary `
             -Samples $ObservationSink['samples'] -PhaseOrder $phaseOrder)
         $ObservationSink['wakeups'] = [ordered]@{ status='not_run'; reason='no-supported-process-wakeup-counter' }
@@ -1919,7 +1955,7 @@ function Invoke-ObserverPerformanceSampleScenario {
             -WaitSeconds $WaitSeconds -CloseInput ordinary
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
-        $ObservationSink['mode'] = 'performance-sample'
+        $ObservationSink['mode'] = if ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
         return $ObservationSink
     }
     finally {

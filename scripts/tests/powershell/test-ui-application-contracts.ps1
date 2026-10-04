@@ -436,7 +436,7 @@ public static class DarkReNamerVmAcceptanceNative {
 # Import the real entry module: only its verified definition libraries are inert.
 $entryProbeName = 'DrUiApplicationEntryProbe'
 if (Test-Path "variable:global:$entryProbeName") { throw 'Entry fixture global state is occupied.' }
-$global:DrUiApplicationEntryProbe = @{ events = [Collections.Generic.List[string]]::new(); reject = $false }
+$global:DrUiApplicationEntryProbe = @{ events = [Collections.Generic.List[string]]::new(); reject = $false; lane = 'source-built' }
 $entry = $null
 try {
     $libraries = @{}
@@ -446,7 +446,7 @@ try {
     $libraries['powershell-ui-bootstrap'] = {
         function Resolve-AcceptanceBootstrap { param($Root, $ScriptPath, $ScriptSha256)
             if ($Root -cne 'requested-root' -or $ScriptPath -cne 'entry.ps1' -or $ScriptSha256 -cne ('e' * 64)) { throw 'Entry bootstrap binding changed.' }
-            $global:DrUiApplicationEntryProbe.events.Add('bootstrap'); @{ root = 'verified-root'; runner = 'verified-runner' }
+            $global:DrUiApplicationEntryProbe.events.Add('bootstrap'); @{ root = 'verified-root'; runner = 'verified-runner'; lane = $global:DrUiApplicationEntryProbe.lane }
         }
         function Resolve-VerifiedBundle { param($Root, $InvokedScriptPath)
             if ($Root -cne 'verified-root' -or $InvokedScriptPath -cne 'verified-runner') { throw 'Entry verified the wrong bundle.' }
@@ -469,6 +469,18 @@ try {
     $global:DrUiApplicationEntryProbe.events.Clear()
     Invoke-DrWindowsVmAcceptance @arguments
     if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap,current-dpi') { throw 'Default current-DPI dispatch changed.' }
+    $global:DrUiApplicationEntryProbe.lane = 'focused-preserved-source-built-product-v1'
+    $global:DrUiApplicationEntryProbe.events.Clear()
+    Assert-Fails { Invoke-DrWindowsVmAcceptance @arguments } 'Preserved product observer requires'
+    if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap') { throw 'Focused lane reached current-DPI dispatch.' }
+    foreach ($mode in @('standard', 'focused-10k-clear')) {
+        $global:DrUiApplicationEntryProbe.events.Clear()
+        Assert-Fails { Invoke-DrWindowsVmAcceptance @arguments -RegressionMode $mode } 'Preserved product observer requires'
+        if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap') { throw 'Focused lane escaped its diagnostic dispatch boundary.' }
+    }
+    $global:DrUiApplicationEntryProbe.events.Clear(); $global:DrUiApplicationEntryProbe.reject = $false
+    Invoke-DrWindowsVmAcceptance @arguments -RegressionMode focused-10k-clear -InputManifestPath 'input.json'
+    if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap,verify,regression') { throw 'Focused diagnostic skipped shared authentication.' }
 }
 finally {
     if ($null -ne $entry) { Remove-Module $entry }

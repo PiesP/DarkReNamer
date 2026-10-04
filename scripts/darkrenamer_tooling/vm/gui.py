@@ -18,7 +18,7 @@ from darkrenamer_tooling.vm import launcher
 from darkrenamer_tooling.vm.connection import load_connection_profile, guest_preflight
 from darkrenamer_tooling.formats.png import PngPolicy, decode_png_bytes
 from darkrenamer_tooling.contracts.tooling import (
-    RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
+    RECORD_NAME, stage_verified_tooling, staged_tooling_files, trusted_tooling_inventory,
 )
 
 
@@ -71,6 +71,21 @@ RUNS = (
 V2_RUNS = tuple({**run, "run_id": f"{run['run_id']}-owned-v2"} for run in RUNS)
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+FOCUSED_CLEAR_MODE = "focused-10k-clear"
+FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
+FOCUSED_PRESERVED_LANE = "focused-preserved-source-built-product-v1"
+FOCUSED_PRODUCT_SOURCE_SHA = "8248c73859e3a3ff0e524fd9448acfe965fa3f68"
+FOCUSED_PRODUCT_REFERENCE_SHA = "b152761010b16ef74e2a3765241a253778b88e0b"
+FOCUSED_ORIGINAL_BUNDLE_SHA256 = "23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e"
+FOCUSED_APPLICATION_SHA256 = "06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f"
+FOCUSED_PRODUCT_ENTRIES_SHA256 = "7c4fc53698413bbab601629a5a56c1129ecd96aaac4a98af09530f87b4a25735"
+FOCUSED_PRODUCT_ENTRIES_COUNT = 104
+FOCUSED_CLEAR_PLAN = {
+    "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
+    "sample_interval_ms": 200, "maximum_seconds": 600,
+    "clear_command_id": 0x800E, "stop_after_first_clear": True,
+    "full_performance_sample": False,
+}
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -97,6 +112,12 @@ def performance_run(order: str = "hidden-visible") -> dict:
     return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
             "text_scale_percent": 100, "long_path_order": order}
+
+
+def focused_clear_run() -> dict:
+    return {"run_id": FOCUSED_CLEAR_RUN_ID, "mode": FOCUSED_CLEAR_MODE,
+            "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
+            "text_scale_percent": 100}
 
 
 def icon_settlement_run(endpoint_method: str = ICON_SETTLEMENT_METHOD) -> dict:
@@ -587,6 +608,131 @@ def source_identity(repo: Path) -> tuple[str, str]:
     return source_sha, source_tree
 
 
+def audit_focused_product_blobs(repo: Path) -> str:
+    """Compare every non-tooling tracked entry of the two frozen product sources."""
+    def entries(source: str) -> list[dict]:
+        raw = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", source], cwd=repo)
+        rows = []
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            identity, name = entry.split(b"\t", 1)
+            path = name.decode("utf-8")
+            if path.startswith("scripts/") or path in {
+                    "DEVELOPMENT.md", "config/tooling-bundle.json", "config/tooling-tests.json"}:
+                continue
+            mode, kind, oid = identity.decode("ascii").split(" ")
+            require(kind == "blob", "Frozen product audit contains a non-blob entry.")
+            rows.append({"path": path, "git_object": oid, "mode": mode})
+        return rows
+
+    original = entries(FOCUSED_PRODUCT_REFERENCE_SHA)
+    prepared = entries(FOCUSED_PRODUCT_SOURCE_SHA)
+    encoded = json.dumps(prepared, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    require(original == prepared and len(prepared) == FOCUSED_PRODUCT_ENTRIES_COUNT and
+            hashlib.sha256(encoded).hexdigest() == FOCUSED_PRODUCT_ENTRIES_SHA256,
+            "Frozen original product sources differ across the complete non-tooling Git inventory.")
+    return subprocess.check_output(
+        ["git", "rev-parse", FOCUSED_PRODUCT_SOURCE_SHA + "^{tree}"], cwd=repo, text=True
+    ).strip()
+
+
+def validate_focused_original_bundle(repo: Path, bundle: Path) -> dict:
+    require(bundle.is_absolute() and bundle.is_dir() and not bundle.is_symlink() and
+            bundle.resolve(strict=True) == bundle and not bundle.is_relative_to(repo),
+            "Focused original bundle root must be an ordinary external absolute directory.")
+    path = ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024, "Focused original bundle manifest")
+    require(digest(path) == FOCUSED_ORIGINAL_BUNDLE_SHA256,
+            "Focused original bundle manifest differs from frozen A bytes.")
+    manifest = read_json(path)
+    require(manifest.get("schema_version") == 1 and manifest.get("source_sha") == FOCUSED_PRODUCT_SOURCE_SHA and
+            manifest.get("source_state") == "clean" and manifest.get("target") == launcher.TARGET and
+            manifest.get("application") == {"file": "DarkReNamer.exe", "sha256": FOCUSED_APPLICATION_SHA256} and
+            manifest.get("runner", {}).get("file") == "windows-vm-guest.ps1" and
+            isinstance(manifest.get("test_binaries"), list) and manifest["test_binaries"] and
+            SHA256.fullmatch(manifest.get("cargo_lock_sha256", "")) is not None,
+            "Focused original bundle is not the frozen source-built product.")
+    for row in [manifest["application"], manifest["runner"], *manifest["test_binaries"]]:
+        require(isinstance(row, dict) and isinstance(row.get("file"), str) and
+                SAFE_LEAF.fullmatch(row["file"]) is not None and
+                isinstance(row.get("sha256"), str) and SHA256.fullmatch(row["sha256"]) is not None,
+                "Focused original bundle artifact record is invalid.")
+        member = ordinary_file(bundle / row["file"], 256 * 1024 * 1024,
+                               "Focused original bundle artifact")
+        require(digest(member) == row["sha256"],
+                "Focused original bundle artifact differs from its frozen manifest.")
+    require(digest(repo / "Cargo.lock") == manifest["cargo_lock_sha256"],
+            "Focused original product lockfile differs from the retained source-built bundle.")
+    return manifest
+
+
+def stage_focused_preserved_bundle(repo: Path, original: Path, active: Path, tooling) -> dict:
+    """Create a truthful split-origin task bundle; leave the original untouched."""
+    require(tooling is not None, "Focused preserved execution requires verified current tooling.")
+    source_sha, source_tree = source_identity(repo)
+    product_tree = audit_focused_product_blobs(repo)
+    original_manifest = validate_focused_original_bundle(repo, original)
+    active.mkdir()
+    sources = {
+        "DarkReNamer.exe": original / "DarkReNamer.exe",
+        "original-bundle.json": original / "bundle.json",
+        "run-gui-regression.py": repo / "scripts" / "run-gui-regression.py",
+        "test-windows-vm.py": repo / "scripts" / "test-windows-vm.py",
+        "run-windows-vm-tests.ps1": repo / "scripts" / "run-windows-vm-tests.ps1",
+        "windows-vm-guest.ps1": repo / "scripts" / "windows-vm-guest.ps1",
+        "windows-vm-acceptance.ps1": repo / "scripts" / "windows-vm-acceptance.ps1",
+        "Cargo.lock": repo / "Cargo.lock",
+    }
+    for name, source in sources.items():
+        source = ordinary_file(source, 256 * 1024 * 1024, "Focused staged input " + name)
+        with source.open("rb") as reader, (active / name).open("xb") as writer:
+            shutil.copyfileobj(reader, writer, 1024 * 1024)
+        require(digest(active / name) == digest(source), "Focused staged input changed during copy.")
+    record = stage_verified_tooling(tooling, active)
+    roles = tuple(row["role"] for row in record["modules"])
+    require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
+             "powershell-guest-entry"}.issubset(roles) and
+            record == {"schema_version": 1, **trusted_tooling_inventory(repo, source_sha, roles)} and
+            set(staged_tooling_files(active)) == {
+                "tooling-record.json", "tooling-bundle.json",
+                *(row["file"] for row in record["modules"])},
+            "Focused current tooling closure differs from the clean Git source.")
+    require(source_identity(repo) == (source_sha, source_tree) and
+            validate_focused_original_bundle(repo, original) == original_manifest,
+            "Focused product or tooling source changed during staging.")
+    def bundle_artifact(name: str) -> dict:
+        return {"file": name, "sha256": digest(active / name)}
+
+    active_manifest = {
+        "schema_version": 2, "lane": FOCUSED_PRESERVED_LANE,
+        "target": launcher.TARGET, "test_binaries": [],
+        "product": {
+            "source_sha": FOCUSED_PRODUCT_SOURCE_SHA, "source_tree": product_tree,
+            "source_state": "clean", "application": bundle_artifact("DarkReNamer.exe"),
+            "provenance": {
+                "kind": "preserved-source-built-bundle", "reference_source_sha": FOCUSED_PRODUCT_REFERENCE_SHA,
+                "original_bundle_manifest": bundle_artifact("original-bundle.json"),
+                "non_tooling_entries_sha256": FOCUSED_PRODUCT_ENTRIES_SHA256,
+                "non_tooling_entries_count": FOCUSED_PRODUCT_ENTRIES_COUNT,
+                "cargo_lock_sha256": original_manifest["cargo_lock_sha256"],
+            },
+        },
+        "harness": {
+            "source_sha": source_sha, "source_tree": source_tree, "source_state": "clean",
+            "launcher": bundle_artifact("run-gui-regression.py"),
+            "builder": bundle_artifact("test-windows-vm.py"),
+            "controller": bundle_artifact("run-windows-vm-tests.ps1"),
+            "runner": bundle_artifact("windows-vm-guest.ps1"),
+            "observers": {"ui": bundle_artifact("windows-vm-acceptance.ps1")},
+            "tooling_record": bundle_artifact(RECORD_NAME),
+        },
+    }
+    require(active_manifest["product"]["application"]["sha256"] == FOCUSED_APPLICATION_SHA256,
+            "Focused preserved application differs from frozen A bytes.")
+    write_json(active / "bundle.json", active_manifest, exclusive=True)
+    return active_manifest
+
+
 def validated_bundle_sources(repo: Path, bundle: Path,
                              acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict[str, Path]]:
     manifest = read_json(ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024,
@@ -634,7 +780,79 @@ def validated_bundle_sources(repo: Path, bundle: Path,
 
 
 def run_input_artifacts(repo: Path, bundle: Path, run_root: Path,
-                        acceptance_profile_id: str = V1_PROFILE_ID) -> tuple[dict, dict]:
+                        acceptance_profile_id: str = V1_PROFILE_ID,
+                        focused_preserved: bool = False) -> tuple[dict, dict]:
+    if focused_preserved:
+        def bundle_artifact(name: str) -> dict:
+            return {"file": name, "sha256": digest(bundle / name)}
+
+        require(acceptance_profile_id == V1_PROFILE_ID,
+                "Focused preserved product is bound to strict V1 cleanup.")
+        manifest = read_json(ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024,
+                                           "Focused active bundle manifest"))
+        source_sha, source_tree = source_identity(repo)
+        product = manifest.get("product", {})
+        harness = manifest.get("harness", {})
+        provenance = product.get("provenance", {})
+        require(manifest.get("schema_version") == 2 and
+                manifest.get("lane") == FOCUSED_PRESERVED_LANE and
+                manifest.get("target") == launcher.TARGET and manifest.get("test_binaries") == [] and
+                product.get("source_sha") == FOCUSED_PRODUCT_SOURCE_SHA and
+                product.get("source_tree") == audit_focused_product_blobs(repo) and
+                product.get("source_state") == "clean" and
+                provenance.get("kind") == "preserved-source-built-bundle" and
+                provenance.get("reference_source_sha") == FOCUSED_PRODUCT_REFERENCE_SHA and
+                provenance.get("non_tooling_entries_sha256") == FOCUSED_PRODUCT_ENTRIES_SHA256 and
+                provenance.get("non_tooling_entries_count") == FOCUSED_PRODUCT_ENTRIES_COUNT and
+                harness.get("source_sha") == source_sha and
+                harness.get("source_tree") == source_tree and
+                harness.get("source_state") == "clean",
+                "Focused active bundle product or current tooling identity differs.")
+        original = read_json(ordinary_file(bundle / "original-bundle.json", 2 * 1024 * 1024,
+                                           "Focused retained original manifest"))
+        require(digest(bundle / "original-bundle.json") == FOCUSED_ORIGINAL_BUNDLE_SHA256 and
+                original.get("source_sha") == FOCUSED_PRODUCT_SOURCE_SHA and
+                original.get("source_state") == "clean" and
+                original.get("target") == launcher.TARGET and
+                original.get("application") == {"file": "DarkReNamer.exe", "sha256": FOCUSED_APPLICATION_SHA256} and
+                provenance.get("original_bundle_manifest") == bundle_artifact("original-bundle.json") and
+                provenance.get("cargo_lock_sha256") == original.get("cargo_lock_sha256") == digest(repo / "Cargo.lock") and
+                product.get("application") == bundle_artifact("DarkReNamer.exe") and
+                product["application"]["sha256"] == FOCUSED_APPLICATION_SHA256,
+                "Focused retained original bundle or executable binding differs.")
+        artifacts = {"launcher": "run-gui-regression.py", "builder": "test-windows-vm.py",
+                     "controller": "run-windows-vm-tests.ps1", "runner": "windows-vm-guest.ps1",
+                     "observer": "windows-vm-acceptance.ps1"}
+        for key, name in artifacts.items():
+            recorded = harness["observers"]["ui"] if key == "observer" else harness[key]
+            require(recorded == bundle_artifact(name) and
+                    digest(bundle / name) == digest(repo / "scripts" / name),
+                    "Focused current harness file differs from the clean checkout: " + name)
+        record = read_json(ordinary_file(bundle / RECORD_NAME, 2 * 1024 * 1024,
+                                         "Focused current tooling record"))
+        roles = tuple(row["role"] for row in record["modules"])
+        require(harness.get("tooling_record") == bundle_artifact(RECORD_NAME) and
+                record == {"schema_version": 1, **trusted_tooling_inventory(repo, source_sha, roles)},
+                "Focused staged tooling record differs from the current Git closure.")
+        names = [*artifacts.values(), "DarkReNamer.exe", "original-bundle.json", "Cargo.lock",
+                 *staged_tooling_files(bundle)]
+        require(len(names) == len(set(names)), "Focused task bundle has colliding input names.")
+        rows = materialize_inputs(run_root, {name: bundle / name for name in names} |
+                                  {"bundle.json": bundle / "bundle.json"})
+        return manifest, {
+            "bundle_manifest": rows["bundle.json"],
+            "original_bundle_manifest": rows["original-bundle.json"],
+            "tooling_record": rows[RECORD_NAME],
+            "artifacts": {
+                "application": rows["DarkReNamer.exe"],
+                **{key: rows[name] for key, name in artifacts.items()},
+                "lockfile": rows["Cargo.lock"],
+            },
+            "source_sha": FOCUSED_PRODUCT_SOURCE_SHA,
+            "source_tree": product["source_tree"],
+            "tooling_source_sha": source_sha,
+            "tooling_source_tree": source_tree,
+        }
     manifest, sources = validated_bundle_sources(repo, bundle, acceptance_profile_id)
     source_sha, source_tree = source_identity(repo)
     test_binaries = manifest["test_binaries"]
@@ -701,12 +919,16 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                    reference: dict | None = None,
                    prepared_application_sha256: str | None = None) -> dict:
     require(prepared_application_sha256 is None or
-            (run["mode"] in {"performance-sample", ICON_SETTLEMENT_MODE} and
+            (run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE} and
              SHA256.fullmatch(prepared_application_sha256) is not None),
             "Prepared bundle provenance is restricted to pinned performance runs.")
     require(run["mode"] != ICON_SETTLEMENT_MODE or prepared_application_sha256 is not None,
             "Icon settlement requires a pinned prepared executable.")
-    _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
+    require(run["mode"] != FOCUSED_CLEAR_MODE or prepared_application_sha256 is not None,
+            "Focused clear requires a pinned prepared executable.")
+    _, inputs = run_input_artifacts(repo, bundle, run_root,
+                                    run.get("acceptance_profile_id", V1_PROFILE_ID),
+                                    focused_preserved=run["mode"] == FOCUSED_CLEAR_MODE)
     if run["mode"] == ICON_SETTLEMENT_MODE and run["endpoint_method"] == ICON_BASELINE_METHOD:
         require(run["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA and
                 run["expected_run_source_sha"] == inputs["source_sha"],
@@ -719,14 +941,24 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
         "run_id": run["run_id"],
         "source_sha": inputs["source_sha"],
         "source_tree": inputs["source_tree"],
+        **({"tooling_source_sha": inputs["tooling_source_sha"],
+            "tooling_source_tree": inputs["tooling_source_tree"]}
+           if run["mode"] == FOCUSED_CLEAR_MODE else {}),
         "private_profile_sha256": profile_sha256,
         "host_preflight": host_preflight,
         "guest_preflight": guest_preflight,
         "bundle_manifest": inputs["bundle_manifest"],
         "artifacts": inputs["artifacts"],
-        **({"prepared_bundle": {"origin": "external-prepared-source-built-bundle",
+        **({"prepared_bundle": {"origin": ("preserved-source-built-product-current-tooling"
+                                           if run["mode"] == FOCUSED_CLEAR_MODE else
+                                           "external-prepared-source-built-bundle"),
                 "bundle_manifest_sha256": inputs["bundle_manifest"]["sha256"],
-                "application_sha256": prepared_application_sha256}}
+                "application_sha256": prepared_application_sha256,
+                **({"original_bundle_manifest_sha256": inputs["original_bundle_manifest"]["sha256"],
+                    "tooling_record_sha256": inputs["tooling_record"]["sha256"],
+                    "product_source_sha": inputs["source_sha"],
+                    "tooling_source_sha": inputs["tooling_source_sha"]}
+                   if run["mode"] == FOCUSED_CLEAR_MODE else {})}}
            if prepared_application_sha256 is not None else {}),
         "request": {
             "mode": run["mode"],
@@ -736,6 +968,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
             **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
                if run["mode"] == "performance-sample" else {}),
+            **({"focused_clear_plan": FOCUSED_CLEAR_PLAN}
+               if run["mode"] == FOCUSED_CLEAR_MODE else {}),
             **({"settlement_plan": ICON_SETTLEMENT_PLAN,
                 "endpoint_method": run["endpoint_method"],
                 **({"baseline_product_source_sha": run["baseline_product_source_sha"]}
@@ -747,12 +981,18 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
             *(["--diagnostic", run["mode"]] if run["mode"] in
-              {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE} else []),
+              {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE} else []),
             *(["--performance-column-order", run["long_path_order"]]
               if run["mode"] == "performance-sample" else []),
+            *(["--preserved-product-bundle-root", "<external-preserved-product-bundle-root>",
+               "--expected-original-bundle-sha256", FOCUSED_ORIGINAL_BUNDLE_SHA256,
+               "--expected-product-source-sha", FOCUSED_PRODUCT_SOURCE_SHA,
+               "--expected-tooling-source-sha", inputs["tooling_source_sha"],
+               "--expected-prepared-application-sha256", prepared_application_sha256]
+              if run["mode"] == FOCUSED_CLEAR_MODE else []),
             *(["--prepared-bundle-root", "<external-prepared-bundle-root>",
                "--expected-prepared-application-sha256", prepared_application_sha256]
-              if prepared_application_sha256 is not None else []),
+              if prepared_application_sha256 is not None and run["mode"] != FOCUSED_CLEAR_MODE else []),
             *(["--desktop-width", str(run["width"]),
                "--desktop-height", str(run["height"]), "--desktop-dpi", str(run["dpi"])]
               if run["mode"] == "appearance-pair" and run["run_id"] == APPEARANCE_PAIR_ID else []),
@@ -847,8 +1087,15 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
             command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
         if run["mode"] == "appearance-pair" and run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
-    elif run["mode"] == "performance-sample":
+    elif run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE}:
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
+    if run["mode"] == FOCUSED_CLEAR_MODE:
+        manifest = read_json(run_root / "input-manifest.json")
+        bundle_manifest = ordinary_file(bundle / "bundle.json", 2 * 1024 * 1024,
+                                        "Focused controller bundle manifest")
+        require(manifest["bundle_manifest"]["sha256"] == digest(bundle_manifest),
+                "Focused controller bundle differs from its immutable input manifest.")
+        command += ["-ExpectedBundleManifestSha256", manifest["bundle_manifest"]["sha256"]]
     return command
 
 
@@ -873,7 +1120,7 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {ICON_SETTLEMENT_RUN_ID}:
+    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {FOCUSED_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
         require(total_bytes <= 32 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == 1,
                 "Performance diagnostic must stay within 32 MiB and one original PNG.")
@@ -968,7 +1215,7 @@ def finalize_run(run_root: Path) -> None:
     mode = manifest["request"]["mode"]
     normalized = (normalize_pair_result(run_root, input_sha256) if mode == "appearance-pair"
                   else normalize_performance_result(run_root, input_sha256) if mode in
-                  {"performance-sample", ICON_SETTLEMENT_MODE}
+                  {"performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE}
                   else normalize_run_result(run_root, input_sha256))
     write_json(result_path, normalized, exclusive=True)
 
@@ -1104,6 +1351,8 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
     validator = repo / "scripts" / "validate-gui-regression-evidence.py"
     ordinary_file(validator, 2 * 1024 * 1024, "GUI regression evidence validator")
     source_sha, _ = source_identity(repo)
+    if diagnostic == FOCUSED_CLEAR_MODE:
+        source_sha = FOCUSED_PRODUCT_SOURCE_SHA
     command = [
         sys.executable, "-I", str(validator), "--result-root", str(result_root),
         "--expected-source-sha", source_sha,
@@ -1111,10 +1360,11 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
     runs = selected_runs if selected_runs is not None else (
         (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else
         (performance_run(),) if diagnostic == "performance-sample" else
+        (focused_clear_run(),) if diagnostic == FOCUSED_CLEAR_MODE else
         (icon_settlement_run(),) if diagnostic == ICON_SETTLEMENT_MODE else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
-    if diagnostic in {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE}:
+    if diagnostic in {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
         command += ["--diagnostic", diagnostic]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
@@ -1131,12 +1381,16 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
-    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--icon-endpoint-method", choices=[ICON_BASELINE_METHOD])
     parser.add_argument("--baseline-product-source-sha")
     parser.add_argument("--expected-run-source-sha")
     parser.add_argument("--performance-column-order", choices=PERFORMANCE_ORDERS)
     parser.add_argument("--prepared-bundle-root", type=Path)
+    parser.add_argument("--preserved-product-bundle-root", type=Path)
+    parser.add_argument("--expected-original-bundle-sha256")
+    parser.add_argument("--expected-product-source-sha")
+    parser.add_argument("--expected-tooling-source-sha")
     parser.add_argument("--expected-prepared-application-sha256")
     parser.add_argument("--configuration-set", choices=["focused"])
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
@@ -1166,17 +1420,31 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Synchronous baseline requires the original product reference and exact frozen run source.")
     require(args.performance_column_order is None or args.diagnostic == "performance-sample",
             "Long-path order selection requires --diagnostic performance-sample.")
-    require((args.prepared_bundle_root is None) ==
-            (args.expected_prepared_application_sha256 is None) and
-            (args.prepared_bundle_root is None or args.diagnostic in
-             {"performance-sample", ICON_SETTLEMENT_MODE}),
+    require(args.prepared_bundle_root is None or
+            (args.expected_prepared_application_sha256 is not None and
+             args.diagnostic in {"performance-sample", ICON_SETTLEMENT_MODE}),
             "Prepared bundle and pinned application hash require the performance diagnostic together.")
+    focused = args.diagnostic == FOCUSED_CLEAR_MODE
+    require((focused and args.preserved_product_bundle_root is not None and
+             args.prepared_bundle_root is None and
+             args.expected_original_bundle_sha256 == FOCUSED_ORIGINAL_BUNDLE_SHA256 and
+             args.expected_product_source_sha == FOCUSED_PRODUCT_SOURCE_SHA and
+             args.expected_prepared_application_sha256 == FOCUSED_APPLICATION_SHA256 and
+             args.expected_tooling_source_sha == source_identity(repo)[0]) or
+            (not focused and args.preserved_product_bundle_root is None and
+             args.expected_original_bundle_sha256 is None and
+             args.expected_product_source_sha is None and
+             args.expected_tooling_source_sha is None and
+             (args.expected_prepared_application_sha256 is None) ==
+             (args.prepared_bundle_root is None)),
+            "Focused preserved product requires exact separate product, bundle, and current tooling pins.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.prepared_bundle_root is not None,
             "Icon settlement requires a prepared bundle and pinned application hash.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
     selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
+                     (focused_clear_run(),) if args.diagnostic == FOCUSED_CLEAR_MODE else
                      (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
                      if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
@@ -1204,6 +1472,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
         selected_runs = tuple({**run, "expected_run_source_sha": args.expected_run_source_sha}
                               for run in selected_runs)
     root = checked_new_root(args.output_root, repo)
+    if focused:
+        audit_focused_product_blobs(repo)
+        validate_focused_original_bundle(repo, args.preserved_product_bundle_root)
     prepared_manifest = None
     if args.prepared_bundle_root is not None:
         prepared_manifest = validate_prepared_bundle(
@@ -1221,7 +1492,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     bundle = args.prepared_bundle_root if prepared_manifest is not None else root / "bundle"
     runs_root = root / "runs"
     runs_root.mkdir()
-    if prepared_manifest is None:
+    if focused:
+        stage_focused_preserved_bundle(repo, args.preserved_product_bundle_root, bundle, tooling)
+    elif prepared_manifest is None:
         launcher.build_bundle(repo, bundle, tooling)
     reference = None
     for run in selected_runs:
@@ -1231,7 +1504,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             reference = reference_for(runs_root / selected_runs[0]["run_id"])
         manifest_document = input_manifest(
             repo, bundle, run_root, run, profile_sha256, host, guest, reference,
-            args.expected_prepared_application_sha256 if prepared_manifest is not None else None)
+            args.expected_prepared_application_sha256 if prepared_manifest is not None or focused else None)
         if prepared_manifest is not None:
             validate_prepared_bundle(repo, bundle, args.expected_prepared_application_sha256)
             require(manifest_document["artifacts"]["application"]["sha256"] ==
@@ -1243,10 +1516,13 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     validate_all(repo, runs_root, root, args.diagnostic, selected_runs, args.configuration_set)
     print(json.dumps({
         "status": "diagnostic-validated" if args.diagnostic else "validated",
-        "source_sha": (prepared_manifest or read_json(bundle / "bundle.json"))["source_sha"],
+        "source_sha": (FOCUSED_PRODUCT_SOURCE_SHA if focused else
+                       (prepared_manifest or read_json(bundle / "bundle.json"))["source_sha"]),
+        **({"tooling_source_sha": source_identity(repo)[0]} if focused else {}),
         "runs": [run["run_id"] for run in selected_runs],
         "diagnostic": args.diagnostic,
-        "bundle_mode": "prepared" if prepared_manifest is not None else "built",
+        "bundle_mode": ("preserved-product-current-tooling" if focused else
+                        "prepared" if prepared_manifest is not None else "built"),
         "configuration_set": args.configuration_set,
         "output_root": str(root),
     }))
