@@ -282,10 +282,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, CHILDID_SELF, FindWindowExW, GW_CHILD,
-    GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetMenu, GetScrollInfo,
-    GetWindow, GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE, OBJID_CLIENT,
-    OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED, TPM_LEFTALIGN,
-    TPM_LEFTBUTTON, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenuEx, UnregisterClassW, WM_CANCELMODE,
+    GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetMenu, GetWindow,
+    GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE, OBJID_CLIENT, OBJID_MENU,
+    SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED, TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD,
+    TPM_TOPALIGN, TrackPopupMenuEx, UnregisterClassW, WM_CANCELMODE,
 };
 use worker::*;
 
