@@ -463,8 +463,10 @@ on the actual worker thread, then returns that list's borrowed identity and
 valid indices through the production request, completion, and ListView paths.
 The owner lives outside the popup action, so worker guardians join and all
 attached production test windows are destroyed before the list is destroyed,
-including error and unwind paths. Deliberate bootstrap failure, worker quit,
-and spawn failure remain tested separately. These controlled cases do not
+including error and unwind paths. If the test popup cannot confirm native window
+destruction, it aborts before releasing a list still attached to a live window.
+Deliberate bootstrap failure, worker quit, and spawn failure remain tested
+separately. These controlled cases do not
 establish that a real Shell bootstrap succeeds in every environment; the
 production Shell lookup and its separate source-bound observations retain that
 coverage.

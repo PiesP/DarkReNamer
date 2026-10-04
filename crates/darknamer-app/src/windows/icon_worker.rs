@@ -49,6 +49,7 @@ const MAX_PUMP_MESSAGES: usize = 256;
 
 /// A read-only process-shared Shell image list, validated on the Shell thread.
 /// Its scalar identity is transferred; neither thread owns or destroys it.
+/// Controlled native tests instead borrow a separately owned populated list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BorrowedSystemImageList(NonZeroIsize);
 
