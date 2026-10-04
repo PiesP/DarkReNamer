@@ -17,6 +17,11 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATT
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Controls::{I_IMAGENONE, ImageList_GetImageCount};
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::{
+    ICC_WIN95_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, ImageList_Create,
+    ImageList_Destroy, ImageList_ReplaceIcon, InitCommonControlsEx,
+};
 use windows_sys::Win32::UI::Shell::{
     SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
@@ -24,6 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
     PeekMessageW, PostThreadMessageW, QS_ALLINPUT, TranslateMessage, WM_QUIT,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{IDI_APPLICATION, LoadIconW};
 
 use crate::icon_cache::IconCacheKey;
 use crate::icon_requests::{
@@ -42,6 +49,7 @@ const MAX_PUMP_MESSAGES: usize = 256;
 
 /// A read-only process-shared Shell image list, validated on the Shell thread.
 /// Its scalar identity is transferred; neither thread owns or destroys it.
+/// Controlled native tests instead borrow a separately owned populated list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BorrowedSystemImageList(NonZeroIsize);
 
@@ -55,6 +63,63 @@ impl BorrowedSystemImageList {
 
     pub(super) const fn raw(self) -> isize {
         self.0.get()
+    }
+}
+
+/// Owns a populated native image list for controlled worker tests only. The
+/// caller keeps it alive until every attached ListView is destroyed and every
+/// worker borrowing its scalar identity has joined.
+#[cfg(test)]
+pub(super) struct OwnedTestImageList(NonZeroIsize);
+
+#[cfg(test)]
+impl OwnedTestImageList {
+    pub(super) fn new() -> io::Result<Self> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_WIN95_CLASSES,
+        };
+        // SAFETY: the exact-sized descriptor remains live through the call.
+        if unsafe { InitCommonControlsEx(&controls) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the image list is local to this test and destroyed by Drop.
+        let raw = unsafe { ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 2, 1) };
+        let Some(identity) = NonZeroIsize::new(raw) else {
+            return Err(io::Error::other("test image list creation failed"));
+        };
+        let owned = Self(identity);
+        // SAFETY: null selects a predefined shared icon. LoadIconW retains its
+        // ownership; ImageList_ReplaceIcon copies it into the owned list.
+        let icon = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
+        if icon.is_null() {
+            return Err(io::Error::other("test shared icon load failed"));
+        }
+        for index in 0..2 {
+            // SAFETY: both native handles are live for this synchronous copy.
+            if unsafe { ImageList_ReplaceIcon(owned.0.get(), -1, icon) } != index {
+                return Err(io::Error::other("test image list population failed"));
+            }
+        }
+        // SAFETY: the owned list remains live; this read verifies the exact
+        // indices used by the controlled stale-result and update cases.
+        if unsafe { ImageList_GetImageCount(owned.0.get()) } != 2 {
+            return Err(io::Error::other("test image list has wrong size"));
+        }
+        Ok(owned)
+    }
+
+    pub(super) const fn borrowed(&self) -> BorrowedSystemImageList {
+        BorrowedSystemImageList(self.0)
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnedTestImageList {
+    fn drop(&mut self) {
+        // SAFETY: the test wrapper outlives its worker guardian and the
+        // production popup window, including their unwinding cleanup.
+        unsafe { ImageList_Destroy(self.0.get()) };
     }
 }
 
@@ -460,6 +525,38 @@ impl ShellLookup {
                 };
                 IconResult::Class { list, index }
             }
+        }
+    }
+}
+
+/// Controlled native tests exercise the real handoff and ListView update with
+/// a test-owned list. COM still starts and ends on the actual worker thread.
+#[cfg(test)]
+pub(super) struct ControlledIconLookup {
+    _com: WorkerCom,
+    image_list: BorrowedSystemImageList,
+}
+
+#[cfg(test)]
+impl ControlledIconLookup {
+    pub(super) fn initialize(image_list: BorrowedSystemImageList) -> Option<Self> {
+        Some(Self {
+            _com: WorkerCom::initialize()?,
+            image_list,
+        })
+    }
+
+    pub(super) const fn image_list(&self) -> BorrowedSystemImageList {
+        self.image_list
+    }
+
+    pub(super) fn query(&self, key: &RequestKey<IconCacheKey>) -> IconResult {
+        match key {
+            RequestKey::Bootstrap => IconResult::Bootstrap(Some(self.image_list)),
+            RequestKey::Class(_) => IconResult::Class {
+                list: Some(self.image_list),
+                index: 0,
+            },
         }
     }
 }

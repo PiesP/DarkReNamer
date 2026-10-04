@@ -49,6 +49,13 @@ impl Drop for ProductionOwnerDrawTestWindow {
             if IsWindow(self.window) != 0 {
                 DestroyWindow(self.window);
             }
+            // A controlled icon test may still have an owned image list
+            // attached to this window. An unwind would drop that list next;
+            // abort if native teardown left the owner alive instead of
+            // releasing an image list still reachable by its ListView.
+            if IsWindow(self.window) != 0 {
+                std::process::abort();
+            }
             UnregisterClassW(self.class_name.as_ptr(), self.instance);
         }
     }

@@ -2492,7 +2492,9 @@ mod native_tests {
         }
     }
 
-    fn with_icon_native_window(action: impl FnOnce(HWND) -> io::Result<()>) -> io::Result<()> {
+    fn with_icon_native_window(
+        action: impl FnOnce(HWND, icon_worker::BorrowedSystemImageList) -> io::Result<()>,
+    ) -> io::Result<()> {
         struct TestOle;
         impl Drop for TestOle {
             fn drop(&mut self) {
@@ -2507,8 +2509,14 @@ mod native_tests {
         let _ole = TestOle;
         let _winrt = WinRtGuard::initialize()
             .ok_or_else(|| io::Error::other("icon test WinRT initialization failed"))?;
+        // This owner is outside the popup action: its native list survives
+        // normal return, errors, and unwinding until the popup guard has
+        // destroyed every attached child and each local guardian has joined.
+        let image_list = icon_worker::OwnedTestImageList::new()?;
         let root = tempfile::tempdir()?;
-        application::with_production_popup_window_for_test(root.path(), false, action)
+        application::with_production_popup_window_for_test(root.path(), false, |window| {
+            action(window, image_list.borrowed())
+        })
     }
 
     fn install_icon_test_guardian(
@@ -2732,7 +2740,7 @@ mod native_tests {
 
     #[test]
     fn icon_worker_bootstrap_and_miss_keep_ui_responsive() -> io::Result<()> {
-        with_icon_native_window(|window| {
+        with_icon_native_window(|window, image_list| {
             let slot = app_state_slot(window);
             // SAFETY: this live production test slot remains held until the
             // worker reaches terminal join, including forced HWND destruction.
@@ -2749,7 +2757,7 @@ mod native_tests {
                 // SAFETY: this scalar identifies the UI thread owning the test.
                 unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                 move || {
-                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
                             if matches!(key, crate::icon_requests::RequestKey::Bootstrap) {
@@ -2759,7 +2767,7 @@ mod native_tests {
                                 worker_miss_entered.store(true, Ordering::Release);
                                 worker_miss_gate.wait();
                             }
-                            shell.query(key)
+                            lookup.query(key)
                         },
                     )
                 },
@@ -2925,7 +2933,7 @@ mod native_tests {
 
     #[test]
     fn icon_worker_bounds_eviction_and_stale_results() -> io::Result<()> {
-        with_icon_native_window(|window| {
+        with_icon_native_window(|window, image_list| {
             let slot = app_state_slot(window);
             // SAFETY: this held production slot outlives the worker's actual
             // terminal join, even if native teardown reenters during the test.
@@ -2946,18 +2954,11 @@ mod native_tests {
                 // SAFETY: this scalar identifies the UI thread owning the test.
                 unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                 move || {
-                    let mut shell = icon_worker::ShellLookup::initialize()?;
-                    let mut image_list = None;
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     let mut first_class = true;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| match key {
-                            crate::icon_requests::RequestKey::Bootstrap => {
-                                let result = shell.query(key);
-                                if let icon_worker::IconResult::Bootstrap(Some(list)) = &result {
-                                    image_list = Some(*list);
-                                }
-                                result
-                            }
+                            crate::icon_requests::RequestKey::Bootstrap => lookup.query(key),
                             crate::icon_requests::RequestKey::Class(class) => {
                                 let stale = *class
                                     == icon_cache_key(&LegacyText::from("zzzzzz.xstale"), false);
@@ -2977,7 +2978,7 @@ mod native_tests {
                                     worker_bad_calls.fetch_add(1, Ordering::AcqRel);
                                 }
                                 icon_worker::IconResult::Class {
-                                    list: image_list,
+                                    list: Some(lookup.image_list()),
                                     index: if bad {
                                         I_IMAGENONE
                                     } else if stale {
@@ -3167,7 +3168,7 @@ mod native_tests {
 
     #[test]
     fn icon_worker_close_and_forced_destroy_retire() -> io::Result<()> {
-        with_icon_native_window(|window| {
+        with_icon_native_window(|window, image_list| {
             let slot = app_state_slot(window);
             // SAFETY: the test owns the published slot; the hold outlives the
             // actual worker join and the deliberately nested owner teardown.
@@ -3182,7 +3183,7 @@ mod native_tests {
                 // SAFETY: this exact scalar identifies the owning UI thread.
                 unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                 move || {
-                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
                             if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
@@ -3192,7 +3193,7 @@ mod native_tests {
                                     worker_gate.wait();
                                 }
                             }
-                            shell.query(key)
+                            lookup.query(key)
                         },
                     )
                 },
@@ -3265,14 +3266,14 @@ mod native_tests {
                         // SAFETY: this is the current owner UI thread ID.
                         unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                         move || {
-                            let mut shell = icon_worker::ShellLookup::initialize()?;
+                            let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                             Some(
                                 move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
                                     if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
                                         let _ = nested_tx.send(());
                                         worker_nested_gate.wait();
                                     }
-                                    shell.query(key)
+                                    lookup.query(key)
                                 },
                             )
                         },
@@ -3342,7 +3343,10 @@ mod native_tests {
         WorkerQuit,
     }
 
-    fn assert_live_rows_settle_after_icon_terminal(cause: IconTerminalCause) -> io::Result<()> {
+    fn assert_live_rows_settle_after_icon_terminal(
+        cause: IconTerminalCause,
+        image_list: icon_worker::BorrowedSystemImageList,
+    ) -> io::Result<()> {
         let root = tempfile::tempdir()?;
         application::with_production_popup_window_for_test(root.path(), false, |window| {
             let slot = app_state_slot(window);
@@ -3359,7 +3363,7 @@ mod native_tests {
                 // SAFETY: this scalar identifies the current test UI thread.
                 unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                 move || {
-                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| match key {
                             crate::icon_requests::RequestKey::Bootstrap => {
@@ -3368,12 +3372,12 @@ mod native_tests {
                                 if matches!(cause, IconTerminalCause::BootstrapFailure) {
                                     icon_worker::IconResult::Bootstrap(None)
                                 } else {
-                                    shell.query(key)
+                                    lookup.query(key)
                                 }
                             }
                             crate::icon_requests::RequestKey::Class(_) => {
                                 worker_class_calls.fetch_add(1, Ordering::AcqRel);
-                                shell.query(key)
+                                lookup.query(key)
                             }
                         },
                     )
@@ -3487,7 +3491,7 @@ mod native_tests {
 
     #[test]
     fn icon_worker_failures_and_message_loop_retire() -> io::Result<()> {
-        with_icon_native_window(|window| {
+        with_icon_native_window(|window, image_list| {
             let slot = app_state_slot(window);
             // SAFETY: the test owns this published production slot and retains
             // it until the worker's terminal join is observed.
@@ -3556,8 +3560,11 @@ mod native_tests {
             }
             // Keep OLE/WinRT initialized on this UI thread while exercising
             // both other terminal causes on separate real production owners.
-            assert_live_rows_settle_after_icon_terminal(IconTerminalCause::BootstrapFailure)?;
-            assert_live_rows_settle_after_icon_terminal(IconTerminalCause::WorkerQuit)?;
+            assert_live_rows_settle_after_icon_terminal(
+                IconTerminalCause::BootstrapFailure,
+                image_list,
+            )?;
+            assert_live_rows_settle_after_icon_terminal(IconTerminalCause::WorkerQuit, image_list)?;
             let failed_spawn_root = tempfile::tempdir()?;
             application::with_production_popup_window_for_test(
                 failed_spawn_root.path(),
@@ -3611,7 +3618,7 @@ mod native_tests {
                     Ok(())
                 },
             )?;
-            assert_injected_message_loop_failure_shutdown_order()?;
+            assert_injected_message_loop_failure_shutdown_order(image_list)?;
             Ok(())
         })
     }
@@ -3666,7 +3673,9 @@ mod native_tests {
         }
     }
 
-    fn assert_injected_message_loop_failure_shutdown_order() -> io::Result<()> {
+    fn assert_injected_message_loop_failure_shutdown_order(
+        image_list: icon_worker::BorrowedSystemImageList,
+    ) -> io::Result<()> {
         let root = tempfile::tempdir()?;
         application::with_production_popup_window_for_test(root.path(), false, |window| {
             let slot = app_state_slot(window);
@@ -3684,14 +3693,14 @@ mod native_tests {
                 // SAFETY: the test UI thread owns the product window.
                 unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
                 move || {
-                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
                             if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
                                 let _ = icon_entered_tx.send(());
                                 worker_icon_gate.wait();
                             }
-                            shell.query(key)
+                            lookup.query(key)
                         },
                     )
                 },
