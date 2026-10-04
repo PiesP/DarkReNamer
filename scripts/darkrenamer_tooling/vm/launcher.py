@@ -86,8 +86,15 @@ REFRESH_PROFILE_V2_COUNTERS = tuple(name for name in REFRESH_PROFILE_COUNTERS
     'render_icon_cache_hits', 'render_icon_cache_misses',
     'icon_request_submissions', 'icon_results_drained',
 )
+REFRESH_PROFILE_V3_COUNTERS = REFRESH_PROFILE_V2_COUNTERS + (
+    'normal_staged_rows_peak', 'normal_logical_staged_payload_bytes_peak',
+    'fallback_staged_rows_peak', 'fallback_logical_staged_payload_bytes_peak',
+    'rendered_vec_growth_events', 'rendered_vec_capacity_bytes_peak',
+    'repeated_nonzero_filetime_inputs',
+)
 REFRESH_PROFILE_V1_KIND = 'refresh-stages-test-build'
 REFRESH_PROFILE_V2_KIND = 'refresh-stages-icon-async-test-build'
+REFRESH_PROFILE_V3_KIND = 'refresh-stages-icon-async-streaming-test-build'
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -1695,32 +1702,44 @@ def _verify_v2_result_owned_binding(result, transport):
 def verify_refresh_profile_records(output, order):
     records = []
     test_prefix = 'test ' + REFRESH_PROFILE_TEST + ' ... '
+    formats = {
+        REFRESH_PROFILE_V1_KIND: (None, REFRESH_PROFILE_COUNTERS),
+        REFRESH_PROFILE_V2_KIND: (2, REFRESH_PROFILE_V2_COUNTERS),
+        REFRESH_PROFILE_V3_KIND: (3, REFRESH_PROFILE_V3_COUNTERS),
+    }
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Refresh diagnostic emitted a duplicate field: ' + key)
+            value[key] = item
+        return value
+
     for line in output.splitlines():
         payload = line[len(test_prefix):] if line.startswith(test_prefix) else line
         if not payload.startswith('{'):
             continue
         try:
-            record = json.loads(payload)
+            record = json.loads(payload, object_pairs_hook=unique_object)
         except json.JSONDecodeError as error:
             raise ValueError('Refresh diagnostic emitted malformed JSON.') from error
-        if not isinstance(record, dict) or record.get('kind') not in {
-                REFRESH_PROFILE_V1_KIND, REFRESH_PROFILE_V2_KIND}:
+        if not isinstance(record, dict) or record.get('kind') not in formats:
             continue
-        v2 = record['kind'] == REFRESH_PROFILE_V2_KIND
-        counters = REFRESH_PROFILE_V2_COUNTERS if v2 else REFRESH_PROFILE_COUNTERS
-        if (not isinstance(record.get('scenario'), str) or
+        version, counters = formats[record['kind']]
+        async_record = version is not None
+        expected_fields = set(counters) | {'kind', 'scenario'}
+        if async_record:
+            expected_fields.update(('schema_version', 'icon_worker_attached'))
+        if (set(record) != expected_fields or
+                (async_record and (type(record.get('schema_version')) is not int or
+                                   record['schema_version'] != version or
+                                   record.get('icon_worker_attached') is not False)) or
+                not isinstance(record.get('scenario'), str) or
                 any(type(record.get(key)) is not int or record[key] < 0
                     for key in counters) or
                 record['timestamp_values'] != 2 * record['rows_formatted'] or
-                (v2 and (set(record) != (set(REFRESH_PROFILE_V2_COUNTERS) |
-                             {'kind', 'schema_version', 'icon_worker_attached', 'scenario'}) or
-                         type(record.get('schema_version')) is not int or
-                         record['schema_version'] != 2 or
-                         record.get('icon_worker_attached') is not False or
-                         any(name in record for name in
-                             ('shell_nested_ns', 'shell_max_ns', 'shell_calls',
-                              'cache_hits', 'cache_misses')) or
-                         record['ui_shell_nested_ns'] != 0 or
+                (async_record and (record['ui_shell_nested_ns'] != 0 or
                          record['ui_shell_max_ns'] != 0 or
                          record['ui_shell_calls'] != 0 or
                          record['icon_request_submissions'] != 0 or
@@ -1729,7 +1748,7 @@ def verify_refresh_profile_records(output, order):
                          record['rows_formatted'] or
                          record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
                          record['ui_shell_nested_ns'] != record['row_values_inclusive_ns'])) or
-                (not v2 and (record['cache_hits'] + record['cache_misses'] !=
+                (not async_record and (record['cache_hits'] + record['cache_misses'] !=
                              record['rows_formatted'] or
                              record['shell_calls'] != record['cache_misses'] or
                              record['row_values_exclusive_ns'] + record['timestamps_nested_ns'] +
@@ -1754,6 +1773,22 @@ def verify_refresh_profile_records(output, order):
             0 if 'proposal-' in scenario else expected_rows)
         if record['rows'] != expected_rows or record['rows_formatted'] != expected_formatted:
             raise ValueError('Refresh diagnostic workload cardinality is invalid.')
+        if record['kind'] == REFRESH_PROFILE_V3_KIND:
+            has_formatted_rows = expected_formatted > 0
+            expected_repeats = (52996 if scenario == 'ordinary-10000' else
+                                max(0, 2 * expected_formatted - 1))
+            if (record['normal_staged_rows_peak'] != int(has_formatted_rows) or
+                    (record['normal_logical_staged_payload_bytes_peak'] > 0) !=
+                    has_formatted_rows or
+                    record['fallback_staged_rows_peak'] != 0 or
+                    record['fallback_logical_staged_payload_bytes_peak'] != 0 or
+                    record['rendered_vec_growth_events'] >
+                    record['native_row_insertions'] or
+                    (record['rendered_vec_capacity_bytes_peak'] < expected_rows
+                     if has_formatted_rows else
+                     record['rendered_vec_capacity_bytes_peak'] != 0) or
+                    record['repeated_nonzero_filetime_inputs'] != expected_repeats):
+                raise ValueError('Streaming refresh diagnostic counters are invalid.')
     return records
 
 
@@ -1862,13 +1897,13 @@ def verify_focused_native_result(root, manifest, result, transport_kind,
                 ('source_sha', 'source_state', 'target')) or
             result.get('diagnostic') != diagnostic or result.get('gui') is not None or
             result.get('status') not in ('passed', 'failed')):
-        raise ValueError('Focused icon result selection is invalid.')
+        raise ValueError('Focused native result selection is invalid.')
     rows = result.get('tests')
     if (not isinstance(rows, list) or not 1 <= len(rows) <= len(expected_names) or
             any(not isinstance(row, dict) for row in rows)):
-        raise ValueError('Focused icon result must contain a fixed case prefix.')
+        raise ValueError('Focused native result must contain a fixed case prefix.')
     if (focused_name is not None and len(rows) != 1):
-        raise ValueError('A selected focused icon case must have one native execution.')
+        raise ValueError('A selected focused native case must have one execution.')
     binary = manifest['test_binaries'][0]
     for artifact in (binary, manifest['application'], manifest['runner']):
         checked_artifact(root, artifact)
@@ -1881,50 +1916,50 @@ def verify_focused_native_result(root, manifest, result, transport_kind,
                 row.get('test_name') != expected_name or row.get('job_cleanup') is not True or
                 type(row.get('exit_code')) is not int or
                 any(type(row.get(key)) is not int for key in ('passed', 'failed', 'ignored'))):
-            raise ValueError('Focused icon native test artifact, counts, or job cleanup is invalid.')
+            raise ValueError('Focused native test artifact, counts, or job cleanup is invalid.')
         for channel in ('stdout', 'stderr'):
             record = row.get(channel)
             if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
                     record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES or
                     output_bytes > output_limit - record['bytes']):
-                raise ValueError('Focused icon output exceeds its bound.')
+                raise ValueError('Focused native output exceeds its bound.')
             path = checked_artifact(root, record)
             if path.stat().st_size != record['bytes']:
-                raise ValueError('Focused icon output size differs from its record.')
+                raise ValueError('Focused native output size differs from its record.')
             output_bytes += record['bytes']
         output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
         summaries = re.findall(
             r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; '
             r'\d+ measured; (\d+) filtered out;', output, re.MULTILINE)
         if len(summaries) != 1:
-            raise ValueError('Focused icon native output has no unique libtest summary.')
+            raise ValueError('Focused native output has no unique libtest summary.')
         outcome, passed, failed, ignored, filtered = summaries[0]
         counts = (int(passed), int(failed), int(ignored))
         names = re.findall(r'(?m)^test (\S+) \.\.\. ', output)
         if (counts[0] + counts[1] != 1 or counts[2] != 0 or int(filtered) < 1 or
                 (outcome == 'ok') != (counts[1] == 0) or names != [expected_name] or
                 [row.get(key) for key in ('passed', 'failed', 'ignored')] != list(counts)):
-            raise ValueError('Focused icon selection or test counts are invalid.')
+            raise ValueError('Focused native selection or test counts are invalid.')
         case_passed = (outcome == 'ok' and row.get('status') == 'passed' and
                        row.get('exit_code') == 0 and row.get('failure_reason') is None)
         if not case_passed and (index != len(rows) or outcome != 'FAILED' or
                                 row.get('status') != 'failed' or
                                 row.get('failure_reason') != 'test_failed' or
                                 row['exit_code'] == 0):
-            raise ValueError('Focused icon execution status differs from its libtest result.')
+            raise ValueError('Focused native execution status differs from its libtest result.')
         if failed_case:
-            raise ValueError('Focused icon executed after a failed case.')
+            raise ValueError('Focused native case executed after a failed case.')
         failed_case = not case_passed
         passed_total += counts[0]
         failed_total += counts[1]
         filtered_total += int(filtered)
     succeeded = not failed_case and len(rows) == len(expected_names) and result['status'] == 'passed'
     if not succeeded and (not failed_case or result['status'] != 'failed'):
-        raise ValueError('Focused icon execution did not finish its fixed case inventory.')
+        raise ValueError('Focused native execution did not finish its fixed case inventory.')
     transport = result.get('transport')
     if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
             transport.get('status') != 'collected' or transport.get('guest_cleanup') is not True):
-        raise ValueError('Focused icon transport did not finish with clean collection.')
+        raise ValueError('Focused native transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
     _verify_v2_result_owned_binding(result, transport)

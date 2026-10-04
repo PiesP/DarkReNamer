@@ -73,19 +73,23 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
-    def refresh_profile_output(self, order='hidden-visible', *, v2=False):
+    def refresh_profile_output(self, order='hidden-visible', *, v2=False, v3=False):
+        if v2 and v3:
+            raise ValueError('A diagnostic fixture cannot mix two schemas.')
         long_paths = ('long-hidden', 'long-hidden-unchanged',
                       'long-visible', 'long-visible-unchanged')
         if order == 'visible-hidden':
             long_paths = long_paths[2:] + long_paths[:2]
         rows = []
         for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
-            row = {'kind': vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND,
+            row = {'kind': (vm.REFRESH_PROFILE_V3_KIND if v3 else
+                            vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND),
                    'scenario': scenario,
-                   **{name: 0 for name in (vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
+                   **{name: 0 for name in (vm.REFRESH_PROFILE_V3_COUNTERS if v3 else
+                                            vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
                                             vm.REFRESH_PROFILE_COUNTERS)}}
-            if v2:
-                row.update(schema_version=2, icon_worker_attached=False)
+            if v2 or v3:
+                row.update(schema_version=3 if v3 else 2, icon_worker_attached=False)
             count = 100 if scenario == 'ordinary-100' else (
                 1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
             formatted = 26500 if scenario == 'ordinary-10000' else (
@@ -93,10 +97,26 @@ class VmRunnerTests(unittest.TestCase):
             row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
                        row_values_inclusive_ns=20 if formatted else 0,
                        row_values_exclusive_ns=10 if formatted else 0,
-                       timestamps_nested_ns=(10 if v2 else 5) if formatted else 0)
-            if v2:
+                       timestamps_nested_ns=(10 if v2 or v3 else 5) if formatted else 0)
+            if v3:
+                row['native_row_insertions'] = (
+                    100 if scenario == 'ordinary-100' else
+                    900 if scenario == 'ordinary-1000' else
+                    9000 if scenario == 'ordinary-10000' else
+                    1000 if scenario.startswith('long-') and 'unchanged' not in scenario else 0)
+            if v2 or v3:
                 row.update(render_icon_cache_hits=max(0, formatted - 1),
                            render_icon_cache_misses=int(formatted > 0))
+                if v3:
+                    row.update(normal_staged_rows_peak=int(formatted > 0),
+                               normal_logical_staged_payload_bytes_peak=128 if formatted else 0,
+                               fallback_staged_rows_peak=0,
+                               fallback_logical_staged_payload_bytes_peak=0,
+                               rendered_vec_growth_events=int(row['native_row_insertions'] > 0),
+                               rendered_vec_capacity_bytes_peak=count * 128 if formatted else 0,
+                               repeated_nonzero_filetime_inputs=(
+                                   52996 if scenario == 'ordinary-10000' else
+                                   max(0, 2 * formatted - 1)))
             else:
                 row.update(cache_hits=max(0, formatted - 1), cache_misses=int(formatted > 0),
                            shell_calls=int(formatted > 0),
@@ -156,6 +176,83 @@ class VmRunnerTests(unittest.TestCase):
             valid.splitlines()[1], historical.splitlines()[1], 1)
         with self.assertRaisesRegex(ValueError, 'mixed historical'):
             vm.verify_refresh_profile_records(mixed, 'hidden-visible')
+
+    def test_streaming_refresh_profile_requires_exact_schema_and_detached_counts(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                self.refresh_profile_output(order, v3=True), order)), 11)
+
+        valid = self.refresh_profile_output(v3=True)
+        prefix = 'test ' + vm.REFRESH_PROFILE_TEST + ' ... '
+
+        def changed(**fields):
+            lines = valid.splitlines()
+            self.assertTrue(lines[1].startswith(prefix))
+            row = json.loads(lines[1][len(prefix):])
+            for key, value in fields.items():
+                if value is None:
+                    row.pop(key)
+                else:
+                    row[key] = value
+            lines[1] = prefix + json.dumps(row)
+            return '\n'.join(lines)
+
+        for key in vm.REFRESH_PROFILE_V3_COUNTERS:
+            with self.subTest(missing=key), self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(changed(**{key: None}), 'hidden-visible')
+        for malformed in (
+                changed(schema_version=2), changed(icon_worker_attached=True),
+                changed(ui_shell_calls=1), changed(icon_request_submissions=1),
+                changed(icon_results_drained=1), changed(shell_calls=0),
+                changed(normal_staged_rows_peak=-1), changed(normal_staged_rows_peak=True)):
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(malformed, 'hidden-visible')
+        for malformed in (
+                changed(normal_staged_rows_peak=0),
+                changed(normal_staged_rows_peak=2),
+                changed(normal_logical_staged_payload_bytes_peak=0),
+                changed(fallback_staged_rows_peak=1),
+                changed(fallback_logical_staged_payload_bytes_peak=1),
+                changed(rendered_vec_growth_events=101),
+                changed(rendered_vec_capacity_bytes_peak=99),
+                changed(repeated_nonzero_filetime_inputs=198),
+                changed(repeated_nonzero_filetime_inputs=0),
+                changed(repeated_nonzero_filetime_inputs=201)):
+            with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+                vm.verify_refresh_profile_records(malformed, 'hidden-visible')
+
+        proposal_lines = valid.splitlines()
+        proposal_index = next(index for index, line in enumerate(proposal_lines)
+                              if '-proposal-' in line)
+        proposal = json.loads(proposal_lines[proposal_index])
+        proposal['rendered_vec_capacity_bytes_peak'] = 128
+        proposal_lines[proposal_index] = json.dumps(proposal)
+        with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+            vm.verify_refresh_profile_records('\n'.join(proposal_lines), 'hidden-visible')
+
+        batched_lines = valid.splitlines()
+        batched_index = next(index for index, line in enumerate(batched_lines)
+                             if '"scenario": "ordinary-10000"' in line)
+        batched = json.loads(batched_lines[batched_index])
+        batched['repeated_nonzero_filetime_inputs'] = 52999
+        batched_lines[batched_index] = json.dumps(batched)
+        with self.assertRaisesRegex(ValueError, 'Streaming refresh diagnostic'):
+            vm.verify_refresh_profile_records('\n'.join(batched_lines), 'hidden-visible')
+
+        duplicate = valid.replace('"rows": 100', '"rows": 100, "rows": 100', 1)
+        with self.assertRaisesRegex(ValueError, 'duplicate field'):
+            vm.verify_refresh_profile_records(duplicate, 'hidden-visible')
+        for historical in (self.refresh_profile_output(),
+                           self.refresh_profile_output(v2=True)):
+            mixed = valid.replace(valid.splitlines()[1], historical.splitlines()[1], 1)
+            with self.assertRaisesRegex(ValueError, 'mixed historical'):
+                vm.verify_refresh_profile_records(mixed, 'hidden-visible')
+        for historical, extra in ((self.refresh_profile_output(), '"schema_version": 1'),
+                                  (self.refresh_profile_output(v2=True),
+                                   '"normal_staged_rows_peak": 1')):
+            injected = historical.replace('"rows": 100', extra + ', "rows": 100', 1)
+            with self.assertRaisesRegex(ValueError, 'counters'):
+                vm.verify_refresh_profile_records(injected, 'hidden-visible')
 
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
@@ -472,6 +569,11 @@ class VmRunnerTests(unittest.TestCase):
             self.result['status'] = 'passed'
             self.result['tests'][0]['stdout']['bytes'] = vm.REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES + 1
             with self.assertRaisesRegex(ValueError, 'output exceeds'):
+                verify()
+            self.result['tests'][0]['stdout']['bytes'] = (
+                self.root / self.result['tests'][0]['stdout']['file']).stat().st_size
+            self.result['transport']['guest_cleanup'] = False
+            with self.assertRaisesRegex(ValueError, 'Focused native transport'):
                 verify()
 
     def test_single_focused_icon_case_requires_exact_name_and_one_execution(self):
