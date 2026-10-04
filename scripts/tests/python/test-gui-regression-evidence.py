@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+from contextlib import redirect_stdout
 from copy import deepcopy
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -14,9 +16,11 @@ import subprocess
 import tempfile
 import unittest
 import zlib
+from types import SimpleNamespace
+from unittest import mock
 
 from darkrenamer_tooling.evidence import gui as evidence
-from controller_cleanup_fixture import clean_controller_cleanup_v2
+from controller_cleanup_fixture import clean_controller_cleanup, clean_controller_cleanup_v2
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
@@ -1005,6 +1009,146 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
 
     def validate(self, run: Path):
         return evidence.validate_run(self.root, run.name, SOURCE)
+
+    def fixed_v2_run(self, mode: str, reference: dict | None = None):
+        run = self.fixture.build(evidence.FIXED_V2_RUN_IDS[mode], mode, reference=reference)
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        profile_hash = digest(profile)
+        (run / "inputs" / "vm-automated-v2.json").write_bytes(profile)
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["acceptance_profile_id"] = evidence.V2_PROFILE_ID
+        manifest["acceptance_profile_sha256"] = profile_hash
+        manifest["acceptance_profile"] = {
+            "file": "inputs/vm-automated-v2.json", "bytes": len(profile), "sha256": profile_hash,
+        }
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                               "<external-output-root>", "--connection-profile",
+                               "<private-connection-profile>", "--acceptance-profile-id",
+                               evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        output = run / "output"
+        raw_path = output / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        jobs = []
+        lifecycles = []
+        for index in range(3 if mode == "full-context" else 1):
+            job = deepcopy(clean_controller_cleanup_v2()["owned_resource_evidence"]["process_job_cleanup"][0])
+            job["pid"] = 4242 + index
+            job["process_start_time_utc_ticks"] = str(134041000000000000 + index)
+            jobs.append(job)
+            lifecycles.append({"process_lifecycle": {
+                "pid": job["pid"], "session_id": 2,
+                "start_time_utc_ticks": job["process_start_time_utc_ticks"],
+                "executable_path": r"C:\fixture\DarkReNamer.exe",
+                "executable_sha256": manifest["artifacts"]["application"]["sha256"],
+                "start_observed": True, "exit_observed": True,
+                "exit_method": "normal-close", "exit_code": 0,
+            }})
+        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        raw["process_lifecycles"] = lifecycles
+        raw["process_job_cleanup"] = cleanup["owned_resource_evidence"]["process_job_cleanup"]
+        raw["observer_lifecycle"] = cleanup["owned_resource_evidence"]["task_execution"]["observer_lifecycle"]
+        write_json(raw_path, raw)
+        transport_path = output / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["raw_cleanup"] = cleanup
+        write_json(transport_path, transport)
+        self.fixture.refresh(run)
+        return run, profile_hash
+
+    def test_fixed_v2_complete_set_accepts_bound_ambient_processes(self):
+        full, profile_hash = self.fixed_v2_run("full-context")
+        standard, _ = self.fixed_v2_run("standard")
+        text, _ = self.fixed_v2_run("text-scale")
+        tooltip, _ = self.fixed_v2_run("tooltip", reference=self.fixture.reference(full))
+        runs = (full, standard, text, tooltip)
+        for run in runs:
+            self.assertEqual(evidence.validate_run(self.root, run.name, SOURCE,
+                             expected_profile_sha256=profile_hash)["result"]["status"], "review_required")
+        argv = ["--result-root", str(self.root), "--expected-source-sha", SOURCE,
+                "--require-complete-set", "--acceptance-profile-id", evidence.V2_PROFILE_ID]
+        for run in runs:
+            argv += ["--run", run.name]
+        with mock.patch.object(evidence.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0,
+                                                            stdout=(SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes())), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(evidence.main(SCRIPT_ROOT.parent, argv), 0)
+
+    def test_fixed_v2_selection_rejects_historical_single_v1_run(self):
+        profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
+        with mock.patch.object(evidence.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0, stdout=profile)):
+            with self.assertRaisesRegex(evidence.EvidenceError, "selection differs"):
+                evidence.main(SCRIPT_ROOT.parent, ["--result-root", str(self.root),
+                             "--expected-source-sha", SOURCE, "--run", self.full.name,
+                             "--acceptance-profile-id", evidence.V2_PROFILE_ID])
+
+    def test_fixed_v2_rejects_profile_and_incomplete_candidate_lifetimes(self):
+        full, profile_hash = self.fixed_v2_run("full-context")
+        self.assertTrue(json.loads((full / "output/transport.json").read_text())["raw_cleanup"]["unexpected_runner_processes"])
+        manifest_path = full / "input-manifest.json"
+        original_manifest = json.loads(manifest_path.read_text())
+        for mutate in (
+            lambda m: m.pop("acceptance_profile_id"),
+            lambda m: m.__setitem__("acceptance_profile_sha256", "0" * 64),
+            lambda m: m["command"].remove("--acceptance-profile-id"),
+        ):
+            with self.subTest(manifest_mutation=mutate):
+                manifest = deepcopy(original_manifest)
+                mutate(manifest)
+                write_json(manifest_path, manifest)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_input_manifest(full, SOURCE,
+                                                     expected_profile_sha256=profile_hash)
+        write_json(manifest_path, original_manifest)
+        with self.assertRaisesRegex(evidence.EvidenceError, "source blob"):
+            evidence.validate_input_manifest(full, SOURCE, expected_profile_sha256="0" * 64)
+        profile_path = full / "inputs/vm-automated-v2.json"
+        profile_path.write_bytes(profile_path.read_bytes() + b" ")
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_input_manifest(full, SOURCE,
+                                             expected_profile_sha256=profile_hash)
+        profile_path.write_bytes((SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes())
+        raw_path = full / "output/acceptance-result.json"
+        original_raw = json.loads(raw_path.read_text())
+        mutations = (
+            lambda r: r["process_lifecycles"].pop(),
+            lambda r: r["process_job_cleanup"].pop(),
+            lambda r: r["process_lifecycles"][1]["process_lifecycle"].__setitem__("pid", 9999),
+            lambda r: r["process_lifecycles"][1]["process_lifecycle"].__setitem__("exit_observed", False),
+            lambda r: r["process_lifecycles"][1]["process_lifecycle"].__setitem__("exit_code", 1),
+            lambda r: r["process_lifecycles"][1]["process_lifecycle"].__setitem__("executable_sha256", "0" * 64),
+            lambda r: r.pop("observer_lifecycle"),
+        )
+        for mutate in mutations:
+            with self.subTest(lifetime_mutation=mutate):
+                changed = deepcopy(original_raw)
+                mutate(changed)
+                write_json(raw_path, changed)
+                self.fixture.refresh(full)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_run(self.root, full.name, SOURCE,
+                                          expected_profile_sha256=profile_hash)
+        write_json(raw_path, original_raw)
+        transport_path = full / "output/transport.json"
+        original_transport = json.loads(transport_path.read_text())
+        for mutate in (
+            lambda t: t.__setitem__("raw_cleanup", clean_controller_cleanup()),
+            lambda t: t["raw_cleanup"].__setitem__("process_jobs_closed", False),
+            lambda t: t["raw_cleanup"]["owned_resource_evidence"]["process_snapshots"]["after_delete"].__setitem__("complete", False),
+            lambda t: t["raw_cleanup"]["owned_resource_evidence"]["observed_roots_after"].__setitem__("guest_present", True),
+            lambda t: t["raw_cleanup"]["owned_resource_evidence"]["task_snapshots"]["after_delete"].append({"name": "unexpected"}),
+        ):
+            with self.subTest(cleanup_mutation=mutate):
+                changed = deepcopy(original_transport)
+                mutate(changed)
+                write_json(transport_path, changed)
+                self.fixture.refresh(full)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_run(self.root, full.name, SOURCE,
+                                          expected_profile_sha256=profile_hash)
 
     def assert_rejected_by_module_and_cli(self, run: Path, diagnostic: str):
         with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):

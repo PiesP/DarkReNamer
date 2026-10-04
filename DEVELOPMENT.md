@@ -505,6 +505,31 @@ After a strict OS-delta rejection, a separately hash-bound coordinator cleanup
 proof may establish only workload-owned cleanup before the next declared
 attempt. It cannot replace the original receipt or reclassify acceptance.
 
+### Fixed GUI cleanup profiles
+
+For future four-cell GUI validation under the existing v2 owned-resource
+contract, select that profile explicitly from a clean, committed checkout:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-fixed-gui-v2-attempt
+```
+
+The four geometry, appearance, text-scale and scenario choices keep their
+existing limits. V2 uses distinct `-owned-v2` run IDs and binds the selected
+source's profile blob, typed revision, staged artifact and digest through the
+producer, controller, raw transport and independent verifier. Validation requires
+all candidate lifetimes and their closed Jobs, complete owned-resource and
+required-environment observations, and successful settings restoration. Ambient
+process residency alone does not change the existing v2 contract.
+
+Omitting the selector retains historical v1 behavior and its original run IDs;
+explicit v1 remains available. Preserved v1 failures cannot be reclassified as
+v2 success. Fixed GUI diagnostics do not replace the complete source-bound
+release campaign or human visual acceptance.
+
 ### Paired appearance diagnostic
 
 On a clean, committed source checkout with the prepared VM available, run the
@@ -530,8 +555,9 @@ V2 owned-resource cleanup contract for this diagnostic only. The launcher
 freezes the unchanged `config/vm-automated-v2.json` bytes and digest in each
 input, binds the controller arguments to them, and independently verifies the
 complete V2 cleanup inventory and the observer Job and process lifetimes.
-This option requires `--diagnostic appearance-pair`; it does not change the
-default four-run regression, either profile definition, or the release matrix.
+For this diagnostic, use the selector with `--diagnostic appearance-pair`.
+The separate fixed-GUI selector above does not change either profile definition
+or the release matrix.
 V2 permits ambient process deltas only under its established ownership and
 required-environment checks. Preserved V1 failures retain their original verdict.
 Selecting V2 cleanup here does not establish complete V2 release acceptance.
