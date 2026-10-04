@@ -1174,12 +1174,20 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
         .filter(|row| !row.icon_resolved)
         .count();
     state.icon_scan_cursor = 0;
-    state.icon_reconcile_remaining = if state.icon_delivery_ack_count != 0 {
-        state.rendered_rows.len()
-    } else {
+    // Keep a pinned batch until its next ACK, but no current row needs a
+    // reconciliation sweep when every rendered icon is already resolved.
+    state.icon_reconcile_remaining =
+        if state.icon_unresolved_rows != 0 && state.icon_delivery_ack_count != 0 {
+            state.rendered_rows.len()
+        } else {
+            0
+        };
+    // Terminal no-image rows need no demand pass even with a nonempty model.
+    state.icon_demand_scan_remaining = if state.icon_unresolved_rows == 0 {
         0
+    } else {
+        state.rendered_rows.len()
     };
-    state.icon_demand_scan_remaining = state.rendered_rows.len();
     state.icon_continue_posted = false;
     state.mark_preview_synchronized();
     {
@@ -1246,9 +1254,18 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         .iter()
         .filter(|row| !row.icon_resolved)
         .count();
-    state.icon_reconcile_remaining = state.rendered_rows.len();
+    // A changed text row cannot create icon work when every icon is resolved.
+    state.icon_reconcile_remaining = if state.icon_unresolved_rows == 0 {
+        0
+    } else {
+        state.rendered_rows.len()
+    };
     state.icon_scan_cursor = 0;
-    state.icon_demand_scan_remaining = state.rendered_rows.len();
+    state.icon_demand_scan_remaining = if state.icon_unresolved_rows == 0 {
+        0
+    } else {
+        state.rendered_rows.len()
+    };
     schedule_icon_poll(state);
     if !update_status_rows(state, &status_rows) {
         state.mark_preview_sync_failed();
@@ -3414,6 +3431,21 @@ mod native_tests {
                 assert_eq!(lease.state().icon_status_value(5), Some(1));
             }
             assert_native_refresh_values(lease.state());
+            drop(lease);
+            let mut lease = try_app_state(window)
+                .ok_or_else(|| io::Error::other("terminal icon state disappeared"))?;
+            let state = lease.state_mut();
+            let changed = state
+                .model
+                .prefix_complete_changed(&LegacyText::from("proposed-"))
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            assert_eq!(changed.len(), 2);
+            refresh_changed_rows(state, &changed);
+            assert_eq!(state.icon_unresolved_rows, 0);
+            assert_eq!(state.icon_reconcile_remaining, 0);
+            assert_eq!(state.icon_demand_scan_remaining, 0);
+            assert_eq!(state.icon_status_value(11), Some(1));
+            assert_native_refresh_values(state);
             Ok(())
         })
     }
