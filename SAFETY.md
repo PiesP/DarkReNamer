@@ -457,13 +457,26 @@ the runtime lock alive until the sole JoinHandle is observed finished and joined
 The UI keeps pumping during a blocked provider call; no hard Shell timeout is
 claimed.
 
+The four controlled native icon cases use a separate test-owned, populated
+two-slot `HIMAGELIST`. Its test-only lookup still initializes and balances COM
+on the actual worker thread, then returns that list's borrowed identity and
+valid indices through the production request, completion, and ListView paths.
+The owner lives outside the popup action, so worker guardians join and all
+attached production test windows are destroyed before the list is destroyed,
+including error and unwind paths. Deliberate bootstrap failure, worker quit,
+and spawn failure remain tested separately. These controlled cases do not
+establish that a real Shell bootstrap succeeds in every environment; the
+production Shell lookup and its separate source-bound observations retain that
+coverage.
+
 The native shutdown fixture owns one production popup window and its reclaim
-hold while a Shell class query, import read, Apply result, and settings save
-wait on independent test barriers. Its callback-free Apply timer is bound to
-that live HWND and retired by the same emergency finalizer as production. The
-fixture invokes the production message-loop-error handler directly; it does
-not represent an OS-issued `GetMessageW` error. Each barrier is released before
-the tracked icon join and before the window or runtime lock can be reclaimed.
+hold while a controlled icon class query, import read, Apply result, and
+settings save wait on independent test barriers. Its callback-free Apply timer
+is bound to that live HWND and retired by the same emergency finalizer as
+production. The fixture invokes the production message-loop-error handler
+directly; it does not represent an OS-issued `GetMessageW` error. Each barrier
+is released before the tracked icon join and before the window or runtime lock
+can be reclaimed.
 
 The ignored refresh-stage diagnostic keeps its original detached ListView
 fixture. Its versioned asynchronous-icon JSON measures UI text, issue and
