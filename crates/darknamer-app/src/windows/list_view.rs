@@ -3468,8 +3468,287 @@ mod native_tests {
             // both other terminal causes on separate real production owners.
             assert_live_rows_settle_after_icon_terminal(IconTerminalCause::BootstrapFailure)?;
             assert_live_rows_settle_after_icon_terminal(IconTerminalCause::WorkerQuit)?;
+            let failed_spawn_root = tempfile::tempdir()?;
+            application::with_production_popup_window_for_test(
+                failed_spawn_root.path(),
+                false,
+                |failed_spawn_window| {
+                    icon_worker::IconRunGuardian::fail_next_spawn_for_test();
+                    // SAFETY: this scalar identifies the current test UI
+                    // thread; the injected failure creates no worker handle.
+                    let launch = icon_worker::IconRunGuardian::start(unsafe {
+                        windows_sys::Win32::System::Threading::GetCurrentThreadId()
+                    });
+                    assert!(launch.is_err());
+                    let no_guardian = launch.ok();
+                    assert!(no_guardian.is_none());
+                    let mut lease = try_app_state(failed_spawn_window)
+                        .ok_or_else(|| io::Error::other("failed-spawn state unavailable"))?;
+                    let state = lease.state_mut();
+                    state
+                        .model
+                        .append_batch_by(
+                            refresh_fixture_rows(r"C:\icon-spawn-failure", "held", 0, 2),
+                            compare_windows,
+                        )
+                        .map_err(|error| io::Error::other(error.to_string()))?;
+                    refresh_all_rows(state);
+                    assert!(
+                        state
+                            .rendered_rows
+                            .iter()
+                            .all(|row| { row.icon_resolved && row.icon == I_IMAGENONE })
+                    );
+                    assert_eq!(state.icon_status_value(1), Some(0));
+                    assert_eq!(state.icon_status_value(5), Some(2));
+                    assert_eq!(state.icon_status_value(11), Some(1));
+                    assert_eq!(state.icon_status_value(12), Some(0));
+                    assert_eq!(state.icon_status_value(21), Some(1));
+                    assert_native_refresh_values(state);
+                    state
+                        .model
+                        .append_batch_by(
+                            refresh_fixture_rows(r"C:\icon-spawn-failure", "later", 2, 1),
+                            compare_windows,
+                        )
+                        .map_err(|error| io::Error::other(error.to_string()))?;
+                    refresh_all_rows(state);
+                    poll_icon_work(state);
+                    assert_eq!(state.icon_status_value(1), Some(0));
+                    assert_eq!(state.icon_status_value(12), Some(0));
+                    assert_eq!(state.icon_unresolved_rows, 0);
+                    assert_native_refresh_values(state);
+                    Ok(())
+                },
+            )?;
+            assert_injected_message_loop_failure_shutdown_order()?;
             Ok(())
         })
+    }
+
+    struct IconEmergencyTestCleanup {
+        window: HWND,
+        guardian: icon_worker::IconRunGuardian,
+        icon_gate: IconTestGate,
+        import_gate: IconTestGate,
+        apply_gate: IconTestGate,
+        preferences_gate: IconTestGate,
+        finished: bool,
+    }
+
+    impl IconEmergencyTestCleanup {
+        fn release_workers(&self) {
+            self.icon_gate.release();
+            self.import_gate.release();
+            self.apply_gate.release();
+            self.preferences_gate.release();
+        }
+
+        fn finish(&mut self) {
+            if self.finished {
+                return;
+            }
+            worker::request_worker_shutdown_after_message_loop_failure(self.window);
+            self.release_workers();
+            self.guardian.retire_and_join_responsively();
+            // The import emergency finalizer deliberately aborts if its
+            // provider remains live. Test-owned barriers are released above;
+            // observe that provider's real terminal state before invoking it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while try_app_state(self.window).is_some_and(|lease| {
+                lease
+                    .state()
+                    .import_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.handle.is_finished())
+            }) {
+                assert!(Instant::now() < deadline, "held test import did not retire");
+                thread::sleep(Duration::from_millis(5));
+            }
+            worker::finish_apply_after_message_loop_failure(self.window);
+            self.finished = true;
+        }
+    }
+
+    impl Drop for IconEmergencyTestCleanup {
+        fn drop(&mut self) {
+            self.finish();
+        }
+    }
+
+    fn assert_injected_message_loop_failure_shutdown_order() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(root.path(), false, |window| {
+            let slot = app_state_slot(window);
+            // SAFETY: this test owns the published slot; the hold remains
+            // until the icon guardian has observed the actual thread join.
+            let _hold = unsafe { CallbackReclaimHold::new(slot) }
+                .ok_or_else(|| io::Error::other("emergency test reclaim hold failed"))?;
+            let icon_gate = IconTestGate::held();
+            let import_gate = IconTestGate::held();
+            let apply_gate = IconTestGate::held();
+            let preferences_gate = IconTestGate::held();
+            let worker_icon_gate = icon_gate.clone();
+            let (icon_entered_tx, icon_entered_rx) = mpsc::sync_channel(1);
+            let guardian = icon_worker::IconRunGuardian::start_with(
+                // SAFETY: the test UI thread owns the product window.
+                unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+                move || {
+                    let mut shell = icon_worker::ShellLookup::initialize()?;
+                    Some(
+                        move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
+                            if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
+                                let _ = icon_entered_tx.send(());
+                                worker_icon_gate.wait();
+                            }
+                            shell.query(key)
+                        },
+                    )
+                },
+            )?;
+            let mut cleanup = IconEmergencyTestCleanup {
+                window,
+                guardian,
+                icon_gate,
+                import_gate: import_gate.clone(),
+                apply_gate: apply_gate.clone(),
+                preferences_gate: preferences_gate.clone(),
+                finished: false,
+            };
+            install_icon_test_guardian(window, &cleanup.guardian)?;
+            let (import_entered_tx, import_entered_rx) = mpsc::sync_channel(1);
+            let worker_import_gate = import_gate.clone();
+            let (apply_entered_tx, apply_entered_rx) = mpsc::sync_channel(1);
+            let worker_apply_gate = apply_gate.clone();
+            let (preferences_entered_tx, preferences_entered_rx) = mpsc::sync_channel(1);
+            let worker_preferences_gate = preferences_gate.clone();
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("emergency test state unavailable"))?;
+                let state = lease.state_mut();
+                state
+                    .model
+                    .append_batch_by(
+                        refresh_fixture_rows(r"C:\icon-emergency", "held", 0, 1),
+                        compare_windows,
+                    )
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                refresh_all_rows(state);
+                let revision = state.revision();
+                worker::start_import_worker_from(
+                    window,
+                    state,
+                    1,
+                    revision,
+                    worker::ImportKind::Names,
+                    move |_| {
+                        let _ = import_entered_tx.send(());
+                        worker_import_gate.wait();
+                        Err(io::Error::other("cancelled test import"))
+                    },
+                )?;
+                worker::start_held_apply_worker_for_test(window, state, move || {
+                    let _ = apply_entered_tx.send(());
+                    worker_apply_gate.wait();
+                })?;
+                let writer = PreferencesWriter::spawn_with_for_test(
+                    root.path().join("held-preferences"),
+                    move |_, _| {
+                        let _ = preferences_entered_tx.try_send(());
+                        worker_preferences_gate.wait();
+                        Ok(())
+                    },
+                )?;
+                state.preference_persistence = PreferencePersistence::new(Some(writer), None);
+                state
+                    .preference_persistence
+                    .submit_columns(state.column_states)?;
+            }
+            for (label, receiver) in [
+                ("icon", icon_entered_rx),
+                ("import", import_entered_rx),
+                ("apply", apply_entered_rx),
+                ("preferences", preferences_entered_rx),
+            ] {
+                receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| io::Error::other(format!("held {label} worker did not enter")))?;
+            }
+            assert_ui_ack_while_icon_blocked(window)?;
+            assert!(initialize_safe_runtime_at(root.path()).is_err());
+            // This injects the production error *handler* after all four
+            // workers entered. No OS-issued GetMessageW failure is claimed.
+            worker::request_worker_shutdown_after_message_loop_failure(window);
+            {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("emergency state disappeared"))?;
+                let state = lease.state();
+                assert!(state.close_pending && state.mutation_locked);
+                assert!(
+                    state
+                        .import_worker
+                        .as_ref()
+                        .is_some_and(worker::ImportWorker::cancellation_requested)
+                );
+                assert!(
+                    state
+                        .apply_worker
+                        .as_ref()
+                        .is_some_and(worker::ApplyWorker::cancellation_requested)
+                );
+                assert!(
+                    state
+                        .icon_shared
+                        .as_ref()
+                        .is_some_and(|shared| shared.is_unavailable())
+                );
+                assert!(!cleanup.guardian.shared.is_joined());
+                assert!(!state.preference_persistence.is_joined());
+            }
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("emergency state disappeared"))?;
+                let state = lease.state_mut();
+                assert!(
+                    state
+                        .preference_persistence
+                        .submit_columns(state.column_states)
+                        .is_err()
+                );
+            }
+            cleanup.icon_gate.release();
+            cleanup.guardian.retire_and_join_responsively();
+            assert!(cleanup.guardian.shared.is_joined());
+            {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("emergency state disappeared"))?;
+                let state = lease.state();
+                assert!(state.import_worker.is_some());
+                assert!(state.apply_worker.is_some());
+                assert!(!state.preference_persistence.is_joined());
+            }
+            assert!(initialize_safe_runtime_at(root.path()).is_err());
+            cleanup.finish();
+            {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("emergency state disappeared"))?;
+                let state = lease.state();
+                assert!(state.import_worker.is_none());
+                assert!(state.apply_worker.is_none());
+                assert!(state.preference_persistence.is_joined());
+                assert!(
+                    state
+                        .icon_shared
+                        .as_ref()
+                        .is_some_and(|shared| shared.is_joined())
+                );
+            }
+            assert!(initialize_safe_runtime_at(root.path()).is_err());
+            Ok(())
+        })?;
+        let reopened = initialize_safe_runtime_at(root.path())?;
+        drop(reopened);
+        Ok(())
     }
 
     fn refresh_fixture_rows(
