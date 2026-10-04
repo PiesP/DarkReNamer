@@ -357,17 +357,29 @@ function Resolve-VerifiedBundle {
                     throw 'bundle.json fixed refresh diagnostic is invalid.'
                 }
             }
-            elseif ($diagnostic.Value.kind -ceq 'focused-icon-tests') {
+            elseif ($diagnostic.Value.kind -cin @('focused-icon-tests', 'focused-refresh-tests')) {
                 $selectedCase = $diagnostic.Value.PSObject.Properties['test_name']
                 Assert-ExactProperties -Value $diagnostic.Value -Names (@(
                     'kind', 'test_profile', 'test_filter'
                 ) + @(if ($null -ne $selectedCase) { 'test_name' } else { 'test_names' })) -Label 'bundle.json diagnostic'
-                $fixedNames = @(
-                    'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
-                    'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
-                    'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
-                    'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
-                )
+                $fixedNames = if ($diagnostic.Value.kind -ceq 'focused-icon-tests') {
+                    @(
+                        'windows::list_view::native_tests::icon_worker_bootstrap_and_miss_keep_ui_responsive',
+                        'windows::list_view::native_tests::icon_worker_bounds_eviction_and_stale_results',
+                        'windows::list_view::native_tests::icon_worker_close_and_forced_destroy_retire',
+                        'windows::list_view::native_tests::icon_worker_failures_and_message_loop_retire'
+                    )
+                } else {
+                    @(
+                        'windows::list_view::native_tests::full_refresh_native_rows_and_proposals',
+                        'windows::list_view::native_tests::full_refresh_native_fallback_and_apply_lock',
+                        'windows::list_view::native_tests::full_refresh_native_dates_follow_locale_and_timezone',
+                        'windows::list_view::native_tests::full_refresh_native_viewport_focus_and_close'
+                    )
+                }
+                $fixedFilter = if ($diagnostic.Value.kind -ceq 'focused-icon-tests') {
+                    'windows::list_view::native_tests::icon_worker_'
+                } else { 'windows::list_view::native_tests::full_refresh_' }
                 $validNames = $true
                 if ($null -eq $selectedCase) {
                     $validNames = $null -ne $diagnostic.Value.PSObject.Properties['test_names'] -and
@@ -384,10 +396,10 @@ function Resolve-VerifiedBundle {
                     }
                 }
                 if ($diagnostic.Value.test_profile -cnotin @('debug', 'release') -or
-                    $diagnostic.Value.test_filter -cne 'windows::list_view::native_tests::icon_worker_' -or
+                    $diagnostic.Value.test_filter -cne $fixedFilter -or
                     ($null -ne $selectedCase -and $selectedCase.Value -cnotin $fixedNames) -or
                     ($null -eq $selectedCase -and -not $validNames)) {
-                    throw 'bundle.json fixed focused icon selection is invalid.'
+                    throw 'bundle.json fixed focused native selection is invalid.'
                 }
             }
             else { throw 'bundle.json diagnostic kind is invalid.' }
