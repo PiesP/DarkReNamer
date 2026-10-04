@@ -3508,14 +3508,23 @@ Invoke-DrTestPowerShellModuleScope `
     if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
         throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
     }
+    $failedRefreshSummary = Read-RustTestSummary `
+        -Stdout 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out;' `
+        -Stderr '' -RefreshProfile
+    if ($failedRefreshSummary.outcome -cne 'FAILED' -or
+        $failedRefreshSummary.passed -ne 0 -or $failedRefreshSummary.failed -ne 1 -or
+        $failedRefreshSummary.ignored -ne 0 -or $failedRefreshSummary.filtered -ne 2) {
+        throw 'The fixed refresh diagnostic lost parseable failed-test counts.'
+    }
     foreach ($invalid in @(
         'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;',
         'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
-        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;'
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 2 filtered out;',
+        'test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;'
     )) {
         Assert-Fails {
             Read-RustTestSummary -Stdout $invalid -Stderr '' -RefreshProfile
-        } 'must select exactly one passing ignored test'
+        } 'must select exactly one ignored test'
     }
     Assert-Fails {
         Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' -Stderr ''

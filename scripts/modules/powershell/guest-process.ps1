@@ -25,9 +25,10 @@
     if (-not $RefreshProfile -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
     }
-    if ($RefreshProfile -and ($summary.Groups[1].Value -cne 'ok' -or
-        $passed -ne 1 -or $failed -ne 0 -or $ignored -ne 0 -or $filtered -lt 1)) {
-        throw 'The fixed refresh diagnostic must select exactly one passing ignored test.'
+    if ($RefreshProfile -and ($passed + $failed -ne 1 -or
+        $ignored -ne 0 -or $filtered -lt 1 -or
+        ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
+        throw 'The fixed refresh diagnostic must select exactly one ignored test.'
     }
     if (-not $AllowZeroTests -and ($passed + $failed + $ignored) -eq 0) {
         throw 'A non-main Rust test harness reported zero tests.'
