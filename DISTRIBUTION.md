@@ -52,6 +52,33 @@ latest designation are distinct; neither changes the supported environment.
 Regular-release status does not require a 1.0.0 version number; the tag must
 still match the chosen Cargo workspace version exactly.
 
+## Prepared 0.1.6 release notes
+
+The next patch delivers [PR #45](https://github.com/PiesP/DarkReNamer/pull/45):
+full refresh streams one additional complete owned row instead of retaining a
+second complete formatted row list. All native column values, including hidden
+columns, remain available. Native-count mismatch or partial update failure
+retains the explicit authoritative rebuild fallback and Apply blocking when
+synchronization cannot be restored. Icon scheduling and file-mutation authority
+are unchanged. Optional timestamp reuse was not selected.
+
+In the [previously recorded prepared-VM comparison](https://github.com/PiesP/DarkReNamer/issues/31#issuecomment-5984364932),
+the selected 10,000-row workload's median sampled peak Private Bytes decreased
+by about 5.77 MiB (11.12%); whole-run sampled peak reduction was about 1.01 MiB.
+The 10,000-row elapsed median increased by 3.09% within the predeclared local
+adoption screen. These are historical development observations from two runs
+per product with 200-ms resource sampling; the workload was four 2,250-row
+additions after 1,000 rows. They are not a fresh benchmark of the packaged
+candidate or a comparison against published v0.1.5's exact executable.
+No general speed improvement is claimed.
+
+The [async-worker normal comparison remains deferred, not verified](https://github.com/PiesP/DarkReNamer/issues/32#issuecomment-5980518916).
+A Shell or import provider that never returns can keep close pending; the
+executable remains intentionally unsigned (`NotSigned`). Preparation is not
+publication approval: the exact new candidate and evidence tuple still require
+the existing validation and separate authorization. Historical v0.1.5 excluded
+this optimization and remains unchanged.
+
 ## Current unsigned handoff
 
 The current executable is intentionally Authenticode `NotSigned`. The packaging
@@ -146,6 +173,12 @@ digest and statement schema agree, and all pinned values agree with current
 `origin/master`, the successful candidate workflow metadata, the unexpired
 artifact metadata, the downloaded handoff
 bytes, the original candidate attestation, and the existing remote tag.
+
+Before collecting new raw evidence, use the local POSIX owner-only destination
+procedure in [campaign development](DEVELOPMENT.md#vm-automated-campaign-development).
+Temporary and final campaign ZIPs are created owner-only before content is
+written, rather than restricted after packaging. This does not retroactively
+prove creation-time privacy of historical evidence archives.
 
 The manual VM validation workflow obtains raw evidence from one dedicated,
 never-published draft release asset owned and uploaded by the repository owner.
