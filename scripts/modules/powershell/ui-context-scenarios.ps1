@@ -2623,6 +2623,16 @@ function Test-ObserverIconTerminalSnapshot {
         $Snapshot.reconcile_rows -eq 0 -and $Snapshot.batch_ack -eq 0
 }
 
+function Test-ObserverIconTransientStatusQueryError {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $outer = $ErrorRecord.Exception
+    $inner = $outer.InnerException
+    $outer -is [Management.Automation.MethodInvocationException] -and
+        $null -ne $inner -and $inner.GetType() -eq [InvalidOperationException] -and
+        $inner.Message -ceq 'Icon status query did not produce a stable published snapshot.'
+}
+
 function Wait-ObserverIconSettlementPhase {
     param([Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][long] $StartUtcTicks,
@@ -2646,7 +2656,7 @@ function Wait-ObserverIconSettlementPhase {
             $snapshot = Get-ObserverIconStatusSnapshot -Application $Application -StartUtcTicks $StartUtcTicks
         }
         catch {
-            if ($_.Exception.Message -cne 'Icon status query did not produce a stable published snapshot.') {
+            if (-not (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_)) {
                 throw
             }
             $unstableQueries++
