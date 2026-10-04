@@ -3301,9 +3301,15 @@ mod native_tests {
                         refresh_all_rows(state);
                         state.list_window
                     };
-                    nested_rx
-                        .recv_timeout(Duration::from_secs(2))
-                        .map_err(|_| io::Error::other("nested class query did not block"))?;
+                    // A busy first submit is retried by the ordinary UI poll.
+                    // Keep servicing that poll while awaiting the real worker
+                    // entry, under the original two-second bound.
+                    pump_icon_test_until(nested, Duration::from_secs(2), || {
+                        nested_rx.try_recv().is_ok()
+                    })
+                    .map_err(|error| {
+                        io::Error::other(format!("nested class query did not block: {error}"))
+                    })?;
                     ICON_TEST_DESTROY_BUSY.with(|observed| observed.set(false));
                     // SAFETY: the test owns this live child; the exact
                     // subclass removes itself in its WM_NCDESTROY callback.
