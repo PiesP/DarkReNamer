@@ -1565,6 +1565,33 @@ function Get-ObserverPerformancePhaseSummary {
     $summary.ToArray()
 }
 
+function Invoke-ObserverBoundPerformanceCommand {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][uint32] $CommandId,
+        [Parameter(Mandatory)][string] $ScenarioPhase,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $CommandSends)
+
+    if ($CommandSends.Count -ge 20) { throw 'Performance command observation limit exceeded.' }
+    try {
+        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+            [IntPtr]$Application.main_handle, [uint32]$Application.process.Id, $CommandId, $ScenarioPhase)
+    }
+    finally {
+        $diagnostic = [DarkReNamerVmAcceptanceNative]::LastPerformanceCommandDiagnostic
+        if ($null -ne $diagnostic) {
+            $CommandSends.Add([ordered]@{
+                command_id = [long]$diagnostic.CommandId
+                scenario_phase = [string]$diagnostic.ScenarioPhase
+                native_return = $diagnostic.NativeReturn
+                message_result = $diagnostic.MessageResult
+                error_code = $diagnostic.ErrorCode
+                elapsed_ms = $diagnostic.ElapsedMs
+                status = [string]$diagnostic.Status
+            })
+        }
+    }
+}
+
 function Invoke-ObserverPerformanceSampleScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -1621,6 +1648,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     $samples = $null
     $timings = [Collections.Generic.List[object]]::new()
     $clearRowCounts = [Collections.Generic.List[int]]::new()
+    $commandSends = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
     $ObservationSink['plan'] = [ordered]@{
@@ -1640,6 +1668,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     }
     $ObservationSink['timings'] = $timings
     $ObservationSink['clear_row_counts'] = $clearRowCounts
+    $ObservationSink['command_sends'] = $commandSends
     try {
         $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'performance sample application' `
@@ -1751,8 +1780,8 @@ function Invoke-ObserverPerformanceSampleScenario {
         $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$fullElapsedMs;
             command_elapsed_ms=$prefix.elapsed_ms; rows=10000;
             observed_rows=[int]$grid.pattern.Current.RowCount })
-        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
-            [uint32]$application.process.Id, [uint32]0x800E)
+        Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
+            -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance list clear did not remove all rows.' }
         $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
         $longModes = if ($LongPathOrder -eq 'visible-hidden') { @('long-visible','long-hidden') }
@@ -1765,8 +1794,8 @@ function Invoke-ObserverPerformanceSampleScenario {
             $wantVisible = $mode -eq 'long-visible'
             if ($wantVisible -ne $columnsVisible) {
                 foreach ($command in @(0x8020,0x8021,0x8022,0x8023)) {
-                    [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
-                        [IntPtr]$application.main_handle, [uint32]$application.process.Id, [uint32]$command)
+                    Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId $command `
+                        -ScenarioPhase "$mode-columns" -CommandSends $commandSends
                 }
                 $columnsVisible = $wantVisible
             }
@@ -1792,8 +1821,8 @@ function Invoke-ObserverPerformanceSampleScenario {
                     throw 'Performance visible auxiliary column values differ.'
                 }
             }
-            [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
-                [uint32]$application.process.Id, [uint32]0x800E)
+            Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
+                -ScenarioPhase "$mode-clear" -CommandSends $commandSends
             if ($grid.pattern.Current.RowCount -ne 0) { throw "Performance $mode list did not clear." }
             $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
         }
@@ -1801,8 +1830,8 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['long_representatives'] = $longRepresentatives
         if (-not $columnsVisible) {
             foreach ($command in @(0x8020,0x8021,0x8022,0x8023)) {
-                [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
-                    [IntPtr]$application.main_handle, [uint32]$application.process.Id, [uint32]$command)
+                Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId $command `
+                    -ScenarioPhase 'extension-columns' -CommandSends $commandSends
             }
         }
         $restoredWidths = @(3..6 | ForEach-Object {
@@ -1824,8 +1853,8 @@ function Invoke-ObserverPerformanceSampleScenario {
         if ($grid.pattern.GetItem(999, 0).Current.Name -cne 'recurring-0999.txt') {
             throw 'Performance recurring extension fixture differs.'
         }
-        [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
-            [uint32]$application.process.Id, [uint32]0x800E)
+        Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
+            -ScenarioPhase 'extension-clear' -CommandSends $commandSends
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance extension list did not clear.' }
         $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
         foreach ($cycle in 1..3) {
@@ -1841,8 +1870,8 @@ function Invoke-ObserverPerformanceSampleScenario {
             if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
                 throw "Performance $id reset did not restore the original name."
             }
-            [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand([IntPtr]$application.main_handle,
-                [uint32]$application.process.Id, [uint32]0x800E)
+            Invoke-ObserverBoundPerformanceCommand -Application $application -CommandId 0x800E `
+                -ScenarioPhase "$id-clear" -CommandSends $commandSends
             if ($grid.pattern.Current.RowCount -ne 0) { throw "Performance $id did not clear." }
             $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
             $timings.Add([ordered]@{ id=$id; elapsed_ms=[Math]::Round($cycleWatch.Elapsed.TotalMilliseconds, 3);
