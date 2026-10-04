@@ -455,6 +455,12 @@ the runtime lock alive until the sole JoinHandle is observed finished and joined
 The UI keeps pumping during a blocked provider call; no hard Shell timeout is
 claimed.
 
+The ignored refresh-stage diagnostic keeps its original detached ListView
+fixture. Its versioned asynchronous-icon JSON measures UI text, issue and
+native-row staging only; it has no icon worker and cannot establish Shell
+latency, icon settlement, or production responsiveness. Those require the
+tracked-worker native cases and source-bound product observations.
+
 The ignored icon-delay diagnostic in `windows/list_view.rs` installs a subclass
 only on its test-owned HWND. Its boxed context remains on the owning UI thread
 through synchronous destruction; `WM_NCDESTROY` removes the exact subclass and

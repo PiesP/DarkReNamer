@@ -1441,20 +1441,28 @@ fn rendered_row(
     refresh_profile::record(|counters| counters.rows_formatted += 1);
     let key = icon_cache_key(item.current_name(), item.is_directory());
     let (icon, icon_resolved) = if let Some(index) = icon_cache.get(&key) {
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.render_icon_cache_hits += 1);
         (*index, true)
-    } else if let Some(previous) = previous.filter(|row| {
-        row.icon_resolved
-            && row.icon_key == key
-            && row.values[0] == *item.current_name()
-            && row.values[2] == *item.root_path()
-            && row.values[3] == *item.source_path()
-    }) {
-        (previous.icon, true)
-    } else if let Some(shared) = icon_shared {
-        let _ = shared.submit(key.clone());
-        (I_IMAGENONE, shared.is_unavailable())
     } else {
-        (I_IMAGENONE, true)
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.render_icon_cache_misses += 1);
+        if let Some(previous) = previous.filter(|row| {
+            row.icon_resolved
+                && row.icon_key == key
+                && row.values[0] == *item.current_name()
+                && row.values[2] == *item.root_path()
+                && row.values[3] == *item.source_path()
+        }) {
+            (previous.icon, true)
+        } else if let Some(shared) = icon_shared {
+            #[cfg(test)]
+            refresh_profile::record(|counters| counters.icon_request_submissions += 1);
+            let _ = shared.submit(key.clone());
+            (I_IMAGENONE, shared.is_unavailable())
+        } else {
+            (I_IMAGENONE, true)
+        }
     };
     RenderedRow {
         values: [
@@ -1528,6 +1536,8 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
         && let Some(completions) = shared.snapshot_completions()
     {
         had_completions = !completions.is_empty();
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.icon_results_drained += completions.len());
         state.icon_delivery_ack_count = completions.len();
         for completion in completions {
             match completion.result {
@@ -1863,12 +1873,8 @@ fn cached_file_icon_index(
 ) -> i32 {
     let key = icon_cache_key(item.current_name(), item.is_directory());
     if let Some(index) = cache.get(&key) {
-        #[cfg(test)]
-        refresh_profile::record(|counters| counters.cache_hits += 1);
         return *index;
     }
-    #[cfg(test)]
-    refresh_profile::record(|counters| counters.cache_misses += 1);
     let (result, index) = query(&key, item.is_directory());
     // A failed query leaves SHFILEINFOW unusable. Cache a known no-image
     // fallback so a failing class cannot repeatedly block each row refresh.
@@ -1898,7 +1904,7 @@ fn query_shell_icon_index(key: &IconCacheKey, is_directory: bool) -> (usize, i32
         #[cfg(test)]
         let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Shell);
         #[cfg(test)]
-        refresh_profile::record(|counters| counters.shell_calls += 1);
+        refresh_profile::record(|counters| counters.ui_shell_calls += 1);
         // SAFETY: path is terminated and info remains writable through the call.
         unsafe {
             SHGetFileInfoW(
@@ -2019,9 +2025,11 @@ mod refresh_profile {
         pub(super) native_rows_visited: usize,
         pub(super) rows_formatted: usize,
         pub(super) timestamp_values: usize,
-        pub(super) shell_calls: usize,
-        pub(super) cache_hits: usize,
-        pub(super) cache_misses: usize,
+        pub(super) ui_shell_calls: usize,
+        pub(super) render_icon_cache_hits: usize,
+        pub(super) render_icon_cache_misses: usize,
+        pub(super) icon_request_submissions: usize,
+        pub(super) icon_results_drained: usize,
         pub(super) native_cells: usize,
         pub(super) native_insertions: usize,
         pub(super) native_deletions: usize,
@@ -2105,16 +2113,21 @@ mod refresh_profile {
             ] = counters.times_ns;
             assert!(timestamps + shell <= inclusive_rows);
             let exclusive_rows = inclusive_rows - timestamps - shell;
+            assert_eq!(shell, 0, "detached UI fixture made a Shell call");
+            assert_eq!(counters.maximum_shell_ns, 0);
+            assert_eq!(counters.ui_shell_calls, 0);
             println!(
-                "{{\"kind\":\"refresh-stages-test-build\",\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"shell_nested_ns\":{shell},\"shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"shell_calls\":{},\"cache_hits\":{},\"cache_misses\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{}}}",
+                "{{\"kind\":\"refresh-stages-icon-async-test-build\",\"schema_version\":2,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{}}}",
                 counters.maximum_shell_ns,
                 counters.issue_count_input_rows_visited,
                 counters.native_rows_visited,
                 counters.rows_formatted,
                 counters.timestamp_values,
-                counters.shell_calls,
-                counters.cache_hits,
-                counters.cache_misses,
+                counters.ui_shell_calls,
+                counters.render_icon_cache_hits,
+                counters.render_icon_cache_misses,
+                counters.icon_request_submissions,
+                counters.icon_results_drained,
                 counters.native_cells,
                 counters.native_insertions,
                 counters.native_deletions,
@@ -2469,6 +2482,7 @@ mod native_tests {
     }
 
     fn pump_icon_test_until(
+        window: HWND,
         timeout: Duration,
         mut condition: impl FnMut() -> bool,
     ) -> io::Result<()> {
@@ -2480,7 +2494,13 @@ mod native_tests {
             }
             // SAFETY: this test owns the UI thread queue and writable MSG.
             while unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } != 0 {
-                if message.message != WM_QUIT {
+                if message.hwnd.is_null() && message.message == WM_APP_ICON_WAKE {
+                    // Production run handles this thread wake outside
+                    // DispatchMessageW. Mirror that path on the test UI thread.
+                    if let Some(mut lease) = try_app_state(window) {
+                        poll_icon_work(lease.state_mut());
+                    }
+                } else if message.message != WM_QUIT {
                     // SAFETY: the copied OS message remains live for dispatch.
                     unsafe {
                         TranslateMessage(&message);
@@ -2489,7 +2509,24 @@ mod native_tests {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(io::Error::other("icon test observer deadline expired"));
+                let progress = try_app_state(window).map(|lease| {
+                    let state = lease.state();
+                    let pending = state.icon_shared.as_ref().map_or(0, |shared| shared.pending_count());
+                    format!(
+                        "rows={} unresolved={} pending={} reconcile={} batch={} demand={} cursor={}",
+                        state.rendered_rows.len(),
+                        state.icon_unresolved_rows,
+                        pending,
+                        state.icon_reconcile_remaining,
+                        state.icon_delivery_ack_count,
+                        state.icon_demand_scan_remaining,
+                        state.icon_scan_cursor,
+                    )
+                });
+                return Err(io::Error::other(format!(
+                    "icon test observer deadline expired: {}",
+                    progress.as_deref().unwrap_or("owner unavailable")
+                )));
             }
             thread::sleep(Duration::from_millis(5));
         }
@@ -2576,7 +2613,9 @@ mod native_tests {
         // message; the subclass records actual queued dispatch.
         let posted = unsafe { PostMessageW(window, ICON_TEST_ACK_MESSAGE, 0, 0) } != 0;
         let observed = if posted {
-            pump_icon_test_until(Duration::from_secs(1), || ICON_TEST_ACKED.with(Cell::get))
+            pump_icon_test_until(window, Duration::from_secs(1), || {
+                ICON_TEST_ACKED.with(Cell::get)
+            })
         } else {
             Err(io::Error::last_os_error())
         };
@@ -2656,12 +2695,12 @@ mod native_tests {
                 .map_err(|_| io::Error::other("bootstrap did not enter the worker"))?;
             assert_ui_ack_while_icon_blocked(window)?;
             bootstrap_gate.release();
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 miss_entered.load(Ordering::Acquire)
             })?;
             assert_ui_ack_while_icon_blocked(window)?;
             miss_gate.release();
-            pump_icon_test_until(Duration::from_secs(10), || {
+            pump_icon_test_until(window, Duration::from_secs(10), || {
                 try_app_state(window).is_some_and(|lease| {
                     lease.state().icon_image_list.is_some()
                         && lease.state().icon_unresolved_rows == 0
@@ -2672,10 +2711,58 @@ mod native_tests {
                 .ok_or_else(|| io::Error::other("icon test state disappeared"))?;
             assert_native_refresh_values(lease.state());
             drop(lease);
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("icon test state unavailable"))?;
+                let state = lease.state_mut();
+                assert!(state.model.move_rows_earlier_changed(&[1]).changed());
+                refresh_all_rows(state);
+                assert_native_refresh_values(state);
+                assert!(state.model.clear());
+                refresh_all_rows(state);
+                assert_eq!(state.rendered_rows.len(), 0);
+                // SAFETY: this scalar count queries the live test ListView.
+                assert_eq!(
+                    // SAFETY: the live test-owned ListView receives only
+                    // scalar parameters and returns its item count.
+                    unsafe { SendMessageW(state.list_window, LVM_GETITEMCOUNT, 0, 0) },
+                    0
+                );
+                state
+                    .model
+                    .append_batch_by(
+                        [
+                            LegacyListItem::new(r"C:\icon-test\fresh.alpha", false, 0, 0, 0),
+                            LegacyListItem::new(r"C:\icon-test\fresh.beta", false, 0, 0, 0),
+                        ],
+                        compare_windows,
+                    )
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                refresh_all_rows(state);
+                assert_native_refresh_values(state);
+                assert_eq!(state.model.remove_rows(&[0]), 1);
+                assert_eq!(
+                    state.model.append(LegacyListItem::new(
+                        r"C:\icon-test\renamed.gamma",
+                        false,
+                        0,
+                        0,
+                        0,
+                    )),
+                    Ok(true)
+                );
+                refresh_all_rows(state);
+                assert_native_refresh_values(state);
+            }
+            pump_icon_test_until(window, Duration::from_secs(10), || {
+                try_app_state(window).is_some_and(|lease| {
+                    lease.state().icon_unresolved_rows == 0 && guardian.shared.pending_count() == 0
+                })
+            })?;
             // SAFETY: this exact live production owner handles the ordinary
             // close message after the AppState lease has ended.
             unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
-            pump_icon_test_until(Duration::from_secs(10), || {
+            pump_icon_test_until(window, Duration::from_secs(10), || {
                 guardian.poll_join();
                 // SAFETY: this scalar liveness query does not borrow AppState.
                 unsafe { IsWindow(window) == 0 }
@@ -2756,7 +2843,7 @@ mod native_tests {
             let _release = ReleaseIconGate(gate.clone());
             let _release_stale = ReleaseIconGate(stale_gate.clone());
             install_icon_test_guardian(window, &guardian)?;
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 try_app_state(window).is_some_and(|lease| lease.state().icon_image_list.is_some())
             })?;
             {
@@ -2804,7 +2891,7 @@ mod native_tests {
             assert_eq!(guardian.shared.pending_count(), 64);
             assert_ui_ack_while_icon_blocked(window)?;
             gate.release();
-            pump_icon_test_until(Duration::from_secs(45), || {
+            pump_icon_test_until(window, Duration::from_secs(45), || {
                 try_app_state(window).is_some_and(|lease| {
                     lease.state().icon_unresolved_rows == 0 && guardian.shared.pending_count() == 0
                 })
@@ -2839,7 +2926,7 @@ mod native_tests {
                 refresh_all_rows(state);
                 assert_eq!(state.icon_unresolved_rows, 1);
             }
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 stale_entered.load(Ordering::Acquire)
             })?;
             {
@@ -2862,7 +2949,7 @@ mod native_tests {
                 assert!(!state.rendered_rows[10_002].icon_resolved);
             }
             stale_gate.release();
-            pump_icon_test_until(Duration::from_secs(10), || {
+            pump_icon_test_until(window, Duration::from_secs(10), || {
                 try_app_state(window).is_some_and(|lease| {
                     lease.state().icon_unresolved_rows == 0 && guardian.shared.pending_count() == 0
                 })
@@ -2913,7 +3000,7 @@ mod native_tests {
             )?;
             let _release = ReleaseIconGate(gate.clone());
             install_icon_test_guardian(window, &guardian)?;
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 try_app_state(window).is_some_and(|lease| lease.state().icon_image_list.is_some())
             })?;
             {
@@ -2984,7 +3071,7 @@ mod native_tests {
                     )?;
                     let _nested_release = ReleaseIconGate(nested_gate.clone());
                     install_icon_test_guardian(nested, &nested_guardian)?;
-                    pump_icon_test_until(Duration::from_secs(5), || {
+                    pump_icon_test_until(nested, Duration::from_secs(5), || {
                         try_app_state(nested)
                             .is_some_and(|lease| lease.state().icon_image_list.is_some())
                     })?;
@@ -3025,7 +3112,7 @@ mod native_tests {
                         0
                     );
                     nested_gate.release();
-                    pump_icon_test_until(Duration::from_secs(10), || {
+                    pump_icon_test_until(nested, Duration::from_secs(10), || {
                         // SAFETY: this query observes only HWND liveness.
                         unsafe { IsWindow(nested) == 0 }
                     })?;
@@ -3087,7 +3174,7 @@ mod native_tests {
                 .map_err(|_| io::Error::other("failed worker did not enter startup"))?;
             assert_ui_ack_while_icon_blocked(window)?;
             gate.release();
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 failed.poll_join();
                 try_app_state(window).is_some_and(|lease| {
                     let state = lease.state();
@@ -3129,7 +3216,9 @@ mod native_tests {
                     },
                 )
             })?;
-            pump_icon_test_until(Duration::from_secs(5), || bootstrap_failed.poll_join())?;
+            pump_icon_test_until(window, Duration::from_secs(5), || {
+                bootstrap_failed.poll_join()
+            })?;
             assert!(bootstrap_failed.shared.is_unavailable());
             assert_eq!(bootstrap_failed.shared.pending_count(), 0);
 
@@ -3137,7 +3226,7 @@ mod native_tests {
                 let mut shell = icon_worker::ShellLookup::initialize()?;
                 Some(move |key: &crate::icon_requests::RequestKey<IconCacheKey>| shell.query(key))
             })?;
-            pump_icon_test_until(Duration::from_secs(5), || {
+            pump_icon_test_until(window, Duration::from_secs(5), || {
                 quit.shared.snapshot_completions().is_some_and(|batch| {
                     batch.iter().any(|completion| {
                         matches!(
@@ -3148,7 +3237,7 @@ mod native_tests {
                 })
             })?;
             assert!(quit.shared.post_quit_for_test());
-            pump_icon_test_until(Duration::from_secs(5), || quit.poll_join())?;
+            pump_icon_test_until(window, Duration::from_secs(5), || quit.poll_join())?;
             assert!(quit.shared.is_unavailable());
             assert_eq!(quit.shared.pending_count(), 0);
             assert!(quit.shared.is_joined());
@@ -3182,15 +3271,30 @@ mod native_tests {
     }
 
     fn assert_native_refresh_values(state: &AppState) {
+        assert_eq!(state.rendered_rows.len(), state.model.len());
         for row in [
             0,
             state.model.len() / 2,
             state.model.len().saturating_sub(1),
         ] {
-            let Some(expected) = state.rendered_rows.get(row) else {
+            let Some(item) = state.model.items().get(row) else {
                 continue;
             };
-            for (column, value) in expected.values.iter().enumerate() {
+            let expected_values = [
+                item.current_name().clone(),
+                item.proposed_name().clone(),
+                item.root_path().clone(),
+                item.source_path().clone(),
+                LegacyText::from(format_iec_file_size(item.actual_size())),
+                format_filetime(item.modified()),
+                format_filetime(item.created()),
+                LegacyText::from(preview_status_label(
+                    state.preview_issue_cache.issue(row),
+                    item.planned_change_kind(),
+                )),
+            ];
+            assert_eq!(state.rendered_rows[row].values, expected_values);
+            for (column, value) in expected_values.iter().enumerate() {
                 let mut text = vec![0_u16; value.len() + 1];
                 let mut query = LVITEMW {
                     iItem: row as i32,
@@ -3228,7 +3332,10 @@ mod native_tests {
                 )
             };
             assert_ne!(found, 0);
-            assert_eq!(query.iImage, expected.icon);
+            // The requested class result is asserted by each native test;
+            // this checks that the scalar image applied to the native row is
+            // the same one retained for that exact current model row.
+            assert_eq!(query.iImage, state.rendered_rows[row].icon);
         }
     }
 
@@ -3237,6 +3344,9 @@ mod native_tests {
         label: &str,
         action: impl FnOnce(&mut AppState),
     ) -> refresh_profile::Counters {
+        // This fixture has no icon worker. Its clocks attribute only text,
+        // issue-count, and native-row UI staging, never async Shell latency.
+        assert!(state.icon_shared.is_none());
         let collection = refresh_profile::Collection::begin();
         action(state);
         let counters = collection.finish(label, state.model.len());
@@ -3247,10 +3357,12 @@ mod native_tests {
         assert_eq!(native_count, state.model.len() as isize);
         assert_eq!(counters.timestamp_values, counters.rows_formatted * 2);
         assert_eq!(
-            counters.cache_hits + counters.cache_misses,
+            counters.render_icon_cache_hits + counters.render_icon_cache_misses,
             counters.rows_formatted
         );
-        assert_eq!(counters.shell_calls, counters.cache_misses);
+        assert_eq!(counters.ui_shell_calls, 0);
+        assert_eq!(counters.icon_request_submissions, 0);
+        assert_eq!(counters.icon_results_drained, 0);
         assert_native_refresh_values(state);
         counters
     }
@@ -3297,6 +3409,7 @@ mod native_tests {
             )?;
             let medium = measure_refresh(state, "ordinary-1000", refresh_all_rows);
             assert_eq!(medium.rows_formatted, 1000);
+            assert!(state.icon_shared.is_none());
             let collection = refresh_profile::Collection::begin();
             // Keep the historical ordinary-10000 operation shape. Model append
             // is outside each stage clock but inside this scenario's envelope.
@@ -3311,7 +3424,13 @@ mod native_tests {
             let large = collection.finish("ordinary-10000", state.model.len());
             assert_eq!(large.rows_formatted, 3250 + 5500 + 7750 + 10000);
             assert_eq!(large.timestamp_values, large.rows_formatted * 2);
-            assert_eq!(large.cache_hits + large.cache_misses, large.rows_formatted);
+            assert_eq!(
+                large.render_icon_cache_hits + large.render_icon_cache_misses,
+                large.rows_formatted
+            );
+            assert_eq!(large.ui_shell_calls, 0);
+            assert_eq!(large.icon_request_submissions, 0);
+            assert_eq!(large.icon_results_drained, 0);
             assert_eq!(large.native_insertions, 9000);
             select_rows(state.list_window, &[4999]);
             let unchanged = measure_refresh(state, "ordinary-10000-unchanged", refresh_all_rows);
