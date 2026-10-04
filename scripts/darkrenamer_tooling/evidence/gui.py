@@ -28,6 +28,15 @@ REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
 PERFORMANCE_MODE = "performance-sample"
+FOCUSED_CLEAR_MODE = "focused-10k-clear"
+FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
+FOCUSED_CLEAR_SCOPE = "focused-10k-clear-v1"
+FOCUSED_CLEAR_PLAN = {
+    "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
+    "sample_interval_ms": 200, "maximum_seconds": 600,
+    "clear_command_id": 0x800E, "stop_after_first_clear": True,
+    "full_performance_sample": False,
+}
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -389,12 +398,14 @@ def validate_request(value: object) -> dict:
         fields.add("high_contrast")
     if isinstance(value, dict) and value.get("mode") == PERFORMANCE_MODE:
         fields.add("performance_plan")
+    if isinstance(value, dict) and value.get("mode") == FOCUSED_CLEAR_MODE:
+        fields.add("focused_clear_plan")
     if isinstance(value, dict) and value.get("mode") == ICON_SETTLEMENT_MODE:
         fields.update({"settlement_plan", "endpoint_method"})
         if value.get("endpoint_method") == ICON_BASELINE_METHOD:
             fields.add("baseline_product_source_sha")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, ICON_SETTLEMENT_MODE},
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
@@ -418,6 +429,11 @@ def validate_request(value: object) -> dict:
                 request["performance_plan"] == {**PERFORMANCE_PLAN,
                     "long_path_order": request["performance_plan"]["long_path_order"]},
                 "Performance request differs from its fixed plan.")
+    elif request["mode"] == FOCUSED_CLEAR_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                typed_equal(request["focused_clear_plan"], FOCUSED_CLEAR_PLAN),
+                "Focused clear request differs from its fixed plan.")
     elif request["mode"] == ICON_SETTLEMENT_MODE:
         require(request["appearance"] == "light" and
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
@@ -557,6 +573,21 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--diagnostic", PERFORMANCE_MODE, "--performance-column-order", order,
                             *prepared_args],
                 "Performance manifest identity or command is invalid.")
+    if request["mode"] == FOCUSED_CLEAR_MODE:
+        prepared = exact_keys(manifest.get("prepared_bundle"),
+                              {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              "focused clear prepared bundle")
+        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                prepared["application_sha256"] == artifacts["application"]["sha256"],
+                "Focused clear prepared executable differs from retained inputs.")
+        require(manifest["run_id"] == FOCUSED_CLEAR_RUN_ID and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", FOCUSED_CLEAR_MODE,
+                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--expected-prepared-application-sha256", prepared["application_sha256"]],
+                "Focused clear manifest identity or command is invalid.")
     if request["mode"] == ICON_SETTLEMENT_MODE:
         prepared = manifest.get("prepared_bundle")
         require(prepared is not None, "Icon settlement requires pinned prepared-bundle provenance.")
@@ -579,9 +610,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--acceptance-profile-id", V2_PROFILE_ID, *method_args],
                 "Icon settlement manifest identity or command is invalid.")
     else:
-        if request["mode"] != PERFORMANCE_MODE:
+        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE}:
             require("prepared_bundle" not in manifest,
-                    "Prepared bundle provenance is restricted to performance runs.")
+                    "Prepared bundle provenance is restricted to performance and focused clear runs.")
     if request["mode"] == "tooltip":
         require("full_context_reference" in manifest,
                 "The tooltip run requires a direct full-context reference.")
@@ -3129,6 +3160,228 @@ def validate_performance_lifecycle(lifecycles: object, scenario: dict, applicati
             "Performance exact process lifecycle did not close normally.")
 
 
+def validate_focused_clear_metrics(scenario: dict) -> dict:
+    require(typed_equal(scenario.get("plan"), FOCUSED_CLEAR_PLAN) and
+            scenario.get("timing_definitions") == PERFORMANCE_TIMING_DEFINITIONS and
+            not any(name in scenario for name in ("columns", "long_representatives",
+                                                   "extension_representatives")),
+            "Focused clear plan or later-work exclusion differs.")
+    startup = exact_keys(scenario.get("startup"), {"launch_request_to_ready_ms",
+        "process_start_to_ready_lower_ms", "process_start_to_ready_upper_ms",
+        "main_hwnd_bound", "empty_grid", "import_command_enabled"}, "focused startup")
+    for name in ("launch_request_to_ready_ms", "process_start_to_ready_lower_ms",
+                 "process_start_to_ready_upper_ms"):
+        require(type(startup[name]) in (int, float) and math.isfinite(startup[name]) and
+                0 < startup[name] <= 600000, "Focused startup timing is invalid.")
+    require(startup["process_start_to_ready_lower_ms"] <=
+            startup["process_start_to_ready_upper_ms"] <= startup["launch_request_to_ready_ms"] and
+            all(startup[name] is True for name in ("main_hwnd_bound", "empty_grid", "import_command_enabled")),
+            "Focused startup identity or readiness is incomplete.")
+    timings = scenario.get("timings")
+    names = ("ordinary-100", "ordinary-1000", "ordinary-10000", "full-preview")
+    require(isinstance(timings, list) and len(timings) == 4,
+            "Focused clear requires exactly four pre-clear timing rows.")
+    for name, row in zip(names, timings, strict=True):
+        fields = {"id", "elapsed_ms", "rows", "observed_rows"}
+        fields |= ({"batch_rows", "batch_command_ready_after_rows_ms"} if name == "ordinary-10000"
+                   else {"command_elapsed_ms"} if name == "full-preview"
+                   else {"command_ready_after_rows_ms"})
+        row = exact_keys(row, fields, f"focused timing {name}")
+        expected_rows = {"ordinary-100": 100, "ordinary-1000": 1000,
+                         "ordinary-10000": 10000, "full-preview": 10000}[name]
+        require(row["id"] == name and int_equals(row["rows"], expected_rows) and
+                int_equals(row["observed_rows"], expected_rows) and
+                type(row["elapsed_ms"]) in (int, float) and math.isfinite(row["elapsed_ms"]) and
+                0 < row["elapsed_ms"] <= 600000,
+                "Focused timing identity or row count differs.")
+        readiness = (row["batch_command_ready_after_rows_ms"] if name == "ordinary-10000"
+                     else [] if name == "full-preview" else [row["command_ready_after_rows_ms"]])
+        require((name != "ordinary-10000" or row["batch_rows"] == [2250] * 4) and
+                isinstance(readiness, list) and
+                (name != "ordinary-10000" or len(readiness) == 4) and
+                all(type(value) in (int, float) and math.isfinite(value) and
+                    0 <= value <= 600000 for value in readiness),
+                "Focused import readiness or 2250-row chunks differ.")
+        if name == "full-preview":
+            require(type(row["command_elapsed_ms"]) in (int, float) and
+                    0 < row["command_elapsed_ms"] <= row["elapsed_ms"],
+                    "Focused preview command duration is invalid.")
+    require(scenario.get("ordinary_representatives") == [
+        {"index": index, "name": f"ordinary-{index:05d}.txt"}
+        for index in (0, 4999, 9999)],
+        "Focused 10000-row ordinary fixture differs.")
+    preview = scenario.get("full_preview_rows")
+    indices = (0, 2499, 4999, 7499, 9999)
+    require(isinstance(preview, list) and len(preview) == 5,
+            "Focused full preview/reset observations are incomplete.")
+    for index, row in zip(indices, preview, strict=True):
+        row = exact_keys(row, {"index", "source", "prefixed", "reset"},
+                         f"focused preview {index}")
+        original = f"ordinary-{index:05d}.txt"
+        require(int_equals(row["index"], index) and row["source"] == row["reset"] == original and
+                row["prefixed"] == "sample-" + original,
+                "Focused preview/reset row differs.")
+    first = exact_keys(scenario.get("first_clear"),
+                       {"stage", "command_id", "process_id", "main_handle", "pre_clear_rows",
+                        "preview_reset", "post_clear_rows"}, "focused first clear")
+    require(first["stage"] == "verified-empty" and int_equals(first["command_id"], 0x800E) and
+            int_equals(first["pre_clear_rows"], 10000) and
+            int_equals(first["post_clear_rows"], 0) and
+            first["preview_reset"] == [f"ordinary-{index:05d}.txt" for index in indices] and
+            int_equals(first["process_id"], scenario.get("process_id")) and
+            type(first["main_handle"]) is int and first["main_handle"] > 0 and
+            int_equals(first["main_handle"], nested(scenario, "environment", "main_window", "hwnd")) and
+            scenario.get("clear_row_counts") == [0],
+            "Focused first clear binding or empty-row postcondition differs.")
+    commands = scenario.get("command_sends")
+    require(isinstance(commands, list) and len(commands) == 1,
+            "Focused clear must send exactly one bounded command.")
+    command = exact_keys(commands[0], {"command_id", "scenario_phase", "native_return",
+        "message_result", "error_code", "elapsed_ms", "status"}, "focused command")
+    require(int_equals(command["command_id"], 0x800E) and
+            command["scenario_phase"] == "full-preview-clear" and
+            type(command["native_return"]) is int and command["native_return"] != 0 and
+            type(command["message_result"]) is int and
+            type(command["error_code"]) is int and 0 <= command["error_code"] <= 0xFFFFFFFF and
+            type(command["elapsed_ms"]) in (int, float) and
+            math.isfinite(command["elapsed_ms"]) and 0 <= command["elapsed_ms"] <= 600000 and
+            command["status"] == "success",
+            "Focused command did not prove a successful bounded native send.")
+    samples = scenario.get("samples")
+    phases = ("empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
+              "single-row", "full-preview", "post")
+    require(isinstance(samples, list) and 150 <= len(samples) <= 3000,
+            "Focused sampler did not cover its bounded 30-second idle.")
+    by_phase = {name: [] for name in phases}
+    previous_elapsed = -1
+    previous_phase = 0
+    for index, value in enumerate(samples):
+        row = exact_keys(value, {"phase", "elapsed_ms", "cpu_ms", "private_bytes",
+            "working_set_bytes", "threads", "handles", "gdi_objects", "ui_response_ms",
+            "probe_status", "probe_error_code", "resource_collection_ms", "sample_gap_ms"},
+            f"focused sample {index}")
+        require(row["phase"] in by_phase and phases.index(row["phase"]) >= previous_phase,
+                "Focused sampler entered a later performance phase or regressed.")
+        previous_phase = phases.index(row["phase"])
+        elapsed = checked_int(row["elapsed_ms"], 0, 600000, "focused elapsed_ms")
+        require(elapsed > previous_elapsed and
+                checked_int(row["cpu_ms"], 0, 6000000, "focused cpu_ms") >= 0 and
+                all(type(row[name]) is int and row[name] > 0 for name in
+                    ("private_bytes", "working_set_bytes")) and
+                all(type(row[name]) is int and row[name] >= 0 for name in
+                    ("threads", "handles", "gdi_objects")) and
+                all(type(row[name]) in (int, float) and math.isfinite(row[name]) and
+                    0 <= row[name] <= 600000 for name in
+                    ("ui_response_ms", "resource_collection_ms", "sample_gap_ms")) and
+                row["probe_status"] in {"success", "timeout", "failure_unknown"} and
+                type(row["probe_error_code"]) is int and
+                ((row["probe_status"] == "success" and row["probe_error_code"] == 0) or
+                 (row["probe_status"] == "timeout" and row["probe_error_code"] == 1460) or
+                 (row["probe_status"] == "failure_unknown" and row["probe_error_code"] != 1460)),
+                "Focused sample resource, probe, or time value is invalid.")
+        previous_elapsed = elapsed
+        by_phase[row["phase"]].append(row)
+    require(samples[0]["phase"] == "empty-idle" and samples[-1]["phase"] == "post" and
+            by_phase["empty-idle"][-1]["elapsed_ms"] >= 29000 and
+            all(by_phase[name] for name in ("ordinary-10000", "full-preview")),
+            "Focused sampler lacks idle, import, preview, or post coverage.")
+    summary = scenario.get("phase_summary")
+    require(isinstance(summary, list) and len(summary) == len(phases) and
+            all(summary[index] == {"phase": phase, "sample_count": len(by_phase[phase]),
+                "max_sample_gap_ms": max((row["sample_gap_ms"] for row in by_phase[phase]), default=0),
+                "max_resource_collection_ms": max((row["resource_collection_ms"] for row in by_phase[phase]), default=0)}
+                for index, phase in enumerate(phases)),
+            "Focused sampler phase summary differs from raw samples.")
+    require(scenario.get("wakeups") == {"status": "not_run", "reason": "no-supported-process-wakeup-counter"} and
+            scenario.get("disk_unchanged") is True and
+            int_equals(scenario.get("journal_residue_count"), 0) and
+            int_equals(scenario.get("normal_exit_code"), 0),
+            "Focused fixture, journal, or normal-close evidence is missing.")
+    return {"sample_count": len(samples), "first_clear_elapsed_ms": command["elapsed_ms"],
+            "first_clear_status": command["status"]}
+
+
+def validate_focused_clear_run(root: Path, run_id: str, source_sha: str) -> dict:
+    require(run_id == FOCUSED_CLEAR_RUN_ID, "Focused clear run id is invalid.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(),
+            "Focused clear run directory is missing or unsafe.")
+    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    require(manifest["request"]["mode"] == FOCUSED_CLEAR_MODE,
+            "Focused clear request mode is missing.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 32 * 1024 * 1024 and
+            {name for name in files if name.endswith(".png")} == {"performance-empty.png"},
+            "Focused clear exceeds its 32 MiB/one-PNG output budget.")
+    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    result, _ = read_json(run_root / "output", Path("run-result.json"), "focused result")
+    result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
+        "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256",
+        "observer_sha256", "observer_result_sha256", "status", "exit_code"}, "focused result")
+    artifacts = manifest["artifacts"]
+    require(int_equals(result["schema_version"], 1) and
+            result["diagnostic"] == FOCUSED_CLEAR_MODE and result["run_id"] == run_id and
+            result["input_manifest_sha256"] == input_hash and
+            result["collection_sha256"] == sha256_bytes(collection_bytes) and
+            result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            result["source_sha"] == source_sha and
+            result["application_sha256"] == artifacts["application"]["sha256"] and
+            result["observer_sha256"] == artifacts["observer"]["sha256"] and
+            result["status"] == "review_required" and int_equals(result["exit_code"], 0),
+            "Focused result binding or terminal status differs.")
+    transport = validate_transport_exit(run_root, files, 0)
+    verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V1_PROFILE_ID)
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"),
+                               "focused observer")
+    observations, observation_bytes = read_json(run_root / "output",
+        Path("acceptance-observations.json"), "focused observations")
+    require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) ==
+            files["acceptance-result.json"]["sha256"] and
+            sha256_bytes(observation_bytes) == files["acceptance-observations.json"]["sha256"] and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observation_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "Focused observer observations are not bound to protected bytes.")
+    require(raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("status") == "review_required" and
+            nested(raw, "assertions", "overall") == "passed" and
+            nested(raw, "assertions", "scope") == FOCUSED_CLEAR_SCOPE and
+            raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            nested(raw, "keyboard", "status") == "not_run" and
+            nested(raw, "accessibility", "status") == "not_run" and
+            nested(raw, "capture", "status") == "passed",
+            "Focused observer source, scope, or cleanup differs.")
+    scenario = observations.get("scenario")
+    require(isinstance(scenario, dict) and scenario.get("mode") == FOCUSED_CLEAR_MODE and
+            scenario.get("appearance") == "light" and
+            scenario.get("executable_sha256") == artifacts["application"]["sha256"] and
+            type(scenario.get("executable_bytes")) is int and scenario["executable_bytes"] > 0 and
+            int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"]) and
+            nested(scenario, "environment", "main_window", "process_id") == scenario["process_id"] and
+            nested(scenario, "environment", "hwnd_dpi") == 96 and
+            nested(scenario, "environment", "text_scale_factor_percent") == 100,
+            "Focused product, PID, or display identity differs.")
+    validate_performance_lifecycle(raw.get("process_lifecycles"), scenario,
+                                   artifacts["application"]["sha256"])
+    captures = raw.get("screenshots")
+    require(isinstance(captures, list) and len(captures) == 1 and
+            captures[0].get("file") == "performance-empty.png" and
+            captures[0].get("sha256") == files["performance-empty.png"]["sha256"],
+            "Focused empty-idle PNG is missing or unbound.")
+    metrics = validate_focused_clear_metrics(scenario)
+    return {"run_id": run_id, "source_sha": source_sha,
+            "application_sha256": artifacts["application"]["sha256"],
+            "bundle_mode": "prepared", "process_id": scenario["process_id"],
+            "observation": metrics, "full_four_run_regression": "not-run",
+            "performance_batch": "not-run", "release_campaign": "not-run"}
+
+
 def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
     require(run_id in {performance_run_id(order) for order in PERFORMANCE_ORDERS}, "Performance run id is invalid.")
     run_root = root / run_id
@@ -3459,7 +3712,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -3482,6 +3735,17 @@ def main(repo: Path, argv=None) -> int:
                           "status": "measured", "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",
                           "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
+        return 0
+    if args.diagnostic == FOCUSED_CLEAR_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                args.runs == [FOCUSED_CLEAR_RUN_ID],
+                "Focused clear requires its single declared diagnostic run.")
+        observed = validate_focused_clear_run(root, args.runs[0], args.expected_source_sha)
+        print(json.dumps({"schema_version": 1, "diagnostic": FOCUSED_CLEAR_MODE,
+                          "status": "observed", "source_sha": args.expected_source_sha,
+                          "runs": [observed], "full_four_run_regression": "not-run",
+                          "performance_batch": "not-run", "release_campaign": "not-run"},
+                         ensure_ascii=False, indent=2))
         return 0
     if args.diagnostic == ICON_SETTLEMENT_MODE:
         require(not args.require_complete_set and args.configuration_set is None and

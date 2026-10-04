@@ -71,6 +71,14 @@ RUNS = (
 V2_RUNS = tuple({**run, "run_id": f"{run['run_id']}-owned-v2"} for run in RUNS)
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+FOCUSED_CLEAR_MODE = "focused-10k-clear"
+FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
+FOCUSED_CLEAR_PLAN = {
+    "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
+    "sample_interval_ms": 200, "maximum_seconds": 600,
+    "clear_command_id": 0x800E, "stop_after_first_clear": True,
+    "full_performance_sample": False,
+}
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -97,6 +105,12 @@ def performance_run(order: str = "hidden-visible") -> dict:
     return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
             "text_scale_percent": 100, "long_path_order": order}
+
+
+def focused_clear_run() -> dict:
+    return {"run_id": FOCUSED_CLEAR_RUN_ID, "mode": FOCUSED_CLEAR_MODE,
+            "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
+            "text_scale_percent": 100}
 
 
 def icon_settlement_run(endpoint_method: str = ICON_SETTLEMENT_METHOD) -> dict:
@@ -701,11 +715,13 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                    reference: dict | None = None,
                    prepared_application_sha256: str | None = None) -> dict:
     require(prepared_application_sha256 is None or
-            (run["mode"] in {"performance-sample", ICON_SETTLEMENT_MODE} and
+            (run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE} and
              SHA256.fullmatch(prepared_application_sha256) is not None),
             "Prepared bundle provenance is restricted to pinned performance runs.")
     require(run["mode"] != ICON_SETTLEMENT_MODE or prepared_application_sha256 is not None,
             "Icon settlement requires a pinned prepared executable.")
+    require(run["mode"] != FOCUSED_CLEAR_MODE or prepared_application_sha256 is not None,
+            "Focused clear requires a pinned prepared executable.")
     _, inputs = run_input_artifacts(repo, bundle, run_root, run.get("acceptance_profile_id", V1_PROFILE_ID))
     if run["mode"] == ICON_SETTLEMENT_MODE and run["endpoint_method"] == ICON_BASELINE_METHOD:
         require(run["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA and
@@ -736,6 +752,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
             **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
                if run["mode"] == "performance-sample" else {}),
+            **({"focused_clear_plan": FOCUSED_CLEAR_PLAN}
+               if run["mode"] == FOCUSED_CLEAR_MODE else {}),
             **({"settlement_plan": ICON_SETTLEMENT_PLAN,
                 "endpoint_method": run["endpoint_method"],
                 **({"baseline_product_source_sha": run["baseline_product_source_sha"]}
@@ -747,7 +765,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
             *(["--diagnostic", run["mode"]] if run["mode"] in
-              {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE} else []),
+              {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE} else []),
             *(["--performance-column-order", run["long_path_order"]]
               if run["mode"] == "performance-sample" else []),
             *(["--prepared-bundle-root", "<external-prepared-bundle-root>",
@@ -847,7 +865,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
             command += ["-AcceptanceProfileSha256", manifest["acceptance_profile_sha256"]]
         if run["mode"] == "appearance-pair" and run["high_contrast"]:
             command += ["-AcceptanceHighContrast"]
-    elif run["mode"] == "performance-sample":
+    elif run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE}:
         command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
     return command
 
@@ -873,7 +891,7 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {ICON_SETTLEMENT_RUN_ID}:
+    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {FOCUSED_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
         require(total_bytes <= 32 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == 1,
                 "Performance diagnostic must stay within 32 MiB and one original PNG.")
@@ -968,7 +986,7 @@ def finalize_run(run_root: Path) -> None:
     mode = manifest["request"]["mode"]
     normalized = (normalize_pair_result(run_root, input_sha256) if mode == "appearance-pair"
                   else normalize_performance_result(run_root, input_sha256) if mode in
-                  {"performance-sample", ICON_SETTLEMENT_MODE}
+                  {"performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE}
                   else normalize_run_result(run_root, input_sha256))
     write_json(result_path, normalized, exclusive=True)
 
@@ -1111,10 +1129,11 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
     runs = selected_runs if selected_runs is not None else (
         (appearance_pair_run(1366, 768, 96),) if diagnostic == "appearance-pair" else
         (performance_run(),) if diagnostic == "performance-sample" else
+        (focused_clear_run(),) if diagnostic == FOCUSED_CLEAR_MODE else
         (icon_settlement_run(),) if diagnostic == ICON_SETTLEMENT_MODE else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
-    if diagnostic in {"appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE}:
+    if diagnostic in {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
         command += ["--diagnostic", diagnostic]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
@@ -1131,7 +1150,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
-    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--icon-endpoint-method", choices=[ICON_BASELINE_METHOD])
     parser.add_argument("--baseline-product-source-sha")
     parser.add_argument("--expected-run-source-sha")
@@ -1169,14 +1188,17 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require((args.prepared_bundle_root is None) ==
             (args.expected_prepared_application_sha256 is None) and
             (args.prepared_bundle_root is None or args.diagnostic in
-             {"performance-sample", ICON_SETTLEMENT_MODE}),
+             {"performance-sample", FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE}),
             "Prepared bundle and pinned application hash require the performance diagnostic together.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.prepared_bundle_root is not None,
             "Icon settlement requires a prepared bundle and pinned application hash.")
+    require(args.diagnostic != FOCUSED_CLEAR_MODE or args.prepared_bundle_root is not None,
+            "Focused clear requires a prepared bundle and pinned application hash.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
     selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
+                     (focused_clear_run(),) if args.diagnostic == FOCUSED_CLEAR_MODE else
                      (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
                      if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else

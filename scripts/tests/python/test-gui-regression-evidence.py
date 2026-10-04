@@ -2611,6 +2611,147 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             evidence.validate_performance_metrics(scenario)
 
 
+class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
+    @cached_property
+    def focused_run(self):
+        run = self.fixture.build(evidence.FOCUSED_CLEAR_RUN_ID, "standard")
+        output = run / "output"
+        manifest_path = run / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["request"] = {"mode": evidence.FOCUSED_CLEAR_MODE, "appearance": "light",
+            "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100,
+            "focused_clear_plan": deepcopy(evidence.FOCUSED_CLEAR_PLAN)}
+        app_hash = manifest["artifacts"]["application"]["sha256"]
+        manifest["prepared_bundle"] = {"origin": "external-prepared-source-built-bundle",
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "application_sha256": app_hash}
+        manifest["command"] = ["python3", "-I", "scripts/run-gui-regression.py",
+            "--output-root", "<external-output-root>", "--connection-profile",
+            "<private-connection-profile>", "--diagnostic", evidence.FOCUSED_CLEAR_MODE,
+            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+            "--expected-prepared-application-sha256", app_hash]
+        write_json(manifest_path, manifest)
+        (output / "screen.png").rename(output / "performance-empty.png")
+        (output / "text-raster-metrics.json").unlink()
+        raw_path = output / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        scenario = PerformanceSampleEvidenceTests.sample_scenario(self)
+        for field in ("columns", "long_representatives", "extension_representatives"):
+            scenario.pop(field)
+        scenario["plan"] = deepcopy(evidence.FOCUSED_CLEAR_PLAN)
+        scenario["timings"] = scenario["timings"][:4]
+        scenario["clear_row_counts"] = [0]
+        phases = ("empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
+                  "single-row", "full-preview", "post")
+        scenario["samples"] = [row for row in scenario["samples"] if row["phase"] in phases]
+        scenario["phase_summary"] = [{"phase": phase,
+            "sample_count": sum(row["phase"] == phase for row in scenario["samples"]),
+            "max_sample_gap_ms": max((row["sample_gap_ms"] for row in scenario["samples"]
+                                      if row["phase"] == phase), default=0),
+            "max_resource_collection_ms": max((row["resource_collection_ms"]
+                for row in scenario["samples"] if row["phase"] == phase), default=0)}
+            for phase in phases]
+        scenario.update(mode=evidence.FOCUSED_CLEAR_MODE, appearance="light",
+            process_id=4242, process_start_utc_ticks=134041000000000000,
+            executable_sha256=app_hash, executable_bytes=849408,
+            first_clear={"stage": "verified-empty", "command_id": 0x800E,
+                "process_id": 4242, "main_handle": 1001, "pre_clear_rows": 10000,
+                "preview_reset": [f"ordinary-{index:05d}.txt"
+                                  for index in (0, 2499, 4999, 7499, 9999)],
+                "post_clear_rows": 0},
+            command_sends=[{"command_id": 0x800E, "scenario_phase": "full-preview-clear",
+                "native_return": 1, "message_result": 0, "error_code": 0,
+                "elapsed_ms": 4.5, "status": "success"}])
+        scenario["environment"] = {"hwnd_dpi": 96, "text_scale_factor_percent": 100,
+            "main_window": {"hwnd": 1001, "process_id": 4242}}
+        raw["assertions"] = {"overall": "passed", "scope": evidence.FOCUSED_CLEAR_SCOPE,
+                             "scenario": scenario}
+        raw["keyboard"]["status"] = "not_run"
+        raw["accessibility"]["status"] = "not_run"
+        raw["process_cleanup"] = True
+        raw["process_lifecycles"] = [{"process_lifecycle": {
+            "pid": 4242, "start_time_utc_ticks": str(scenario["process_start_utc_ticks"]),
+            "executable_sha256": app_hash, "start_observed": True,
+            "exit_observed": True, "exit_method": "normal-close", "exit_code": 0}}]
+        raw["screenshots"] = [{"file": "performance-empty.png",
+            "sha256": digest((output / "performance-empty.png").read_bytes())}]
+        write_json(raw_path, raw)
+        transport_path = output / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["raw_cleanup"] = clean_controller_cleanup()
+        write_json(transport_path, transport)
+        self.refresh_focused(run)
+        return run
+
+    def refresh_focused(self, run):
+        self.fixture.refresh(run)
+        output = run / "output"
+        manifest = json.loads((run / "input-manifest.json").read_text())
+        raw_bytes = (output / "acceptance-result.json").read_bytes()
+        result = {"schema_version": 1, "diagnostic": evidence.FOCUSED_CLEAR_MODE,
+            "run_id": run.name, "input_manifest_sha256": digest((run / "input-manifest.json").read_bytes()),
+            "collection_sha256": digest((run / "collection.json").read_bytes()),
+            "cleanup_sha256": digest((output / "cleanup.json").read_bytes()),
+            "source_sha": manifest["source_sha"],
+            "application_sha256": manifest["artifacts"]["application"]["sha256"],
+            "observer_sha256": manifest["artifacts"]["observer"]["sha256"],
+            "observer_result_sha256": digest(raw_bytes), "status": "review_required",
+            "exit_code": 0}
+        write_json(output / "run-result.json", result)
+
+    def validate(self):
+        return evidence.validate_focused_clear_run(self.root, self.focused_run.name, SOURCE)
+
+    def test_focused_run_is_observed_without_full_batch_metrics(self):
+        result = self.validate()
+        self.assertEqual(result["bundle_mode"], "prepared")
+        self.assertEqual(result["performance_batch"], "not-run")
+        self.assertEqual(result["observation"]["first_clear_status"], "success")
+        with self.assertRaisesRegex(evidence.EvidenceError, "Performance run id is invalid"):
+            evidence.validate_performance_run(self.root, self.focused_run.name, SOURCE)
+
+    def test_missing_binding_first_clear_lifecycle_and_cleanup_are_rejected(self):
+        cases = (
+            ("prepared", lambda m, t, r: m["prepared_bundle"].__setitem__("application_sha256", "f" * 64),
+             "prepared executable"),
+            ("plan", lambda m, t, r: m["request"]["focused_clear_plan"].__setitem__(
+                "stop_after_first_clear", 1), "fixed plan"),
+            ("preview", lambda m, t, r: r["assertions"]["scenario"]["full_preview_rows"].pop(),
+             "preview/reset observations"),
+            ("first-clear", lambda m, t, r: r["assertions"]["scenario"].pop("first_clear"),
+             "focused first clear"),
+            ("command", lambda m, t, r: r["assertions"]["scenario"]["command_sends"][0].__setitem__(
+                "status", "timeout"), "successful bounded native send"),
+            ("normal-exit", lambda m, t, r: r["process_lifecycles"][0]["process_lifecycle"].__setitem__(
+                "exit_method", "forced-termination"), "exact process lifecycle"),
+            ("jobs", lambda m, t, r: t["raw_cleanup"].__setitem__("process_jobs_closed", False),
+             "closed process jobs"),
+            ("guest", lambda m, t, r: t.__setitem__("guest_cleanup", False),
+             "transport guest cleanup"),
+            ("scope", lambda m, t, r: r["assertions"].__setitem__("scope",
+                "performance-sample-p1-p3-v2"), "scope, or cleanup"),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                self.reset_fixture()
+                self.__dict__.pop("focused_run", None)
+                run = self.focused_run
+                manifest_path = run / "input-manifest.json"
+                transport_path = run / "output" / "transport.json"
+                raw_path = run / "output" / "acceptance-result.json"
+                manifest = json.loads(manifest_path.read_text())
+                transport = json.loads(transport_path.read_text())
+                raw = json.loads(raw_path.read_text())
+                mutate(manifest, transport, raw)
+                write_json(manifest_path, manifest)
+                write_json(transport_path, transport)
+                write_json(raw_path, raw)
+                self.refresh_focused(run)
+                with self.assertRaisesRegex(evidence.EvidenceError, expected):
+                    self.validate()
+
+
 class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
     @staticmethod
     def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0,

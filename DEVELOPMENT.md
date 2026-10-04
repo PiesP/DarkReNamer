@@ -691,7 +691,8 @@ both observations bound to the same executable bytes, first build with
 Read and freeze `application.sha256` from its `bundle.json`, then pass
 `--prepared-bundle-root /absolute/private/native-bundle` and
 `--expected-prepared-application-sha256` with that digest to each performance
-invocation. Prepared reuse is restricted to this diagnostic; the runner verifies
+invocation. Prepared reuse is restricted to declared performance, focused-clear,
+and icon-settlement diagnostics; the runner verifies
 the clean source, executable, test binaries and trusted native tooling closure
 before contacting the VM. Each attempt retains its own authenticated inputs and
 prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
@@ -732,6 +733,35 @@ hypothesis and fixed count; two observations do not establish significance or
 tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
+
+### Focused first-10k-clear diagnostic
+
+Use `focused-10k-clear` only for a separately authorized, single observation of
+the first clear after the ordinary 10,000-row full preview/reset. Pin a clean
+source-built prepared bundle and the exact application hash before VM contact:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic focused-10k-clear \
+  --prepared-bundle-root /absolute/private/native-baseline-bundle \
+  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-focused-clear-attempt
+```
+
+The distinct `focused-10k-clear-v1-1366x768-96-text100` run repeats the original
+30-second idle, 100/1,000/10,000 ordinary rows, four 2,250-row additions,
+single-row preview/reset, and five-row full preview/reset. It records the bound
+product PID and HWND, pre-clear rows, native command result and last-error class,
+post-clear rows, sampler coverage, exact normal exit, and the existing strict
+V1 guest cleanup. It stops after the first successful clear and does not run
+long-path, extension, or cycle phases. The 5-second native command timeout,
+600-second observer limit, one-PNG/32 MiB collection cap, and original fixture
+and disk/journal checks still apply. Failed attempts retain their original raw
+failure and partial observations; later cleanup cannot convert them to success.
+This receipt is an observation, not a full performance comparison or release
+acceptance. The original failed performance receipt stays failed, and the
+focused result cannot supply normal A/B/B/A medians.
 
 ### Icon settlement diagnostic
 

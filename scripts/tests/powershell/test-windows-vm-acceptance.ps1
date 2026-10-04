@@ -2916,12 +2916,62 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    $candidateFocusedInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidateFocusedInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'focused-10k-clear-v1-1366x768-96-text100'
+    $candidateFocusedInput.request.mode = 'focused-10k-clear'
+    $candidateFocusedInput.request.text_scale_percent = [long]100
+    $candidateFocusedInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidateFocusedInput.request.desktop.width = [long]1366
+    $candidateFocusedInput.request.desktop.height = [long]768
+    $candidateFocusedInput.request | Add-Member -NotePropertyName focused_clear_plan -NotePropertyValue ([ordered]@{
+        ordinary_rows=@(100,1000,10000); idle_seconds=30; sample_interval_ms=200
+        maximum_seconds=600; clear_command_id=32782
+        stop_after_first_clear=$true; full_performance_sample=$false
+    })
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
+        -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidateFocusedInput.request.focused_clear_plan.stop_after_first_clear = [long]1
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
+            -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidateFocusedInput.request.focused_clear_plan.stop_after_first_clear = $true
+    $candidateFocusedInput.request.focused_clear_plan.ordinary_rows = @(100,1000,9999)
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
+            -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidateFocusedInput.request.focused_clear_plan.ordinary_rows = @(100,1000,10000)
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
+            -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'immutable manifest'
     Assert-Fails -Expected 'performance scenario entered with empty captures' -Action {
         & {
             function New-PrivateDirectory { throw 'performance scenario entered with empty captures' }
             Invoke-ObserverPerformanceSampleScenario -Verified ([pscustomobject]@{}) `
                 -RuntimeRoot 'unopened-fixture' -EvidenceRoot 'unopened-evidence' `
                 -SessionId 1 -WaitSeconds 1 -Captures ([Collections.Generic.List[object]]::new()) `
+                -ProcessLifecycleObservations ([Collections.Generic.List[object]]::new()) `
+                -ObservationSink ([ordered]@{})
+        }
+    }
+    Assert-Fails -Expected 'focused scenario entered with empty captures' -Action {
+        & {
+            function New-PrivateDirectory { throw 'focused scenario entered with empty captures' }
+            Invoke-ObserverPerformanceSampleScenario -Verified ([pscustomobject]@{}) `
+                -RuntimeRoot 'unopened-fixture' -EvidenceRoot 'unopened-evidence' `
+                -SessionId 1 -WaitSeconds 1 -StopAfterFirstClear `
+                -Captures ([Collections.Generic.List[object]]::new()) `
                 -ProcessLifecycleObservations ([Collections.Generic.List[object]]::new()) `
                 -ObservationSink ([ordered]@{})
         }

@@ -348,6 +348,46 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertNotIn("--desktop-height", manifest["command"])
         self.assertNotIn("--desktop-dpi", manifest["command"])
 
+    def test_focused_clear_has_separate_pinned_plan_and_v1_bound(self):
+        run = runner.focused_clear_run()
+        pin = "a" * 64
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": pin}},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
+                                             run, "e" * 64, {}, {},
+                                             prepared_application_sha256=pin)
+            with self.assertRaisesRegex(ValueError, "pinned prepared executable"):
+                runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
+                                      run, "e" * 64, {}, {})
+        self.assertEqual(run["run_id"], runner.FOCUSED_CLEAR_RUN_ID)
+        self.assertEqual(manifest["request"]["focused_clear_plan"], runner.FOCUSED_CLEAR_PLAN)
+        self.assertNotIn("performance_plan", manifest["request"])
+        self.assertEqual(manifest["command"][manifest["command"].index("--diagnostic") + 1],
+                         runner.FOCUSED_CLEAR_MODE)
+        self.assertEqual(manifest["command"][-2:],
+                         ["--expected-prepared-application-sha256", pin])
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(
+                self.root, self.root / "bundle", self.root / "run", run,
+                {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
+                {"expectedGuestSid": "fixture-sid"})
+        self.assertEqual(command[command.index("-AcceptanceMode") + 1],
+                         runner.FOCUSED_CLEAR_MODE)
+        self.assertEqual(command[command.index("-TestTimeoutSeconds") + 1], "600")
+        self.assertNotIn("-AcceptanceProfileId", command)
+        output = self.root / "run" / "output"
+        output.mkdir(parents=True)
+        (output / "performance-empty.png").write_bytes(b"fixture")
+        receipt = runner.collection_document(self.root / "run", "f" * 64,
+                                             runner.FOCUSED_CLEAR_RUN_ID)
+        self.assertEqual(len(receipt["files"]), 1)
+        (output / "extra.png").write_bytes(b"fixture")
+        with self.assertRaisesRegex(ValueError, "one original PNG"):
+            runner.collection_document(self.root / "run", "f" * 64,
+                                       runner.FOCUSED_CLEAR_RUN_ID)
+
     def test_consumer_policies_preserve_formats_alpha_and_axis_limits(self):
         grayscale = png_bytes(1, 1, 0, b"\0\x12")
         self.assertEqual(evidence.decode_png(grayscale, "gray"), (1, 1, b"\x12\x12\x12\xff"))
