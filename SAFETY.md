@@ -455,6 +455,14 @@ the runtime lock alive until the sole JoinHandle is observed finished and joined
 The UI keeps pumping during a blocked provider call; no hard Shell timeout is
 claimed.
 
+The native shutdown fixture owns one production popup window and its reclaim
+hold while a Shell class query, import read, Apply result, and settings save
+wait on independent test barriers. Its callback-free Apply timer is bound to
+that live HWND and retired by the same emergency finalizer as production. The
+fixture invokes the production message-loop-error handler directly; it does
+not represent an OS-issued `GetMessageW` error. Each barrier is released before
+the tracked icon join and before the window or runtime lock can be reclaimed.
+
 The ignored refresh-stage diagnostic keeps its original detached ListView
 fixture. Its versioned asynchronous-icon JSON measures UI text, issue and
 native-row staging only; it has no icon worker and cannot establish Shell

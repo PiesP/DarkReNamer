@@ -1,5 +1,7 @@
 //! One tracked Shell-icon worker and its bounded, pointer-free handoff.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -31,6 +33,10 @@ use crate::icon_requests::{
 use super::{WM_APP_ICON_WAKE, WM_APP_ICON_WORK};
 
 static NEXT_ICON_SESSION: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ICON_SPAWN: Cell<bool> = const { Cell::new(false) };
+}
 const IDLE_WAIT_MS: u32 = 250;
 const MAX_PUMP_MESSAGES: usize = 256;
 
@@ -564,6 +570,11 @@ pub(super) struct IconRunGuardian {
 }
 
 impl IconRunGuardian {
+    #[cfg(test)]
+    pub(super) fn fail_next_spawn_for_test() {
+        FAIL_NEXT_ICON_SPAWN.with(|failure| failure.set(true));
+    }
+
     pub(super) fn start(ui_thread_id: u32) -> io::Result<Self> {
         Self::start_with(ui_thread_id, || {
             ShellLookup::initialize()
@@ -582,6 +593,10 @@ impl IconRunGuardian {
             })
             .map_err(|_| io::Error::other("icon session identifiers exhausted"))?;
         let shared = Arc::new(IconShared::new(session, ui_thread_id));
+        #[cfg(test)]
+        if FAIL_NEXT_ICON_SPAWN.with(|failure| failure.replace(false)) {
+            return Err(io::Error::other("injected icon thread spawn failure"));
+        }
         let worker_shared = Arc::clone(&shared);
         let handle = thread::Builder::new()
             .name("darknamer-shell-icons".to_owned())

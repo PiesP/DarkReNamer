@@ -178,6 +178,56 @@ impl ApplyWorker {
     }
 }
 
+#[cfg(test)]
+pub(super) fn start_held_apply_worker_for_test(
+    window: HWND,
+    state: &mut AppState,
+    wait: impl FnOnce() + Send + 'static,
+) -> io::Result<()> {
+    let journal = FileJournal::create_candidate(
+        &state.journal_root,
+        CANDIDATE_JOURNAL_LEAF,
+        ACTIVE_JOURNAL_LEAF,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
+    let cancellation = Arc::new(CancellationToken::new());
+    let progress = Arc::new(WorkerProgress::new(window));
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: this test owns the live top-level window and the callback-free
+    // timer has the same owner and lifetime as a production Apply timer.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-test-held-apply".to_owned())
+        .spawn(move || {
+            wait();
+            let result = ApplyWorkerResult::Executed {
+                journal: Box::new(journal),
+                execution: Err(ExecuteError {
+                    entry: None,
+                    kind: ExecuteErrorKind::Cancelled,
+                }),
+            };
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact test timer was installed above.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            return Err(error);
+        }
+    };
+    state.apply_worker = Some(ApplyWorker {
+        cancellation,
+        progress,
+        receiver,
+        handle,
+    });
+    state.mutation_locked = true;
+    Ok(())
+}
+
 impl PlanWorker {
     pub(super) fn cancellation_requested(&self) -> bool {
         self.cancellation.is_requested()
