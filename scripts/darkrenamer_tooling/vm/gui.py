@@ -502,7 +502,32 @@ def project_raw_semantics(observer: dict, cleanup: dict, run_root: Path, mode: s
             blocking = nested(scenario, "blocking")
             require(isinstance(blocking, dict) and all(nested(blocking, name, "blocked") is True for name in ("no_change", "collision", "invalid_name")), "Raw text100 blocking evidence is incomplete.")
         else:
-            baseline = text_metric_samples(run_root.parent / RUNS[1]["run_id"] / "output" / "text-raster-metrics.json")
+            current_manifest = read_json(run_root / "input-manifest.json")
+            selected_profile = current_manifest.get("acceptance_profile_id", V1_PROFILE_ID)
+            require(selected_profile in {V1_PROFILE_ID, V2_PROFILE_ID},
+                    "Text150 acceptance profile is unsupported.")
+            fixed_runs = V2_RUNS if selected_profile == V2_PROFILE_ID else RUNS
+            require(run_root.name == fixed_runs[2]["run_id"] and
+                    current_manifest.get("run_id") == run_root.name,
+                    "Text150 run identity differs from its selected profile.")
+            baseline_root = run_root.parent / fixed_runs[1]["run_id"]
+            require(baseline_root.is_dir() and not baseline_root.is_symlink(),
+                    "Text100 reference for the selected profile is missing or unsafe.")
+            baseline_manifest = read_json(ordinary_file(
+                baseline_root / "input-manifest.json", 2 * 1024 * 1024, "Text100 input manifest"))
+            require(baseline_manifest.get("run_id") == baseline_root.name and
+                    nested(baseline_manifest, "request", "mode") == "standard" and
+                    baseline_manifest.get("acceptance_profile_id", V1_PROFILE_ID) == selected_profile and
+                    baseline_manifest.get("acceptance_profile_sha256") ==
+                    current_manifest.get("acceptance_profile_sha256") and
+                    all(baseline_manifest.get(name) == current_manifest.get(name)
+                        for name in ("source_sha", "source_tree", "private_profile_sha256")) and
+                    nested(baseline_manifest, "artifacts", "application", "sha256") ==
+                    nested(current_manifest, "artifacts", "application", "sha256"),
+                    "Text100 reference differs from the Text150 run source or profile.")
+            baseline = text_metric_samples(ordinary_file(
+                baseline_root / "output" / "text-raster-metrics.json", 2 * 1024 * 1024,
+                "Text100 raster metrics"))
             enlarged = all(
                 baseline[name].get("text_sha256") == metrics[name].get("text_sha256") and
                 nested(metrics[name], "ink_bounds", "width") >= nested(baseline[name], "ink_bounds", "width") * 1.25 and
