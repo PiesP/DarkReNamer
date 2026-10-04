@@ -1406,6 +1406,7 @@ public sealed class DarkReNamerIconStatusSnapshot {
     public ulong Session, Generation, StatusRevision, ModelRevision;
     public uint Bootstrap, Queued, InFlight, Undrained, UnresolvedRows, Cursor;
     public uint Settled, WorkerJoined, ReconcileRows, BatchAck, DemandExhausted, DemandRemaining;
+    public uint UnavailableOrRetiring;
 }
 
 public static class DarkReNamerIconStatusObserver {
@@ -1457,12 +1458,13 @@ public static class DarkReNamerIconStatusObserver {
                     Settled = Scalar(window, 11), WorkerJoined = Scalar(window, 12),
                     ReconcileRows = Scalar(window, 13), BatchAck = Scalar(window, 14),
                     DemandExhausted = Scalar(window, 17), DemandRemaining = Scalar(window, 18),
+                    UnavailableOrRetiring = Scalar(window, 21),
                 };
                 ulong modelAfter = Pair(window, 19);
                 ulong after = Pair(window, 15);
                 if (before != after || (after & 1) != 0 || modelBefore != modelAfter) continue;
                 if (value.Bootstrap > 2 || value.Settled > 1 || value.WorkerJoined > 1 ||
-                    value.DemandExhausted > 1)
+                    value.DemandExhausted > 1 || value.UnavailableOrRetiring > 1)
                     throw new InvalidOperationException("Icon status scalar flags are invalid.");
                 if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
                     GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)

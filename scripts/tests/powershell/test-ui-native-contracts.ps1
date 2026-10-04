@@ -511,8 +511,16 @@ if (-not (0 -le $resetAt -and $resetAt -lt $beginAt -and $beginAt -lt $sendAt -a
 $iconStatus = [ordered]@{ version=1; session='41'; generation='2'; bootstrap=1;
     queued=0; inflight=0; undrained=0; unresolved_rows=0; cursor=1000;
     settled=$true; worker_joined=$false; reconcile_rows=0; batch_ack=0;
-    status_revision='8'; demand_exhausted=$true; demand_remaining=0; model_revision='2' }
+    status_revision='8'; demand_exhausted=$true; demand_remaining=0; model_revision='2';
+    unavailable_or_retiring=$false }
 Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $true 'Stable icon terminal state'
+$iconStatus.unavailable_or_retiring = $true
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'unavailable or retired'
+$iconStatus.worker_joined = $true
+Assert-Fails { Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000 } 'unavailable or retired'
+$iconStatus.unavailable_or_retiring = $false
+Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $false 'Joined worker is not active terminal state'
+$iconStatus.worker_joined = $false
 $iconStatus.demand_remaining = 1
 Assert-Equal (Test-ObserverIconTerminalSnapshot -Snapshot $iconStatus -Rows 1000) $false 'Unexhausted icon demand'
 $iconStatus.demand_remaining = 0

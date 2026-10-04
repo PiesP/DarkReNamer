@@ -733,8 +733,10 @@ icon-settled endpoint. A pointer-free, versioned main-window scalar query is
 sampled every 100 ms within the existing 600-second observer limit. Settlement
 requires an attached system image list, zero unresolved rows, exhausted demand,
 empty queued/in-flight/completion/reconciliation state and the same full
-generation in consecutive stable snapshots. A missing query, failed bootstrap,
-changed session or deadline produces a failed attempt, not a baseline fallback.
+generation in consecutive stable snapshots. Both pre-close snapshots must also
+show a nonzero worker session, `unavailable_or_retiring=false`, and
+`worker_joined=false`. A missing query, failed bootstrap, retired or unavailable
+worker, changed session or deadline produces a failed attempt, not a baseline fallback.
 Terminal negative Shell results may legitimately remain no-image; settlement
 means no unresolved demand, not a visible glyph on every row.
 The verifier binds the source, prepared EXE, process ID and start time, exact

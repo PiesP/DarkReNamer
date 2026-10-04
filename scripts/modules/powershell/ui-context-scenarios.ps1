@@ -2582,6 +2582,7 @@ function Get-ObserverIconStatusSnapshot {
         demand_exhausted = $value.DemandExhausted -eq 1
         demand_remaining = [int]$value.DemandRemaining
         model_revision = [string]$value.ModelRevision
+        unavailable_or_retiring = $value.UnavailableOrRetiring -eq 1
     }
 }
 
@@ -2610,8 +2611,12 @@ function Test-ObserverIconTerminalSnapshot {
     if ($Snapshot.bootstrap -eq 2) {
         throw 'Icon image-list bootstrap failed; no-image fallback is not icon settlement.'
     }
+    if ($Snapshot.unavailable_or_retiring) {
+        throw 'Icon worker became unavailable or retired before settlement; no-image fallback is not icon settlement.'
+    }
     [ulong]$Snapshot.generation -gt 0 -and
         $Snapshot.bootstrap -eq 1 -and $Snapshot.settled -eq $true -and
+        $Snapshot.worker_joined -eq $false -and
         $Snapshot.demand_exhausted -eq $true -and $Snapshot.demand_remaining -eq 0 -and
         $Snapshot.queued -eq 0 -and $Snapshot.inflight -eq 0 -and
         $Snapshot.undrained -eq 0 -and $Snapshot.unresolved_rows -eq 0 -and

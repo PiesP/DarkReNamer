@@ -3131,7 +3131,7 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
 ICON_STATUS_FIELDS = {"version", "session", "generation", "bootstrap", "queued", "inflight",
                       "undrained", "unresolved_rows", "cursor", "settled", "worker_joined",
                       "reconcile_rows", "batch_ack", "status_revision", "demand_exhausted",
-                      "demand_remaining", "model_revision"}
+                      "demand_remaining", "model_revision", "unavailable_or_retiring"}
 
 
 def validate_icon_status(value: object, rows: int, label: str) -> dict:
@@ -3150,7 +3150,7 @@ def validate_icon_status(value: object, rows: int, label: str) -> dict:
                           ("demand_remaining", rows)):
         checked_int(status[name], 0, maximum, f"{label}.{name}")
     require(all(type(status[name]) is bool for name in
-                ("settled", "worker_joined", "demand_exhausted")) and
+                ("settled", "worker_joined", "demand_exhausted", "unavailable_or_retiring")) and
             status["queued"] + status["inflight"] + status["undrained"] <= 64,
             f"{label} flags or combined request bound differ.")
     return status
@@ -3158,6 +3158,8 @@ def validate_icon_status(value: object, rows: int, label: str) -> dict:
 
 def icon_terminal(status: dict) -> bool:
     return (status["bootstrap"] == 1 and status["settled"] is True and
+            status["worker_joined"] is False and status["unavailable_or_retiring"] is False and
+            int(status["session"]) > 0 and
             status["demand_exhausted"] is True and status["demand_remaining"] == 0 and
             all(status[name] == 0 for name in ("queued", "inflight", "undrained",
                 "unresolved_rows", "reconcile_rows", "batch_ack")))

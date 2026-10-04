@@ -2469,13 +2469,15 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
 
 class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
     @staticmethod
-    def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0):
+    def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0,
+               unavailable_or_retiring=False, worker_joined=False):
         return {"version": 1, "session": "41", "generation": str(generation),
                 "bootstrap": bootstrap, "queued": pending, "inflight": 0,
                 "undrained": 0, "unresolved_rows": 0, "cursor": 1000,
-                "settled": settled, "worker_joined": False, "reconcile_rows": 0,
+                "settled": settled, "worker_joined": worker_joined, "reconcile_rows": 0,
                 "batch_ack": 0, "status_revision": "8", "demand_exhausted": demand_remaining == 0,
-                "demand_remaining": demand_remaining, "model_revision": str(generation)}
+                "demand_remaining": demand_remaining, "model_revision": str(generation),
+                "unavailable_or_retiring": unavailable_or_retiring}
 
     def scenario(self):
         phases = []
@@ -2514,6 +2516,13 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
                 lambda s: s["phases"][1]["settled_status"].__setitem__("generation", "2"),
                 lambda s: s["phases"][0]["first_status"].__setitem__("queued", 65),
                 lambda s: s["phases"][0]["first_status"].__setitem__("status_revision", "7"),
+                lambda s: s["phases"][0]["settled_status"].update(
+                    unavailable_or_retiring=True, worker_joined=False),
+                lambda s: s["phases"][0]["settled_status"].update(
+                    unavailable_or_retiring=True, worker_joined=True),
+                lambda s: s["phases"][0]["settled_status"].update(worker_joined=True),
+                lambda s: s["phases"][0]["confirmation_status"].update(
+                    unavailable_or_retiring=True, worker_joined=True),
                 lambda s: s["worker_join_evidence"].update(kind="observed", observed=True)):
             damaged = self.scenario()
             change(damaged)
