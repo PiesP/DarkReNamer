@@ -737,14 +737,19 @@ or physical-media acceptance.
 ### Focused first-10k-clear diagnostic
 
 Use `focused-10k-clear` only for a separately authorized, single observation of
-the first clear after the ordinary 10,000-row full preview/reset. Pin a clean
-source-built prepared bundle and the exact application hash before VM contact:
+the first clear after the ordinary 10,000-row full preview/reset. It retains
+the original source-built product EXE and original bundle manifest unchanged,
+while separately binding the corrected tooling to the current clean checkout.
+Pin both origins before VM contact:
 
 ```bash
 python3 -I scripts/run-gui-regression.py \
   --diagnostic focused-10k-clear \
-  --prepared-bundle-root /absolute/private/native-baseline-bundle \
-  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
+  --preserved-product-bundle-root /tmp/issue32-bootstrap-baseline-prepared-8248c73 \
+  --expected-original-bundle-sha256 23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e \
+  --expected-product-source-sha 8248c73859e3a3ff0e524fd9448acfe965fa3f68 \
+  --expected-tooling-source-sha <current-clean-tooling-source-sha> \
+  --expected-prepared-application-sha256 06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f \
   --connection-profile /absolute/private/connection-profile.json \
   --output-root /absolute/private/new-focused-clear-attempt
 ```

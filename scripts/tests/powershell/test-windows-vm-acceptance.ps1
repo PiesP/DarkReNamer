@@ -544,7 +544,7 @@ try {
     }
     foreach ($requiredCandidateObserverSource in @(
         '@($manifest.harness.observers.PSObject.Properties | ForEach-Object Value)',
-        '$expectedAcceptanceSourceSha = if ($candidateLane)',
+        '$expectedAcceptanceSourceSha = if ($splitLane)',
         '$manifest.harness.observers.ui.file -cne ''windows-vm-acceptance.ps1''',
         '$manifest.harness.observers.ui.sha256 -ine $observer.sha256'
     )) {
@@ -2929,14 +2929,56 @@ try {
         maximum_seconds=600; clear_command_id=32782
         stop_after_first_clear=$true; full_performance_sample=$false
     })
+    $focusedRegressionResolved = $candidateRegressionResolved |
+        ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $focusedRegressionResolved.lane = 'focused-preserved-source-built-product-v1'
+    $focusedRegressionResolved.product.source_sha =
+        '8248c73859e3a3ff0e524fd9448acfe965fa3f68'
+    $focusedRegressionResolved.source_sha = $focusedRegressionResolved.product.source_sha
+    $focusedRegressionResolved.product | Add-Member -NotePropertyName source_tree -NotePropertyValue ('b' * 40)
+    $focusedRegressionResolved.harness | Add-Member -NotePropertyName source_tree -NotePropertyValue ('c' * 40)
+    $focusedRegressionResolved.harness.source_sha = 'e' * 40
+    $focusedRegressionResolved.harness | Add-Member -NotePropertyName tooling_record `
+        -NotePropertyValue ([pscustomobject]@{ file='tooling-record.json'; sha256=('d' * 64) })
+    $focusedRegressionResolved | Add-Member -NotePropertyName harness_source_sha -NotePropertyValue ('e' * 40)
+    $focusedRegressionResolved.product.provenance | Add-Member `
+        -NotePropertyName original_bundle_manifest `
+        -NotePropertyValue ([pscustomobject]@{ file='original-bundle.json'; sha256=('f' * 64) })
+    $candidateFocusedInput.source_sha = $focusedRegressionResolved.product.source_sha
+    $candidateFocusedInput | Add-Member -NotePropertyName source_tree -NotePropertyValue ('b' * 40)
+    $candidateFocusedInput | Add-Member -NotePropertyName tooling_source_sha -NotePropertyValue ('e' * 40)
+    $candidateFocusedInput | Add-Member -NotePropertyName tooling_source_tree -NotePropertyValue ('c' * 40)
+    $candidateFocusedInput | Add-Member -NotePropertyName prepared_bundle -NotePropertyValue ([pscustomobject]@{
+        original_bundle_manifest_sha256 = 'f' * 64
+        tooling_record_sha256 = 'd' * 64
+    })
+    $focusedManifest = [pscustomobject]@{
+        lane = $focusedRegressionResolved.lane
+        product = $focusedRegressionResolved.product
+        harness = $focusedRegressionResolved.harness
+    }
+    Assert-AcceptanceInputArtifactBinding -InputDocument $candidateFocusedInput `
+        -Manifest $focusedManifest -CandidateLane $true
+    $candidateFocusedInput.tooling_source_sha = '0' * 40
+    Assert-Fails {
+        Assert-AcceptanceInputArtifactBinding -InputDocument $candidateFocusedInput `
+            -Manifest $focusedManifest -CandidateLane $true
+    } 'current tooling source differs'
+    $candidateFocusedInput.tooling_source_sha = 'e' * 40
+    $candidateFocusedInput.prepared_bundle.original_bundle_manifest_sha256 = '0' * 64
+    Assert-Fails {
+        Assert-AcceptanceInputArtifactBinding -InputDocument $candidateFocusedInput `
+            -Manifest $focusedManifest -CandidateLane $true
+    } 'current tooling source differs'
+    $candidateFocusedInput.prepared_bundle.original_bundle_manifest_sha256 = 'f' * 64
     Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
-        -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+        -Verified $focusedRegressionResolved -RegressionMode focused-10k-clear `
         -Appearance light -TextScalePercent 100 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     $candidateFocusedInput.request.focused_clear_plan.stop_after_first_clear = [long]1
     Assert-Fails {
         Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
-            -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+            -Verified $focusedRegressionResolved -RegressionMode focused-10k-clear `
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
@@ -2944,7 +2986,7 @@ try {
     $candidateFocusedInput.request.focused_clear_plan.ordinary_rows = @(100,1000,9999)
     Assert-Fails {
         Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFocusedInput `
-            -Verified $candidateRegressionResolved -RegressionMode focused-10k-clear `
+            -Verified $focusedRegressionResolved -RegressionMode focused-10k-clear `
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'

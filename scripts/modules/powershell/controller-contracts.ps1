@@ -213,6 +213,20 @@ function Assert-AcceptanceInputArtifactBinding {
             $Manifest.harness.runner.sha256) {
         throw 'Acceptance input candidate application or runner differs from the frozen bundle.'
     }
+    if ($Manifest.lane -ceq 'focused-preserved-source-built-product-v1' -and
+        ($InputDocument.request.mode -cne 'focused-10k-clear' -or
+         $InputDocument.source_sha -cne $Manifest.product.source_sha -or
+         $InputDocument.source_tree -cne $Manifest.product.source_tree -or
+         $InputDocument.tooling_source_sha -cne $Manifest.harness.source_sha -or
+         $InputDocument.tooling_source_tree -cne $Manifest.harness.source_tree -or
+         $InputDocument.prepared_bundle.original_bundle_manifest_sha256 -cne
+            $Manifest.product.provenance.original_bundle_manifest.sha256 -or
+         $InputDocument.prepared_bundle.tooling_record_sha256 -cne
+            $Manifest.harness.tooling_record.sha256 -or
+         $InputDocument.artifacts.observer.sha256 -cne
+            $Manifest.harness.observers.ui.sha256)) {
+        throw 'Focused preserved product or current tooling source differs from the frozen input.'
+    }
 }
 function Assert-SafeAcceptanceRunId {
     param([AllowNull()][object] $RunId)
@@ -239,7 +253,9 @@ function Assert-ObserverResultBinding {
     }
     $candidate = $Manifest.schema_version -eq 2
     if ($candidate) {
-        if ($Result.lane -cne 'candidate-gui-only' -or
+        if ($Result.lane -cne $Manifest.lane -or
+            $Result.lane -cnotin @('candidate-gui-only',
+                'focused-preserved-source-built-product-v1') -or
             $Result.observer_role -cne $Role -or
             $null -eq $Result.product -or $null -eq $Result.harness) {
             throw 'Candidate observer result role or provenance shape is invalid.'

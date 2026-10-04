@@ -350,10 +350,13 @@ class GuiRegressionRunnerTests(unittest.TestCase):
 
     def test_focused_clear_has_separate_pinned_plan_and_v1_bound(self):
         run = runner.focused_clear_run()
-        pin = "a" * 64
+        pin = runner.FOCUSED_APPLICATION_SHA256
         inputs = {"bundle_manifest": {"sha256": "b" * 64},
                   "artifacts": {"application": {"sha256": pin}},
-                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+                  "source_sha": runner.FOCUSED_PRODUCT_SOURCE_SHA, "source_tree": "d" * 40,
+                  "tooling_source_sha": "c" * 40, "tooling_source_tree": "e" * 40,
+                  "original_bundle_manifest": {"sha256": runner.FOCUSED_ORIGINAL_BUNDLE_SHA256},
+                  "tooling_record": {"sha256": "f" * 64}}
         with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
             manifest = runner.input_manifest(self.root, self.root / "bundle", self.root / "run",
                                              run, "e" * 64, {}, {},
@@ -368,6 +371,10 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                          runner.FOCUSED_CLEAR_MODE)
         self.assertEqual(manifest["command"][-2:],
                          ["--expected-prepared-application-sha256", pin])
+        self.assertEqual(manifest["source_sha"], runner.FOCUSED_PRODUCT_SOURCE_SHA)
+        self.assertEqual(manifest["tooling_source_sha"], "c" * 40)
+        self.assertEqual(manifest["prepared_bundle"]["origin"],
+                         "preserved-source-built-product-current-tooling")
         with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "run", run,

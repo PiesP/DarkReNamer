@@ -16,6 +16,9 @@ import sys
 from darkrenamer_tooling.evidence.errors import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
 from darkrenamer_tooling.contracts.platform import V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup
+from darkrenamer_tooling.contracts.tooling import (
+    RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
+)
 
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -31,6 +34,13 @@ PERFORMANCE_MODE = "performance-sample"
 FOCUSED_CLEAR_MODE = "focused-10k-clear"
 FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
 FOCUSED_CLEAR_SCOPE = "focused-10k-clear-v1"
+FOCUSED_PRESERVED_LANE = "focused-preserved-source-built-product-v1"
+FOCUSED_PRODUCT_SOURCE_SHA = "8248c73859e3a3ff0e524fd9448acfe965fa3f68"
+FOCUSED_PRODUCT_REFERENCE_SHA = "b152761010b16ef74e2a3765241a253778b88e0b"
+FOCUSED_ORIGINAL_BUNDLE_SHA256 = "23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e"
+FOCUSED_APPLICATION_SHA256 = "06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f"
+FOCUSED_PRODUCT_ENTRIES_SHA256 = "7c4fc53698413bbab601629a5a56c1129ecd96aaac4a98af09530f87b4a25735"
+FOCUSED_PRODUCT_ENTRIES_COUNT = 104
 FOCUSED_CLEAR_PLAN = {
     "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
     "sample_interval_ms": 200, "maximum_seconds": 600,
@@ -477,6 +487,8 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         required.add("full_context_reference")
     if isinstance(value, dict) and "prepared_bundle" in value:
         required.add("prepared_bundle")
+    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == FOCUSED_CLEAR_MODE:
+        required.update({"tooling_source_sha", "tooling_source_tree"})
     fixed_v2 = isinstance(value, dict) and isinstance(value.get("request"), dict) and (
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
@@ -574,18 +586,99 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             *prepared_args],
                 "Performance manifest identity or command is invalid.")
     if request["mode"] == FOCUSED_CLEAR_MODE:
+        require(manifest["source_sha"] == FOCUSED_PRODUCT_SOURCE_SHA and
+                isinstance(manifest["tooling_source_sha"], str) and
+                SHA1.fullmatch(manifest["tooling_source_sha"]) is not None and
+                isinstance(manifest["tooling_source_tree"], str) and
+                SHA1.fullmatch(manifest["tooling_source_tree"]) is not None and
+                manifest["tooling_source_sha"] != manifest["source_sha"] and
+                artifacts["application"]["sha256"] == FOCUSED_APPLICATION_SHA256,
+                "Focused product and separate tooling source identity differs.")
         prepared = exact_keys(manifest.get("prepared_bundle"),
-                              {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              {"origin", "bundle_manifest_sha256", "application_sha256",
+                               "original_bundle_manifest_sha256", "tooling_record_sha256",
+                               "product_source_sha", "tooling_source_sha"},
                               "focused clear prepared bundle")
-        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+        require(prepared["origin"] == "preserved-source-built-product-current-tooling" and
                 prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
-                prepared["application_sha256"] == artifacts["application"]["sha256"],
-                "Focused clear prepared executable differs from retained inputs.")
+                prepared["application_sha256"] == FOCUSED_APPLICATION_SHA256 and
+                prepared["original_bundle_manifest_sha256"] == FOCUSED_ORIGINAL_BUNDLE_SHA256 and
+                prepared["product_source_sha"] == manifest["source_sha"] and
+                prepared["tooling_source_sha"] == manifest["tooling_source_sha"],
+                "Focused preserved product provenance differs from retained inputs.")
+        active, _ = read_json(run_root, Path(manifest["bundle_manifest"]["file"]),
+                              "focused active bundle")
+        active = exact_keys(active, {"schema_version", "lane", "target", "test_binaries",
+                                     "product", "harness"}, "focused active bundle")
+        product = exact_keys(active["product"], {"source_sha", "source_tree", "source_state",
+                                                 "application", "provenance"}, "focused product")
+        origin = exact_keys(product["provenance"], {"kind", "reference_source_sha",
+            "original_bundle_manifest", "non_tooling_entries_sha256",
+            "non_tooling_entries_count", "cargo_lock_sha256"}, "focused origin")
+        harness = exact_keys(active["harness"], {"source_sha", "source_tree", "source_state",
+            "launcher", "builder", "controller", "runner", "observers", "tooling_record"},
+            "focused harness")
+        observers = exact_keys(harness["observers"], {"ui"}, "focused observers")
+        require(int_equals(active["schema_version"], 2) and
+                active["lane"] == FOCUSED_PRESERVED_LANE and
+                active["target"] == "x86_64-pc-windows-msvc" and active["test_binaries"] == [] and
+                product["source_sha"] == manifest["source_sha"] and
+                product["source_tree"] == manifest["source_tree"] and
+                product["source_state"] == "clean" and
+                origin["kind"] == "preserved-source-built-bundle" and
+                origin["reference_source_sha"] == FOCUSED_PRODUCT_REFERENCE_SHA and
+                origin["non_tooling_entries_sha256"] == FOCUSED_PRODUCT_ENTRIES_SHA256 and
+                int_equals(origin["non_tooling_entries_count"], 104) and
+                origin["cargo_lock_sha256"] == artifacts["lockfile"]["sha256"] and
+                harness["source_sha"] == manifest["tooling_source_sha"] and
+                harness["source_tree"] == manifest["tooling_source_tree"] and
+                harness["source_state"] == "clean",
+                "Focused active bundle mixes product and tooling identities.")
+        def staged(row: object, expected_leaf: str, label: str) -> dict:
+            active_row = exact_keys(row, {"file", "sha256"}, label)
+            require(active_row["file"] == expected_leaf, label + " filename differs.")
+            relative = "inputs/" + expected_leaf
+            data = read_bytes(run_root, Path(relative), MAX_ARTIFACT_BYTES, label)
+            return checked_artifact(run_root, {"file": relative, "sha256": active_row["sha256"],
+                                               "bytes": len(data)}, label)
+
+        original_row = staged(origin["original_bundle_manifest"], "original-bundle.json",
+                              "focused original bundle")
+        record_row = staged(harness["tooling_record"], RECORD_NAME,
+                            "focused tooling record")
+        require(original_row["file"] == "inputs/original-bundle.json" and
+                original_row["sha256"] == FOCUSED_ORIGINAL_BUNDLE_SHA256 and
+                record_row["file"] == "inputs/tooling-record.json" and
+                record_row["sha256"] == prepared["tooling_record_sha256"] and
+                staged(product["application"], "DarkReNamer.exe", "focused application") ==
+                    artifacts["application"] and
+                all(staged(harness[key], name, "focused " + key) == artifacts[key]
+                    for key, name in (("launcher", "run-gui-regression.py"),
+                                      ("builder", "test-windows-vm.py"),
+                                      ("controller", "run-windows-vm-tests.ps1"),
+                                      ("runner", "windows-vm-guest.ps1"))) and
+                staged(observers["ui"], "windows-vm-acceptance.ps1", "focused observer") ==
+                    artifacts["observer"],
+                "Focused retained product and current harness artifacts differ.")
+        original, _ = read_json(run_root, Path(original_row["file"]),
+                                "focused original source-built bundle")
+        require(original.get("schema_version") == 1 and
+                original.get("source_sha") == FOCUSED_PRODUCT_SOURCE_SHA and
+                original.get("source_state") == "clean" and
+                original.get("target") == active["target"] and
+                original.get("application") == {"file": "DarkReNamer.exe",
+                                                "sha256": FOCUSED_APPLICATION_SHA256} and
+                original.get("cargo_lock_sha256") == origin["cargo_lock_sha256"] and
+                isinstance(original.get("test_binaries"), list) and original["test_binaries"],
+                "Focused original source-built manifest does not identify the preserved product.")
         require(manifest["run_id"] == FOCUSED_CLEAR_RUN_ID and
                 command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
                             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
                             "--diagnostic", FOCUSED_CLEAR_MODE,
-                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--preserved-product-bundle-root", "<external-preserved-product-bundle-root>",
+                            "--expected-original-bundle-sha256", FOCUSED_ORIGINAL_BUNDLE_SHA256,
+                            "--expected-product-source-sha", FOCUSED_PRODUCT_SOURCE_SHA,
+                            "--expected-tooling-source-sha", manifest["tooling_source_sha"],
                             "--expected-prepared-application-sha256", prepared["application_sha256"]],
                 "Focused clear manifest identity or command is invalid.")
     if request["mode"] == ICON_SETTLEMENT_MODE:
@@ -3301,7 +3394,55 @@ def validate_focused_clear_metrics(scenario: dict) -> dict:
             "first_clear_status": command["status"]}
 
 
-def validate_focused_clear_run(root: Path, run_id: str, source_sha: str) -> dict:
+def verify_focused_product_inventory(repo: Path) -> str:
+    def entries(sha: str) -> list[dict]:
+        raw = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", sha], cwd=repo)
+        rows = []
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            identity, name = entry.split(b"\t", 1)
+            path = name.decode("utf-8")
+            if path.startswith("scripts/") or path in {
+                    "DEVELOPMENT.md", "config/tooling-bundle.json", "config/tooling-tests.json"}:
+                continue
+            mode, kind, oid = identity.decode("ascii").split(" ")
+            require(kind == "blob", "Focused original inventory has a non-blob product entry.")
+            rows.append({"path": path, "git_object": oid, "mode": mode})
+        return rows
+
+    original = entries(FOCUSED_PRODUCT_SOURCE_SHA)
+    reference = entries(FOCUSED_PRODUCT_REFERENCE_SHA)
+    encoded = json.dumps(original, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    require(original == reference and len(original) == FOCUSED_PRODUCT_ENTRIES_COUNT and
+            sha256_bytes(encoded) == FOCUSED_PRODUCT_ENTRIES_SHA256,
+            "Focused original product differs across the complete non-tooling Git inventory.")
+    return subprocess.check_output(["git", "rev-parse", FOCUSED_PRODUCT_SOURCE_SHA + "^{tree}"],
+                                   cwd=repo, text=True).strip()
+
+
+def verify_focused_harness_git(repo: Path, tooling_sha: str, artifacts: dict) -> None:
+    """Bind the five staged top-level harness scripts to ordinary Git blobs."""
+    names = {"launcher": "run-gui-regression.py", "builder": "test-windows-vm.py",
+             "controller": "run-windows-vm-tests.ps1", "runner": "windows-vm-guest.ps1",
+             "observer": "windows-vm-acceptance.ps1"}
+    for role, name in names.items():
+        path = "scripts/" + name
+        tree = subprocess.check_output(["git", "ls-tree", tooling_sha, "--", path],
+                                       cwd=repo, text=True).strip()
+        match = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\t" + re.escape(path), tree)
+        require(match is not None, "Focused harness is not one ordinary tracked Git blob: " + path)
+        size = int(subprocess.check_output(["git", "cat-file", "-s", match.group(2)],
+                                           cwd=repo, text=True).strip())
+        require(0 <= size <= 8 * 1024 * 1024,
+                "Focused harness Git blob exceeds its bound: " + path)
+        source = subprocess.check_output(["git", "show", tooling_sha + ":" + path], cwd=repo)
+        require(len(source) == size and sha256_bytes(source) == artifacts[role]["sha256"],
+                "Focused harness differs from the selected tooling Git blob: " + path)
+
+
+def validate_focused_clear_run(root: Path, run_id: str, source_sha: str,
+                               tooling_repo: Path) -> dict:
     require(run_id == FOCUSED_CLEAR_RUN_ID, "Focused clear run id is invalid.")
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(),
@@ -3309,6 +3450,19 @@ def validate_focused_clear_run(root: Path, run_id: str, source_sha: str) -> dict
     manifest, input_bytes = validate_input_manifest(run_root, source_sha)
     require(manifest["request"]["mode"] == FOCUSED_CLEAR_MODE,
             "Focused clear request mode is missing.")
+    record_path = Path("inputs/tooling-record.json")
+    record, _ = read_json(run_root, record_path, "focused tooling record")
+    roles = tuple(row["role"] for row in record.get("modules", []))
+    require({"vm-launcher", "powershell-controller-entry", "powershell-ui-entry",
+             "powershell-guest-entry"}.issubset(roles) and
+            record == trusted_tooling_inventory(tooling_repo, manifest["tooling_source_sha"], roles) and
+            set(staged_tooling_files(run_root / "inputs")) ==
+                {RECORD_NAME, "tooling-bundle.json", *(row["file"] for row in record["modules"])} and
+            subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=tooling_repo,
+                                    text=True).strip() == manifest["tooling_source_tree"] and
+            verify_focused_product_inventory(tooling_repo) == manifest["source_tree"],
+            "Focused current tooling closure or original product tree differs.")
+    verify_focused_harness_git(tooling_repo, manifest["tooling_source_sha"], manifest["artifacts"])
     input_hash = sha256_bytes(input_bytes)
     _, cleanup_bytes = validate_cleanup(run_root, input_hash)
     _, collection_bytes, files = validate_collection(run_root, input_hash)
@@ -3345,7 +3499,14 @@ def validate_focused_clear_run(root: Path, run_id: str, source_sha: str) -> dict
             typed_equal(raw.get("acceptance_observations"), observations) and
             typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
             "Focused observer observations are not bound to protected bytes.")
-    require(raw.get("source_sha") == source_sha and
+    require(int_equals(raw.get("schema_version"), 2) and
+            "source_sha" not in raw and
+            raw.get("lane") == FOCUSED_PRESERVED_LANE and
+            raw.get("product") == read_json(run_root, Path(manifest["bundle_manifest"]["file"]),
+                                             "focused active bundle")[0]["product"] and
+            raw.get("harness") == read_json(run_root, Path(manifest["bundle_manifest"]["file"]),
+                                             "focused active bundle")[0]["harness"] and
+            raw.get("observer_role") == "ui" and
             nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
             raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
             raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
@@ -3377,7 +3538,7 @@ def validate_focused_clear_run(root: Path, run_id: str, source_sha: str) -> dict
     metrics = validate_focused_clear_metrics(scenario)
     return {"run_id": run_id, "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
-            "bundle_mode": "prepared", "process_id": scenario["process_id"],
+            "bundle_mode": "preserved-product-current-tooling", "process_id": scenario["process_id"],
             "observation": metrics, "full_four_run_regression": "not-run",
             "performance_batch": "not-run", "release_campaign": "not-run"}
 
@@ -3740,7 +3901,7 @@ def main(repo: Path, argv=None) -> int:
         require(not args.require_complete_set and args.configuration_set is None and
                 args.runs == [FOCUSED_CLEAR_RUN_ID],
                 "Focused clear requires its single declared diagnostic run.")
-        observed = validate_focused_clear_run(root, args.runs[0], args.expected_source_sha)
+        observed = validate_focused_clear_run(root, args.runs[0], args.expected_source_sha, repo)
         print(json.dumps({"schema_version": 1, "diagnostic": FOCUSED_CLEAR_MODE,
                           "status": "observed", "source_sha": args.expected_source_sha,
                           "runs": [observed], "full_four_run_regression": "not-run",
