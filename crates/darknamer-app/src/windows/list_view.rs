@@ -2334,8 +2334,8 @@ mod native_tests {
     };
     use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETTOPINDEX, LVM_SCROLL,
-        LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
+        LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         PM_REMOVE, PeekMessageW, SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
@@ -2599,6 +2599,44 @@ mod native_tests {
             Ok(action(lease.state_mut()))
         }
 
+        fn attach_test_image_list(
+            &self,
+            image_list: icon_worker::BorrowedSystemImageList,
+        ) -> io::Result<()> {
+            self.with_state(|state| {
+                // SAFETY: the test owns this live ListView. Both calls carry
+                // only scalar image-list identities; the separate owner
+                // outlives the ListView's confirmed destruction.
+                let existing = unsafe {
+                    SendMessageW(state.list_window, LVM_GETIMAGELIST, LVSIL_SMALL as usize, 0)
+                };
+                if existing != 0 {
+                    return Err(io::Error::other(
+                        "refresh test ListView already has an image list",
+                    ));
+                }
+                // SAFETY: LVS_SHAREIMAGELISTS keeps ownership with this test;
+                // the borrowed scalar remains live until parent destruction.
+                unsafe {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_SETIMAGELIST,
+                        LVSIL_SMALL as usize,
+                        image_list.raw(),
+                    )
+                };
+                // SAFETY: scalar readback on the same live ListView.
+                let attached = unsafe {
+                    SendMessageW(state.list_window, LVM_GETIMAGELIST, LVSIL_SMALL as usize, 0)
+                };
+                if attached != image_list.raw() {
+                    return Err(io::Error::other("refresh test image list was not attached"));
+                }
+                state.icon_image_list = Some(image_list);
+                Ok(())
+            })?
+        }
+
         fn close(&mut self) -> io::Result<()> {
             if self.owner.is_null() {
                 return Ok(());
@@ -2634,9 +2672,12 @@ mod native_tests {
 
     impl Drop for RefreshTestApp {
         fn drop(&mut self) {
-            // Preserve the slot on uncertain native teardown instead of freeing
-            // resources still reachable by a native window.
-            let _ = self.close();
+            // A controlled image list may still be attached. Do not let its
+            // outer owner drop after uncertain native window destruction.
+            if let Err(error) = self.close() {
+                eprintln!("refresh test native teardown failed: {error}");
+                std::process::abort();
+            }
         }
     }
 
@@ -4347,7 +4388,7 @@ mod native_tests {
         const CHILD_MODE: &str = "DARKRENAMER_TEST_NATIVE_REFRESH_CHILD";
         const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
         const DEADLINE: Duration = Duration::from_secs(60);
-        let exact_name = format!("windows::list_view::native_tests::{case}");
+        let exact_name = format!("windows::list_view::native_tests::full_refresh_{case}");
         if let Some(requested) = std::env::var_os(CHILD_MODE) {
             if requested != std::ffi::OsStr::new(&exact_name) {
                 return Err(io::Error::other("unexpected native-refresh child case").into());
@@ -4438,7 +4479,9 @@ mod native_tests {
 
     fn run_native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
         let _ole = RefreshTestOle::initialize()?;
+        let image_list = icon_worker::OwnedTestImageList::new()?;
         let mut app = RefreshTestApp::new()?;
+        app.attach_test_image_list(image_list.borrowed())?;
         app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
             let parent = r"C:\refresh-fixture\normal";
             assert_eq!(state.model.len(), 0);
@@ -4448,9 +4491,10 @@ mod native_tests {
             for (index, item) in rows.iter().enumerate() {
                 state.icon_cache.insert(
                     icon_cache_key(item.current_name(), item.is_directory()),
-                    (index + 11) as i32,
+                    (index % 2) as i32,
                 );
             }
+            assert_eq!(state.icon_cache.len(), rows.len());
             state.model.append_batch_by(rows, compare_windows)?;
             // The empty ListView and model were synchronized before insertion.
             assert_normal_refresh(state, "regression-first-insertion");
@@ -4461,7 +4505,7 @@ mod native_tests {
                     .take(6)
                     .map(|row| row.icon)
                     .collect::<Vec<_>>(),
-                vec![11, 12, 13, 14, 15, 16]
+                vec![0, 1, 0, 1, 0, 1]
             );
             assert_eq!(
                 state.rendered_rows[0].values[0],
@@ -4594,7 +4638,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_rows_and_proposals() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case("native_rows_and_proposals", run_native_rows_and_proposals)
     }
 
@@ -4723,7 +4767,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_fallback_and_apply_lock() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_fallback_and_apply_lock",
             run_native_fallback_and_apply_lock,
@@ -4818,7 +4862,8 @@ mod native_tests {
     }
 
     #[test]
-    fn native_dates_follow_locale_and_timezone() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_dates_follow_locale_and_timezone()
+    -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_dates_follow_locale_and_timezone",
             run_native_dates_follow_locale_and_timezone,
@@ -4904,7 +4949,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
+    fn full_refresh_native_viewport_focus_and_close() -> Result<(), Box<dyn std::error::Error>> {
         isolated_native_refresh_case(
             "native_viewport_focus_and_close",
             run_native_viewport_focus_and_close,

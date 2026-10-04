@@ -489,9 +489,14 @@ tracked-worker native cases and source-bound product observations.
 The focused native refresh regressions own a live hidden parent and ListView,
 publish the ordinary callback lease, and destroy every child before reclaiming
 the state. Each case runs in an exact-named bounded child process so WinRT and
-OLE lifetime caches cannot couple cases. Test-only thread-local seams refuse a
-selected incremental cell update or rebuild before native dispatch on that
-valid HWND; they exercise authoritative fallback, retained preview failure,
+OLE lifetime caches cannot couple cases. The mixed-icon case attaches the
+existing populated two-slot test image list to its shared-image-list ListView
+and uses only validated indices 0 and 1. Its owner is declared before the
+window fixture and released only after confirmed child destruction, including
+error and unwind paths. Uncertain native teardown aborts the isolated child
+before the image list can be freed while attached. Test-only thread-local seams
+refuse a selected incremental cell update or rebuild before native dispatch on
+that valid HWND; they exercise authoritative fallback, retained preview failure,
 Apply blocking, and recovery without forged handles or process-wide hooks.
 The test date seam supplies explicit registered time zones and locale names to
 synchronous Win32 formatting without changing system settings. UTF-16 output
