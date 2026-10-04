@@ -329,7 +329,8 @@ const DEFERRED_MESSAGE_TIMER_ID: usize = 0xD4A4;
 enum CallbackStateStatus {
     Available,
     Leased,
-    ReclaimPending,
+    ReclaimPendingLeased,
+    ReclaimPendingIdle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -346,6 +347,7 @@ enum ReclaimDisposition {
 /// confined to the UI thread.
 struct CallbackState<T, R = ()> {
     status: Cell<CallbackStateStatus>,
+    reclaim_held: Cell<bool>,
     menu_edge_color: Cell<Option<u32>>,
     retirement: UnsafeCell<Option<R>>,
     value: UnsafeCell<T>,
@@ -356,10 +358,41 @@ struct CallbackStateLease<T, R = ()> {
     _ui_thread_only: PhantomData<Rc<()>>,
 }
 
+/// A UI-thread run-scope owner for a window slot after its publication ends.
+/// Construct only while the slot is live; drop after all tracked work joins.
+struct CallbackReclaimHold<T, R = ()> {
+    slot: NonNull<CallbackState<T, R>>,
+    _ui_thread_only: PhantomData<Rc<()>>,
+}
+
+impl<T, R> CallbackReclaimHold<T, R> {
+    unsafe fn new(slot: *mut CallbackState<T, R>) -> Option<Self> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: the caller owns this still-live UI-thread slot. The hold
+        // retains its allocation after publication is removed.
+        if !unsafe { CallbackState::hold_reclaim(slot.as_ptr()) } {
+            return None;
+        }
+        Some(Self {
+            slot,
+            _ui_thread_only: PhantomData,
+        })
+    }
+}
+
+impl<T, R> Drop for CallbackReclaimHold<T, R> {
+    fn drop(&mut self) {
+        // SAFETY: this token owns the exact hold from construction, and its
+        // retained allocation remains live until this release completes.
+        unsafe { CallbackState::release_reclaim_hold(self.slot.as_ptr()) };
+    }
+}
+
 impl<T, R> CallbackState<T, R> {
     fn into_raw(value: T) -> *mut Self {
         Box::into_raw(Box::new(Self {
             status: Cell::new(CallbackStateStatus::Available),
+            reclaim_held: Cell::new(false),
             menu_edge_color: Cell::new(None),
             retirement: UnsafeCell::new(None),
             value: UnsafeCell::new(value),
@@ -418,22 +451,85 @@ impl<T, R> CallbackState<T, R> {
         // SAFETY: the caller has unpublished this UI-thread-owned allocation,
         // so no new callback can acquire it. A pending outer lease keeps the
         // allocation live until `CallbackStateLease::drop`.
-        let previous = {
-            // SAFETY: the slot remains live until the state transition decides
-            // whether reclamation is immediate or deferred.
-            let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
-            status.replace(CallbackStateStatus::ReclaimPending)
+        // SAFETY: these disjoint Cells belong to the live UI-thread allocation.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
         };
-        match previous {
+        match status.get() {
             CallbackStateStatus::Available => {
-                // SAFETY: publication was cleared and no lease exists. This is
-                // the allocation's unique immediate reclamation path.
-                unsafe { drop(Box::from_raw(slot.as_ptr())) };
-                ReclaimDisposition::Reclaimed
+                if held.get() {
+                    status.set(CallbackStateStatus::ReclaimPendingIdle);
+                    ReclaimDisposition::Deferred
+                } else {
+                    // SAFETY: publication was cleared, and neither a lease nor
+                    // a run-scope hold can retain this exact allocation.
+                    unsafe { drop(Box::from_raw(slot.as_ptr())) };
+                    ReclaimDisposition::Reclaimed
+                }
             }
-            CallbackStateStatus::Leased | CallbackStateStatus::ReclaimPending => {
+            CallbackStateStatus::Leased => {
+                status.set(CallbackStateStatus::ReclaimPendingLeased);
                 ReclaimDisposition::Deferred
             }
+            CallbackStateStatus::ReclaimPendingLeased | CallbackStateStatus::ReclaimPendingIdle => {
+                ReclaimDisposition::Deferred
+            }
+        }
+    }
+
+    /// Retains an unpublished slot while a run-scope worker is still tracked.
+    /// The caller must release this hold after the worker has actually joined.
+    unsafe fn hold_reclaim(slot: *mut Self) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the caller owns the live UI-thread slot and touches only
+        // Cells disjoint from its possibly leased value.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
+        };
+        if held.get()
+            || !matches!(
+                status.get(),
+                CallbackStateStatus::Available | CallbackStateStatus::Leased
+            )
+        {
+            return false;
+        }
+        held.set(true);
+        true
+    }
+
+    /// Ends the run-scope hold after its worker has joined. A still-active
+    /// callback lease completes reclamation when that lease exits.
+    unsafe fn release_reclaim_hold(slot: *mut Self) -> ReclaimDisposition {
+        let Some(slot) = NonNull::new(slot) else {
+            return ReclaimDisposition::Deferred;
+        };
+        // SAFETY: the hold itself keeps this UI-thread allocation live until
+        // this method has decided whether it is the final owner.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*slot.as_ptr()).reclaim_held),
+            )
+        };
+        if !held.replace(false) {
+            return ReclaimDisposition::Deferred;
+        }
+        if status.get() == CallbackStateStatus::ReclaimPendingIdle {
+            // SAFETY: publication and the sole lease already ended; releasing
+            // this hold is the unique remaining Box reclamation path.
+            unsafe { drop(Box::from_raw(slot.as_ptr())) };
+            ReclaimDisposition::Reclaimed
+        } else {
+            ReclaimDisposition::Deferred
         }
     }
 
@@ -476,20 +572,29 @@ impl<T, R> CallbackStateLease<T, R> {
 
 impl<T, R> Drop for CallbackStateLease<T, R> {
     fn drop(&mut self) {
-        // SAFETY: the slot remains live for the duration of its sole lease.
-        let reclaim = {
-            // SAFETY: the slot remains live until this sole lease decides
-            // whether it must perform deferred reclamation.
-            let status = unsafe { &*std::ptr::addr_of!((*self.slot.as_ptr()).status) };
-            match status.replace(CallbackStateStatus::Available) {
-                CallbackStateStatus::Leased => false,
-                CallbackStateStatus::ReclaimPending => true,
-                CallbackStateStatus::Available => false,
+        // SAFETY: the slot remains live for its sole lease; both Cells are
+        // disjoint from the leased value and confined to this UI thread.
+        let (status, held) = unsafe {
+            (
+                &*std::ptr::addr_of!((*self.slot.as_ptr()).status),
+                &*std::ptr::addr_of!((*self.slot.as_ptr()).reclaim_held),
+            )
+        };
+        let reclaim = match status.get() {
+            CallbackStateStatus::Leased => {
+                status.set(CallbackStateStatus::Available);
+                false
             }
+            CallbackStateStatus::ReclaimPendingLeased if held.get() => {
+                status.set(CallbackStateStatus::ReclaimPendingIdle);
+                false
+            }
+            CallbackStateStatus::ReclaimPendingLeased => true,
+            CallbackStateStatus::Available | CallbackStateStatus::ReclaimPendingIdle => false,
         };
         if reclaim {
             // SAFETY: reclamation was requested after publication was cleared,
-            // and this is the sole lease ending, so exactly one owner remains.
+            // and both the hold and sole lease ended, so exactly one owner remains.
             unsafe { drop(Box::from_raw(self.slot.as_ptr())) };
         }
     }
@@ -1375,6 +1480,102 @@ mod tests {
         drop(outer);
         assert_eq!(state_drops.get(), 1);
         assert_eq!(retirement_drops.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn callback_state_run_hold_reclaims_after_both_possible_lease_release_orders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: every slot below is test-owned on this UI thread. A slot is
+        // unpublished before request_reclaim; the hold and sole lease retain
+        // it until the corresponding release, and no raw pointer is used after
+        // its final release.
+        unsafe {
+            for lease_first in [true, false] {
+                let drops = Rc::new(Cell::new(0));
+                let slot = CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(
+                    Rc::clone(&drops),
+                ));
+                assert!(CallbackState::hold_reclaim(slot));
+                let outer = CallbackState::try_lease(slot)
+                    .ok_or_else(|| io::Error::other("held callback lease was rejected"))?;
+                assert_eq!(
+                    CallbackState::request_reclaim(slot),
+                    ReclaimDisposition::Deferred
+                );
+                assert_eq!(
+                    CallbackState::request_reclaim(slot),
+                    ReclaimDisposition::Deferred
+                );
+                assert!(CallbackState::try_lease(slot).is_none());
+                if lease_first {
+                    drop(outer);
+                    assert_eq!(drops.get(), 0);
+                    assert!(CallbackState::try_lease(slot).is_none());
+                    assert_eq!(
+                        CallbackState::release_reclaim_hold(slot),
+                        ReclaimDisposition::Reclaimed
+                    );
+                } else {
+                    assert_eq!(
+                        CallbackState::release_reclaim_hold(slot),
+                        ReclaimDisposition::Deferred
+                    );
+                    assert_eq!(drops.get(), 0);
+                    assert!(CallbackState::try_lease(slot).is_none());
+                    drop(outer);
+                }
+                assert_eq!(drops.get(), 1);
+            }
+
+            let drops = Rc::new(Cell::new(0));
+            let slot =
+                CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(Rc::clone(&drops)));
+            assert!(CallbackState::hold_reclaim(slot));
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert!(CallbackState::try_lease(slot).is_none());
+            assert_eq!(drops.get(), 0);
+            assert_eq!(
+                CallbackState::release_reclaim_hold(slot),
+                ReclaimDisposition::Reclaimed
+            );
+            assert_eq!(drops.get(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn callback_state_unused_run_hold_can_end_while_published()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let drops = Rc::new(Cell::new(0));
+        let slot =
+            CallbackState::<CallbackDropProbe>::into_raw(CallbackDropProbe(Rc::clone(&drops)));
+        // SAFETY: this test owns the live UI-thread slot. Releasing the unused
+        // hold leaves it published; the sole lease ends before unpublication,
+        // and no pointer access follows final reclamation.
+        unsafe {
+            assert!(CallbackState::hold_reclaim(slot));
+            assert_eq!(
+                CallbackState::release_reclaim_hold(slot),
+                ReclaimDisposition::Deferred
+            );
+            assert_eq!(drops.get(), 0);
+            let lease = CallbackState::try_lease(slot)
+                .ok_or_else(|| io::Error::other("published slot was not leaseable"))?;
+            drop(lease);
+            assert_eq!(
+                CallbackState::request_reclaim(slot),
+                ReclaimDisposition::Reclaimed
+            );
+        }
+        assert_eq!(drops.get(), 1);
         Ok(())
     }
 

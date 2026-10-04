@@ -361,7 +361,12 @@ The following bounded design dispositions retain existing behavior:
 - **CallbackState / CallbackStateLease: retain the current protocol.** A sole
   UI-thread lease rejects nested borrowing; destruction removes publication and
   defers exactly one reclamation until that lease ends. Retirement and color
-  sidecars remain disjoint from the leased value. An Rc-backed owner with
+  sidecars remain disjoint from the leased value. An optional UI-thread run hold
+  can defer reclamation further while a tracked worker is retiring: an
+  unpublished slot remains unleaseable after either the callback lease or hold
+  ends, and is freed exactly once after both end. This keeps the AppState's
+  last-dropped runtime lock alive until the worker has actually joined without
+  moving a native state pointer to that worker. An Rc-backed owner with
   RefCell::try_borrow_mut could replace borrowing/reclamation internals, but must
   also retain a strong owner before callback dispatch, remove publication before
   destruction, and keep sidecars independently accessible during a value borrow.

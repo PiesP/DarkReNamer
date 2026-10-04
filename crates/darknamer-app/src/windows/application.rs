@@ -583,6 +583,15 @@ fn run_unsafe() -> io::Result<()> {
             return Err(error);
         }
     };
+    // SAFETY: the hidden live window still owns this exact AppStateSlot. Its
+    // UI-thread hold retains AppState through WM_NCDESTROY until run returns;
+    // future tracked work must join before this local is dropped.
+    let Some(_run_reclaim_hold) = (unsafe { CallbackReclaimHold::new(state) }) else {
+        // SAFETY: a failed hold leaves the hidden live window's ordinary
+        // publication/reclamation contract unchanged.
+        unsafe { DestroyWindow(window) };
+        return Err(io::Error::other("window state retirement hold failed"));
+    };
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     unsafe {
         ShowWindow(window, SW_SHOW);
