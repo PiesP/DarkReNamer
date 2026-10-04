@@ -539,4 +539,35 @@ Assert-Equal $sortedChurnNames[298] 'extension-0596.e298' 'Last sorted unique cl
 Assert-Equal $sortedChurnNames[299] 'recurring-0001.txt' 'First sorted recurring class'
 Assert-Equal $sortedChurnNames[499] 'recurring-0401.txt' 'Observed middle sorted churn row'
 Assert-Equal $sortedChurnNames[999] 'recurring-0999.txt' 'Last sorted churn row'
+Add-Type -TypeDefinition @'
+using System;
+public static class IconStatusExceptionFixture {
+    public static void Transient() {
+        throw new InvalidOperationException("Icon status query did not produce a stable published snapshot.");
+    }
+    public static void ForeignText() {
+        throw new InvalidOperationException("Icon status query timed out or failed.");
+    }
+    public static void ForeignType() {
+        throw new ArgumentException("Icon status query did not produce a stable published snapshot.");
+    }
+}
+'@
+foreach ($case in @(
+    @{ name='Transient'; expected=$true },
+    @{ name='ForeignText'; expected=$false },
+    @{ name='ForeignType'; expected=$false })) {
+    try { [IconStatusExceptionFixture]::($case.name)() }
+    catch {
+        Assert-Equal (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_) `
+            $case.expected "Exact wrapped icon query classification: $($case.name)"
+        continue
+    }
+    throw "Expected a wrapped C# failure: $($case.name)"
+}
+try { throw [InvalidOperationException]::new('Icon status query did not produce a stable published snapshot.') }
+catch {
+    Assert-Equal (Test-ObserverIconTransientStatusQueryError -ErrorRecord $_) $false `
+        'Unwrapped message is not a trusted transient query'
+}
 Write-Output 'UI native/input behavior contracts passed.'
