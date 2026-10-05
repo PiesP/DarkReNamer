@@ -177,8 +177,14 @@ bytes, the original candidate attestation, and the existing remote tag.
 Before collecting new raw evidence, use the local POSIX owner-only destination
 procedure in [campaign development](DEVELOPMENT.md#vm-automated-campaign-development).
 Temporary and final campaign ZIPs are created owner-only before content is
-written, rather than restricted after packaging. This does not retroactively
-prove creation-time privacy of historical evidence archives.
+written, rather than restricted after packaging. The supported Linux/WSL
+producer enforces an effective-user-owned `0700` ordinary parent, retains its
+descriptor, and refuses uncertain cleanup of names it cannot authenticate.
+Use local Linux storage with enforced POSIX permissions, keep it private through
+upload, and preserve equivalent protection when moving or copying raw evidence.
+These checks do not certify filesystem ACLs or support Windows-backed WSL
+packaging destinations. They do not retroactively prove creation-time privacy
+or the newer parent/cleanup boundaries of historical evidence archives.
 
 The manual VM validation workflow obtains raw evidence from one dedicated,
 never-published draft release asset owned and uploaded by the repository owner.

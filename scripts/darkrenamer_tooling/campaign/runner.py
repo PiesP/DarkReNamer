@@ -42,6 +42,8 @@ WINDOWS_RESERVED = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
+_DIR_FD_FUNCTIONS = (os.open, os.stat, os.link, os.unlink, os.mkdir)
+_NOFOLLOW_FUNCTIONS = (os.stat, os.link)
 
 
 def require(condition: bool, message: str) -> None:
@@ -84,6 +86,53 @@ def ordinary_directory(path: Path, label: str) -> Path:
     require(stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode),
             label + " must be an ordinary directory.")
     return path.resolve(strict=True)
+
+
+def _private_parent_state(descriptor: int, path: Path, label: str,
+                          identity: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Check the opened POSIX directory and its selected pathname together."""
+    opened = os.fstat(descriptor)
+    selected = os.lstat(path)
+    actual = (opened.st_dev, opened.st_ino)
+    require(stat.S_ISDIR(opened.st_mode) and stat.S_ISDIR(selected.st_mode) and
+            actual == (selected.st_dev, selected.st_ino) and
+            (identity is None or actual == identity) and
+            opened.st_uid == os.geteuid() and selected.st_uid == os.geteuid() and
+            stat.S_IMODE(opened.st_mode) == 0o700 and
+            stat.S_IMODE(selected.st_mode) == 0o700,
+            label + " must remain an effective-user-owned private (0700) ordinary directory.")
+    return actual
+
+
+@contextmanager
+def private_parent(path: Path, label: str):
+    """Retain the validated packaging parent for relative filesystem operations."""
+    path = Path(path)
+    require(path.is_absolute(), label + " must be absolute.")
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+    require(os.name == "posix" and hasattr(os, "geteuid") and
+            all(hasattr(os, name) for name in required) and
+            all(function in os.supports_dir_fd for function in _DIR_FD_FUNCTIONS) and
+            all(function in os.supports_follow_symlinks for function in _NOFOLLOW_FUNCTIONS),
+            label + " requires POSIX directory-descriptor capabilities.")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY |
+                             os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise ValueError(label + " must be an available ordinary directory.") from error
+    try:
+        identity = _private_parent_state(descriptor, path, label)
+        yield descriptor, identity
+    except BaseException as primary:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup:
+            raise RuntimeError(label + " failed: " + _bounded_error(primary) +
+                               "; descriptor cleanup uncertain: " +
+                               _bounded_error(cleanup)) from primary
+        raise
+    else:
+        os.close(descriptor)
 
 
 def ordinary_file(path: Path, label: str, maximum: int = MAX_FILE_BYTES) -> Path:
@@ -210,12 +259,14 @@ def new_external_root(repo: Path, requested: Path) -> Path:
     require(requested.is_absolute(), "Campaign output root must be absolute.")
     require(not requested.exists() and not requested.is_symlink(),
             "Campaign output root must be new.")
-    parent = ordinary_directory(requested.parent, "Campaign output parent")
-    target = parent / safe_segment(requested.name)
-    resolved_repo = repo.resolve(strict=True)
-    require(not target.is_relative_to(resolved_repo) and not resolved_repo.is_relative_to(target),
-            "Campaign output root must be external to the checkout.")
-    target.mkdir(mode=0o700)
+    with private_parent(requested.parent, "Campaign output parent") as (parent_fd, identity):
+        target = requested.parent.resolve(strict=True) / safe_segment(requested.name)
+        resolved_repo = repo.resolve(strict=True)
+        require(not target.is_relative_to(resolved_repo) and not resolved_repo.is_relative_to(target),
+                "Campaign output root must be external to the checkout.")
+        _private_parent_state(parent_fd, requested.parent, "Campaign output parent", identity)
+        os.mkdir(target.name, mode=0o700, dir_fd=parent_fd)
+        _private_parent_state(parent_fd, requested.parent, "Campaign output parent", identity)
     return target
 
 
@@ -224,12 +275,14 @@ def new_archive_path(repo: Path, requested: Path, output: Path) -> Path:
     require(requested.is_absolute() and requested.suffix.lower() == ".zip",
             "Campaign archive must be an absolute ZIP path.")
     require(not requested.exists() and not requested.is_symlink(), "Campaign archive must be new.")
-    parent = ordinary_directory(requested.parent, "Campaign archive parent")
-    target = parent / safe_segment(requested.name)
-    require(not target.is_relative_to(repo.resolve(strict=True)) and
-            not repo.resolve(strict=True).is_relative_to(target) and
-            not target.is_relative_to(output),
-            "Campaign archive must remain outside the checkout and package root.")
+    with private_parent(requested.parent, "Campaign archive parent") as (parent_fd, identity):
+        target = requested.parent.resolve(strict=True) / safe_segment(requested.name)
+        resolved_repo = repo.resolve(strict=True)
+        require(not target.is_relative_to(resolved_repo) and
+                not resolved_repo.is_relative_to(target) and
+                not target.is_relative_to(output.resolve(strict=False)),
+                "Campaign archive must remain outside the checkout and package root.")
+        _private_parent_state(parent_fd, requested.parent, "Campaign archive parent", identity)
     return target
 
 
@@ -610,6 +663,81 @@ def zip_info(name: str) -> ZipInfo:
     return info
 
 
+def _archive_entry(parent_fd: int, name: str, created: os.stat_result,
+                   expected_links: int) -> dict[str, object]:
+    """Hash an archive member through the held parent, rejecting name replacement."""
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(named.st_mode) and stat.S_ISREG(before.st_mode) and
+                (named.st_dev, named.st_ino) == (created.st_dev, created.st_ino) ==
+                (before.st_dev, before.st_ino) and
+                named.st_uid == before.st_uid == os.geteuid() and
+                stat.S_IMODE(named.st_mode) == stat.S_IMODE(before.st_mode) == 0o600 and
+                named.st_nlink == before.st_nlink == expected_links,
+                "Evidence archive entry changed while validating.")
+        algorithm = hashlib.sha256()
+        size = 0
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            size += len(block)
+            require(size <= MAX_TOTAL_BYTES, "Evidence archive exceeds its total byte bound.")
+            algorithm.update(block)
+        after = os.fstat(descriptor)
+        named_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except BaseException as primary:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup:
+            raise RuntimeError("Evidence archive entry validation failed: " +
+                               _bounded_error(primary) + "; descriptor cleanup uncertain: " +
+                               _bounded_error(cleanup)) from primary
+        raise
+    else:
+        os.close(descriptor)
+    require(all((item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                 item.st_uid, stat.S_IMODE(item.st_mode), item.st_nlink) ==
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                 before.st_uid, stat.S_IMODE(before.st_mode), expected_links)
+                for item in (after, named_after)) and size == before.st_size,
+            "Evidence archive entry changed while hashing.")
+    return {"device": before.st_dev, "inode": before.st_ino, "size": size,
+            "mtime_ns": before.st_mtime_ns, "sha256": algorithm.hexdigest()}
+
+
+def _cleanup_archive_entry(parent_fd: int, parent_path: Path,
+                           parent_identity: tuple[int, int], name: str,
+                           created_fd: int, created: os.stat_result, *,
+                           required: bool) -> None:
+    """Delete only a named entry that is still the held created inode."""
+    _private_parent_state(parent_fd, parent_path, "Evidence archive parent", parent_identity)
+    held = os.fstat(created_fd)
+    require(stat.S_ISREG(held.st_mode) and held.st_uid == os.geteuid() and
+            (held.st_dev, held.st_ino) == (created.st_dev, created.st_ino),
+            "Evidence archive created descriptor changed during cleanup.")
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if required:
+            raise ValueError("Evidence archive created entry is missing during cleanup.")
+        return
+    if not (stat.S_ISREG(named.st_mode) and named.st_uid == os.geteuid() and
+            (named.st_dev, named.st_ino) == (created.st_dev, created.st_ino)):
+        if required:
+            raise ValueError("Evidence archive created entry was replaced during cleanup.")
+        return
+    _private_parent_state(parent_fd, parent_path, "Evidence archive parent", parent_identity)
+    os.unlink(name, dir_fd=parent_fd)
+
+
+def _bounded_error(error: BaseException) -> str:
+    return type(error).__name__ + ": " + str(error)[:400]
+
+
 def package_evidence(root: Path, archive_path: Path, *,
                      profile_id: str = "vm-automated-v1-win11-ntfs") -> dict[str, object]:
     revision, _ = profile_definition(profile_id)
@@ -617,76 +745,147 @@ def package_evidence(root: Path, archive_path: Path, *,
     archive_path = Path(archive_path)
     require(archive_path.is_absolute() and not archive_path.exists() and not archive_path.is_symlink(),
             "Evidence archive must be a new absolute path.")
-    ordinary_directory(archive_path.parent, "Evidence archive parent")
-    files = freeze_tree(root)
-    index = {
-        "schema": f"darkrenamer-vm-automated-index-v{revision}",
-        "files": {name: {"sha256": frozen["sha256"], "size": frozen["size"]}
-                  for name, (_path, frozen) in sorted(files.items())},
-    }
-    index_bytes = (json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    require(0 < len(index_bytes) <= MAX_INDEX_BYTES and
-            sum(frozen["size"] for _path, frozen in files.values()) + len(index_bytes) <= MAX_TOTAL_BYTES,
-            "Evidence index or aggregate bytes exceed their bound.")
-    temporary = archive_path.parent / ("." + archive_path.name + "." + uuid.uuid4().hex + ".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                         getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        output = os.fdopen(descriptor, "wb")
-    except BaseException:
-        os.close(descriptor)
-        temporary.unlink(missing_ok=True)
-        raise
-    published = False
-    try:
-        with output:
-            os.fchmod(output.fileno(), 0o600)
-            created = os.fstat(output.fileno())
-            require(stat.S_ISREG(created.st_mode) and
+    with private_parent(archive_path.parent, "Evidence archive parent") as (parent_fd, parent_id):
+        files = freeze_tree(root)
+        index = {
+            "schema": f"darkrenamer-vm-automated-index-v{revision}",
+            "files": {name: {"sha256": frozen["sha256"], "size": frozen["size"]}
+                      for name, (_path, frozen) in sorted(files.items())},
+        }
+        index_bytes = (json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        require(0 < len(index_bytes) <= MAX_INDEX_BYTES and
+                sum(frozen["size"] for _path, frozen in files.values()) + len(index_bytes) <= MAX_TOTAL_BYTES,
+                "Evidence index or aggregate bytes exceed their bound.")
+        temporary_name = "." + archive_path.name + "." + uuid.uuid4().hex + ".tmp"
+        descriptor = None
+        created = None
+        attempted_publication = False
+        published = False
+        receipt = None
+        primary = None
+        cleanup_errors = []
+        post_cleanup_failure = False
+        try:
+            _private_parent_state(parent_fd, archive_path.parent,
+                                  "Evidence archive parent", parent_id)
+            descriptor = os.open(temporary_name, os.O_WRONLY | os.O_CREAT |
+                                 os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent_fd)
+            # Keep this descriptor open through cleanup, including after fdopen closes its duplicate.
+            created = os.fstat(descriptor)
+            require(stat.S_ISREG(created.st_mode) and created.st_uid == os.geteuid() and
                     stat.S_IMODE(created.st_mode) == 0o600 and created.st_nlink == 1,
-                    "Evidence archive temporary file must be private.")
-            with ZipFile(output, "w", compression=ZIP_STORED, allowZip64=False) as archive:
-                for name, (path, frozen) in sorted(files.items()):
-                    archive.writestr(zip_info(name), read_frozen_file(path, frozen))
-                archive.writestr(zip_info("evidence-index.json"), index_bytes)
-            written = os.fstat(output.fileno())
-            require((written.st_dev, written.st_ino) == (created.st_dev, created.st_ino) and
-                    stat.S_IMODE(written.st_mode) == 0o600 and written.st_nlink == 1,
-                    "Evidence archive temporary file changed while writing.")
-        for path, frozen in files.values():
-            require(frozen_file(path) == frozen, "Evidence changed after archive creation.")
-        temporary_frozen = frozen_file(temporary, MAX_TOTAL_BYTES)
-        require((temporary_frozen["device"], temporary_frozen["inode"]) ==
-                (created.st_dev, created.st_ino),
-                "Evidence archive temporary file changed before publication.")
-        require(temporary_frozen["size"] <= MAX_TOTAL_BYTES,
-                "Evidence archive exceeds its total byte bound.")
-        os.link(temporary, archive_path)
-        published = True
-        frozen_archive = frozen_file(archive_path, MAX_TOTAL_BYTES)
-        published_metadata = os.lstat(archive_path)
-        require(stat.S_ISREG(published_metadata.st_mode) and
-                (published_metadata.st_dev, published_metadata.st_ino) ==
-                (created.st_dev, created.st_ino) and
-                stat.S_IMODE(published_metadata.st_mode) == 0o600,
-                "Evidence archive must remain private after publication.")
-        require(frozen_archive == temporary_frozen,
-                "Evidence archive changed while being published.")
-        return {"file": str(archive_path), "sha256": frozen_archive["sha256"],
-                "size": frozen_archive["size"]}
-    except BaseException:
-        if published:
+                    "Evidence archive temporary file must be private at creation.")
+            writer_fd = os.dup(descriptor)
             try:
-                published_metadata = os.lstat(archive_path)
-            except FileNotFoundError:
-                pass
+                output = os.fdopen(writer_fd, "wb")
+            except BaseException:
+                try:
+                    os.close(writer_fd)
+                except BaseException as cleanup:
+                    cleanup_errors.append(cleanup)
+                raise
+            with output:
+                os.fchmod(output.fileno(), 0o600)
+                with ZipFile(output, "w", compression=ZIP_STORED, allowZip64=False) as archive:
+                    for name, (path, frozen) in sorted(files.items()):
+                        archive.writestr(zip_info(name), read_frozen_file(path, frozen))
+                    archive.writestr(zip_info("evidence-index.json"), index_bytes)
+                written = os.fstat(output.fileno())
+                require((written.st_dev, written.st_ino) == (created.st_dev, created.st_ino) and
+                        stat.S_IMODE(written.st_mode) == 0o600 and written.st_nlink == 1,
+                        "Evidence archive temporary file changed while writing.")
+            for path, frozen in files.values():
+                require(frozen_file(path) == frozen, "Evidence changed after archive creation.")
+            temporary_frozen = _archive_entry(parent_fd, temporary_name, created, 1)
+            _private_parent_state(parent_fd, archive_path.parent,
+                                  "Evidence archive parent", parent_id)
+            attempted_publication = True
+            os.link(temporary_name, archive_path.name, src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd, follow_symlinks=False)
+            published = True
+            frozen_archive = _archive_entry(parent_fd, archive_path.name, created, 2)
+            require(frozen_archive == temporary_frozen,
+                    "Evidence archive changed while being published.")
+            _private_parent_state(parent_fd, archive_path.parent,
+                                  "Evidence archive parent", parent_id)
+            receipt = {"file": str(archive_path), "sha256": frozen_archive["sha256"],
+                       "size": frozen_archive["size"]}
+        except BaseException as error:
+            primary = error
+        if descriptor is not None:
+            if created is None:
+                cleanup_errors.append(ValueError(
+                    "Evidence archive temporary identity is unknown; entry left untouched."))
             else:
-                if (published_metadata.st_dev, published_metadata.st_ino) == \
-                        (created.st_dev, created.st_ino):
-                    archive_path.unlink()
-        raise
-    finally:
-        temporary.unlink(missing_ok=True)
+                if published and primary is not None:
+                    try:
+                        _cleanup_archive_entry(parent_fd, archive_path.parent, parent_id,
+                                               archive_path.name, descriptor, created,
+                                               required=True)
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                elif attempted_publication and primary is not None:
+                    # A failing link call gives no proof that this process created the final name.
+                    try:
+                        _private_parent_state(parent_fd, archive_path.parent,
+                                              "Evidence archive parent", parent_id)
+                        named = os.stat(archive_path.name, dir_fd=parent_fd,
+                                        follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                    else:
+                        if (named.st_dev, named.st_ino) == (created.st_dev, created.st_ino):
+                            cleanup_errors.append(ValueError(
+                                "Evidence archive publication outcome is unknown; "
+                                "final entry left untouched."))
+                try:
+                    _cleanup_archive_entry(parent_fd, archive_path.parent, parent_id,
+                                           temporary_name, descriptor, created, required=True)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+                if published and primary is None and not cleanup_errors:
+                    try:
+                        _private_parent_state(parent_fd, archive_path.parent,
+                                              "Evidence archive parent", parent_id)
+                        after_cleanup = _archive_entry(parent_fd, archive_path.name, created, 1)
+                        require(after_cleanup == temporary_frozen,
+                                "Evidence archive changed after temporary cleanup.")
+                        _private_parent_state(parent_fd, archive_path.parent,
+                                              "Evidence archive parent", parent_id)
+                    except BaseException as error:
+                        primary = error
+                        post_cleanup_failure = True
+                if published and primary is None and cleanup_errors:
+                    try:
+                        _cleanup_archive_entry(parent_fd, archive_path.parent, parent_id,
+                                               archive_path.name, descriptor, created,
+                                               required=True)
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                elif published and post_cleanup_failure and not cleanup_errors:
+                    try:
+                        _cleanup_archive_entry(parent_fd, archive_path.parent, parent_id,
+                                               archive_path.name, descriptor, created,
+                                               required=True)
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            detail = "; ".join(_bounded_error(error) for error in cleanup_errors[:3])
+            if primary is not None:
+                raise RuntimeError("Evidence packaging failed: " + _bounded_error(primary) +
+                                   "; cleanup uncertain: " + detail) from primary
+            raise RuntimeError("Evidence archive cleanup uncertain: " + detail) from cleanup_errors[0]
+        if primary is not None:
+            raise primary
+        require(receipt is not None, "Evidence archive receipt is unavailable.")
+        return receipt
 
 
 def candidate_from_args(args) -> Candidate:

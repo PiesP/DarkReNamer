@@ -478,17 +478,67 @@ the immutable candidate EXE and records its exact handoff identity. Its native
 backend preparation retains source-bound test binaries, the complete actual
 stdout/stderr transcripts, result and transport records, and cleanup evidence.
 
-Create campaign output and archive destinations on a local POSIX filesystem under
-an owner-only (`0700`) directory before running the campaign. Keep this parent
-private through packaging and upload; mode bits on files do not prevent a writer
-to the parent directory from substituting names. Do not use a shared or
-Windows-mounted destination whose permissions do not enforce this boundary.
+The supported packaging route is Linux or WSL on a local Linux filesystem with
+enforced POSIX permissions. Create a fresh parent outside the checkout first;
+keep the output directory and ZIP as siblings beneath it. For example, replace
+the placeholder inputs with the frozen candidate and configured connection:
+
+```bash
+task_evidence_parent="$(mktemp -d "$HOME/darkrenamer-evidence.XXXXXXXX")"
+python3 -I scripts/run-vm-automated-campaign.py \
+  --connection-profile /path/to/private/connection-profile.json \
+  --backend-root /path/to/source-bound/backend-bundle \
+  --candidate-handoff-root /path/to/immutable/candidate-handoff \
+  --candidate-source-root /path/to/clean/same-sha/checkout \
+  --candidate-run-metadata /path/to/candidate-run.json \
+  --candidate-artifact-metadata /path/to/candidate-artifact.json \
+  --candidate-source-sha '<40-character-source-sha>' \
+  --candidate-workflow-run '<candidate-run-id>' \
+  --candidate-run-attempt '<candidate-run-attempt>' \
+  --candidate-artifact-id '<candidate-artifact-id>' \
+  --candidate-executable-sha256 '<64-character-executable-sha256>' \
+  --output-root "$task_evidence_parent/campaign" \
+  --archive "$task_evidence_parent/campaign.zip"
+```
+
+Use this example only when `$HOME` is on the supported filesystem and outside
+the checkout; otherwise select an equivalent local Linux storage location.
+The runner checks both parents before creating output or accessing the VM, and
+the packager repeats the archive-parent check. It opens each parent without
+following a direct symlink and requires an ordinary directory owned by the
+effective user with exactly `0700` permissions. Unsafe parents are refused;
+their permissions, ownership and contents are not repaired. Required POSIX
+directory-descriptor and no-follow operations must be available.
+
+The packager retains the validated parent descriptor for relative creation,
+validation, publication and cleanup, and rechecks parent identity and privacy
+before publication or deletion. Keep the parent private through packaging and
+upload. The operator must ensure that the filesystem actually enforces this
+boundary; capability and mode checks do not certify mount behavior or ACLs.
+Native Windows packaging and Windows-backed WSL destinations are unsupported.
+Windows-execution source and candidate mirrors are separate from this private
+POSIX raw-evidence storage. Moving or copying raw evidence requires equivalent
+protection at its destination.
 The packager exclusively creates its temporary archive with owner-only (`0600`)
 permissions before writing any raw observations, and retains that mode when
 publishing the final archive without replacement. No later `chmod` is needed to
-establish initial file privacy. These prospective protections do not establish
-creation-time privacy for historical archives, including v0.1.5's archive whose
-permissions were restricted only after creation.
+establish initial file privacy. Cleanup authenticates each name against the
+created object while retaining its original descriptor. Replaced names,
+changed parents, unknown creation identity or cleanup errors cause failure and
+leave unverified objects untouched; no successful receipt is returned for
+uncertain publication or cleanup. Diagnostics remain private local evidence.
+This protects against unrelated unprivileged accounts, assuming the parent
+remains private. It does not protect against root, a compromised same-user
+process or a compromised filesystem, and pathname checking followed by unlink
+is not a universal atomic conditional-delete operation. It makes no durability
+or secure-deletion claim.
+
+These prospective protections do not establish creation-time privacy for
+historical archives, including v0.1.5's archive whose permissions were restricted
+only after creation. v0.1.6 already used exclusive `0600` creation and no-replace
+publication; that historical producer did not enforce the private parent or
+authenticate every cleanup name. The new checks do not retroactively prove
+those boundaries for v0.1.6 evidence.
 
 The campaign ZIP is private raw input, not a release verdict. It contains the
 complete indexed observations and failed records without normalizing producer
