@@ -46,31 +46,82 @@ def audit_result(process: subprocess.CompletedProcess[str]) -> str:
     return "clean"
 
 
+def deny_record_error(item: object) -> str | None:
+    """Validate verdict fields emitted by the pinned cargo-deny 0.20.2."""
+    # Producers: src/diag/grapher.rs, src/cargo-deny/main.rs and stats.rs.
+    if not isinstance(item, dict):
+        return "record is not an object"
+    record_type = item.get("type")
+    if record_type not in ("diagnostic", "log", "summary"):
+        return "unsupported record type"
+    fields = item.get("fields")
+    if not isinstance(fields, dict):
+        return "record fields are not an object"
+    if record_type == "diagnostic":
+        if fields.get("severity") not in ("error", "warning", "note", "help", "bug"):
+            return "missing or invalid diagnostic severity"
+        if not isinstance(fields.get("message"), str):
+            return "missing or invalid diagnostic message"
+        if "code" in fields and not isinstance(fields["code"], str):
+            return "invalid diagnostic code"
+    elif record_type == "log":
+        if fields.get("level") not in ("ERROR", "WARN", "INFO", "DEBUG", "TRACE"):
+            return "missing or invalid log level"
+        if not isinstance(fields.get("timestamp"), str) or not isinstance(fields.get("message"), str):
+            return "missing or invalid log timestamp or message"
+    else:
+        for check, counts in fields.items():
+            if check not in ("advisories", "bans", "licenses", "sources") or not isinstance(counts, dict):
+                return "invalid summary check"
+            for name in ("errors", "warnings", "notes", "helps"):
+                count = counts.get(name)
+                if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 0xFFFFFFFF:
+                    return "missing or invalid summary count"
+    return None
+
+
 def deny_result(process: subprocess.CompletedProcess[str]) -> str:
     errors = 0
     data_errors = 0
-    for line in (process.stdout + "\n" + process.stderr).splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            isinstance(item, dict)
-            and item.get("type") == "diagnostic"
-            and isinstance(item.get("fields"), dict)
-            and item["fields"].get("severity") == "error"
-        ):
-            code = item["fields"].get("code")
-            if isinstance(code, str) and code.rsplit(":", 1)[-1] in (
-                "index-failure", "index-cache-load-failure"
-            ):
-                data_errors += 1
+    tool_errors = 0
+    summary_errors = 0
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("non-JSON numeric constant")
+
+    for stream, output in (("stdout", process.stdout), ("stderr", process.stderr)):
+        for number, line in enumerate(output.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line, parse_constant=reject_constant)
+                reason = deny_record_error(item)
+            except ValueError:
+                reason = "invalid JSON"
+            if reason:
+                return f"tool or output-validation failure (malformed cargo-deny output: {stream} line {number}: {reason})"
+            fields = item["fields"]
+            if item["type"] == "diagnostic":
+                if fields["severity"] == "bug":
+                    tool_errors += 1
+                elif fields["severity"] == "error":
+                    code = fields.get("code", "")
+                    if code.rsplit(":", 1)[-1] in ("index-failure", "index-cache-load-failure"):
+                        data_errors += 1
+                    else:
+                        errors += 1
+            elif item["type"] == "log":
+                tool_errors += fields["level"] == "ERROR"
             else:
-                errors += 1
+                summary_errors += sum(counts["errors"] for counts in fields.values())
     if data_errors:
         return f"tool or advisory-data failure ({data_errors} cargo-deny index errors)"
+    if tool_errors:
+        return f"tool or advisory-data failure ({tool_errors} cargo-deny error logs or bug diagnostics)"
     if errors:
         return f"policy violations ({errors} error diagnostics)"
+    if summary_errors:
+        return "tool or advisory-data failure (cargo-deny summary errors without error diagnostics)"
     if process.returncode == 0:
         return "clean"
     return "tool or advisory-data failure (cargo-deny exited without policy diagnostics)"
