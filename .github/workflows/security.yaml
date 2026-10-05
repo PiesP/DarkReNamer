@@ -14,6 +14,54 @@ on:
 permissions: {}
 
 jobs:
+  rust-dependency-audit:
+    name: Rust dependency audit
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Restore pinned Rust security tools
+        id: security-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/darkrenamer-security-tools
+          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2
+
+      - name: Install pinned Rust security tools
+        if: steps.security-tools-cache.outputs.cache-hit != 'true'
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
+        run: |
+          cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version 0.22.2
+          cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version 0.20.2
+
+      - name: Refresh and audit Rust dependencies
+        id: audit
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
+        run: python3 scripts/run-scheduled-rust-audit.py
+
+      - name: Summarize setup failure
+        if: failure() && steps.audit.outcome == 'skipped'
+        run: |
+          {
+            echo '## Rust dependency audit'
+            echo
+            echo "Source: \`$GITHUB_SHA\`"
+            echo
+            echo 'Result: tool, checkout, or runner failure before the audit; see the failed step.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   codeql:
     name: CodeQL Analysis (${{ matrix.language }})
     runs-on: ubuntu-24.04

@@ -61,6 +61,13 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
    create a release requirement. Preserve failures and inspect their evidence
    before a corrective change justifies another workload.
 
+The Rust dependency-audit job in `.github/workflows/security.yaml` runs on its
+weekly schedule and by manual dispatch, including when source is unchanged.
+CI retains the pull-request, push, and merge-group dependency gate. The
+scheduled job caches pinned scanner binaries only; each run refreshes advisory
+data and checks the selected `Cargo.lock` and dependency policy anew. A failed
+refresh or scan is a failed check, not a clean result.
+
 ## Tooling tests
 
 `scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
