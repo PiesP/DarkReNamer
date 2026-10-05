@@ -33,6 +33,7 @@ $workflows = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot '.github/work
 $expectedInstallCounts = @{
     'ci.yaml' = 4
     'release.yaml' = 1
+    'security.yaml' = 1
     'benchmark-planning.yaml' = 1
     'binary-size-matrix.yaml' = 1
     'profile-benchmark-matrix.yaml' = 1
@@ -55,8 +56,8 @@ foreach ($workflow in $workflows) {
         }
     }
 }
-if ($installCount -ne 9) {
-    throw "Expected nine workflow toolchain installations, found $installCount."
+if ($installCount -ne 10) {
+    throw "Expected ten workflow toolchain installations, found $installCount."
 }
 
 Write-Host "Toolchain consistency tests passed for Rust $channel ($installCount workflow installs)."
