@@ -25,7 +25,7 @@ jobs:
       - name: Checkout selected source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: master
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -33,14 +33,26 @@ jobs:
         id: source
         shell: pwsh
         run: |
+          $eventSha = '${{ github.sha }}'
+          if ($eventSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The workflow event SHA must be a full source commit SHA.'
+          }
           $sourceCommit = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'The selected source commit could not be resolved.' }
+          if ($LASTEXITCODE -ne 0 -or $sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The selected source commit could not be resolved as a full SHA.'
+          }
+          if ($sourceCommit -cne $eventSha) {
+            throw 'The checked-out source does not match the workflow event SHA.'
+          }
           $remoteMaster = @(& git ls-remote origin refs/heads/master)
           if ($LASTEXITCODE -ne 0 -or $remoteMaster.Count -ne 1 -or
-              ($remoteMaster[0] -split "`t")[0] -cne $sourceCommit) {
-            throw 'The candidate source must match the live origin/master commit.'
+              $remoteMaster[0] -cnotmatch '^[0-9a-f]{40}\trefs/heads/master$') {
+            throw 'The live origin/master commit could not be resolved.'
           }
-          $epoch = git show -s --format=%ct HEAD
+          if (($remoteMaster[0] -split "`t")[0] -cne $sourceCommit) {
+            throw 'The workflow event is stale; dispatch a new candidate run from current master.'
+          }
+          $epoch = git show -s --format=%ct $sourceCommit
           if ($LASTEXITCODE -ne 0 -or $epoch -notmatch '^\d+$') {
             throw 'The selected source commit timestamp could not be resolved.'
           }
