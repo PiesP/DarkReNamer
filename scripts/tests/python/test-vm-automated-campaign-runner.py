@@ -13,6 +13,7 @@ import stat
 from tooling_test_paths import REPOSITORY_ROOT
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile
@@ -248,6 +249,13 @@ class CampaignRunnerTests(unittest.TestCase):
         finally:
             FakeGuiRunner.plan_path = None
 
+    def synthetic_package(self, name: str) -> Path:
+        package = self.root / name
+        package.mkdir()
+        (package / "campaign.json").write_text("{}", encoding="utf-8")
+        (package / "plan.json").write_text("{}", encoding="utf-8")
+        return package
+
     def test_profile_identity_or_bytes_mismatch_fails_before_vm_and_plan(self) -> None:
         calls, command = self.fake_command()
         args = self.args()
@@ -429,22 +437,26 @@ class CampaignRunnerTests(unittest.TestCase):
         (package / "campaign.json").write_text("{}", encoding="utf-8")
         (package / "plan.json").write_text("{}", encoding="utf-8")
         archive_path = self.root / "private.zip"
-        original = runner.read_frozen_file
         observed = []
 
-        def inspect_temporary(path, frozen):
-            temporary, = self.root.glob(".private.zip.*.tmp")
-            observed.append(stat.S_IMODE(temporary.stat().st_mode))
-            return original(path, frozen)
+        real_open = os.open
+
+        def inspect_creation(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                created = os.fstat(descriptor)
+                observed.append((stat.S_IMODE(created.st_mode), created.st_size,
+                                 flags & os.O_EXCL, flags & os.O_NOFOLLOW))
+            return descriptor
 
         previous_umask = os.umask(0)
         try:
-            with patch.object(runner, "read_frozen_file", side_effect=inspect_temporary):
+            with patch.object(runner.os, "open", side_effect=inspect_creation):
                 runner.package_evidence(package, archive_path)
         finally:
             os.umask(previous_umask)
         self.assertTrue(observed)
-        self.assertEqual(set(observed), {0o600})
+        self.assertEqual(observed, [(0o600, 0, os.O_EXCL, os.O_NOFOLLOW)])
         self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
         self.assertEqual(list(self.root.glob(".private.zip.*.tmp")), [])
 
@@ -510,12 +522,12 @@ class CampaignRunnerTests(unittest.TestCase):
         archive_path = self.root / "publish-mode.zip"
         original_link = os.link
 
-        def expose_published_archive(source, destination):
-            original_link(source, destination)
-            Path(destination).chmod(0o644)
+        def expose_published_archive(source, destination, **kwargs):
+            original_link(source, destination, **kwargs)
+            archive_path.chmod(0o644)
 
         with patch.object(runner.os, "link", side_effect=expose_published_archive), \
-                self.assertRaisesRegex(ValueError, "remain private after publication"):
+                self.assertRaisesRegex(ValueError, "entry changed"):
             runner.package_evidence(package, archive_path)
         self.assertFalse(archive_path.exists())
         self.assertEqual(list(self.root.glob(".publish-mode.zip.*.tmp")), [])
@@ -527,8 +539,10 @@ class CampaignRunnerTests(unittest.TestCase):
         (package / "plan.json").write_text("{}", encoding="utf-8")
         archive_path = self.root / "collision.zip"
 
-        def occupy_destination(_source, destination):
-            Path(destination).write_bytes(b"existing archive")
+        def occupy_destination(_source, destination, **kwargs):
+            os.close(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600, dir_fd=kwargs["dst_dir_fd"]))
+            archive_path.write_bytes(b"existing archive")
             raise FileExistsError("injected publication collision")
 
         with patch.object(runner.os, "link", side_effect=occupy_destination), \
@@ -536,6 +550,525 @@ class CampaignRunnerTests(unittest.TestCase):
             runner.package_evidence(package, archive_path)
         self.assertEqual(archive_path.read_bytes(), b"existing archive")
         self.assertEqual(list(self.root.glob(".collision.zip.*.tmp")), [])
+
+    def test_private_parent_success_keeps_archive_index_and_mode(self) -> None:
+        package = self.synthetic_package("private-parent-package")
+        archive_path = self.root / "private-parent.zip"
+        receipt = runner.package_evidence(package, archive_path)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
+        self.assertEqual(receipt["sha256"], hashlib.sha256(archive_path.read_bytes()).hexdigest())
+        with ZipFile(archive_path) as archive:
+            index = json.loads(archive.read("evidence-index.json"))
+            self.assertEqual(set(index["files"]), {"campaign.json", "plan.json"})
+            for name, details in index["files"].items():
+                self.assertEqual(details["sha256"], hashlib.sha256(archive.read(name)).hexdigest())
+
+    def test_unsafe_archive_parent_rejected_without_creating_temporary(self) -> None:
+        package = self.synthetic_package("unsafe-parent-package")
+        parent = self.root / "unsafe-parent"
+        parent.mkdir(mode=0o700)
+        for mode in (0o755, 0o770):
+            with self.subTest(mode=oct(mode)):
+                parent.chmod(mode)
+                with self.assertRaisesRegex(ValueError, "private \\(0700\\)"):
+                    runner.package_evidence(package, parent / "evidence.zip")
+                self.assertEqual(list(parent.iterdir()), [])
+                self.assertEqual(stat.S_IMODE(parent.stat().st_mode), mode)
+        parent.chmod(0o700)
+        linked = self.root / "linked-parent"
+        linked.symlink_to(parent, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "ordinary directory"):
+            runner.package_evidence(package, linked / "evidence.zip")
+        self.assertEqual(list(parent.iterdir()), [])
+
+        original_fstat = os.fstat
+
+        def inject_wrong_owner(descriptor):
+            metadata = original_fstat(descriptor)
+            if stat.S_ISDIR(metadata.st_mode):
+                return SimpleNamespace(st_mode=metadata.st_mode, st_dev=metadata.st_dev,
+                                       st_ino=metadata.st_ino, st_uid=os.geteuid() + 1)
+            return metadata
+
+        with self.subTest(case="injected wrong effective owner"), \
+                patch.object(runner.os, "fstat", side_effect=inject_wrong_owner), \
+                self.assertRaisesRegex(ValueError, "effective-user-owned"):
+            runner.package_evidence(package, parent / "evidence.zip")
+        self.assertEqual(list(parent.iterdir()), [])
+
+    def test_output_and_archive_parents_are_private_before_vm_work(self) -> None:
+        unsafe = self.root / "unsafe-preflight"
+        unsafe.mkdir(mode=0o700)
+        calls, command = self.fake_command()
+        try:
+            for destination in ("archive", "output_root"):
+                for mode in (0o755, 0o770):
+                    with self.subTest(destination=destination, mode=oct(mode)):
+                        unsafe.chmod(mode)
+                        args = self.args()
+                        setattr(args, destination, unsafe / ("campaign.zip" if destination == "archive"
+                                                           else "campaign"))
+                        with self.assertRaisesRegex(ValueError, "private \\(0700\\)"):
+                            self.execute(args, command)
+                        self.assertFalse(self.output.exists())
+                        self.assertEqual(list(unsafe.iterdir()), [])
+                        self.assertEqual(calls, [])
+        finally:
+            unsafe.chmod(0o700)
+        linked = self.root / "linked-preflight"
+        linked.symlink_to(unsafe, target_is_directory=True)
+        for destination in ("archive", "output_root"):
+            with self.subTest(destination=destination, case="linked parent"):
+                args = self.args()
+                setattr(args, destination, linked / ("campaign.zip" if destination == "archive"
+                                                    else "campaign"))
+                with self.assertRaisesRegex(ValueError, "ordinary directory"):
+                    self.execute(args, command)
+                self.assertEqual(calls, [])
+        original_fstat = os.fstat
+
+        def inject_wrong_owner(descriptor):
+            metadata = original_fstat(descriptor)
+            if stat.S_ISDIR(metadata.st_mode):
+                return SimpleNamespace(st_mode=metadata.st_mode, st_dev=metadata.st_dev,
+                                       st_ino=metadata.st_ino, st_uid=os.geteuid() + 1)
+            return metadata
+
+        for destination in ("archive", "output_root"):
+            with self.subTest(destination=destination, case="injected wrong effective owner"):
+                args = self.args()
+                setattr(args, destination, unsafe / ("campaign.zip" if destination == "archive"
+                                                    else "campaign"))
+                with patch.object(runner.os, "fstat", side_effect=inject_wrong_owner), \
+                        self.assertRaisesRegex(ValueError, "effective-user-owned"):
+                    self.execute(args, command)
+                self.assertEqual(list(unsafe.iterdir()), [])
+                self.assertEqual(calls, [])
+
+    def test_parent_ancestor_alias_cannot_bypass_checkout_containment(self) -> None:
+        checkout = self.root / "checkout"
+        checkout.mkdir(mode=0o700)
+        private = checkout / "private"
+        private.mkdir(mode=0o700)
+        alias = self.root / "checkout-alias"
+        alias.symlink_to(checkout, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "external to the checkout"):
+            runner.new_external_root(checkout, alias / "private" / "campaign")
+        with self.assertRaisesRegex(ValueError, "outside the checkout"):
+            runner.new_archive_path(checkout, alias / "private" / "campaign.zip",
+                                    self.root / "campaign")
+        self.assertEqual(list(private.iterdir()), [])
+
+    def test_missing_relative_nofollow_capability_refuses_packaging(self) -> None:
+        package = self.synthetic_package("capability-package")
+        with patch.object(runner.os, "supports_follow_symlinks", set()), \
+                self.assertRaisesRegex(ValueError, "directory-descriptor capabilities"):
+            runner.package_evidence(package, self.root / "unsupported.zip")
+        self.assertEqual(list(self.root.glob(".unsupported.zip.*.tmp")), [])
+
+    def test_early_identity_failure_closes_descriptor_without_guessing_name(self) -> None:
+        package = self.synthetic_package("identity-failure-package")
+        created_fd = None
+        real_open = os.open
+        real_fstat = os.fstat
+
+        def capture_creation(path, flags, *args, **kwargs):
+            nonlocal created_fd
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                created_fd = descriptor
+            return descriptor
+
+        def fail_created_identity(descriptor):
+            if descriptor == created_fd:
+                raise OSError("injected identity capture failure")
+            return real_fstat(descriptor)
+
+        with patch.object(runner.os, "open", side_effect=capture_creation), \
+                patch.object(runner.os, "fstat", side_effect=fail_created_identity), \
+                self.assertRaisesRegex(RuntimeError, "identity capture failure.*cleanup uncertain"):
+            runner.package_evidence(package, self.root / "identity-failure.zip")
+        self.assertIsNotNone(created_fd)
+        with self.assertRaises(OSError):
+            os.fstat(created_fd)
+        temporary, = self.root.glob(".identity-failure.zip.*.tmp")
+        self.assertEqual(stat.S_IMODE(temporary.stat().st_mode), 0o600)
+        self.assertFalse((self.root / "identity-failure.zip").exists())
+
+    def test_fdopen_failure_closes_both_descriptors_and_cleans_owned_temporary(self) -> None:
+        package = self.synthetic_package("fdopen-failure-package")
+        created_fds = []
+        real_open = os.open
+        real_dup = os.dup
+
+        def capture_creation(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                created_fds.append(descriptor)
+            return descriptor
+
+        def capture_duplicate(descriptor):
+            duplicate = real_dup(descriptor)
+            created_fds.append(duplicate)
+            return duplicate
+
+        with patch.object(runner.os, "open", side_effect=capture_creation), \
+                patch.object(runner.os, "dup", side_effect=capture_duplicate), \
+                patch.object(runner.os, "fdopen", side_effect=OSError("injected fdopen failure")), \
+                self.assertRaisesRegex(OSError, "injected fdopen failure"):
+            runner.package_evidence(package, self.root / "fdopen-failure.zip")
+        self.assertEqual(len(created_fds), 2)
+        for descriptor in created_fds:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertEqual(list(self.root.glob(".fdopen-failure.zip.*.tmp")), [])
+
+    def test_fdopen_and_duplicate_close_failures_report_both_errors(self) -> None:
+        package = self.synthetic_package("fdopen-close-package")
+        original_dup = os.dup
+        original_close = os.close
+        writer_fd = None
+
+        def capture_duplicate(descriptor):
+            nonlocal writer_fd
+            writer_fd = original_dup(descriptor)
+            return writer_fd
+
+        def close_then_fail(descriptor):
+            original_close(descriptor)
+            if descriptor == writer_fd:
+                raise OSError("injected duplicate close failure")
+
+        with patch.object(runner.os, "dup", side_effect=capture_duplicate), \
+                patch.object(runner.os, "fdopen", side_effect=OSError("injected fdopen failure")), \
+                patch.object(runner.os, "close", side_effect=close_then_fail), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "fdopen failure.*cleanup uncertain.*duplicate close failure") as caught:
+            runner.package_evidence(package, self.root / "fdopen-close.zip")
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(list(self.root.glob(".fdopen-close.zip.*.tmp")), [])
+        with self.assertRaises(OSError):
+            os.fstat(writer_fd)
+
+    def test_private_parent_close_failure_preserves_primary_error(self) -> None:
+        original_close = os.close
+        parent_fd = None
+
+        def close_then_fail(descriptor):
+            original_close(descriptor)
+            if descriptor == parent_fd:
+                raise OSError("injected parent close failure")
+
+        with patch.object(runner.os, "close", side_effect=close_then_fail), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "injected primary failure.*descriptor cleanup uncertain.*"
+                                       "parent close failure") as caught:
+            with runner.private_parent(self.root, "Test private parent") as (descriptor, _identity):
+                parent_fd = descriptor
+                raise RuntimeError("injected primary failure")
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
+    def test_parent_close_failure_after_valid_package_denies_receipt(self) -> None:
+        package = self.synthetic_package("parent-close-package")
+        original_open = os.open
+        original_close = os.close
+        parent_fd = None
+
+        def capture_parent(path, flags, *args, **kwargs):
+            nonlocal parent_fd
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if flags & os.O_DIRECTORY:
+                parent_fd = descriptor
+            return descriptor
+
+        def close_then_fail(descriptor):
+            original_close(descriptor)
+            if descriptor == parent_fd:
+                raise OSError("injected parent close failure")
+
+        with patch.object(runner.os, "open", side_effect=capture_parent), \
+                patch.object(runner.os, "close", side_effect=close_then_fail), \
+                self.assertRaisesRegex(OSError, "injected parent close failure"):
+            runner.package_evidence(package, self.root / "parent-close.zip")
+        self.assertTrue((self.root / "parent-close.zip").is_file())
+
+    def test_archive_entry_close_failure_preserves_validation_error(self) -> None:
+        entry = self.root / "entry-close.zip"
+        entry.write_bytes(b"synthetic entry")
+        entry.chmod(0o600)
+        original_open = os.open
+        original_close = os.close
+        entry_fd = None
+
+        def capture_entry(path, flags, *args, **kwargs):
+            nonlocal entry_fd
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path == entry.name:
+                entry_fd = descriptor
+            return descriptor
+
+        def close_then_fail(descriptor):
+            original_close(descriptor)
+            if descriptor == entry_fd:
+                raise OSError("injected entry close failure")
+
+        with runner.private_parent(self.root, "Test private parent") as (parent_fd, _identity):
+            created = os.stat(entry.name, dir_fd=parent_fd, follow_symlinks=False)
+            with patch.object(runner.os, "open", side_effect=capture_entry), \
+                    patch.object(runner.os, "close", side_effect=close_then_fail), \
+                    self.assertRaisesRegex(RuntimeError,
+                                           "entry changed.*descriptor cleanup uncertain.*"
+                                           "entry close failure") as caught:
+                runner._archive_entry(parent_fd, entry.name, created, 2)
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
+        with self.assertRaises(OSError):
+            os.fstat(entry_fd)
+
+    def test_temporary_replacement_survives_failed_publication_and_cleanup(self) -> None:
+        package = self.synthetic_package("replace-temporary-package")
+        archive_path = self.root / "replace-temporary.zip"
+        original_read = runner.read_frozen_file
+        saved = self.root / "saved-original-temporary"
+        replaced = False
+        replacement_identity = None
+
+        def replace_temporary(path, frozen):
+            nonlocal replaced, replacement_identity
+            if not replaced:
+                temporary, = self.root.glob(".replace-temporary.zip.*.tmp")
+                temporary.rename(saved)
+                temporary.write_bytes(b"replacement temporary")
+                replacement_identity = (temporary.stat().st_dev, temporary.stat().st_ino)
+                replaced = True
+            return original_read(path, frozen)
+
+        with patch.object(runner, "read_frozen_file", side_effect=replace_temporary), \
+                self.assertRaisesRegex(RuntimeError, "entry changed.*cleanup uncertain.*replaced"):
+            runner.package_evidence(package, archive_path)
+        temporary, = self.root.glob(".replace-temporary.zip.*.tmp")
+        self.assertEqual(temporary.read_bytes(), b"replacement temporary")
+        self.assertEqual((temporary.stat().st_dev, temporary.stat().st_ino), replacement_identity)
+        self.assertTrue(saved.is_file())
+        self.assertFalse(archive_path.exists())
+
+    def test_missing_temporary_entry_reports_uncertainty_without_searching(self) -> None:
+        package = self.synthetic_package("missing-temporary-package")
+        archive_path = self.root / "missing-temporary.zip"
+        saved = self.root / "saved-missing-temporary"
+        original_read = runner.read_frozen_file
+        saved_identity = None
+
+        def move_temporary(path, frozen):
+            nonlocal saved_identity
+            if saved_identity is None:
+                temporary, = self.root.glob(".missing-temporary.zip.*.tmp")
+                temporary.rename(saved)
+                saved_identity = (saved.stat().st_dev, saved.stat().st_ino)
+            return original_read(path, frozen)
+
+        with patch.object(runner, "read_frozen_file", side_effect=move_temporary), \
+                self.assertRaisesRegex(RuntimeError, "No such file.*cleanup uncertain.*missing"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual((saved.stat().st_dev, saved.stat().st_ino), saved_identity)
+        self.assertFalse(archive_path.exists())
+        self.assertEqual(list(self.root.glob(".missing-temporary.zip.*.tmp")), [])
+
+    def test_parent_replacement_blocks_publication_and_preserves_old_directory(self) -> None:
+        package = self.synthetic_package("replace-parent-package")
+        parent = self.root / "replace-parent"
+        parent.mkdir(mode=0o700)
+        original_identity = (parent.stat().st_dev, parent.stat().st_ino)
+        moved = self.root / "moved-parent"
+        archive_path = parent / "evidence.zip"
+        original_read = runner.read_frozen_file
+        replaced = False
+
+        def replace_parent(path, frozen):
+            nonlocal replaced
+            if not replaced:
+                parent.rename(moved)
+                parent.mkdir(mode=0o700)
+                replaced = True
+            return original_read(path, frozen)
+
+        with patch.object(runner, "read_frozen_file", side_effect=replace_parent), \
+                self.assertRaisesRegex(RuntimeError, "private.*cleanup uncertain"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertEqual((moved.stat().st_dev, moved.stat().st_ino), original_identity)
+        self.assertEqual(len(list(moved.glob(".evidence.zip.*.tmp"))), 1)
+
+    def test_parent_replacement_after_publication_leaves_original_names_untouched(self) -> None:
+        package = self.synthetic_package("late-parent-package")
+        parent = self.root / "late-parent"
+        parent.mkdir(mode=0o700)
+        original_identity = (parent.stat().st_dev, parent.stat().st_ino)
+        moved = self.root / "late-parent-moved"
+        archive_path = parent / "evidence.zip"
+        original_entry = runner._archive_entry
+        replaced = False
+
+        def replace_parent_after_link(parent_fd, name, created, expected_links):
+            nonlocal replaced
+            result = original_entry(parent_fd, name, created, expected_links)
+            if name == archive_path.name and not replaced:
+                parent.rename(moved)
+                parent.mkdir(mode=0o700)
+                replaced = True
+            return result
+
+        with patch.object(runner, "_archive_entry", side_effect=replace_parent_after_link), \
+                self.assertRaisesRegex(RuntimeError, "private.*cleanup uncertain"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual((moved.stat().st_dev, moved.stat().st_ino), original_identity)
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertTrue((moved / "evidence.zip").is_file())
+        self.assertEqual(len(list(moved.glob(".evidence.zip.*.tmp"))), 1)
+
+    def test_final_replacement_survives_failed_validation(self) -> None:
+        package = self.synthetic_package("replace-final-package")
+        archive_path = self.root / "replace-final.zip"
+        saved = self.root / "saved-original-final.zip"
+        original_entry = runner._archive_entry
+        replacement_identity = None
+
+        def replace_final(parent_fd, name, created, expected_links):
+            nonlocal replacement_identity
+            if name == archive_path.name:
+                archive_path.rename(saved)
+                archive_path.write_bytes(b"replacement final")
+                replacement_identity = (archive_path.stat().st_dev, archive_path.stat().st_ino)
+            return original_entry(parent_fd, name, created, expected_links)
+
+        with patch.object(runner, "_archive_entry", side_effect=replace_final), \
+                self.assertRaisesRegex(RuntimeError, "entry changed.*cleanup uncertain.*replaced"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual(archive_path.read_bytes(), b"replacement final")
+        self.assertEqual((archive_path.stat().st_dev, archive_path.stat().st_ino),
+                         replacement_identity)
+        self.assertTrue(saved.is_file())
+        self.assertEqual(list(self.root.glob(".replace-final.zip.*.tmp")), [])
+
+    def test_cleanup_failure_reports_primary_error_and_keeps_owned_evidence(self) -> None:
+        package = self.synthetic_package("cleanup-failure-package")
+        archive_path = self.root / "cleanup-failure.zip"
+        original_unlink = os.unlink
+
+        def fail_temporary_unlink(path, *args, **kwargs):
+            if str(path).startswith(".cleanup-failure.zip."):
+                raise OSError("injected cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(runner, "read_frozen_file",
+                          side_effect=RuntimeError("injected primary write failure")), \
+                patch.object(runner.os, "unlink", side_effect=fail_temporary_unlink), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "primary write failure.*cleanup uncertain.*cleanup failure"):
+            runner.package_evidence(package, archive_path)
+        temporary, = self.root.glob(".cleanup-failure.zip.*.tmp")
+        self.assertEqual(stat.S_IMODE(temporary.stat().st_mode), 0o600)
+        self.assertFalse(archive_path.exists())
+
+    def test_cleanup_failure_after_valid_publication_returns_no_receipt(self) -> None:
+        package = self.synthetic_package("cleanup-after-publish-package")
+        archive_path = self.root / "cleanup-after-publish.zip"
+        original_unlink = os.unlink
+
+        def fail_temporary_unlink(path, *args, **kwargs):
+            if str(path).startswith(".cleanup-after-publish.zip."):
+                raise OSError("injected temporary cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(runner.os, "unlink", side_effect=fail_temporary_unlink), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "cleanup uncertain.*temporary cleanup failure"):
+            runner.package_evidence(package, archive_path)
+        self.assertFalse(archive_path.exists())
+        temporary, = self.root.glob(".cleanup-after-publish.zip.*.tmp")
+        self.assertEqual(stat.S_IMODE(temporary.stat().st_mode), 0o600)
+
+    def test_link_that_succeeds_then_reports_failure_leaves_uncertain_final(self) -> None:
+        package = self.synthetic_package("uncertain-link-package")
+        archive_path = self.root / "uncertain-link.zip"
+        original_link = os.link
+
+        def link_then_fail(source, destination, **kwargs):
+            original_link(source, destination, **kwargs)
+            raise OSError("injected link result failure")
+
+        with patch.object(runner.os, "link", side_effect=link_then_fail), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "link result failure.*cleanup uncertain.*outcome is unknown"):
+            runner.package_evidence(package, archive_path)
+        self.assertTrue(archive_path.is_file())
+        self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
+        self.assertEqual(list(self.root.glob(".uncertain-link.zip.*.tmp")), [])
+
+    def test_final_replacement_after_temporary_cleanup_blocks_receipt(self) -> None:
+        package = self.synthetic_package("after-cleanup-final-package")
+        archive_path = self.root / "after-cleanup-final.zip"
+        saved = self.root / "saved-after-cleanup-final.zip"
+        original_unlink = os.unlink
+        replacement_identity = None
+
+        def replace_final_after_unlink(path, *args, **kwargs):
+            nonlocal replacement_identity
+            result = original_unlink(path, *args, **kwargs)
+            if str(path).startswith(".after-cleanup-final.zip."):
+                archive_path.rename(saved)
+                archive_path.write_bytes(b"replacement after temp cleanup")
+                metadata = archive_path.stat()
+                replacement_identity = (metadata.st_dev, metadata.st_ino)
+            return result
+
+        with patch.object(runner.os, "unlink", side_effect=replace_final_after_unlink), \
+                self.assertRaisesRegex(RuntimeError, "entry changed.*cleanup uncertain.*replaced"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual(archive_path.read_bytes(), b"replacement after temp cleanup")
+        self.assertEqual((archive_path.stat().st_dev, archive_path.stat().st_ino),
+                         replacement_identity)
+        self.assertTrue(saved.is_file())
+        self.assertEqual(list(self.root.glob(".after-cleanup-final.zip.*.tmp")), [])
+
+    def test_parent_replacement_after_temporary_cleanup_blocks_receipt(self) -> None:
+        package = self.synthetic_package("after-cleanup-parent-package")
+        parent = self.root / "after-cleanup-parent"
+        parent.mkdir(mode=0o700)
+        original_identity = (parent.stat().st_dev, parent.stat().st_ino)
+        moved = self.root / "after-cleanup-parent-moved"
+        archive_path = parent / "evidence.zip"
+        original_unlink = os.unlink
+
+        def replace_parent_after_unlink(path, *args, **kwargs):
+            result = original_unlink(path, *args, **kwargs)
+            if str(path).startswith(".evidence.zip."):
+                parent.rename(moved)
+                parent.mkdir(mode=0o700)
+            return result
+
+        with patch.object(runner.os, "unlink", side_effect=replace_parent_after_unlink), \
+                self.assertRaisesRegex(RuntimeError, "private.*cleanup uncertain"):
+            runner.package_evidence(package, archive_path)
+        self.assertEqual((moved.stat().st_dev, moved.stat().st_ino), original_identity)
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertTrue((moved / "evidence.zip").is_file())
+        self.assertEqual(list(moved.glob(".evidence.zip.*.tmp")), [])
+
+    def test_existing_file_and_dangling_link_destinations_survive(self) -> None:
+        package = self.synthetic_package("existing-final-package")
+        existing = self.root / "existing-final.zip"
+        existing.write_bytes(b"existing evidence")
+        dangling = self.root / "dangling-final.zip"
+        dangling.symlink_to(self.root / "missing-target")
+        for destination in (existing, dangling):
+            with self.subTest(destination=destination.name), \
+                    self.assertRaisesRegex(ValueError, "new absolute path"):
+                runner.package_evidence(package, destination)
+        self.assertEqual(existing.read_bytes(), b"existing evidence")
+        self.assertTrue(dangling.is_symlink())
+        self.assertEqual(list(self.root.glob(".existing-final.zip.*.tmp")), [])
+        self.assertEqual(list(self.root.glob(".dangling-final.zip.*.tmp")), [])
 
     def test_output_and_archive_must_be_fresh(self) -> None:
         self.output.mkdir()
