@@ -294,6 +294,62 @@ fn checkout_is_read_only(path: &str, job: &Job) -> Result<(), String> {
     )
 }
 
+fn candidate_source_policy(path: &str, job: &Job) -> Result<(), String> {
+    let checkout = actions(job, "actions/checkout");
+    require(
+        checkout.len() == 1 && with_is(checkout[0], "ref", "${{ github.sha }}"),
+        format!("{path} candidate must check out the workflow event SHA"),
+    )?;
+    let checkout_index = job
+        .steps
+        .iter()
+        .position(|step| step.uses.as_deref().map(action_name) == Some("actions/checkout"))
+        .ok_or_else(|| format!("{path} candidate checkout is missing"))?;
+    let source_indices = job
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| (step.id.as_deref() == Some("source")).then_some(index))
+        .collect::<Vec<_>>();
+    let install_index = job
+        .steps
+        .iter()
+        .position(|step| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("rustup toolchain install"))
+        })
+        .ok_or_else(|| format!("{path} candidate tool installation is missing"))?;
+    require(
+        source_indices.len() == 1
+            && checkout_index < source_indices[0]
+            && source_indices[0] < install_index,
+        format!("{path} candidate must verify source before tool installation"),
+    )?;
+    let source_run = job.steps[source_indices[0]]
+        .run
+        .as_deref()
+        .ok_or_else(|| format!("{path} candidate source verification is missing"))?;
+    script_contract(
+        path,
+        source_run,
+        &[
+            "$eventSha = '${{ github.sha }}'",
+            "$eventSha -cnotmatch '^[0-9a-f]{40}$'",
+            "$sourceCommit = git rev-parse HEAD",
+            "$sourceCommit -cnotmatch '^[0-9a-f]{40}$'",
+            "$sourceCommit -cne $eventSha",
+            "git ls-remote origin refs/heads/master",
+            "$remoteMaster[0] -cnotmatch '^[0-9a-f]{40}\\trefs/heads/master$'",
+            "($remoteMaster[0] -split \"`t\")[0] -cne $sourceCommit",
+            "$epoch = git show -s --format=%ct $sourceCommit",
+            "source_commit=$sourceCommit",
+            "SOURCE_DATE_EPOCH=$epoch",
+        ],
+        &[],
+    )
+}
+
 fn env_is_bound(path: &str, job: &Job, name: &str, expected: &str) -> Result<(), String> {
     let bindings = job
         .steps
@@ -700,11 +756,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             "actions/upload-artifact",
         ],
     )?;
-    let checkout = actions(candidate_job, "actions/checkout")[0];
-    require(
-        checkout.with.get("ref").map(Scalar::text).as_deref() == Some("master"),
-        "candidate workflow must check out master",
-    )?;
+    candidate_source_policy(candidate_path, candidate_job)?;
     let attestations = actions(candidate_job, "actions/attest");
     let uploads = actions(candidate_job, "actions/upload-artifact");
     require(
@@ -1090,6 +1142,91 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
     ] {
         validate_experiment(&experiment)?;
     }
+    Ok(())
+}
+
+#[test]
+fn candidate_source_policy_rejects_mutable_ref_and_removed_guards() -> Result<(), String> {
+    let path = ".github/workflows/release.yaml";
+    let source = include_str!("../../../../.github/workflows/release.yaml");
+    let fresh = || parse(path, source);
+    let valid = fresh()?;
+    candidate_source_policy(path, only_job(path, &valid, "windows")?)?;
+
+    let mut mutable_checkout = fresh()?;
+    let job = mutable_checkout
+        .jobs
+        .get_mut("windows")
+        .ok_or("missing fixture job")?;
+    let checkout = job
+        .steps
+        .iter_mut()
+        .find(|step| step.uses.as_deref().map(action_name) == Some("actions/checkout"))
+        .ok_or("missing fixture checkout")?;
+    checkout
+        .with
+        .insert("ref".to_owned(), Scalar::String("master".to_owned()));
+    assert!(
+        candidate_source_policy(path, job)
+            .as_ref()
+            .is_err_and(|error| error.contains("workflow event SHA"))
+    );
+
+    for removed_guard in [
+        "$eventSha -cnotmatch '^[0-9a-f]{40}$'",
+        "$sourceCommit -cne $eventSha",
+        "git ls-remote origin refs/heads/master",
+        "($remoteMaster[0] -split \"`t\")[0] -cne $sourceCommit",
+    ] {
+        let mut weakened = fresh()?;
+        let job = weakened
+            .jobs
+            .get_mut("windows")
+            .ok_or("missing fixture job")?;
+        let source_step = job
+            .steps
+            .iter_mut()
+            .find(|step| step.id.as_deref() == Some("source"))
+            .ok_or("missing fixture source step")?;
+        let run = source_step
+            .run
+            .as_mut()
+            .ok_or("missing fixture source script")?;
+        require(run.contains(removed_guard), "fixture guard is missing")?;
+        *run = run.replace(removed_guard, "'removed-guard'");
+        assert!(
+            candidate_source_policy(path, job)
+                .as_ref()
+                .is_err_and(|error| error.contains("script contract is missing")),
+            "candidate policy must reject removal of {removed_guard}"
+        );
+    }
+
+    let mut late_guard = fresh()?;
+    let job = late_guard
+        .jobs
+        .get_mut("windows")
+        .ok_or("missing fixture job")?;
+    let source_index = job
+        .steps
+        .iter()
+        .position(|step| step.id.as_deref() == Some("source"))
+        .ok_or("missing fixture source step")?;
+    let install_index = job
+        .steps
+        .iter()
+        .position(|step| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("rustup toolchain install"))
+        })
+        .ok_or("missing fixture install step")?;
+    job.steps.swap(source_index, install_index);
+    assert!(
+        candidate_source_policy(path, job)
+            .as_ref()
+            .is_err_and(|error| error.contains("before tool installation"))
+    );
     Ok(())
 }
 
