@@ -907,10 +907,22 @@ $candidateSource = Assert-OneCommand `
     -Name 'git' `
     -BeforeDelimiter @('rev-parse', 'HEAD') `
     -Message 'Candidate workflow must resolve the selected source commit.'
+$candidateSourceBlocks = @($workflowBlocks[$candidatePath] | Where-Object {
+    $_.script.Contains('git ls-remote origin refs/heads/master', [StringComparison]::Ordinal)
+})
+if ($candidateSourceBlocks.Count -ne 1) {
+    throw 'Candidate workflow must have exactly one source verification step.'
+}
+$candidateSourceBlock = $candidateSourceBlocks[0]
+Assert-Assignment `
+    -Blocks @($candidateSourceBlock) `
+    -Left '$eventSha' `
+    -Right "'`${{ github.sha }}'" `
+    -Message 'Candidate workflow must verify the event SHA before building.'
 $candidateEpoch = Assert-OneCommand `
     -Commands $candidateCommands `
     -Name 'git' `
-    -BeforeDelimiter @('show', '-s', '--format=%ct', 'HEAD') `
+    -BeforeDelimiter @('show', '-s', '--format=%ct', '$sourceCommit') `
     -Message 'Candidate workflow must derive SOURCE_DATE_EPOCH from the source commit.'
 $candidateHandoff = Assert-OneCommand `
     -Commands $candidateCommands `
@@ -960,6 +972,15 @@ if ($candidateCheckoutLines.Count -ne 1 -or $candidateAttestLines.Count -ne 2 -o
     $candidateUploadLines.Count -ne 1) {
     throw 'Candidate action line mapping must match the YAML action policy.'
 }
+$candidateYamlLines = @(Get-Content -LiteralPath $candidatePath)
+if ($candidateYamlLines[$candidateCheckoutLines[0] + 1] -cne '          ref: ${{ github.sha }}') {
+    throw 'Candidate checkout must use the exact workflow event SHA.'
+}
+$candidateInstallLine = @($candidateYamlLines | Select-String -Pattern '^      - name: Install pinned Rust and verified release tools$')
+if ($candidateInstallLine.Count -ne 1 -or
+    $candidateSourceBlock.line -ge $candidateInstallLine[0].LineNumber) {
+    throw 'Candidate source verification must precede release-tool installation.'
+}
 Assert-LineOrder `
     -Lines @(
         $candidateCheckoutLines[0],
@@ -970,6 +991,141 @@ Assert-LineOrder `
         $candidateUploadLines[0]
     ) `
     -Message 'Candidate checkout, source proof, handoff validation, attestations, and upload must remain ordered.'
+
+function Invoke-CandidateSourceFixture {
+    param(
+        [Parameter(Mandatory)][string] $SourceRoot,
+        [AllowEmptyString()][string] $EventSha,
+        [Parameter(Mandatory)][string] $OutputRoot
+    )
+
+    $outputPath = Join-Path $OutputRoot 'github-output.txt'
+    $environmentPath = Join-Path $OutputRoot 'github-env.txt'
+    Remove-Item -LiteralPath $outputPath, $environmentPath -ErrorAction SilentlyContinue
+    $saved = @{}
+    foreach ($name in @('GITHUB_OUTPUT', 'GITHUB_ENV', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
+    $env:GITHUB_OUTPUT = $outputPath
+    $env:GITHUB_ENV = $environmentPath
+    $env:GITHUB_RUN_ID = '51'
+    $env:GITHUB_RUN_ATTEMPT = '1'
+    Push-Location $SourceRoot
+    try {
+        $scriptText = $candidateSourceBlock.script.Replace('${{ github.sha }}', $EventSha)
+        & ([scriptblock]::Create($scriptText)) 2>$null
+    }
+    finally {
+        Pop-Location
+        foreach ($name in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+    }
+}
+
+function Assert-CandidateSourceFixtureRejects {
+    param(
+        [Parameter(Mandatory)][string] $SourceRoot,
+        [AllowEmptyString()][string] $EventSha,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $ExpectedFragment
+    )
+
+    Assert-Fails -Action {
+        Invoke-CandidateSourceFixture -SourceRoot $SourceRoot -EventSha $EventSha -OutputRoot $OutputRoot
+    } -ExpectedFragment $ExpectedFragment
+    foreach ($path in @('github-output.txt', 'github-env.txt')) {
+        if (Test-Path -LiteralPath (Join-Path $OutputRoot $path)) {
+            throw 'Rejected candidate source must not export build metadata.'
+        }
+    }
+}
+
+$candidateFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'darkrenamer-candidate-source-' + [guid]::NewGuid().ToString('N')
+)
+$candidateFixtureSource = Join-Path $candidateFixtureRoot 'source'
+$candidateFixtureRemote = Join-Path $candidateFixtureRoot 'origin.git'
+$savedGitDates = @{}
+foreach ($name in @('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE')) {
+    $savedGitDates[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+try {
+    [void](New-Item -ItemType Directory -Path $candidateFixtureSource -Force)
+    & git init --quiet --bare $candidateFixtureRemote
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture remote initialization failed.' }
+    & git -C $candidateFixtureSource init --quiet --initial-branch=master
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture source initialization failed.' }
+    & git -C $candidateFixtureSource config user.name 'DarkReNamer fixture'
+    & git -C $candidateFixtureSource config user.email 'darkrenamer-fixture@example.invalid'
+    & git -C $candidateFixtureSource remote add origin $candidateFixtureRemote
+    Set-Content -LiteralPath (Join-Path $candidateFixtureSource 'source.txt') -Value 'A'
+    & git -C $candidateFixtureSource add source.txt
+    $env:GIT_AUTHOR_DATE = '2001-01-01T00:00:00+0000'
+    $env:GIT_COMMITTER_DATE = $env:GIT_AUTHOR_DATE
+    & git -C $candidateFixtureSource commit --quiet -m 'fixture: source A'
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture A commit failed.' }
+    $sourceA = (& git -C $candidateFixtureSource rev-parse HEAD).Trim()
+    & git -C $candidateFixtureSource push --quiet origin master
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture A push failed.' }
+
+    Invoke-CandidateSourceFixture -SourceRoot $candidateFixtureSource -EventSha $sourceA -OutputRoot $candidateFixtureRoot
+    $candidateOutput = Get-Content -LiteralPath (Join-Path $candidateFixtureRoot 'github-output.txt') -Raw
+    $candidateEnvironment = Get-Content -LiteralPath (Join-Path $candidateFixtureRoot 'github-env.txt') -Raw
+    $sourceAEpoch = (& git -C $candidateFixtureSource show -s --format=%ct $sourceA).Trim()
+    if (-not $candidateOutput.Contains("source_commit=$sourceA", [StringComparison]::Ordinal) -or
+        -not $candidateEnvironment.Contains("SOURCE_DATE_EPOCH=$sourceAEpoch", [StringComparison]::Ordinal)) {
+        throw 'Fresh candidate dispatch must export the verified source and its epoch.'
+    }
+
+    Set-Content -LiteralPath (Join-Path $candidateFixtureSource 'source.txt') -Value 'B'
+    & git -C $candidateFixtureSource add source.txt
+    $env:GIT_AUTHOR_DATE = '2001-01-02T00:00:00+0000'
+    $env:GIT_COMMITTER_DATE = $env:GIT_AUTHOR_DATE
+    & git -C $candidateFixtureSource commit --quiet -m 'fixture: source B'
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture B commit failed.' }
+    $sourceB = (& git -C $candidateFixtureSource rev-parse HEAD).Trim()
+    & git -C $candidateFixtureSource push --quiet origin master
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture B push failed.' }
+
+    Invoke-CandidateSourceFixture -SourceRoot $candidateFixtureSource -EventSha $sourceB -OutputRoot $candidateFixtureRoot
+    $candidateOutput = Get-Content -LiteralPath (Join-Path $candidateFixtureRoot 'github-output.txt') -Raw
+    $candidateEnvironment = Get-Content -LiteralPath (Join-Path $candidateFixtureRoot 'github-env.txt') -Raw
+    $sourceBEpoch = (& git -C $candidateFixtureSource show -s --format=%ct $sourceB).Trim()
+    if ($sourceAEpoch -ceq $sourceBEpoch -or
+        -not $candidateOutput.Contains("source_commit=$sourceB", [StringComparison]::Ordinal) -or
+        -not $candidateEnvironment.Contains("SOURCE_DATE_EPOCH=$sourceBEpoch", [StringComparison]::Ordinal)) {
+        throw 'New candidate dispatch must export the current source and its epoch.'
+    }
+
+    Assert-CandidateSourceFixtureRejects `
+        -SourceRoot $candidateFixtureSource -EventSha $sourceA -OutputRoot $candidateFixtureRoot `
+        -ExpectedFragment 'checked-out source does not match the workflow event SHA'
+    & git -C $candidateFixtureSource switch --quiet --detach $sourceA
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture stale checkout failed.' }
+    Assert-CandidateSourceFixtureRejects `
+        -SourceRoot $candidateFixtureSource -EventSha $sourceA -OutputRoot $candidateFixtureRoot `
+        -ExpectedFragment 'workflow event is stale'
+    & git -C $candidateFixtureSource switch --quiet master
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate fixture master restore failed.' }
+    foreach ($invalidSha in @('', 'not-a-full-sha')) {
+        Assert-CandidateSourceFixtureRejects `
+            -SourceRoot $candidateFixtureSource -EventSha $invalidSha -OutputRoot $candidateFixtureRoot `
+            -ExpectedFragment 'workflow event SHA must be a full source commit SHA'
+    }
+    & git -C $candidateFixtureSource remote set-url origin (Join-Path $candidateFixtureRoot 'missing.git')
+    Assert-CandidateSourceFixtureRejects `
+        -SourceRoot $candidateFixtureSource -EventSha $sourceB -OutputRoot $candidateFixtureRoot `
+        -ExpectedFragment 'live origin/master commit could not be resolved'
+}
+finally {
+    foreach ($name in $savedGitDates.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedGitDates[$name])
+    }
+    if (Test-Path -LiteralPath $candidateFixtureRoot) {
+        Remove-Item -LiteralPath $candidateFixtureRoot -Recurse -Force
+    }
+}
 
 $promotionMetadata = Assert-OneCommand `
     -Commands $promotionCommands `
