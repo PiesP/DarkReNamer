@@ -27,10 +27,11 @@ pub use command_catalog::{
     command_ui_policy, command_ui_spec, legacy_command_shortcut, legacy_command_shortcuts,
     rail_tool_spec, rail_tool_specs,
 };
-#[cfg(any(windows, test))]
+#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use command_catalog::{DELETE_SELECTED_COMMAND, EXIT_COMMAND};
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use ui_layout::{AppearanceDialogLayout, PromptLayout, StatusChromeGeometry};
 #[cfg(any(windows, test))]
 pub(crate) use ui_layout::{
@@ -71,14 +72,15 @@ pub(crate) use appearance_model::{
     theme_from_foreground, unpack_ui_appearance,
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use appearance_model::SemanticPalette;
 
 // These crate-root aliases existed before extraction; retain them for internal callers.
 #[cfg(any(windows, test))]
 #[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use appearance_model::{ProposedNameColors, ProposedNameVisual, theme_mode_for_command};
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use ui_layout::{ButtonPaintGeometry, HeaderChromeGeometry, MainLayout};
 #[cfg(any(windows, test))]
