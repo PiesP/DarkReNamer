@@ -10,7 +10,7 @@ import re
 import stat
 
 from darkrenamer_tooling.contracts.platform import (
-    V1_PROFILE_ID, V2_PROFILE_ID, _v2_process_rows, _v2_task_rows,
+    V1_PROFILE_ID, V2_PROFILE_ID, _v2_matches_owned_lifetime, _v2_process_rows, _v2_task_rows,
     _verify_v2_owned_resources, require_fixture_root,
 )
 from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
@@ -412,15 +412,17 @@ def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
             require(prior is None or prior == row,
                     "V2 finalizer process lifetime changed or PID was reused.")
             identities[row["pid"]] = row
-    owned_pids = {row["pid"] for row in evidence["declared_processes"]}
-    owned_pids.update((evidence["preflight_child"]["pid"], evidence["engine_child"]["pid"],
-                       evidence["task_execution"]["observer_lifecycle"]["pid"]))
-    owned_pids.update(row["task_execution"]["observer_lifecycle"]["pid"]
-                      for row in evidence["rescue_executions"])
+    owned_starts: dict[int, list[int]] = {}
+    lifetimes = [*evidence["declared_processes"], evidence["preflight_child"],
+                 evidence["engine_child"], evidence["task_execution"]["observer_lifecycle"],
+                 *(row["task_execution"]["observer_lifecycle"]
+                   for row in evidence["rescue_executions"])]
+    for lifetime in lifetimes:
+        owned_starts.setdefault(lifetime["pid"], []).append(int(lifetime["start_time_utc_ticks"]))
     paths = tuple(row["path"].casefold() for row in roots.values())
     for row in identities.values():
         scope = (row["executable_path"] + " " + row["command_line"]).casefold()
-        require(row["pid"] not in owned_pids and row["parent_pid"] not in owned_pids and
+        require(not _v2_matches_owned_lifetime(row, owned_starts) and
                 run_name.casefold() not in scope and not any(path in scope for path in paths),
                 "V2 finalizer retained a protected process scope.")
 

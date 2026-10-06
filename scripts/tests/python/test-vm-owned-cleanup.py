@@ -9,6 +9,7 @@ import unittest
 
 from darkrenamer_tooling.contracts.owned_cleanup import (
     _observer_finished, _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
+    _v2_finalizer_inventory,
     verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
@@ -58,6 +59,37 @@ def text_scale_snapshot(factor):
 
 
 class OwnedCleanupTests(unittest.TestCase):
+    def test_v2_finalizer_distinguishes_reused_parent_from_owned_lifetime(self):
+        cleanup = clean_controller_cleanup_v2()
+        evidence = cleanup['owned_resource_evidence']
+        evidence['declared_processes'][0]['pid'] = 9432
+        evidence['declared_processes'][0]['start_time_utc_ticks'] = '639268888530000008'
+        row = deepcopy(evidence['process_snapshots']['after_delete']['processes'][0])
+        row.update(pid=3636, identity='3636|2025-10-05T13:31:43.0000000Z',
+                   creation_time_utc='2025-10-05T13:31:43.0000000Z', parent_pid=9432)
+        snapshot = {'tasks': [], 'processes': [row]}
+        def verify():
+            _v2_finalizer_inventory(snapshot, snapshot, snapshot, cleanup,
+                                    evidence['root_records'], evidence['run_name'])
+
+        verify()
+        row['creation_time_utc'] = '2026-10-06T13:07:33.0000000Z'
+        row['identity'] = '3636|' + row['creation_time_utc']
+        with self.assertRaises(EvidenceError):
+            verify()
+        row['parent_pid'] = 100
+        row['pid'] = 9432
+        row['identity'] = '9432|' + row['creation_time_utc']
+        with self.assertRaises(EvidenceError):
+            verify()
+        row['pid'] = 3636
+        row['parent_pid'] = 9432
+        row['creation_time_utc'] = '2025-10-05T13:31:43.0000000Z'
+        row['identity'] = '3636|' + row['creation_time_utc']
+        row['command_line'] += ' ' + evidence['root_records']['guest']['path']
+        with self.assertRaises(EvidenceError):
+            verify()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
