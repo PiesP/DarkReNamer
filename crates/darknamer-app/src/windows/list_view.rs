@@ -106,7 +106,6 @@ use windows_sys::Win32::Foundation::WPARAM;
 use windows_sys::Win32::Globalization::DATE_SHORTDATE;
 use windows_sys::Win32::Globalization::GetDateFormatEx;
 use windows_sys::Win32::Globalization::GetTimeFormatEx;
-use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
 use windows_sys::Win32::Graphics::Gdi::DT_END_ELLIPSIS;
 use windows_sys::Win32::Graphics::Gdi::DT_LEFT;
 use windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX;
@@ -115,7 +114,6 @@ use windows_sys::Win32::Graphics::Gdi::DT_SINGLELINE;
 use windows_sys::Win32::Graphics::Gdi::DT_VCENTER;
 use windows_sys::Win32::Graphics::Gdi::DrawTextW;
 use windows_sys::Win32::Graphics::Gdi::FillRect;
-use windows_sys::Win32::Graphics::Gdi::GetSysColor;
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
@@ -176,6 +174,8 @@ use windows_sys::Win32::UI::Controls::CDRF_NOTIFYITEMDRAW;
 use windows_sys::Win32::UI::Controls::CDRF_NOTIFYPOSTPAINT;
 use windows_sys::Win32::UI::Controls::CDRF_NOTIFYSUBITEMDRAW;
 use windows_sys::Win32::UI::Controls::CDRF_SKIPDEFAULT;
+use windows_sys::Win32::UI::Controls::GetThemeColor;
+use windows_sys::Win32::UI::Controls::GetWindowTheme;
 use windows_sys::Win32::UI::Controls::HDI_TEXT;
 use windows_sys::Win32::UI::Controls::HDI_WIDTH;
 use windows_sys::Win32::UI::Controls::HDITEMW;
@@ -192,6 +192,7 @@ use windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES;
 use windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::InitCommonControlsEx;
+use windows_sys::Win32::UI::Controls::LISS_SELECTEDNOTFOCUS;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVCF_FMT;
 #[cfg(test)]
@@ -233,6 +234,7 @@ use windows_sys::Win32::UI::Controls::LVM_SETITEMSTATE;
 use windows_sys::Win32::UI::Controls::LVM_SETITEMTEXTW;
 use windows_sys::Win32::UI::Controls::LVM_SETITEMW;
 use windows_sys::Win32::UI::Controls::LVN_GETINFOTIPW;
+use windows_sys::Win32::UI::Controls::LVP_LISTITEM;
 use windows_sys::Win32::UI::Controls::LVS_EX_DOUBLEBUFFER;
 use windows_sys::Win32::UI::Controls::LVS_EX_FULLROWSELECT;
 use windows_sys::Win32::UI::Controls::LVS_EX_INFOTIP;
@@ -252,6 +254,7 @@ use windows_sys::Win32::UI::Controls::NMHDR;
 use windows_sys::Win32::UI::Controls::NMHEADERW;
 use windows_sys::Win32::UI::Controls::NMLVCUSTOMDRAW;
 use windows_sys::Win32::UI::Controls::NMLVGETINFOTIPW;
+use windows_sys::Win32::UI::Controls::TMT_TEXTCOLOR;
 #[cfg(test)]
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
@@ -1224,6 +1227,29 @@ fn paint_blank_list_body(list: HWND, dc: HDC, brush: HBRUSH, expected_rows: usiz
     unsafe { FillRect(dc, &body, brush) };
 }
 
+/// Reads the live ListView theme's unfocused selection foreground, if defined.
+fn inactive_selected_list_text_color(list: HWND) -> Option<u32> {
+    // SAFETY: the live ListView owns this borrowed theme handle. The query
+    // copies one color synchronously; it neither retains nor closes the handle.
+    let theme = unsafe { GetWindowTheme(list) };
+    if theme == 0 {
+        return None;
+    }
+    let mut color = 0;
+    // SAFETY: theme is the ListView's current theme during this UI-thread
+    // paint callback, and color is writable stack storage for the result.
+    let result = unsafe {
+        GetThemeColor(
+            theme,
+            LVP_LISTITEM,
+            LISS_SELECTEDNOTFOCUS,
+            TMT_TEXTCOLOR as i32,
+            &mut color,
+        )
+    };
+    (result == 0).then_some(color)
+}
+
 /// Keeps native row rendering with a readable inactive Dark selection foreground.
 /// Unselected changed proposed names may receive restrained semantic colors.
 pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
@@ -1290,19 +1316,19 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     let focused = item_state & LVIS_FOCUSED != 0;
     if selected {
         let resolved = state.resolved_appearance();
-        // DarkMode_Explorer draws an inactive selection with a pale native
-        // background while LVM_SETTEXTCOLOR still supplies Dark's white text.
-        // Match the system foreground for that native band only. Keep native
-        // selection/background/icon/focus painting and Forced Colors precedence.
+        // The native inactive-selection band can be light or dark across
+        // visual styles. Match its current ListView theme text state, leaving
+        // native background/icon/focus painting and Forced Colors precedence.
         // SAFETY: GetFocus returns only this UI thread's current HWND.
         let list_has_focus = unsafe { GetFocus() } == state.list_window;
         if resolved.theme == ResolvedTheme::Dark
             && resolved.custom_colors_enabled
             && !list_has_focus
+            && let Some(color) = inactive_selected_list_text_color(state.list_window)
         {
-            // SAFETY: GetSysColor returns a copied scalar, and the validated
-            // custom-draw payload remains writable for this callback only.
-            unsafe { (*custom).clrText = GetSysColor(COLOR_WINDOWTEXT) };
+            // SAFETY: the validated custom-draw payload remains writable
+            // for this callback; the theme query returned a copied scalar.
+            unsafe { (*custom).clrText = color };
             return Some(CDRF_NEWFONT as LRESULT);
         }
         return Some(CDRF_DODEFAULT as LRESULT);
@@ -2928,11 +2954,15 @@ mod native_tests {
     use windows_sys::Win32::Foundation::{
         ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, SetLastError,
     };
-    use windows_sys::Win32::Graphics::Gdi::{CreateFontIndirectW, GetObjectW, LOGFONTW};
+    use windows_sys::Win32::Graphics::Gdi::{
+        COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
+        GetBkColor, GetObjectW, GetSysColor, GetTextColor, LOGFONTW,
+    };
     use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
-        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
-        LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        IsAppThemed, IsThemeActive, LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT,
+        LVM_GETITEMW, LVM_GETTEXTCOLOR, LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR,
+        LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -5792,6 +5822,10 @@ mod native_tests {
         Ok(())
     }
 
+    thread_local! {
+        static INACTIVE_SELECTION_PAINT_DIAGNOSTIC: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
     unsafe extern "system" fn inactive_selection_test_parent(
         window: HWND,
         message: u32,
@@ -5803,9 +5837,77 @@ mod native_tests {
         if message == WM_NOTIFY
             && lparam != 0
             && let Some(lease) = try_app_state(window)
-            && let Some(result) = handle_list_custom_draw(lease.state(), lparam)
         {
-            return result;
+            let list = lease.state().list_window;
+            let header = lparam as *const NMHDR;
+            // SAFETY: every WM_NOTIFY payload has the readable NMHDR prefix;
+            // source and code are copied before any larger payload read.
+            let source_is_list =
+                unsafe { (*header).hwndFrom == list && (*header).code == NM_CUSTOMDRAW };
+            let custom = lparam as *const NMLVCUSTOMDRAW;
+            let probe = if source_is_list {
+                // SAFETY: this ListView's NM_CUSTOMDRAW supplies the synchronous
+                // NMLVCUSTOMDRAW payload. Only pre-v6 fields are read. Theme,
+                // DC and color queries copy scalars from live UI-thread handles.
+                unsafe {
+                    if (*custom).nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)
+                        && (*custom).nmcd.dwItemSpec == 0
+                        && (*custom).iSubItem == 0
+                        && GetFocus() != list
+                    {
+                        let theme = GetWindowTheme(list);
+                        let mut theme_color = 0;
+                        let theme_hr = if theme != 0 {
+                            Some(GetThemeColor(
+                                theme,
+                                LVP_LISTITEM,
+                                LISS_SELECTEDNOTFOCUS,
+                                TMT_TEXTCOLOR as i32,
+                                &mut theme_color,
+                            ))
+                        } else {
+                            None
+                        };
+                        let item_state =
+                            SendMessageW(list, LVM_GETITEMSTATE, 0, LVIS_SELECTED as LPARAM) as u32;
+                        Some(format!(
+                            "theme={theme:#x} theme_hr={theme_hr:?} theme_text={theme_color:#x} app_themed={} theme_active={} native_item_state={:#x} selected={} focus_is_list=false before_text={:#x} before_text_bk={:#x} dc_text={:#x} dc_bk={:#x} list_text={:#x} list_bk={:#x} sys_window={:#x} sys_window_text={:#x} sys_highlight={:#x} sys_highlight_text={:#x}",
+                            IsAppThemed(),
+                            IsThemeActive(),
+                            (*custom).nmcd.uItemState,
+                            item_state & LVIS_SELECTED != 0,
+                            (*custom).clrText,
+                            (*custom).clrTextBk,
+                            GetTextColor((*custom).nmcd.hdc),
+                            GetBkColor((*custom).nmcd.hdc),
+                            SendMessageW(list, LVM_GETTEXTCOLOR, 0, 0),
+                            SendMessageW(list, LVM_GETBKCOLOR, 0, 0),
+                            GetSysColor(COLOR_WINDOW),
+                            GetSysColor(COLOR_WINDOWTEXT),
+                            GetSysColor(COLOR_HIGHLIGHT),
+                            GetSysColor(COLOR_HIGHLIGHTTEXT),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let result = handle_list_custom_draw(lease.state(), lparam);
+            if let Some(probe) = probe {
+                INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| {
+                    *slot.borrow_mut() = Some(format!(
+                        "{probe} after_text={:#x} return={result:?}",
+                        // SAFETY: this validated synchronous ListView payload
+                        // remains live until the parent callback returns.
+                        unsafe { (*custom).clrText }
+                    ));
+                });
+            }
+            if let Some(result) = result {
+                return result;
+            }
         }
         // SAFETY: unhandled notifications retain the native parent chain.
         unsafe { DefSubclassProc(window, message, wparam, lparam) }
@@ -6049,13 +6151,19 @@ mod native_tests {
             if unsafe { GetFocus() } != button || selected_indices(list) != [0] {
                 return Err(io::Error::other("button focus did not retain row selection").into());
             }
+            INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow_mut().take());
             for (row, selected) in [(0, true), (1, false)] {
                 for (subitem, name) in [(0, "original"), (1, "proposed")] {
                     let (readable_pixels, background) =
                         name_raster_contrast(list, app._directory.path(), row, subitem, selected)?;
+                    println!(
+                        "native-inactive-selection-paint: row={row} subitem={subitem} selected={selected} contrast_pixels={readable_pixels} background={background:?} original_cell_probe={:?}",
+                        INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow().clone())
+                    );
                     if readable_pixels < 20 {
                         return Err(io::Error::other(format!(
-                            "row {row} {name} name has only {readable_pixels} high-contrast pixels against {background:?}"
+                            "row {row} {name} name has only {readable_pixels} high-contrast pixels against {background:?}; paint probe {:?}",
+                            INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow().clone())
                         ))
                         .into());
                     }
