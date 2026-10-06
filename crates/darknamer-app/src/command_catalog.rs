@@ -389,9 +389,9 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         RESET,
         rail(RailSide::Right, 0, 0),
-        "이름\n초기화",
+        "제안명\n초기화",
         menu(MenuGroup::Edit, 2, 0),
-        "이름 미리보기 초기화",
+        "제안 이름 초기화",
         "모든 제안 이름을 현재 이름으로 되돌립니다. 대상 폴더 변경은 유지되며, 완료된 파일 작업은 취소하지 않습니다.",
         None,
         Rows,

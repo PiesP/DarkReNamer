@@ -64,10 +64,10 @@ when any row is a directory. Review the rebuilt path, collision, Status, and
 Apply-readiness previews after choosing the folder.
 
 **편집 > 대상 폴더 > 대상 폴더 미리보기 초기화** resets destination parents to the
-original parents while keeping proposed names. **편집 > 이름 미리보기 초기화**
-resets proposed names while keeping destination parents. Both commands change
-the proposal only. Neither command reverses a filesystem operation that has
-already completed.
+original parents while keeping proposed names. **편집 > 제안 이름 초기화** and
+the **제안명 초기화** command-rail button reset proposed names while keeping
+destination parents. Both reset commands change the proposal only. Neither
+reverses a filesystem operation that has already completed.
 
 ## Apply a proposal
 

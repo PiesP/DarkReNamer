@@ -3955,9 +3955,96 @@ mod native_tests {
         })
     }
 
+    fn assert_ordinary_close_waits_for_icon_join(
+        image_list: icon_worker::BorrowedSystemImageList,
+    ) -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(root.path(), false, |window| {
+            let gate = IconTestGate::held();
+            let worker_gate = gate.clone();
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let class_calls = Arc::new(AtomicUsize::new(0));
+            let worker_class_calls = Arc::clone(&class_calls);
+            let mut guardian = icon_worker::IconRunGuardian::start_with(
+                // SAFETY: the production test window belongs to this UI thread.
+                unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+                move || {
+                    let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
+                    Some(
+                        move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
+                            if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
+                                if worker_class_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                                    let _ = entered_tx.send(());
+                                    worker_gate.wait();
+                                }
+                            }
+                            lookup.query(key)
+                        },
+                    )
+                },
+            )?;
+            // On every error path, release the controlled provider before the
+            // guardian's Drop joins its tracked worker.
+            let _release = ReleaseIconGate(gate.clone());
+            install_icon_test_guardian(window, &guardian)?;
+            pump_icon_test_until(window, Duration::from_secs(5), || {
+                try_app_state(window).is_some_and(|lease| lease.state().icon_image_list.is_some())
+            })?;
+            {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("ordinary close state unavailable"))?;
+                let state = lease.state_mut();
+                assert_eq!(
+                    state.model.append(LegacyListItem::new(
+                        r"C:\icon-test\ordinary.pending",
+                        false,
+                        0,
+                        0,
+                        0,
+                    )),
+                    Ok(true)
+                );
+                refresh_all_rows(state);
+            }
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| io::Error::other("ordinary close icon lookup did not block"))?;
+            // SAFETY: the live production owner handles its ordinary close
+            // message after the preceding AppState lease has ended.
+            unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
+            assert_ne!(unsafe { IsWindow(window) }, 0);
+            {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("ordinary close state disappeared early"))?;
+                let state = lease.state();
+                assert!(state.close_pending && state.mutation_locked);
+                assert_eq!(
+                    state.ui_status.message_text(),
+                    "아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다."
+                );
+                assert!(!guardian.shared.is_joined());
+            }
+            assert_ui_ack_while_icon_blocked(window)?;
+            gate.release();
+            pump_icon_test_until(window, Duration::from_secs(10), || {
+                guardian.poll_join();
+                // Destruction before the tracked Shell worker joins would be
+                // an ownership regression even if the window later disappears.
+                let live = unsafe { IsWindow(window) } != 0;
+                assert!(live || guardian.shared.is_joined());
+                !live
+            })?;
+            assert!(guardian.shared.is_joined());
+            assert!(guardian.shared.owner_destroyed());
+            assert_eq!(class_calls.load(Ordering::Acquire), 1);
+            Ok(())
+        })
+    }
+
     #[test]
     fn icon_worker_close_and_forced_destroy_retire() -> io::Result<()> {
         with_icon_native_window(|window, image_list| {
+            assert_ordinary_close_waits_for_icon_join(image_list)?;
             let slot = app_state_slot(window);
             // SAFETY: the test owns the published slot; the hold outlives the
             // actual worker join and the deliberately nested owner teardown.
