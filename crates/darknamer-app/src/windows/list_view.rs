@@ -3460,22 +3460,70 @@ mod native_tests {
         shared: Arc<IconShared>,
         saw_destroy: AtomicBool,
         joined_at_destroy: AtomicBool,
+        detached_at_nc_destroy: AtomicBool,
     }
 
-    struct IconCloseJoinSubclass(HWND);
+    struct IconCloseJoinSubclass {
+        window: HWND,
+        observation: Option<Box<IconCloseJoinObservation>>,
+    }
+
+    impl IconCloseJoinSubclass {
+        fn install(window: HWND, shared: Arc<IconShared>) -> io::Result<Self> {
+            let observation = Box::new(IconCloseJoinObservation {
+                shared,
+                saw_destroy: AtomicBool::new(false),
+                joined_at_destroy: AtomicBool::new(false),
+                detached_at_nc_destroy: AtomicBool::new(false),
+            });
+            // SAFETY: this UI thread owns the live window. The guard owns the
+            // stable allocation published as refdata until confirmed removal
+            // or window destruction.
+            if unsafe {
+                SetWindowSubclass(
+                    window,
+                    Some(icon_test_close_join_subclass),
+                    ICON_TEST_CLOSE_JOIN_SUBCLASS,
+                    (&*observation as *const IconCloseJoinObservation) as usize,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                window,
+                observation: Some(observation),
+            })
+        }
+
+        fn observation(&self) -> &IconCloseJoinObservation {
+            self.observation
+                .as_deref()
+                .expect("installed close-join observation")
+        }
+    }
 
     impl Drop for IconCloseJoinSubclass {
         fn drop(&mut self) {
-            // SAFETY: the test's UI thread removes the callback before its
-            // stack-owned observation can be dropped on an early return.
-            if unsafe { IsWindow(self.0) } != 0 {
-                unsafe {
+            let Some(observation) = self.observation.take() else {
+                return;
+            };
+            // SAFETY: this test's UI thread is the only callback dispatcher.
+            // A live window can still retain refdata on an early return.
+            if unsafe { IsWindow(self.window) } != 0 {
+                let removed = unsafe {
                     RemoveWindowSubclass(
-                        self.0,
+                        self.window,
                         Some(icon_test_close_join_subclass),
                         ICON_TEST_CLOSE_JOIN_SUBCLASS,
                     )
                 };
+                if removed == 0 {
+                    // Native detach is uncertain. Retain at most this one
+                    // inert test context instead of freeing reachable refdata.
+                    eprintln!("close-join test subclass detach failed; retaining observation");
+                    Box::leak(observation);
+                }
             }
         }
     }
@@ -3498,14 +3546,19 @@ mod native_tests {
             observation.saw_destroy.store(true, Ordering::Release);
         }
         if message == WM_NCDESTROY {
-            // SAFETY: the owner is ending this exact test subclass lifetime.
-            unsafe {
+            // SAFETY: the guard still owns this boxed refdata until callback
+            // completion; record whether exact native removal succeeded.
+            let observation = unsafe { &*(ref_data as *const IconCloseJoinObservation) };
+            let removed = unsafe {
                 RemoveWindowSubclass(
                     window,
                     Some(icon_test_close_join_subclass),
                     ICON_TEST_CLOSE_JOIN_SUBCLASS,
                 )
             };
+            observation
+                .detached_at_nc_destroy
+                .store(removed != 0, Ordering::Release);
         }
         // SAFETY: all other messages keep the native subclass chain.
         unsafe { DefSubclassProc(window, message, wparam, lparam) }
@@ -4045,25 +4098,8 @@ mod native_tests {
             // guardian's Drop joins its tracked worker.
             let _release = ReleaseIconGate(gate.clone());
             install_icon_test_guardian(window, &guardian)?;
-            let observation = Box::new(IconCloseJoinObservation {
-                shared: Arc::clone(&guardian.shared),
-                saw_destroy: AtomicBool::new(false),
-                joined_at_destroy: AtomicBool::new(false),
-            });
-            // SAFETY: this UI thread owns the live owner. The guard removes
-            // the callback before the boxed observation is dropped.
-            if unsafe {
-                SetWindowSubclass(
-                    window,
-                    Some(icon_test_close_join_subclass),
-                    ICON_TEST_CLOSE_JOIN_SUBCLASS,
-                    (&*observation as *const IconCloseJoinObservation) as usize,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            let _close_join_subclass = IconCloseJoinSubclass(window);
+            let close_join_subclass =
+                IconCloseJoinSubclass::install(window, Arc::clone(&guardian.shared))?;
             pump_icon_test_until(window, Duration::from_secs(5), || {
                 try_app_state(window).is_some_and(|lease| lease.state().icon_image_list.is_some())
             })?;
@@ -4109,8 +4145,10 @@ mod native_tests {
                 // actual lifetime boundary, before this later observer runs.
                 unsafe { IsWindow(window) == 0 }
             })?;
+            let observation = close_join_subclass.observation();
             assert!(observation.saw_destroy.load(Ordering::Acquire));
             assert!(observation.joined_at_destroy.load(Ordering::Acquire));
+            assert!(observation.detached_at_nc_destroy.load(Ordering::Acquire));
             assert!(guardian.shared.is_joined());
             assert!(guardian.shared.owner_destroyed());
             assert_eq!(class_calls.load(Ordering::Acquire), 1);
