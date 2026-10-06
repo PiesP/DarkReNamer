@@ -1,9 +1,13 @@
 #[cfg(test)]
+use crate::AppThemeMode;
+#[cfg(test)]
 use crate::ApplyPresentation;
 #[cfg(test)]
 use crate::BASE_DPI;
 #[cfg(test)]
 use crate::COLUMNS;
+#[cfg(test)]
+use crate::ForcedColorsState;
 #[cfg(test)]
 use crate::GRAPHITE_DARK;
 use crate::LayoutRect;
@@ -102,6 +106,7 @@ use windows_sys::Win32::Foundation::WPARAM;
 use windows_sys::Win32::Globalization::DATE_SHORTDATE;
 use windows_sys::Win32::Globalization::GetDateFormatEx;
 use windows_sys::Win32::Globalization::GetTimeFormatEx;
+use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
 use windows_sys::Win32::Graphics::Gdi::DT_END_ELLIPSIS;
 use windows_sys::Win32::Graphics::Gdi::DT_LEFT;
 use windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX;
@@ -110,6 +115,7 @@ use windows_sys::Win32::Graphics::Gdi::DT_SINGLELINE;
 use windows_sys::Win32::Graphics::Gdi::DT_VCENTER;
 use windows_sys::Win32::Graphics::Gdi::DrawTextW;
 use windows_sys::Win32::Graphics::Gdi::FillRect;
+use windows_sys::Win32::Graphics::Gdi::GetSysColor;
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
@@ -248,6 +254,7 @@ use windows_sys::Win32::UI::Controls::NMLVCUSTOMDRAW;
 use windows_sys::Win32::UI::Controls::NMLVGETINFOTIPW;
 #[cfg(test)]
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::Shell::DefSubclassProc;
 use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
 #[cfg(test)]
@@ -1217,8 +1224,8 @@ fn paint_blank_list_body(list: HWND, dc: HDC, brush: HBRUSH, expected_rows: usiz
     unsafe { FillRect(dc, &body, brush) };
 }
 
-/// Applies restrained colors only to an unselected changed proposed-name cell.
-/// Every other stage and state remains under the native ListView renderer.
+/// Keeps native row rendering with a readable inactive Dark selection foreground.
+/// Unselected changed proposed names may receive restrained semantic colors.
 pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
     let header = lparam as *const NMHDR;
     if header.is_null()
@@ -1262,15 +1269,12 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     let row = unsafe { (*custom).nmcd.dwItemSpec };
     // SAFETY: same payload; iSubItem is an integral field.
     let subitem = unsafe { (*custom).iSubItem };
-    if subitem < 1 {
-        return Some(CDRF_DODEFAULT as LRESULT);
-    }
     let Some(item) = state.model.items().get(row) else {
         return Some(CDRF_DODEFAULT as LRESULT);
     };
     // NMCUSTOMDRAW.uItemState can report stale CDIS_SELECTED state for a
     // ListView using LVS_SHOWSELALWAYS. Query the control's authoritative item
-    // state so native selection/focus rendering always takes precedence.
+    // state before touching any selected row, including its original-name cell.
     // SAFETY: list_window is the live notification source, row names an item
     // already validated against the synchronized model, and the message uses
     // only integral parameters without retaining caller memory.
@@ -1285,6 +1289,25 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     let selected = item_state & LVIS_SELECTED != 0;
     let focused = item_state & LVIS_FOCUSED != 0;
     if selected {
+        let resolved = state.resolved_appearance();
+        // DarkMode_Explorer draws an inactive selection with a pale native
+        // background while LVM_SETTEXTCOLOR still supplies Dark's white text.
+        // Match the system foreground for that native band only. Keep native
+        // selection/background/icon/focus painting and Forced Colors precedence.
+        // SAFETY: GetFocus returns only this UI thread's current HWND.
+        let list_has_focus = unsafe { GetFocus() } == state.list_window;
+        if resolved.theme == ResolvedTheme::Dark
+            && resolved.custom_colors_enabled
+            && !list_has_focus
+        {
+            // SAFETY: GetSysColor returns a copied scalar, and the validated
+            // custom-draw payload remains writable for this callback only.
+            unsafe { (*custom).clrText = GetSysColor(COLOR_WINDOWTEXT) };
+            return Some(CDRF_NEWFONT as LRESULT);
+        }
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    if subitem < 1 {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
     if !item.planned_change_kind().renames() {
@@ -2911,6 +2934,7 @@ mod native_tests {
         LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
         LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         PM_REMOVE, PeekMessageW, SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
         WM_APP, WM_GETFONT, WM_NULL, WM_QUIT, WM_SETFONT,
@@ -5764,6 +5788,290 @@ mod native_tests {
         })??;
         app.close()?;
         run_native_text150_ellipsis_regression()?;
+        run_native_inactive_selection_contrast_regression()?;
+        Ok(())
+    }
+
+    unsafe extern "system" fn inactive_selection_test_parent(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _refdata: usize,
+    ) -> LRESULT {
+        if message == WM_NOTIFY
+            && lparam != 0
+            && let Some(lease) = try_app_state(window)
+            && let Some(result) = handle_list_custom_draw(lease.state(), lparam)
+        {
+            return result;
+        }
+        // SAFETY: unhandled notifications retain the native parent chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    fn name_raster_contrast(
+        list: HWND,
+        root: &Path,
+        row: i32,
+        subitem: i32,
+        selected: bool,
+    ) -> Result<(usize, [u8; 3]), Box<dyn std::error::Error>> {
+        let mut cell = RECT {
+            left: LVIR_BOUNDS as i32,
+            top: subitem,
+            ..RECT::default()
+        };
+        // SAFETY: the requested row exists and the live ListView writes
+        // this subitem rectangle into stack storage synchronously.
+        if unsafe {
+            SendMessageW(
+                list,
+                LVM_GETSUBITEMRECT,
+                row as WPARAM,
+                (&raw mut cell) as LPARAM,
+            )
+        } == 0
+        {
+            return Err(io::Error::other("name cell is unavailable").into());
+        }
+        // Exclude the native icon gutter, cell border and focus outline. This
+        // interior still contains the nonempty filename at 150% text.
+        let left = cell.left + if subitem == 0 { 35 } else { 6 };
+        let right = (cell.left + 180).min(cell.right - 6);
+        let top = cell.top + 3;
+        let bottom = cell.bottom - 3;
+        // SAFETY: no AppState lease is held; repaint completes before capture.
+        if unsafe {
+            RedrawWindow(
+                list,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let output = root.join(format!("inactive-name-{row}-{subitem}.bmp"));
+        let measurement = write_window_bmp(list, &output)?;
+        if left < 0
+            || top < 0
+            || right <= left
+            || bottom <= top
+            || right > measurement.width
+            || bottom > measurement.height
+        {
+            return Err(io::Error::other("name is outside the ListView capture").into());
+        }
+        let width = usize::try_from(measurement.width)?;
+        let height = usize::try_from(measurement.height)?;
+        let bytes = std::fs::read(output)?;
+        const BMP_OFFSET: usize = 54;
+        if bytes.get(..2) != Some(b"BM")
+            || bytes.get(10..14) != Some(&(BMP_OFFSET as u32).to_le_bytes()[..])
+            || bytes.len() != BMP_OFFSET + width * height * 4
+        {
+            return Err(io::Error::other("unexpected name BMP format").into());
+        }
+        let mut colors = HashMap::<[u8; 3], usize>::new();
+        let mut pixels = Vec::new();
+        for y in top..bottom {
+            for x in left..right {
+                let at = BMP_OFFSET + ((y as usize * width + x as usize) * 4);
+                let bgr = [bytes[at], bytes[at + 1], bytes[at + 2]];
+                *colors.entry(bgr).or_default() += 1;
+                pixels.push(bgr);
+            }
+        }
+        let background = colors
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .ok_or("name raster is empty")?
+            .0;
+        let workspace = semantic_palette(ResolvedTheme::Dark)
+            .ok_or("Dark palette missing")?
+            .surface_workspace;
+        let workspace_bgr = [
+            ((workspace >> 16) & 0xff) as u8,
+            ((workspace >> 8) & 0xff) as u8,
+            (workspace & 0xff) as u8,
+        ];
+        if selected == (background == workspace_bgr) {
+            return Err(io::Error::other(format!(
+                "row {row} background {background:?} does not match selected={selected}"
+            ))
+            .into());
+        }
+        let luminance = |bgr: [u8; 3]| {
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(bgr[2]) + 0.7152 * channel(bgr[1]) + 0.0722 * channel(bgr[0])
+        };
+        let background_luminance = luminance(background);
+        let readable_pixels = pixels
+            .into_iter()
+            .filter(|pixel| {
+                let text_luminance = luminance(*pixel);
+                (background_luminance.max(text_luminance) + 0.05)
+                    / (background_luminance.min(text_luminance) + 0.05)
+                    >= 4.5
+            })
+            .count();
+        Ok((readable_pixels, background))
+    }
+
+    fn run_native_inactive_selection_contrast_regression() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut app = RefreshTestApp::new()?;
+        let (list, button) =
+            app.with_state(|state| -> Result<_, Box<dyn std::error::Error>> {
+                state.appearance.theme = AppThemeMode::Dark;
+                state.forced_colors = ForcedColorsState::Inactive;
+                assert_eq!(state.resolved_appearance().theme, ResolvedTheme::Dark);
+                // SAFETY: this test owns the hidden parent and lays out its children
+                // at the observed narrow Windows regression size.
+                if unsafe {
+                    SetWindowPos(
+                        app.owner,
+                        null_mut(),
+                        0,
+                        0,
+                        703,
+                        737,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error().into());
+                }
+                super::super::arrange(app.owner, state);
+                state.model.append_batch_by(
+                    [
+                        r"C:\refresh-fixture\00-한국어-日本語-long-original-name.txt",
+                        r"C:\refresh-fixture\01-한국어-日本語-next-row-name.txt",
+                    ]
+                    .into_iter()
+                    .map(|path| {
+                        LegacyListItem::new_with_actual_size(
+                            path,
+                            false,
+                            24,
+                            24,
+                            133_497_936_000_000_000,
+                            133_497_936_000_000_000,
+                        )
+                    }),
+                    compare_windows,
+                )?;
+                assert_normal_refresh(state, "regression-dark-inactive-selection");
+                assert!(!state.model.items()[0].current_name().is_empty());
+                assert!(!state.model.items()[0].proposed_name().is_empty());
+                assert!(!state.model.items()[1].current_name().is_empty());
+                assert!(!state.model.items()[1].proposed_name().is_empty());
+                let list = state.list_window;
+                // Match the production native association and copied Dark palette.
+                assert!(apply_native_control_theme(
+                    list,
+                    NativeThemeTarget::FileList,
+                    ResolvedTheme::Dark,
+                ));
+                let palette =
+                    semantic_palette(ResolvedTheme::Dark).ok_or("Dark palette missing")?;
+                // SAFETY: scalar native ListView color/column messages retain no
+                // caller memory and all controls remain owned by this fixture.
+                unsafe {
+                    SendMessageW(list, LVM_SETBKCOLOR, 0, palette.surface_workspace as isize);
+                    SendMessageW(
+                        list,
+                        LVM_SETTEXTBKCOLOR,
+                        0,
+                        palette.surface_workspace as isize,
+                    );
+                    SendMessageW(list, LVM_SETTEXTCOLOR, 0, palette.text_primary as isize);
+                    SendMessageW(list, LVM_SETCOLUMNWIDTH, 0, 240);
+                    SendMessageW(list, LVM_SETCOLUMNWIDTH, 1, 240);
+                }
+                select_rows_with_focus(list, &[0], Some(0));
+                // SAFETY: the test owns this parent; Windows copies both
+                // temporary UTF-16 class and label strings during creation.
+                let button = unsafe {
+                    CreateWindowExW(
+                        0,
+                        wide("BUTTON").as_ptr(),
+                        wide("focus target").as_ptr(),
+                        WS_CHILD | WS_VISIBLE,
+                        600,
+                        50,
+                        80,
+                        30,
+                        app.owner,
+                        null_mut(),
+                        GetModuleHandleW(null()),
+                        null_mut(),
+                    )
+                };
+                if button.is_null() {
+                    return Err(io::Error::last_os_error().into());
+                }
+                Ok((list, button))
+            })??;
+        // The parent is a native STATIC fixture, so route real ListView paint
+        // notifications through the production custom-draw handler. No refdata
+        // is stored; the published state is cleared before parent destruction.
+        // SAFETY: parent and callback are live on this UI thread; no external
+        // pointer is passed or retained as subclass reference data.
+        if unsafe { SetWindowSubclass(app.owner, Some(inactive_selection_test_parent), 19, 0) } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let restored = Cell::new(false);
+        {
+            let font = Text150FontGuard::install(list, &restored)?;
+            font.require_installed()?;
+            // SAFETY: both test-owned children share this UI thread. The focus
+            // move reproduces an inactive ListView selection without clearing it.
+            unsafe { SetFocus(list) };
+            // SAFETY: the scalar query reads this UI thread's current focus.
+            if unsafe { GetFocus() } != list {
+                return Err(io::Error::other("ListView did not receive keyboard focus").into());
+            }
+            // SAFETY: button is a live test-owned child on this UI thread.
+            unsafe { SetFocus(button) };
+            // SAFETY: the scalar query reads this UI thread's current focus.
+            if unsafe { GetFocus() } != button || selected_indices(list) != [0] {
+                return Err(io::Error::other("button focus did not retain row selection").into());
+            }
+            for (row, selected) in [(0, true), (1, false)] {
+                for (subitem, name) in [(0, "original"), (1, "proposed")] {
+                    let (readable_pixels, background) =
+                        name_raster_contrast(list, app._directory.path(), row, subitem, selected)?;
+                    if readable_pixels < 20 {
+                        return Err(io::Error::other(format!(
+                            "row {row} {name} name has only {readable_pixels} high-contrast pixels against {background:?}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
+        if !restored.get() {
+            return Err(io::Error::other("original ListView font was not restored").into());
+        }
+        // SAFETY: the test-owned parent remains live and this exact subclass
+        // holds no external resources after detachment.
+        if unsafe { RemoveWindowSubclass(app.owner, Some(inactive_selection_test_parent), 19) } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        app.close()?;
         Ok(())
     }
 

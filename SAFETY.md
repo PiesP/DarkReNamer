@@ -564,6 +564,17 @@ subclasses. The native blank-body regression routes real ListView custom-draw
 notifications through a test-owned parent subclass. Its boxed UI-thread context
 and brush remain live through confirmed parent destruction; failed destruction
 retains that bounded context instead of leaving dangling callback refdata.
+For a selected Dark FileList row after keyboard focus moves elsewhere, the
+native inactive-selection band can be light while the control's configured text
+is white. The existing synchronous custom-draw callback checks authoritative
+ListView selection and actual control focus, then copies the system window-text
+color into the foreground field for every selected subitem. The control still
+draws its selection background, icons, focus and input; no theme handle, brush,
+pointer or callback state is retained. Active selection, System/Light themes,
+Forced Colors and unknown high-contrast state keep native text behavior. A
+source-bound native raster regression checks nonempty original/proposed names
+after focus moves to a button; static checks alone do not establish desktop
+acceptance.
 
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.
