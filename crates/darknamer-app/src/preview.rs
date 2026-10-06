@@ -105,6 +105,23 @@ pub(crate) enum PreviewRowIssue {
     DuplicateDestination,
 }
 
+const RENAME_STATUS: &str = "이름 변경 예정";
+const MOVE_STATUS: &str = "이동 예정";
+const MOVE_AND_RENAME_STATUS: &str = "이동·이름 변경 예정";
+const EMPTY_STEM_STATUS: &str = "주의: 이름 본체";
+const INVALID_NAME_STATUS: &str = "차단: 이름";
+const DUPLICATE_DESTINATION_STATUS: &str = "차단: 충돌";
+
+/// Every nonempty row label measured by the native Status column.
+pub(crate) const PREVIEW_STATUS_LABELS: [&str; 6] = [
+    RENAME_STATUS,
+    MOVE_STATUS,
+    MOVE_AND_RENAME_STATUS,
+    EMPTY_STEM_STATUS,
+    INVALID_NAME_STATUS,
+    DUPLICATE_DESTINATION_STATUS,
+];
+
 /// Short, non-authorizing text rendered in the fixed native Status column.
 #[must_use]
 pub(crate) const fn preview_status_label(
@@ -112,15 +129,15 @@ pub(crate) const fn preview_status_label(
     change: PlannedChangeKind,
 ) -> &'static str {
     match issue {
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => "이름 변경 예정",
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => "이동 예정",
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => RENAME_STATUS,
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => MOVE_STATUS,
         PreviewRowIssue::None if matches!(change, PlannedChangeKind::MoveAndRename) => {
-            "이동·이름 변경 예정"
+            MOVE_AND_RENAME_STATUS
         }
         PreviewRowIssue::None => "",
-        PreviewRowIssue::EmptyStem => "주의: 이름 본체",
-        PreviewRowIssue::InvalidName(_) => "차단: 이름",
-        PreviewRowIssue::DuplicateDestination => "차단: 충돌",
+        PreviewRowIssue::EmptyStem => EMPTY_STEM_STATUS,
+        PreviewRowIssue::InvalidName(_) => INVALID_NAME_STATUS,
+        PreviewRowIssue::DuplicateDestination => DUPLICATE_DESTINATION_STATUS,
     }
 }
 
@@ -970,6 +987,17 @@ mod tests {
     fn native_preview_status_labels_are_short_korean_text_without_filename_prefixes() {
         use darknamer_core::WindowsLeafNameError;
 
+        assert_eq!(
+            PREVIEW_STATUS_LABELS,
+            [
+                "이름 변경 예정",
+                "이동 예정",
+                "이동·이름 변경 예정",
+                "주의: 이름 본체",
+                "차단: 이름",
+                "차단: 충돌",
+            ]
+        );
         assert_eq!(
             preview_status_label(PreviewRowIssue::None, PlannedChangeKind::None),
             ""

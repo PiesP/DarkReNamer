@@ -1,4 +1,5 @@
 use super::*;
+use crate::preview::PREVIEW_STATUS_LABELS;
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
@@ -20,15 +21,6 @@ const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
 pub(super) const LIST_VIEW_EXTENDED_STYLES: u32 =
     LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP;
-const STATUS_COLUMN_TEXT_SAMPLES: [&str; 7] = [
-    NATIVE_STATUS_COLUMN.label,
-    "이름 변경 예정",
-    "이동 예정",
-    "이동·이름 변경 예정",
-    "주의: 이름 본체",
-    "차단: 이름",
-    "차단: 충돌",
-];
 
 pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
     // Store only the copied owner HWND. Each callback resolves and leases the
@@ -446,8 +438,9 @@ pub(super) fn native_status_column_minimum_px(state: &AppState) -> i32 {
 }
 
 fn native_status_column_minimum_px_for(list_window: HWND, font: HFONT, dpi: u32) -> i32 {
-    let measured = STATUS_COLUMN_TEXT_SAMPLES
+    let measured = PREVIEW_STATUS_LABELS
         .into_iter()
+        .chain(core::iter::once(NATIVE_STATUS_COLUMN.label))
         .filter_map(|text| measure_text(list_window, font, text, true))
         .map(|(width, _height)| width)
         .max()
