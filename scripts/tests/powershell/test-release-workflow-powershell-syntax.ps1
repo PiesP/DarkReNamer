@@ -1335,6 +1335,7 @@ Assert-Assignment `
 $matrixPolicies = @(
     [pscustomobject]@{
         Path = $binarySizePath
+        Matrix = 'BinarySize'
         Commands = $binarySizeCommands
         Fields = [ordered]@{
             measurement_kind = "'release-profile-size-matrix'"
@@ -1351,6 +1352,7 @@ $matrixPolicies = @(
     }
     [pscustomobject]@{
         Path = $profileBenchmarkPath
+        Matrix = 'ProfileBenchmark'
         Commands = $profileBenchmarkCommands
         Fields = [ordered]@{
             measurement_kind = "'release-profile-cpu-micro-workloads'"
@@ -1375,6 +1377,7 @@ $matrixPolicies = @(
     }
     [pscustomobject]@{
         Path = $profilePlanningPath
+        Matrix = 'ProfilePlanning'
         Commands = $profilePlanningCommands
         Fields = [ordered]@{
             measurement_kind = "'release-profile-windows-planning'"
@@ -1404,18 +1407,11 @@ $matrixPolicies = @(
 
 foreach ($policy in $matrixPolicies) {
     $blocks = $workflowBlocks[$policy.Path]
-    Assert-OutputContract `
-        -Blocks $blocks `
-        -LiteralPath '$env:GITHUB_ENV' `
-        -PathOption '-FilePath' `
-        -RequiredText @('SOURCE_SHA=$sourceSha') `
-        -Message "$($policy.Path) must export its resolved source SHA."
-    Assert-OutputContract `
-        -Blocks $blocks `
-        -LiteralPath '$env:GITHUB_ENV' `
-        -PathOption '-FilePath' `
-        -RequiredText @('SOURCE_DATE_EPOCH=$sourceEpoch') `
-        -Message "$($policy.Path) must export its resolved source timestamp."
+    $null = Assert-OneCommand `
+        -Commands $policy.Commands `
+        -Name './scripts/resolve-source-matrix-metadata.ps1' `
+        -BeforeDelimiter @('-Matrix', $policy.Matrix) `
+        -Message "$($policy.Path) must resolve source and output metadata through its matrix helper."
     Assert-HashtableContract `
         -Blocks $blocks `
         -Required $policy.Fields `

@@ -121,7 +121,7 @@ the immutable revision linked in
 
 Python owns portable planning, parsing and verification; PowerShell owns host,
 guest, Hyper-V, UI Automation and Windows release integration. These are owners,
-not interchangeable runtimes. The tracked `scripts/` tree currently contains
+not interchangeable runtimes. At the issue base, the tracked `scripts/` tree contained
 67 Python, 76 PowerShell (`.ps1`/`.psm1`) and two Bash files, including tests and
 fixtures. The nine workflow YAML files also contain handwritten Bash/default
 shell and PowerShell steps; moving those lines into YAML does not remove their
@@ -132,7 +132,9 @@ language. Ten PowerShell module files contain embedded C# (`Add-Type`):
 and `ui-native.ps1`. This is a file count, not a count of C# blocks.
 The C# is a separate CLR/native-interop requirement, not PowerShell syntax or
 generated JavaScript. Product Rust and workflow configuration are outside these
-script-language counts. This documentation stage changes none of those counts.
+script-language counts. The source-metadata extraction adds one PowerShell
+helper and one registered PowerShell test, bringing that count to 78; the
+Python, Bash and embedded-C# file counts remain unchanged.
 
 The table names public command families and their effects; the complete test
 selection, platforms, scope and deadlines stay in
@@ -154,13 +156,16 @@ second command or asset registry.
 | `run-windows-vm-tests.ps1`, `windows-vm-guest.ps1`, `windows-vm-acceptance.ps1`, `windows-vm-recovery-acceptance.ps1` / PowerShell modules | PowerShell 7.4+; verified checkout or bundle role closure, host transport or guest session | Launch/control bounded native, UI and recovery work, transfer private evidence, and clean owned resources; registered VM/observer tests cover contracts. Windows runtime acceptance still requires the prepared VM. |
 | `run-vm-automated-hosted.ps1` / PowerShell | Hosted Windows validation runner, authenticated candidate metadata and trusted source | Acquires/verifies handoff, invokes campaign and records gate outputs; `run-vm-automated-hosted` tests and `vm-acceptance.yaml` own this path. |
 | `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `get-git-blob-sha256.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release/profile workflows cover their callers. Candidate validation does not promote a release. |
+| `resolve-source-matrix-metadata.ps1` / PowerShell | PowerShell 7.4+ in the three manual size/profile matrix jobs; selected profile, checked-out Git source, pinned rustc and runner environment | Validates source SHA/epoch/rustc, rejects existing run/attempt output roots, creates the two roots and appends five `GITHUB_ENV` values; registered `resolve-source-matrix-metadata` and workflow syntax tests exercise the actual CLI. No guest or VM operation. |
 | `capture-local-visual-gallery.sh` → `diagnostics/capture-local-visual-gallery.sh` / Bash | Opt-in Linux/WSL diagnostic from repository root; Wine/Xvfb, cross-build tools, FFmpeg, jq, GNU tools, optional empty absolute output directory | Builds a Windows test executable, captures BMP/PNG and SHA256 manifest, and cleans temporary Wine state. `visual-gallery-diagnostics` tests its wrapper with inert tools; output is diagnostic only. |
 
 Workflow inline code remains owned by each workflow: `ci.yaml` invokes the
 registered test gate; `security.yaml` selects the scheduled audit; VM and
 release workflows authenticate candidates and invoke their PowerShell/Python
 commands; profile and size matrices use PowerShell for experiment-specific
-measurement. Review an inline block for extraction when two callers genuinely
+measurement. Their identical source/output preparation is owned by
+`resolve-source-matrix-metadata.ps1`; each workflow retains its profile and
+measurement authority. Review an inline block for extraction when two callers genuinely
 share an unprivileged contract, or when a block develops substantial independent
 logic. Keep trusted-source selection, secrets and publication authority in the
 workflow. Test subprocess callers live under `scripts/tests/`; registered tests
@@ -213,7 +218,24 @@ review. Revisit a port if a shared Python diagnostic contract demonstrably
 replaces the pipeline without changing its output or cleanup. Review embedded
 C# whenever a native signature, marshalling, handle lifetime or UI boundary
 changes; a separate stage must confirm that no portable policy is stranded in
-the CLR strings before calling the exception fully bounded.
+the CLR strings before changing that boundary. The reviewed `guest-native.ps1`
+blocks implement Win32 signatures/structures and handle lifetimes, UI Automation
+provider registration, and the WinRT text-scale COM bridge. File-ID formatting
+encodes the native identity, and the window-count cap bounds `EnumWindows`;
+neither is a separate portable planner or serializer. Keep those ABI and cleanup
+operations together. Its PowerShell Windows-root checks enforce the guest's
+native filesystem contract; forwarding them to Python would add a guest runtime
+without removing that contract.
+
+The three large candidates are retained as cohesive units for this change.
+Controller inventory/cleanup is coupled to its remote session and error order;
+GUI verdict families share bounded decoding/source checks while remaining
+independent from their producers; UI scenarios share one observer session and
+capture state. Existing `formats` and `vm.connection` modules already own shared
+portable decoding and connection mechanics. Revisit a split when a specific
+scenario or cleanup policy needs independent maintenance, then update the
+authenticated role closure and run its focused fixtures plus any affected
+Windows cleanup/UI evidence.
 
 ## Authenticated tooling modules
 
