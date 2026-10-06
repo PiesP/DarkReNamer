@@ -1,4 +1,184 @@
-use super::*;
+#[cfg(test)]
+use crate::AppThemeMode;
+use crate::BASE_DPI;
+use crate::ComboControlError;
+use crate::ComboOperation;
+#[cfg(test)]
+use crate::DIRECTORY_DIRECT_BUTTON_ID;
+#[cfg(test)]
+use crate::DIRECTORY_RECURSE_BUTTON_ID;
+use crate::ForcedColorsState;
+use crate::LayoutRect;
+use crate::PromptFields;
+use crate::PromptFontMetrics;
+use crate::PromptLayout;
+use crate::ResolvedTheme;
+use crate::UiAppearance;
+use crate::admission::PathBudget;
+use crate::admission::PathBudgetReservation;
+use crate::admission::bounded_selection;
+use crate::calculate_prompt_layout;
+use crate::prompt_custom_theme_enabled;
+use crate::rename::MAX_PATH_UNITS;
+use crate::scale_dip;
+use crate::semantic_palette;
+use crate::validate_combo_result;
+use darknamer_core::LegacyText;
+use raw_window_handle::DisplayHandle;
+use raw_window_handle::HandleError;
+use raw_window_handle::HasDisplayHandle;
+use raw_window_handle::HasWindowHandle;
+use raw_window_handle::RawWindowHandle;
+use raw_window_handle::Win32WindowHandle;
+use raw_window_handle::WindowHandle;
+#[cfg(test)]
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::io;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+use std::mem::size_of;
+use std::num::NonZeroIsize;
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::ptr::NonNull;
+use std::ptr::null;
+use std::ptr::null_mut;
+
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::LPARAM;
+use windows_sys::Win32::Foundation::LRESULT;
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::WPARAM;
+use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
+use windows_sys::Win32::Graphics::Gdi::DT_CALCRECT;
+use windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX;
+use windows_sys::Win32::Graphics::Gdi::DT_WORDBREAK;
+use windows_sys::Win32::Graphics::Gdi::DrawTextW;
+use windows_sys::Win32::Graphics::Gdi::FillRect;
+use windows_sys::Win32::Graphics::Gdi::GetDC;
+use windows_sys::Win32::Graphics::Gdi::GetMonitorInfoW;
+use windows_sys::Win32::Graphics::Gdi::HDC;
+use windows_sys::Win32::Graphics::Gdi::HFONT;
+use windows_sys::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST;
+use windows_sys::Win32::Graphics::Gdi::MONITORINFO;
+use windows_sys::Win32::Graphics::Gdi::MonitorFromWindow;
+use windows_sys::Win32::Graphics::Gdi::RDW_ALLCHILDREN;
+use windows_sys::Win32::Graphics::Gdi::RDW_ERASE;
+use windows_sys::Win32::Graphics::Gdi::RDW_INVALIDATE;
+use windows_sys::Win32::Graphics::Gdi::RedrawWindow;
+use windows_sys::Win32::Graphics::Gdi::ReleaseDC;
+use windows_sys::Win32::Graphics::Gdi::SelectObject;
+use windows_sys::Win32::Graphics::Gdi::SetBkColor;
+use windows_sys::Win32::Graphics::Gdi::SetBkMode;
+use windows_sys::Win32::Graphics::Gdi::SetTextColor;
+use windows_sys::Win32::Graphics::Gdi::TRANSPARENT;
+use windows_sys::Win32::Graphics::Gdi::UpdateWindow;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+use super::{
+    AppearanceResources, CallbackState, CallbackStateLease, OwnedFont, SeparatorSurface,
+    apply_auxiliary_dwm_title_frame, child, copy_clipboard, create_message_font,
+    draw_custom_button, draw_owner_separator, message, move_window_dip, query_high_contrast_active,
+    query_system_theme, show_message_now, try_app_state, wide,
+};
+use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
+use windows_sys::Win32::System::SystemServices::SS_OWNERDRAW;
+use windows_sys::Win32::UI::Controls::TASKDIALOG_BUTTON;
+use windows_sys::Win32::UI::Controls::TASKDIALOGCONFIG;
+use windows_sys::Win32::UI::Controls::TASKDIALOGCONFIG_0;
+use windows_sys::Win32::UI::Controls::TASKDIALOGCONFIG_1;
+use windows_sys::Win32::UI::Controls::TD_WARNING_ICON;
+use windows_sys::Win32::UI::Controls::TDCBF_CANCEL_BUTTON;
+use windows_sys::Win32::UI::Controls::TDF_ALLOW_DIALOG_CANCELLATION;
+use windows_sys::Win32::UI::Controls::TDF_POSITION_RELATIVE_TO_WINDOW;
+use windows_sys::Win32::UI::Controls::TDF_SIZE_TO_CONTENT;
+use windows_sys::Win32::UI::Controls::TDF_USE_COMMAND_LINKS;
+use windows_sys::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::DefSubclassProc;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+use windows_sys::Win32::UI::WindowsAndMessaging::BN_CLICKED;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::BN_SETFOCUS;
+use windows_sys::Win32::UI::WindowsAndMessaging::BS_DEFPUSHBUTTON;
+use windows_sys::Win32::UI::WindowsAndMessaging::CB_ADDSTRING;
+use windows_sys::Win32::UI::WindowsAndMessaging::CB_GETCURSEL;
+use windows_sys::Win32::UI::WindowsAndMessaging::CB_SETCURSEL;
+use windows_sys::Win32::UI::WindowsAndMessaging::CBS_DROPDOWNLIST;
+use windows_sys::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
+use windows_sys::Win32::UI::WindowsAndMessaging::CS_HREDRAW;
+use windows_sys::Win32::UI::WindowsAndMessaging::CS_VREDRAW;
+use windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT;
+use windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW;
+use windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::ES_AUTOHSCROLL;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE;
+use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+use windows_sys::Win32::UI::WindowsAndMessaging::IDC_ARROW;
+use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
+use windows_sys::Win32::UI::WindowsAndMessaging::IDOK;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsDialogMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW;
+use windows_sys::Win32::UI::WindowsAndMessaging::MSG;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage;
+use windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassExW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE;
+use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER;
+use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_COMMAND;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CREATE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLOREDIT;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORLISTBOX;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORSTATIC;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_DPICHANGED;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_DRAWITEM;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_FONTCHANGE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCCREATE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NOTIFY;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETFONT;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED;
+use windows_sys::Win32::UI::WindowsAndMessaging::WNDCLASSEXW;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_BORDER;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_CAPTION;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_SYSMENU;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_TABSTOP;
+use windows_sys::core::HRESULT;
+
 use ::windows::Win32::Foundation::PROPERTYKEY;
 use ::windows::Win32::System::Com::StructuredStorage::{PropVariantToGUID, PropVariantToUInt64};
 use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};

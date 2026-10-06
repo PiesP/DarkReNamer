@@ -1,4 +1,120 @@
-use super::*;
+use crate::ADD_FILES;
+use crate::APPEARANCE_ADVANCED;
+use crate::APPLY;
+use crate::CLEAR_LIST;
+use crate::CLEAR_NAME;
+use crate::COPY_NAMES;
+use crate::COPY_PATHS;
+use crate::CommandOutcome;
+use crate::DELETE_DELIMITED;
+use crate::DELETE_POSITION;
+use crate::DELETE_SELECTED_COMMAND;
+use crate::EXIT_COMMAND;
+use crate::EXT_ADD;
+use crate::EXT_DELETE;
+use crate::EXT_REPLACE;
+use crate::IMPORT_NAMES;
+use crate::IMPORT_PATHS;
+use crate::KEEP_DIGITS;
+use crate::LegacyShortcutModifiers;
+use crate::LegacyVirtualKey;
+use crate::MANUAL_CHANGE;
+use crate::MOVE_DOWN;
+use crate::MOVE_UP;
+use crate::PAD_DIGITS;
+use crate::PARENT_PREFIX;
+use crate::PARENT_SUFFIX;
+use crate::PREFIX;
+use crate::PREVIEW_DETAILS;
+use crate::REPLACE;
+use crate::RESET;
+use crate::RESET_PATH;
+use crate::SAVE_NAMES;
+use crate::SAVE_PATHS;
+use crate::SEQUENCE;
+use crate::SHOW_CREATED;
+use crate::SHOW_FULL_PATH;
+use crate::SHOW_MODIFIED;
+use crate::SHOW_SIZE;
+use crate::SORT;
+use crate::SUFFIX;
+use crate::THEME_DARK;
+use crate::THEME_LIGHT;
+use crate::THEME_SYSTEM;
+use crate::UNIFY_PATH;
+use crate::UiEffect;
+use crate::VERSION;
+use crate::admission::MAX_ADMITTED_SOURCES;
+use crate::admission::PathBudget;
+use crate::admission::PathBudgetReservation;
+use crate::admission::bounded_import_lines;
+use crate::appearance_after_theme_command;
+use crate::appearance_command_allowed;
+use crate::changed_move_rows;
+use crate::command_effect_fits_policy;
+use crate::command_ui_spec;
+use crate::legacy_command_shortcuts;
+use crate::preview_item_details;
+use crate::rename::ModelRevision;
+use crate::rename::WindowsRenameBackend;
+use darknamer_core::LegacyInputError;
+use darknamer_core::LegacyList;
+use darknamer_core::LegacyListItem;
+use darknamer_core::LegacySequenceMode;
+use darknamer_core::LegacySortMode;
+use darknamer_core::LegacyText;
+use darknamer_core::ProposalMutationError;
+use darknamer_core::SortSemantics;
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::io;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
+
+use super::{
+    AppState, AppearanceDialogPlatform, DISCARD_STAGED_JOURNAL, EXPORT_RECOVERY_JOURNAL,
+    ImportKind, PreparedAppearanceAction, PreparedDiscardTaskDialog, PreparedFileDialogKind,
+    PreparedFileDialogSelection, PreparedRecoveryExport, PreparedTaskDialogSpec,
+    PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec, SHOW_RECOVERY_STATUS,
+    admit_paths, apply_changes, apply_native_appearance_nonblocking, arrange, compare_windows,
+    copy_clipboard_or_report, destination_parent_mutation_error_korean, finalize_admission_start,
+    finalize_admission_start_failure, legacy_path, message, prepare_appearance_dialog,
+    prepare_discard_staged_journal, prepare_recovery_export, prompt_input_or_report,
+    proposal_mutation_error_korean, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
+    report_admission_start_error, request_window_close, run_prepared_appearance_action,
+    run_prepared_discard_task_dialog, run_prepared_recovery_export, show_recovery_status,
+    start_import_worker, text_details, try_app_state, try_finish_window_close,
+    update_column_visibility, update_controls, update_primary_column_widths,
+    write_legacy_text_to_target,
+};
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::Controls::LVIS_FOCUSED;
+use windows_sys::Win32::UI::Controls::LVIS_SELECTED;
+use windows_sys::Win32::UI::Controls::LVITEMW;
+use windows_sys::Win32::UI::Controls::LVM_ENSUREVISIBLE;
+use windows_sys::Win32::UI::Controls::LVM_GETNEXTITEM;
+use windows_sys::Win32::UI::Controls::LVM_SETITEMSTATE;
+use windows_sys::Win32::UI::Controls::LVNI_FOCUSED;
+use windows_sys::Win32::UI::Controls::LVNI_SELECTED;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_DOWN;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F2;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_OEM_COMMA;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_OEM_PERIOD;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_UP;
+use windows_sys::Win32::UI::WindowsAndMessaging::ACCEL;
+use windows_sys::Win32::UI::WindowsAndMessaging::CreateAcceleratorTableW;
+use windows_sys::Win32::UI::WindowsAndMessaging::DestroyAcceleratorTable;
+use windows_sys::Win32::UI::WindowsAndMessaging::FALT;
+use windows_sys::Win32::UI::WindowsAndMessaging::FCONTROL;
+use windows_sys::Win32::UI::WindowsAndMessaging::FSHIFT;
+use windows_sys::Win32::UI::WindowsAndMessaging::FVIRTKEY;
+use windows_sys::Win32::UI::WindowsAndMessaging::HACCEL;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::MSG;
+use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::TranslateAcceleratorW;
 
 pub(super) struct AcceleratorTable(HACCEL);
 

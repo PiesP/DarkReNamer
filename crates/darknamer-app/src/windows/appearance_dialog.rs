@@ -33,7 +33,89 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_SYSMENU, WS_TABSTOP, WS_VSCROLL,
 };
 
-use super::*;
+#[cfg(test)]
+use crate::AppThemeMode;
+use crate::AppearanceDialogAction;
+use crate::AppearanceDialogEffect;
+use crate::AppearanceDialogLayout;
+use crate::AppearanceDialogMetrics;
+use crate::AppearanceDialogModel;
+use crate::BASE_DPI;
+use crate::ForcedColorsState;
+#[cfg(test)]
+use crate::GRAPHITE_DARK;
+use crate::LayoutRect;
+#[cfg(test)]
+use crate::PRECISION_LIGHT;
+use crate::PreviewEmphasis;
+use crate::RailDensityPreference;
+use crate::ResolvedTheme;
+use crate::UiAppearance;
+use crate::advanced_appearance_available;
+use crate::appearance_dialog_should_notify_cancel;
+use crate::calculate_appearance_dialog_layout;
+use crate::clamp_appearance_dialog_scroll;
+use crate::pack_ui_appearance;
+use crate::rename::ModelRevision;
+use crate::scale_dip;
+use crate::semantic_palette;
+use crate::unpack_ui_appearance;
+
+#[cfg(test)]
+use darknamer_core::LegacyText;
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::rc::Rc;
+
+use windows_sys::Win32::Graphics::Gdi::HDC;
+use windows_sys::Win32::Graphics::Gdi::HFONT;
+use windows_sys::Win32::Graphics::Gdi::RDW_ALLCHILDREN;
+use windows_sys::Win32::Graphics::Gdi::RDW_ERASE;
+use windows_sys::Win32::Graphics::Gdi::RDW_INVALIDATE;
+use windows_sys::Win32::Graphics::Gdi::RedrawWindow;
+
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::CDDS_PREPAINT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::CDRF_SKIPDEFAULT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::DRAWITEMSTRUCT;
+
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::Shell::DefSubclassProc;
+use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
+use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::BN_SETFOCUS;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::BeginDeferWindowPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::DeferWindowPos;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::EndDeferWindowPos;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_APP;
+
+use super::{
+    AppState, AppearanceResources, CallbackState, CallbackStateLease, OwnedFont, OwnerEnableGuard,
+    SeparatorSurface, WM_APP_APPEARANCE_ACCESSIBILITY, WM_APP_APPEARANCE_ARM,
+    WM_APP_APPEARANCE_DISMISS, WM_APP_APPEARANCE_FINISH, WM_APP_APPEARANCE_PREVIEW,
+    WM_APP_APPEARANCE_RESTORE_FOCUS, apply_auxiliary_dwm_title_frame,
+    apply_native_appearance_nonblocking, arrange, child, create_message_font, draw_custom_button,
+    draw_owner_button, draw_owner_separator, measure_text, message, try_app_state,
+    try_finish_window_close, update_controls, wide,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_CHILD;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
+
+#[cfg(test)]
+use super::window_text;
 
 const DENSITY_AUTOMATIC_ID: u16 = 0xA101;
 const DENSITY_COMFORTABLE_ID: u16 = 0xA102;

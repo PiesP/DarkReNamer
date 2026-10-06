@@ -1,4 +1,74 @@
-use super::*;
+#[cfg(test)]
+use crate::ADD_FILES;
+#[cfg(test)]
+use crate::APPLY;
+#[cfg(test)]
+use crate::DROP_EFFECT_COPY;
+use crate::DROP_EFFECT_NONE;
+use crate::DropNegotiation;
+use crate::DropPresentation;
+use crate::admission::MAX_ADMITTED_SOURCES;
+use crate::admission::PathBudget;
+use crate::admission::PathBudgetReservation;
+use crate::admission::bounded_selection;
+use crate::drop_effect_after_admission_start;
+use crate::negotiate_drop_effect;
+#[cfg(test)]
+use crate::rename::FileJournalError;
+use crate::rename::MAX_PATH_UNITS;
+#[cfg(test)]
+use std::ffi::c_void;
+#[cfg(test)]
+use std::fs;
+use std::io;
+#[cfg(test)]
+use std::mem::size_of;
+use std::os::windows::ffi::OsStringExt;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(test)]
+use std::ptr::null;
+use std::ptr::null_mut;
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::thread;
+use windows_sys::Win32::Foundation::E_FAIL;
+#[cfg(test)]
+use windows_sys::Win32::Foundation::E_NOINTERFACE;
+use windows_sys::Win32::Foundation::E_POINTER;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::S_OK;
+#[cfg(test)]
+use windows_sys::Win32::System::Com::DVASPECT_CONTENT;
+#[cfg(test)]
+use windows_sys::Win32::System::Com::FORMATETC;
+#[cfg(test)]
+use windows_sys::Win32::System::Com::STGMEDIUM;
+use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
+#[cfg(test)]
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Ole::CF_HDROP;
+use windows_sys::Win32::System::Ole::DROPEFFECT_COPY;
+
+#[cfg(test)]
+use super::initialize_safe_runtime_at;
+#[cfg(test)]
+use super::{
+    APPLY_POLL_TIMER_ID, AppState, ReclaimDisposition, create_drop_overlay,
+    finalize_admission_start_failure, wide,
+};
+use super::{
+    AppStateSlot, CallbackState, WM_APP_ADMISSION_STARTED, admit_paths, message,
+    report_admission_start_error, set_drop_overlay_control, try_app_state,
+};
 use ::windows::Win32::Foundation::{HWND as ComHwnd, POINTL as ComPoint};
 use ::windows::Win32::System::Com::{
     DVASPECT_CONTENT as COM_DVASPECT_CONTENT, FORMATETC as ComFormatEtc, IDataObject,
@@ -10,6 +80,36 @@ use ::windows::Win32::System::Ole::{
 };
 use ::windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows_core::{ComObject, IUnknownImpl, Ref};
+#[cfg(test)]
+use windows_sys::Win32::System::Ole::OleUninitialize;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::ICC_LISTVIEW_CLASSES;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::InitCommonControlsEx;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVS_REPORT;
+use windows_sys::Win32::UI::Shell::DragQueryFileW;
+use windows_sys::Win32::UI::Shell::HDROP;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_CHILD;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+#[cfg(test)]
+use windows_sys::core::GUID;
+use windows_sys::core::HRESULT;
 
 #[cfg(test)]
 #[repr(C)]

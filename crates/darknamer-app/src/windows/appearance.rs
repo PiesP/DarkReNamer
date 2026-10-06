@@ -33,7 +33,41 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
-use super::*;
+use crate::BASE_DPI;
+use crate::DwmFrameAction;
+use crate::LayoutRect;
+use crate::ResolvedTheme;
+use crate::SemanticPalette;
+use crate::StatusChromeGeometry;
+use crate::WorkspaceChromeGeometry;
+use crate::calculate_apply_readiness_indicator_rect;
+use crate::calculate_button_paint_geometry;
+use crate::calculate_menu_bottom_edge;
+use crate::command_ui_spec;
+use crate::decorative_separator_line;
+use crate::dwm_frame_action;
+
+use crate::scale_dip;
+use crate::semantic_palette;
+use crate::theme_from_foreground;
+
+use windows_sys::Win32::Foundation::LPARAM;
+use windows_sys::Win32::Foundation::LRESULT;
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Graphics::Gdi::HFONT;
+#[cfg(test)]
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::LVM_GETTOOLTIPS;
+
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::HMENU;
+
+use super::{
+    AppState, CallbackState, OwnerMenuKind, WM_APP_MENU_REDRAW, WM_APP_POPUP_MENU_UPDATE,
+    app_state_slot, command_rail, owner_menu_has_submenu, owner_menu_is_separator, owner_menu_kind,
+    owner_menu_label, owner_menu_uses_radio, prepare_menu_appearance, wide,
+};
+
 use crate::{ButtonMnemonicRendering, button_mnemonic_rendering};
 
 /// Balances a successful WinRT initialization on the native UI thread.
