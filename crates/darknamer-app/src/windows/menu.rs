@@ -79,6 +79,7 @@ use std::mem::size_of;
 use std::ptr::null;
 use std::ptr::null_mut;
 
+use super::appearance::normalize_new_file_list_theme;
 use super::{
     AppState, CANCEL_WORKER_ID, CommandRail, DISCARD_STAGED_JOURNAL, EMPTY_ADD_ID,
     EMPTY_INSTRUCTION_ID, EMPTY_SAFETY_ID, EXPORT_RECOVERY_JOURNAL, LIST_ID,
@@ -569,6 +570,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.owner_draw_menu = owner_draw_menu;
     state.pending_menu = Some(menu);
     install_list_view_notification_subclass(state)?;
+    normalize_new_file_list_theme(state.list_window);
     apply_native_appearance_nonblocking(window, state);
     arrange(window, state);
     refresh(state);

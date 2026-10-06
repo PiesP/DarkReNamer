@@ -1267,6 +1267,21 @@ pub(super) fn apply_native_control_theme(
     })
 }
 
+pub(super) fn normalize_new_file_list_theme(window: HWND) {
+    let explorer = wide("Explorer");
+    // A fresh ListView changes its clipped text after the first Explorer-family
+    // theme transition at 150% text size. Initialize those native metrics once
+    // before rows are rendered, then leave the system association in force.
+    // SAFETY: window is the newly created, live app-owned ListView. Both calls
+    // are synchronous and the temporary name remains live for the first call.
+    // Always restore the true null association, including if Explorer fails;
+    // normal appearance application below still selects the desired theme.
+    unsafe {
+        SetWindowTheme(window, explorer.as_ptr(), null());
+        SetWindowTheme(window, null(), null());
+    }
+}
+
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);

@@ -116,6 +116,8 @@ use windows_sys::Win32::Graphics::Gdi::HFONT;
 use windows_sys::Win32::Graphics::Gdi::RDW_ALLCHILDREN;
 use windows_sys::Win32::Graphics::Gdi::RDW_ERASE;
 use windows_sys::Win32::Graphics::Gdi::RDW_INVALIDATE;
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::RDW_UPDATENOW;
 use windows_sys::Win32::Graphics::Gdi::RedrawWindow;
 use windows_sys::Win32::Graphics::Gdi::ReleaseDC;
 use windows_sys::Win32::Graphics::Gdi::SelectObject;
@@ -211,6 +213,8 @@ use windows_sys::Win32::UI::Controls::LVM_GETITEMRECT;
 use windows_sys::Win32::UI::Controls::LVM_GETITEMSTATE;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVM_GETITEMTEXTW;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVM_GETSUBITEMRECT;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVM_GETTOOLTIPS;
 #[cfg(test)]
@@ -2896,11 +2900,12 @@ mod native_tests {
     use std::sync::mpsc::{self, Sender};
     use std::time::{Duration, Instant};
 
-    use super::super::visual_capture::capture_window_pixels;
+    use super::super::visual_capture::{capture_window_pixels, write_window_bmp};
     use super::*;
     use windows_sys::Win32::Foundation::{
         ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, SetLastError,
     };
+    use windows_sys::Win32::Graphics::Gdi::{CreateFontIndirectW, GetObjectW, LOGFONTW};
     use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
         LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
@@ -2908,7 +2913,7 @@ mod native_tests {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         PM_REMOVE, PeekMessageW, SIF_POS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
-        WM_APP, WM_NULL, WM_QUIT,
+        WM_APP, WM_GETFONT, WM_NULL, WM_QUIT, WM_SETFONT,
     };
 
     const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
@@ -5757,6 +5762,275 @@ mod native_tests {
             ));
             Ok(())
         })??;
+        app.close()?;
+        run_native_text150_ellipsis_regression()?;
+        Ok(())
+    }
+
+    struct Text150FontGuard<'a> {
+        list: HWND,
+        original: HFONT,
+        replacement: OwnedFont,
+        restored: &'a Cell<bool>,
+    }
+
+    impl<'a> Text150FontGuard<'a> {
+        fn install(list: HWND, restored: &'a Cell<bool>) -> io::Result<Self> {
+            // SAFETY: WM_GETFONT borrows the live ListView's font. Copy its
+            // descriptor before replacing the handle; AppState retains it.
+            let original = unsafe { SendMessageW(list, WM_GETFONT, 0, 0) } as HFONT;
+            if original.is_null() {
+                return Err(io::Error::other("ListView font is unavailable"));
+            }
+            let mut descriptor = LOGFONTW::default();
+            // SAFETY: original remains live and the stack descriptor has the
+            // exact size requested by this synchronous GDI query.
+            if unsafe {
+                GetObjectW(
+                    original,
+                    size_of::<LOGFONTW>() as i32,
+                    (&raw mut descriptor).cast(),
+                )
+            } != size_of::<LOGFONTW>() as i32
+            {
+                return Err(io::Error::other("ListView font descriptor is unavailable"));
+            }
+            descriptor.lfHeight = -18; // 150% text at 96 DPI in the regression cell.
+            // SAFETY: CreateFontIndirectW copies the complete descriptor and
+            // returns a separate test-owned font.
+            let scaled = unsafe { CreateFontIndirectW(&raw const descriptor) };
+            if scaled.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut replacement = OwnedFont::default();
+            replacement.replace(scaled);
+            let guard = Self {
+                list,
+                original,
+                replacement,
+                restored,
+            };
+            // SAFETY: the replacement stays owned and live until this guard
+            // restores the original font while the ListView is still live.
+            unsafe { SendMessageW(list, WM_SETFONT, guard.replacement.as_raw() as usize, 1) };
+            guard.require_installed()?;
+            Ok(guard)
+        }
+
+        fn require_installed(&self) -> io::Result<()> {
+            // SAFETY: the live ListView returns its borrowed installed handle.
+            if unsafe { SendMessageW(self.list, WM_GETFONT, 0, 0) } as HFONT
+                != self.replacement.as_raw()
+            {
+                return Err(io::Error::other("scaled ListView font changed"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Text150FontGuard<'_> {
+        fn drop(&mut self) {
+            // SAFETY: this guard drops before the ListView and its original
+            // AppState-owned font. Read back before freeing the replacement.
+            unsafe { SendMessageW(self.list, WM_SETFONT, self.original as usize, 1) };
+            // SAFETY: the same live ListView returns its borrowed font handle.
+            if unsafe { SendMessageW(self.list, WM_GETFONT, 0, 0) } as HFONT == self.original {
+                self.restored.set(true);
+            } else {
+                // Never delete a font that the ListView may still have selected.
+                std::mem::forget(std::mem::take(&mut self.replacement));
+            }
+        }
+    }
+
+    fn text150_target_cell(list: HWND) -> io::Result<RECT> {
+        let mut cell = RECT {
+            left: LVIR_BOUNDS as i32,
+            top: 2,
+            ..RECT::default()
+        };
+        // SAFETY: row zero exists and the live ListView writes this stack RECT
+        // synchronously for its third subitem.
+        if unsafe { SendMessageW(list, LVM_GETSUBITEMRECT, 0, (&raw mut cell) as isize) } == 0 {
+            return Err(io::Error::other("target-folder cell is unavailable"));
+        }
+        Ok(cell)
+    }
+
+    fn capture_text150_target_cell(
+        list: HWND,
+        root: &Path,
+        leaf: &str,
+        expected: RECT,
+        font: &Text150FontGuard<'_>,
+    ) -> io::Result<Vec<u8>> {
+        font.require_installed()?;
+        let cell = text150_target_cell(list)?;
+        if (cell.left, cell.top, cell.right, cell.bottom)
+            != (expected.left, expected.top, expected.right, expected.bottom)
+            || list_column_width(list, 2) != 80
+        {
+            return Err(io::Error::other("target-folder geometry changed"));
+        }
+        // SAFETY: no AppState lease is held. The live ListView completes this
+        // bounded repaint before the owned BMP capture.
+        if unsafe {
+            RedrawWindow(
+                list,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let output = root.join(format!("text150-{leaf}.bmp"));
+        let measurement = write_window_bmp(list, &output)?;
+        let width = usize::try_from(measurement.width)
+            .map_err(|_| io::Error::other("invalid ListView capture width"))?;
+        let height = usize::try_from(measurement.height)
+            .map_err(|_| io::Error::other("invalid ListView capture height"))?;
+        let inner = RECT {
+            left: cell.left + 3,
+            top: cell.top + 2,
+            right: cell.right - 3,
+            bottom: cell.bottom - 2,
+        };
+        if inner.left < 0
+            || inner.top < 0
+            || inner.right <= inner.left
+            || inner.bottom <= inner.top
+            || inner.right > measurement.width
+            || inner.bottom > measurement.height
+        {
+            return Err(io::Error::other("target-folder cell is outside capture"));
+        }
+        let bmp = std::fs::read(output)?;
+        const OFFSET: usize = 54;
+        let pixel_bytes = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| io::Error::other("ListView capture size overflowed"))?;
+        if bmp.get(..2) != Some(b"BM")
+            || bmp.len() != OFFSET + pixel_bytes
+            || bmp.get(10..14) != Some(&(OFFSET as u32).to_le_bytes()[..])
+        {
+            return Err(io::Error::other("unexpected ListView BMP format"));
+        }
+        let mut rgb = Vec::new();
+        for y in inner.top..inner.bottom {
+            for x in inner.left..inner.right {
+                let at = OFFSET + ((y as usize * width + x as usize) * 4);
+                rgb.extend_from_slice(&bmp[at..at + 3]);
+            }
+        }
+        Ok(rgb)
+    }
+
+    fn run_native_text150_ellipsis_regression() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = RefreshTestApp::new()?;
+        let list = app.with_state(|state| -> Result<HWND, Box<dyn std::error::Error>> {
+            // SAFETY: this test owns the hidden parent and lays out its live
+            // children after changing only the fixed regression dimensions.
+            if unsafe {
+                SetWindowPos(
+                    app.owner,
+                    null_mut(),
+                    0,
+                    0,
+                    703,
+                    737,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            super::super::arrange(app.owner, state);
+            assert_eq!(state.shown_columns, [false; 4]);
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\Program Files\fixture", "ordinary", 0, 1),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "regression-text150-clean-one-row");
+            for (column, width) in [120, 120, 80].into_iter().enumerate() {
+                // SAFETY: the live native columns accept scalar widths.
+                unsafe { SendMessageW(state.list_window, LVM_SETCOLUMNWIDTH, column, width) };
+                assert_eq!(list_column_width(state.list_window, column), width as i32);
+            }
+            Ok(state.list_window)
+        })??;
+        let restored = Cell::new(false);
+        {
+            let font = Text150FontGuard::install(list, &restored)?;
+            let cell = text150_target_cell(list)?;
+            assert!(apply_native_control_theme(
+                list,
+                NativeThemeTarget::FileList,
+                ResolvedTheme::Light,
+            ));
+            // Match the production palette after each native association.
+            // SAFETY: these messages copy integral COLORREF values only.
+            unsafe {
+                SendMessageW(list, LVM_SETBKCOLOR, 0, 0x00ff_ffff);
+                SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, 0x00ff_ffff);
+                SendMessageW(list, LVM_SETTEXTCOLOR, 0, 0);
+            }
+            let before =
+                capture_text150_target_cell(list, app._directory.path(), "before", cell, &font)?;
+            thread::sleep(Duration::from_millis(200));
+            let settled_before = capture_text150_target_cell(
+                list,
+                app._directory.path(),
+                "settled-before",
+                cell,
+                &font,
+            )?;
+            assert_eq!(before, settled_before, "initial Light raster was unstable");
+            assert!(
+                before
+                    .chunks_exact(3)
+                    .filter(|pixel| *pixel != [0xff; 3])
+                    .count()
+                    > 20,
+                "target-folder text was not rendered"
+            );
+            assert!(apply_native_control_theme(
+                list,
+                NativeThemeTarget::FileList,
+                ResolvedTheme::Dark,
+            ));
+            assert!(apply_native_control_theme(
+                list,
+                NativeThemeTarget::FileList,
+                ResolvedTheme::Light,
+            ));
+            // SAFETY: restore the same copied COLORREF values after the theme.
+            unsafe {
+                SendMessageW(list, LVM_SETBKCOLOR, 0, 0x00ff_ffff);
+                SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, 0x00ff_ffff);
+                SendMessageW(list, LVM_SETTEXTCOLOR, 0, 0);
+            }
+            let after =
+                capture_text150_target_cell(list, app._directory.path(), "after", cell, &font)?;
+            thread::sleep(Duration::from_millis(200));
+            let settled_after = capture_text150_target_cell(
+                list,
+                app._directory.path(),
+                "settled-after",
+                cell,
+                &font,
+            )?;
+            assert_eq!(after, settled_after, "restored Light raster was unstable");
+            assert_eq!(
+                settled_before, settled_after,
+                "target-folder ellipsis changed"
+            );
+        }
+        if !restored.get() {
+            return Err(io::Error::other("original ListView font was not restored").into());
+        }
         app.close()?;
         Ok(())
     }
