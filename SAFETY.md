@@ -471,6 +471,15 @@ establish that a real Shell bootstrap succeeds in every environment; the
 production Shell lookup and its separate source-bound observations retain that
 coverage.
 
+The ordinary-close icon regression installs a test-only subclass on its owned
+production popup window. Its guard owns the boxed observation published as
+native refdata. The subclass records the tracked worker's joined state at
+`WM_DESTROY` and attempts exact detachment at `WM_NCDESTROY`. On an early exit
+with a live window, the guard frees the observation only after confirmed
+subclass removal; uncertain removal retains at most one inert test context
+rather than leave dangling refdata. Once window destruction completes, no
+callback can reach the observation.
+
 The native shutdown fixture owns one production popup window and its reclaim
 hold while a controlled icon class query, import read, Apply result, and
 settings save wait on independent test barriers. Its callback-free Apply timer
