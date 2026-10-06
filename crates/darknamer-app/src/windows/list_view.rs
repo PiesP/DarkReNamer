@@ -319,6 +319,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_DESTROY;
 use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
 use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCPAINT;
 use windows_sys::Win32::UI::WindowsAndMessaging::WM_NOTIFY;
@@ -3394,6 +3396,7 @@ mod native_tests {
     const ICON_TEST_ACK_MESSAGE: u32 = WM_APP + 0x60;
     const ICON_TEST_ACK_SUBCLASS: usize = 0xD4B0;
     const ICON_TEST_DESTROY_SUBCLASS: usize = 0xD4B1;
+    const ICON_TEST_CLOSE_JOIN_SUBCLASS: usize = 0xD4B2;
     thread_local! {
         static ICON_TEST_ACKED: Cell<bool> = const { Cell::new(false) };
         static ICON_TEST_DESTROY_BUSY: Cell<bool> = const { Cell::new(false) };
@@ -3450,6 +3453,61 @@ mod native_tests {
             };
         }
         // SAFETY: every other message retains the native subclass chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    struct IconCloseJoinObservation {
+        shared: Arc<IconShared>,
+        saw_destroy: AtomicBool,
+        joined_at_destroy: AtomicBool,
+    }
+
+    struct IconCloseJoinSubclass(HWND);
+
+    impl Drop for IconCloseJoinSubclass {
+        fn drop(&mut self) {
+            // SAFETY: the test's UI thread removes the callback before its
+            // stack-owned observation can be dropped on an early return.
+            if unsafe { IsWindow(self.0) } != 0 {
+                unsafe {
+                    RemoveWindowSubclass(
+                        self.0,
+                        Some(icon_test_close_join_subclass),
+                        ICON_TEST_CLOSE_JOIN_SUBCLASS,
+                    )
+                };
+            }
+        }
+    }
+
+    unsafe extern "system" fn icon_test_close_join_subclass(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        ref_data: usize,
+    ) -> LRESULT {
+        if message == WM_DESTROY {
+            // SAFETY: IconCloseJoinSubclass removes this callback before the
+            // boxed observation is dropped, including every error path.
+            let observation = unsafe { &*(ref_data as *const IconCloseJoinObservation) };
+            observation
+                .joined_at_destroy
+                .store(observation.shared.is_joined(), Ordering::Release);
+            observation.saw_destroy.store(true, Ordering::Release);
+        }
+        if message == WM_NCDESTROY {
+            // SAFETY: the owner is ending this exact test subclass lifetime.
+            unsafe {
+                RemoveWindowSubclass(
+                    window,
+                    Some(icon_test_close_join_subclass),
+                    ICON_TEST_CLOSE_JOIN_SUBCLASS,
+                )
+            };
+        }
+        // SAFETY: all other messages keep the native subclass chain.
         unsafe { DefSubclassProc(window, message, wparam, lparam) }
     }
 
@@ -3987,6 +4045,25 @@ mod native_tests {
             // guardian's Drop joins its tracked worker.
             let _release = ReleaseIconGate(gate.clone());
             install_icon_test_guardian(window, &guardian)?;
+            let observation = Box::new(IconCloseJoinObservation {
+                shared: Arc::clone(&guardian.shared),
+                saw_destroy: AtomicBool::new(false),
+                joined_at_destroy: AtomicBool::new(false),
+            });
+            // SAFETY: this UI thread owns the live owner. The guard removes
+            // the callback before the boxed observation is dropped.
+            if unsafe {
+                SetWindowSubclass(
+                    window,
+                    Some(icon_test_close_join_subclass),
+                    ICON_TEST_CLOSE_JOIN_SUBCLASS,
+                    (&*observation as *const IconCloseJoinObservation) as usize,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let _close_join_subclass = IconCloseJoinSubclass(window);
             pump_icon_test_until(window, Duration::from_secs(5), || {
                 try_app_state(window).is_some_and(|lease| lease.state().icon_image_list.is_some())
             })?;
@@ -4028,12 +4105,12 @@ mod native_tests {
             gate.release();
             pump_icon_test_until(window, Duration::from_secs(10), || {
                 guardian.poll_join();
-                // Destruction before the tracked Shell worker joins would be
-                // an ownership regression even if the window later disappears.
-                let live = unsafe { IsWindow(window) } != 0;
-                assert!(live || guardian.shared.is_joined());
-                !live
+                // The WM_DESTROY callback records the worker state at the
+                // actual lifetime boundary, before this later observer runs.
+                unsafe { IsWindow(window) == 0 }
             })?;
+            assert!(observation.saw_destroy.load(Ordering::Acquire));
+            assert!(observation.joined_at_destroy.load(Ordering::Acquire));
             assert!(guardian.shared.is_joined());
             assert!(guardian.shared.owner_destroyed());
             assert_eq!(class_calls.load(Ordering::Acquire), 1);
