@@ -1353,6 +1353,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_reloads_both_final_settings_after_writer_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let revision = state.model_revision;
+        let locked = state.mutation_locked;
+        state.preference_persistence = PreferencePersistence::new(
+            Some(PreferencesWriter::spawn(
+                state.column_preferences_path.clone(),
+                || {},
+            )?),
+            Some(AppearancePreferencesWriter::spawn(
+                state.appearance_preferences_path.clone(),
+                || {},
+            )?),
+        );
+        for width in [180, 210, 260] {
+            state.column_states[0].record_user_resize(width, BASE_DPI);
+            state.appearance.theme = AppThemeMode::Dark;
+            state.persist_column_preferences();
+            state.persist_appearance_preferences();
+        }
+        // Close supplies the current snapshots even if earlier requests are pending.
+        state.column_states[0].record_user_resize(320, BASE_DPI);
+        state.column_states[3].set_visible(true);
+        state.appearance.theme = AppThemeMode::Light;
+        state.appearance.emphasis = PreviewEmphasis::Strong;
+        let final_columns = state.column_states;
+        let final_appearance = state.appearance;
+        state
+            .preference_persistence
+            .shutdown_and_join(final_columns, final_appearance);
+        assert!(state.preference_persistence.is_joined());
+        assert_eq!(state.model_revision, revision);
+        assert_eq!(state.mutation_locked, locked);
+        drop(state);
+
+        // This exercises the real startup paths and decoders, in the test process.
+        let reopened = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        assert_eq!(reopened.column_states, final_columns);
+        assert_eq!(reopened.appearance, final_appearance);
+        assert_eq!(reopened.model_revision, revision);
+        assert_eq!(reopened.mutation_locked, locked);
+        assert!(reopened.model.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn destination_parent_errors_keep_the_model_unchanged_and_give_a_retry_action() {
         let budget = destination_parent_mutation_error_korean(
             DestinationParentMutationError::ParentBudgetExceeded {
