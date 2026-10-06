@@ -43,16 +43,23 @@ pub(crate) struct AppearancePreferencesLoad {
     pub(crate) failure: Option<io::Error>,
 }
 
-#[derive(Clone, Copy)]
-struct PreferenceRequest {
+struct PreferenceRequest<T> {
     generation: u64,
-    columns: [ColumnState; COLUMN_COUNT],
+    snapshot: T,
 }
 
-#[derive(Default)]
-struct PreferenceQueue {
-    pending: Option<PreferenceRequest>,
+struct PreferenceQueue<T> {
+    pending: Option<PreferenceRequest<T>>,
     shutdown: bool,
+}
+
+impl<T> Default for PreferenceQueue<T> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            shutdown: false,
+        }
+    }
 }
 
 /// Terminal or per-generation result emitted by the durable settings writer.
@@ -67,12 +74,160 @@ pub(crate) enum PreferenceWriteEvent {
 type SavePreferences =
     dyn Fn(&Path, &[ColumnState; COLUMN_COUNT]) -> io::Result<()> + Send + Sync + 'static;
 
-/// Single durable writer that coalesces pending UI preference snapshots.
-pub(crate) struct PreferencesWriter {
-    queue: Arc<(Mutex<PreferenceQueue>, Condvar)>,
+/// Each instance owns its own queue, generation stream, worker, and results.
+struct CoalescingWriter<T> {
+    queue: Arc<(Mutex<PreferenceQueue<T>>, Condvar)>,
     events: Receiver<PreferenceWriteEvent>,
     handle: Option<JoinHandle<()>>,
     next_generation: u64,
+}
+
+impl<T: Send + 'static> CoalescingWriter<T> {
+    fn spawn(
+        path: PathBuf,
+        thread_name: &'static str,
+        wake: impl Fn() + Send + Sync + 'static,
+        save: impl Fn(&Path, T) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let queue = Arc::new((Mutex::new(PreferenceQueue::default()), Condvar::new()));
+        let worker_queue = Arc::clone(&queue);
+        let (sender, events) = channel();
+        let handle = thread::Builder::new()
+            .name(thread_name.to_owned())
+            .spawn(move || {
+                // The shipped abort profile still aborts on panic; this event is
+                // observable in the unwind test profile only.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    loop {
+                        let request = {
+                            let (lock, available) = worker_queue.as_ref();
+                            let mut state = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            while state.pending.is_none() && !state.shutdown {
+                                state = available
+                                    .wait(state)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                            match state.pending.take() {
+                                Some(request) => request,
+                                None => break,
+                            }
+                        };
+                        let event = match save(&path, request.snapshot) {
+                            Ok(()) => PreferenceWriteEvent::Saved {
+                                generation: request.generation,
+                            },
+                            Err(error) => PreferenceWriteEvent::Failed {
+                                generation: request.generation,
+                                error: error.to_string(),
+                            },
+                        };
+                        let _sent = sender.send(event);
+                        wake();
+                    }
+                }));
+                let terminal = if outcome.is_ok() {
+                    PreferenceWriteEvent::Stopped
+                } else {
+                    PreferenceWriteEvent::Panicked
+                };
+                let _sent = sender.send(terminal);
+                wake();
+            })?;
+        Ok(Self {
+            queue,
+            events,
+            handle: Some(handle),
+            next_generation: 0,
+        })
+    }
+
+    fn submit(
+        &mut self,
+        snapshot: T,
+        stopped: &'static str,
+        shutting_down: &'static str,
+    ) -> io::Result<u64> {
+        if self.is_finished() {
+            return Err(io::Error::other(stopped));
+        }
+        let generation = self.next_generation.saturating_add(1);
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Err(io::Error::other(shutting_down));
+        }
+        self.next_generation = generation;
+        state.pending = Some(PreferenceRequest {
+            generation,
+            snapshot,
+        });
+        available.notify_one();
+        Ok(generation)
+    }
+
+    fn shutdown_with(&mut self, snapshot: T, stopped: &'static str) -> io::Result<u64> {
+        if self.is_finished() {
+            return Err(io::Error::other(stopped));
+        }
+        let generation = self.next_generation.saturating_add(1);
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Ok(self.next_generation);
+        }
+        self.next_generation = generation;
+        state.pending = Some(PreferenceRequest {
+            generation,
+            snapshot,
+        });
+        state.shutdown = true;
+        available.notify_one();
+        Ok(generation)
+    }
+
+    fn drain_events(&self) -> Vec<PreferenceWriteEvent> {
+        self.events.try_iter().collect()
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    fn join(&mut self) -> thread::Result<()> {
+        self.request_shutdown();
+        self.handle.take().map_or(Ok(()), JoinHandle::join)
+    }
+}
+
+impl<T> CoalescingWriter<T> {
+    fn request_shutdown(&mut self) {
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.shutdown = true;
+        available.notify_one();
+    }
+}
+
+impl<T> Drop for CoalescingWriter<T> {
+    fn drop(&mut self) {
+        self.request_shutdown();
+        if let Some(handle) = self.handle.take() {
+            let _joined = handle.join();
+        }
+    }
+}
+
+/// Single durable writer that coalesces pending column snapshots.
+pub(crate) struct PreferencesWriter {
+    writer: CoalescingWriter<[ColumnState; COLUMN_COUNT]>,
 }
 
 impl PreferencesWriter {
@@ -96,160 +251,50 @@ impl PreferencesWriter {
         wake: impl Fn() + Send + Sync + 'static,
         save_preferences: Arc<SavePreferences>,
     ) -> io::Result<Self> {
-        let queue = Arc::new((Mutex::new(PreferenceQueue::default()), Condvar::new()));
-        let worker_queue = Arc::clone(&queue);
-        let wake = Arc::new(wake);
-        let worker_wake = Arc::clone(&wake);
-        let (sender, events) = channel();
-        let handle = thread::Builder::new()
-            .name("darkrenamer-preferences".to_owned())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    loop {
-                        let request = {
-                            let (lock, available) = worker_queue.as_ref();
-                            let mut state = lock
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            while state.pending.is_none() && !state.shutdown {
-                                state = available
-                                    .wait(state)
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            }
-                            match state.pending.take() {
-                                Some(request) => request,
-                                None => break,
-                            }
-                        };
-                        let event = match save_preferences(&path, &request.columns) {
-                            Ok(()) => PreferenceWriteEvent::Saved {
-                                generation: request.generation,
-                            },
-                            Err(error) => PreferenceWriteEvent::Failed {
-                                generation: request.generation,
-                                error: error.to_string(),
-                            },
-                        };
-                        let _sent = sender.send(event);
-                        worker_wake();
-                    }
-                }));
-                let terminal = if outcome.is_ok() {
-                    PreferenceWriteEvent::Stopped
-                } else {
-                    PreferenceWriteEvent::Panicked
-                };
-                let _sent = sender.send(terminal);
-                worker_wake();
-            })?;
         Ok(Self {
-            queue,
-            events,
-            handle: Some(handle),
-            next_generation: 0,
+            writer: CoalescingWriter::spawn(
+                path,
+                "darkrenamer-preferences",
+                wake,
+                move |path, columns| save_preferences(path, &columns),
+            )?,
         })
     }
 
     pub(crate) fn submit(&mut self, columns: [ColumnState; COLUMN_COUNT]) -> io::Result<u64> {
-        if self.is_finished() {
-            return Err(io::Error::other("column preference writer has stopped"));
-        }
-        let generation = self.next_generation.saturating_add(1);
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.shutdown {
-            return Err(io::Error::other(
-                "column preference writer is shutting down",
-            ));
-        }
-        self.next_generation = generation;
-        state.pending = Some(PreferenceRequest {
-            generation,
+        self.writer.submit(
             columns,
-        });
-        available.notify_one();
-        Ok(generation)
+            "column preference writer has stopped",
+            "column preference writer is shutting down",
+        )
     }
 
     pub(crate) fn shutdown_with(
         &mut self,
         columns: [ColumnState; COLUMN_COUNT],
     ) -> io::Result<u64> {
-        if self.is_finished() {
-            return Err(io::Error::other("column preference writer has stopped"));
-        }
-        let generation = self.next_generation.saturating_add(1);
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.shutdown {
-            return Ok(self.next_generation);
-        }
-        self.next_generation = generation;
-        state.pending = Some(PreferenceRequest {
-            generation,
-            columns,
-        });
-        state.shutdown = true;
-        available.notify_one();
-        Ok(generation)
-    }
-
-    fn request_shutdown(&mut self) {
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.shutdown = true;
-        available.notify_one();
+        self.writer
+            .shutdown_with(columns, "column preference writer has stopped")
     }
 
     pub(crate) fn drain_events(&self) -> Vec<PreferenceWriteEvent> {
-        self.events.try_iter().collect()
+        self.writer.drain_events()
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+        self.writer.is_finished()
     }
 
     pub(crate) fn join(&mut self) -> thread::Result<()> {
-        self.request_shutdown();
-        self.handle.take().map_or(Ok(()), JoinHandle::join)
+        self.writer.join()
     }
-}
-
-impl Drop for PreferencesWriter {
-    fn drop(&mut self) {
-        self.request_shutdown();
-        if let Some(handle) = self.handle.take() {
-            let _joined = handle.join();
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct AppearancePreferenceRequest {
-    generation: u64,
-    appearance: UiAppearance,
-}
-
-#[derive(Default)]
-struct AppearancePreferenceQueue {
-    pending: Option<AppearancePreferenceRequest>,
-    shutdown: bool,
 }
 
 type SaveAppearance = dyn Fn(&Path, UiAppearance) -> io::Result<()> + Send + Sync + 'static;
 
 /// Independent durable writer for coalesced appearance snapshots.
 pub(crate) struct AppearancePreferencesWriter {
-    queue: Arc<(Mutex<AppearancePreferenceQueue>, Condvar)>,
-    events: Receiver<PreferenceWriteEvent>,
-    handle: Option<JoinHandle<()>>,
-    next_generation: u64,
+    writer: CoalescingWriter<UiAppearance>,
 }
 
 impl AppearancePreferencesWriter {
@@ -265,137 +310,39 @@ impl AppearancePreferencesWriter {
         wake: impl Fn() + Send + Sync + 'static,
         save_preferences: Arc<SaveAppearance>,
     ) -> io::Result<Self> {
-        let queue = Arc::new((
-            Mutex::new(AppearancePreferenceQueue::default()),
-            Condvar::new(),
-        ));
-        let worker_queue = Arc::clone(&queue);
-        let wake = Arc::new(wake);
-        let worker_wake = Arc::clone(&wake);
-        let (sender, events) = channel();
-        let handle = thread::Builder::new()
-            .name("darkrenamer-appearance".to_owned())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    loop {
-                        let request = {
-                            let (lock, available) = worker_queue.as_ref();
-                            let mut state = lock
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            while state.pending.is_none() && !state.shutdown {
-                                state = available
-                                    .wait(state)
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            }
-                            match state.pending.take() {
-                                Some(request) => request,
-                                None => break,
-                            }
-                        };
-                        let event = match save_preferences(&path, request.appearance) {
-                            Ok(()) => PreferenceWriteEvent::Saved {
-                                generation: request.generation,
-                            },
-                            Err(error) => PreferenceWriteEvent::Failed {
-                                generation: request.generation,
-                                error: error.to_string(),
-                            },
-                        };
-                        let _sent = sender.send(event);
-                        worker_wake();
-                    }
-                }));
-                let terminal = if outcome.is_ok() {
-                    PreferenceWriteEvent::Stopped
-                } else {
-                    PreferenceWriteEvent::Panicked
-                };
-                let _sent = sender.send(terminal);
-                worker_wake();
-            })?;
         Ok(Self {
-            queue,
-            events,
-            handle: Some(handle),
-            next_generation: 0,
+            writer: CoalescingWriter::spawn(
+                path,
+                "darkrenamer-appearance",
+                wake,
+                move |path, appearance| save_preferences(path, appearance),
+            )?,
         })
     }
 
     pub(crate) fn submit(&mut self, appearance: UiAppearance) -> io::Result<u64> {
-        if self.is_finished() {
-            return Err(io::Error::other("appearance preference writer has stopped"));
-        }
-        let generation = self.next_generation.saturating_add(1);
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.shutdown {
-            return Err(io::Error::other(
-                "appearance preference writer is shutting down",
-            ));
-        }
-        self.next_generation = generation;
-        state.pending = Some(AppearancePreferenceRequest {
-            generation,
+        self.writer.submit(
             appearance,
-        });
-        available.notify_one();
-        Ok(generation)
+            "appearance preference writer has stopped",
+            "appearance preference writer is shutting down",
+        )
     }
 
     pub(crate) fn shutdown_with(&mut self, appearance: UiAppearance) -> io::Result<u64> {
-        if self.is_finished() {
-            return Err(io::Error::other("appearance preference writer has stopped"));
-        }
-        let generation = self.next_generation.saturating_add(1);
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.shutdown {
-            return Ok(self.next_generation);
-        }
-        self.next_generation = generation;
-        state.pending = Some(AppearancePreferenceRequest {
-            generation,
-            appearance,
-        });
-        state.shutdown = true;
-        available.notify_one();
-        Ok(generation)
-    }
-
-    fn request_shutdown(&mut self) {
-        let (lock, available) = self.queue.as_ref();
-        let mut state = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.shutdown = true;
-        available.notify_one();
+        self.writer
+            .shutdown_with(appearance, "appearance preference writer has stopped")
     }
 
     pub(crate) fn drain_events(&self) -> Vec<PreferenceWriteEvent> {
-        self.events.try_iter().collect()
+        self.writer.drain_events()
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+        self.writer.is_finished()
     }
 
     pub(crate) fn join(&mut self) -> thread::Result<()> {
-        self.request_shutdown();
-        self.handle.take().map_or(Ok(()), JoinHandle::join)
-    }
-}
-
-impl Drop for AppearancePreferencesWriter {
-    fn drop(&mut self) {
-        self.request_shutdown();
-        if let Some(handle) = self.handle.take() {
-            let _joined = handle.join();
-        }
+        self.writer.join()
     }
 }
 
@@ -453,23 +400,13 @@ pub(crate) fn load_appearance_or_default(path: &Path) -> AppearancePreferencesLo
 
 pub(crate) fn save_appearance(path: &Path, appearance: UiAppearance) -> io::Result<()> {
     let bytes = encode_appearance(appearance);
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "appearance preference path has no parent",
-        )
-    })?;
-    fs::create_dir_all(parent)?;
-    let (temporary_path, mut temporary) = create_appearance_process_temp(parent)?;
-    let mut cleanup = OwnedTemp::new(temporary_path.clone());
-    temporary.write_all(&bytes)?;
-    temporary.flush()?;
-    temporary.sync_all()?;
-    drop(temporary);
-    atomic_replace(&temporary_path, path)?;
-    cleanup.disarm();
-    sync_parent(parent)?;
-    Ok(())
+    persist_encoded(
+        path,
+        &bytes,
+        APPEARANCE_SETTINGS_LEAF,
+        "appearance preference path has no parent",
+        "could not allocate a unique appearance preference temporary file",
+    )
 }
 
 fn encode_appearance(appearance: UiAppearance) -> [u8; APPEARANCE_SERIALIZED_LEN] {
@@ -581,20 +518,57 @@ fn read_appearance(path: &Path) -> io::Result<Option<UiAppearance>> {
 
 pub(crate) fn save(path: &Path, columns: &[ColumnState; 7]) -> io::Result<()> {
     let bytes = encode(columns)?;
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "column preference path has no parent",
-        )
-    })?;
+    persist_encoded(
+        path,
+        &bytes,
+        SETTINGS_LEAF,
+        "column preference path has no parent",
+        "could not allocate a unique column preference temporary file",
+    )
+}
+
+fn persist_encoded(
+    path: &Path,
+    bytes: &[u8],
+    leaf: &str,
+    parent_error: &'static str,
+    temp_error: &'static str,
+) -> io::Result<()> {
+    persist_encoded_with(
+        path,
+        bytes,
+        leaf,
+        parent_error,
+        temp_error,
+        |temporary, bytes| temporary.write_all(bytes),
+        atomic_replace,
+    )
+}
+
+fn persist_encoded_with(
+    path: &Path,
+    bytes: &[u8],
+    leaf: &str,
+    parent_error: &'static str,
+    temp_error: &'static str,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, parent_error))?;
     fs::create_dir_all(parent)?;
-    let (temporary_path, mut temporary) = create_process_temp(parent)?;
+    let (temporary_path, mut temporary) = create_process_temp(parent, leaf, temp_error)?;
     let mut cleanup = OwnedTemp::new(temporary_path.clone());
-    temporary.write_all(&bytes)?;
-    temporary.flush()?;
-    temporary.sync_all()?;
+    // Close the handle before owned cleanup on either success or failure.
+    let write_result = (|| {
+        write(&mut temporary, bytes)?;
+        temporary.flush()?;
+        temporary.sync_all()
+    })();
     drop(temporary);
-    atomic_replace(&temporary_path, path)?;
+    write_result?;
+    replace(&temporary_path, path)?;
     cleanup.disarm();
     sync_parent(parent)?;
     Ok(())
@@ -690,54 +664,29 @@ fn read(path: &Path) -> io::Result<Option<[ColumnState; COLUMN_COUNT]>> {
     decode(&bytes).map(Some)
 }
 
-fn create_process_temp(parent: &Path) -> io::Result<(PathBuf, File)> {
+fn create_process_temp(
+    parent: &Path,
+    leaf: &str,
+    failure: &'static str,
+) -> io::Result<(PathBuf, File)> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     for _ in 0..16 {
         let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let leaf = format!(
-            ".{SETTINGS_LEAF}.{}.{}.{}.tmp",
+        let path = parent.join(format!(
+            ".{leaf}.{}.{}.{}.tmp",
             std::process::id(),
             timestamp,
             id
-        );
-        let path = parent.join(leaf);
+        ));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique column preference temporary file",
-    ))
-}
-
-fn create_appearance_process_temp(parent: &Path) -> io::Result<(PathBuf, File)> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    for _ in 0..16 {
-        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let leaf = format!(
-            ".{APPEARANCE_SETTINGS_LEAF}.{}.{}.{}.tmp",
-            std::process::id(),
-            timestamp,
-            id
-        );
-        let path = parent.join(leaf);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique appearance preference temporary file",
-    ))
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, failure))
 }
 
 struct OwnedTemp {
@@ -1078,6 +1027,244 @@ mod tests {
             show_preview_tint: true,
             show_empty_safety: false,
         }
+    }
+
+    #[test]
+    fn both_formats_keep_independent_golden_bytes() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let columns_path = directory.path().join(SETTINGS_LEAF);
+        let appearance_path = directory.path().join(APPEARANCE_SETTINGS_LEAF);
+        save(&columns_path, &default_column_states())?;
+        save_appearance(&appearance_path, customized_appearance())?;
+        assert_eq!(
+            fs::read(columns_path)?,
+            [
+                68, 82, 67, 79, 76, 83, 0, 0, 1, 7, 0, 0, 1, 0, 150, 0, 0, 0, 1, 0, 150, 0, 0, 0,
+                1, 0, 100, 0, 0, 0, 0, 0, 120, 0, 0, 0, 0, 0, 80, 0, 0, 0, 0, 0, 120, 0, 0, 0, 0,
+                0, 120, 0, 0, 0, 17, 12, 82, 102,
+            ]
+        );
+        assert_eq!(
+            fs::read(appearance_path)?,
+            [
+                68, 82, 65, 80, 80, 82, 0, 0, 1, 8, 0, 0, 2, 2, 2, 0, 1, 0, 0, 0, 254, 181, 216,
+                140,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_persistence_cleans_only_its_temporary_after_write_or_replace_failure()
+    -> io::Result<()> {
+        for (leaf, bytes) in [
+            (SETTINGS_LEAF, encode(&default_column_states())?.to_vec()),
+            (
+                APPEARANCE_SETTINGS_LEAF,
+                encode_appearance(customized_appearance()).to_vec(),
+            ),
+        ] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join(leaf);
+            fs::write(&path, b"previous file")?;
+            let unrelated = directory.path().join("unrelated.tmp");
+            fs::write(&unrelated, b"keep")?;
+            let write_error = persist_encoded_with(
+                &path,
+                &bytes,
+                leaf,
+                "no parent",
+                "no temp",
+                |temporary, bytes| {
+                    temporary.write_all(&bytes[..1])?;
+                    Err(io::Error::other("injected write failure"))
+                },
+                atomic_replace,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("injected write unexpectedly succeeded"))?;
+            assert_eq!(write_error.to_string(), "injected write failure");
+            assert_eq!(fs::read(&path)?, b"previous file");
+            assert_eq!(fs::read(&unrelated)?, b"keep");
+            assert_eq!(fs::read_dir(directory.path())?.count(), 2);
+
+            let replace_error = persist_encoded_with(
+                &path,
+                &bytes,
+                leaf,
+                "no parent",
+                "no temp",
+                |temporary, bytes| temporary.write_all(bytes),
+                |temporary, destination| {
+                    assert!(temporary.exists());
+                    assert_eq!(destination, path);
+                    Err(io::Error::other("injected replace failure"))
+                },
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("injected replace unexpectedly succeeded"))?;
+            assert_eq!(replace_error.to_string(), "injected replace failure");
+            assert_eq!(fs::read(&path)?, b"previous file");
+            assert_eq!(fs::read(&unrelated)?, b"keep");
+            assert_eq!(fs::read_dir(directory.path())?.count(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_columns_do_not_delay_appearance_failure_recovery_or_final_flush()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (started, first_started) = mpsc::channel();
+        let (release, released) = mpsc::sync_channel(1);
+        let released = Mutex::new(released);
+        let column_saves = Arc::new(Mutex::new(Vec::new()));
+        let observed_columns = Arc::clone(&column_saves);
+        let column_save = Arc::new(move |_path: &Path, columns: &[ColumnState; 7]| {
+            let mut saves = observed_columns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let first = saves.is_empty();
+            saves.push(*columns);
+            drop(saves);
+            if first {
+                let _sent = started.send(());
+                released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+            }
+            Ok(())
+        });
+        let mut columns = PreferencesWriter::spawn_with(
+            directory.path().join(SETTINGS_LEAF),
+            || {},
+            column_save,
+        )?;
+        let (wake, woke) = mpsc::channel();
+        let (release_wake, released_wake) = mpsc::sync_channel(1);
+        let released_wake = Mutex::new(released_wake);
+        let wake_count = AtomicUsize::new(0);
+        let appearance_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&appearance_calls);
+        let appearance_saves = Arc::new(Mutex::new(Vec::new()));
+        let observed_appearance = Arc::clone(&appearance_saves);
+        let appearance_save = Arc::new(move |_path: &Path, appearance: UiAppearance| {
+            observed_appearance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(appearance);
+            if calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err(io::Error::other("appearance first save failed"))
+            } else {
+                Ok(())
+            }
+        });
+        let mut appearance = AppearancePreferencesWriter::spawn_with(
+            directory.path().join(APPEARANCE_SETTINGS_LEAF),
+            move || {
+                if wake_count.fetch_add(1, Ordering::AcqRel) == 0 {
+                    let _sent = wake.send(());
+                    let _released = released_wake
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv_timeout(std::time::Duration::from_secs(5));
+                }
+            },
+            appearance_save,
+        )?;
+        let first_columns = default_column_states();
+        let mut pending_columns = first_columns;
+        pending_columns[3].set_visible(true);
+        let mut final_columns = pending_columns;
+        final_columns[5].set_visible(true);
+        let first_appearance = UiAppearance::default();
+        let final_appearance = customized_appearance();
+        assert_eq!(columns.submit(first_columns)?, 1);
+        first_started.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert_eq!(appearance.submit(first_appearance)?, 1);
+        woke.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert!(matches!(
+            appearance.drain_events().as_slice(),
+            [PreferenceWriteEvent::Failed { generation: 1, .. }]
+        ));
+        assert_eq!(columns.submit(pending_columns)?, 2);
+        assert_eq!(
+            appearance.submit(UiAppearance {
+                theme: AppThemeMode::Light,
+                ..first_appearance
+            })?,
+            2
+        );
+        assert_eq!(appearance.shutdown_with(final_appearance)?, 3);
+        assert!(appearance.submit(first_appearance).is_err());
+        release_wake.send(())?;
+        appearance
+            .join()
+            .map_err(|_| io::Error::other("appearance worker panicked"))?;
+        assert_eq!(
+            appearance.drain_events(),
+            vec![
+                PreferenceWriteEvent::Saved { generation: 3 },
+                PreferenceWriteEvent::Stopped
+            ]
+        );
+        assert_eq!(
+            *appearance_saves
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![first_appearance, final_appearance]
+        );
+        assert!(!columns.is_finished());
+        assert_eq!(columns.shutdown_with(final_columns)?, 3);
+        assert!(columns.submit(first_columns).is_err());
+        release.send(())?;
+        columns
+            .join()
+            .map_err(|_| io::Error::other("column worker panicked"))?;
+        assert_eq!(
+            columns.drain_events(),
+            vec![
+                PreferenceWriteEvent::Saved { generation: 1 },
+                PreferenceWriteEvent::Saved { generation: 3 },
+                PreferenceWriteEvent::Stopped
+            ]
+        );
+        assert_eq!(
+            *column_saves
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![first_columns, final_columns]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn both_wrappers_report_unwinding_worker_failure() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut columns = PreferencesWriter::spawn_with(
+            directory.path().join(SETTINGS_LEAF),
+            || {},
+            Arc::new(|_, _| std::panic::resume_unwind(Box::new("column save panic"))),
+        )?;
+        let mut appearance = AppearancePreferencesWriter::spawn_with(
+            directory.path().join(APPEARANCE_SETTINGS_LEAF),
+            || {},
+            Arc::new(|_, _| std::panic::resume_unwind(Box::new("appearance save panic"))),
+        )?;
+        columns.submit(default_column_states())?;
+        appearance.submit(UiAppearance::default())?;
+        assert!(columns.join().is_ok());
+        assert!(appearance.join().is_ok());
+        assert_eq!(columns.drain_events(), vec![PreferenceWriteEvent::Panicked]);
+        assert_eq!(
+            appearance.drain_events(),
+            vec![PreferenceWriteEvent::Panicked]
+        );
+        assert!(columns.submit(default_column_states()).is_err());
+        assert!(appearance.submit(UiAppearance::default()).is_err());
+        Ok(())
     }
 
     fn refresh_appearance_checksum(bytes: &mut [u8]) {
