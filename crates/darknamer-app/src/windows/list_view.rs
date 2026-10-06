@@ -3496,10 +3496,8 @@ mod native_tests {
             })
         }
 
-        fn observation(&self) -> &IconCloseJoinObservation {
-            self.observation
-                .as_deref()
-                .expect("installed close-join observation")
+        fn observation(&self) -> Option<&IconCloseJoinObservation> {
+            self.observation.as_deref()
         }
     }
 
@@ -3511,6 +3509,8 @@ mod native_tests {
             // SAFETY: this test's UI thread is the only callback dispatcher.
             // A live window can still retain refdata on an early return.
             if unsafe { IsWindow(self.window) } != 0 {
+                // SAFETY: this test owns the live HWND and removes its exact
+                // subclass before releasing the published refdata.
                 let removed = unsafe {
                     RemoveWindowSubclass(
                         self.window,
@@ -3549,6 +3549,8 @@ mod native_tests {
             // SAFETY: the guard still owns this boxed refdata until callback
             // completion; record whether exact native removal succeeded.
             let observation = unsafe { &*(ref_data as *const IconCloseJoinObservation) };
+            // SAFETY: WM_NCDESTROY is for this test-owned HWND and the guard
+            // keeps refdata allocated through this synchronous callback.
             let removed = unsafe {
                 RemoveWindowSubclass(
                     window,
@@ -4083,11 +4085,11 @@ mod native_tests {
                     let lookup = icon_worker::ControlledIconLookup::initialize(image_list)?;
                     Some(
                         move |key: &crate::icon_requests::RequestKey<IconCacheKey>| {
-                            if matches!(key, crate::icon_requests::RequestKey::Class(_)) {
-                                if worker_class_calls.fetch_add(1, Ordering::AcqRel) == 0 {
-                                    let _ = entered_tx.send(());
-                                    worker_gate.wait();
-                                }
+                            if matches!(key, crate::icon_requests::RequestKey::Class(_))
+                                && worker_class_calls.fetch_add(1, Ordering::AcqRel) == 0
+                            {
+                                let _ = entered_tx.send(());
+                                worker_gate.wait();
                             }
                             lookup.query(key)
                         },
@@ -4125,6 +4127,8 @@ mod native_tests {
             // SAFETY: the live production owner handles its ordinary close
             // message after the preceding AppState lease has ended.
             unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
+            // SAFETY: this pointer-free query observes the test-owned HWND
+            // immediately after its synchronous ordinary close callback.
             assert_ne!(unsafe { IsWindow(window) }, 0);
             {
                 let lease = try_app_state(window)
@@ -4143,9 +4147,12 @@ mod native_tests {
                 guardian.poll_join();
                 // The WM_DESTROY callback records the worker state at the
                 // actual lifetime boundary, before this later observer runs.
+                // SAFETY: this pointer-free query observes the test-owned HWND.
                 unsafe { IsWindow(window) == 0 }
             })?;
-            let observation = close_join_subclass.observation();
+            let observation = close_join_subclass
+                .observation()
+                .ok_or_else(|| io::Error::other("close-join observation unavailable"))?;
             assert!(observation.saw_destroy.load(Ordering::Acquire));
             assert!(observation.joined_at_destroy.load(Ordering::Acquire));
             assert!(observation.detached_at_nc_destroy.load(Ordering::Acquire));

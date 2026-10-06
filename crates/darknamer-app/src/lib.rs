@@ -1955,14 +1955,14 @@ mod tests {
     }
 
     #[test]
-    fn compact_rail_keeps_the_longest_two_line_label_width() {
+    fn compact_rail_keeps_the_longest_two_line_label_width() -> Result<(), &'static str> {
         assert_eq!(RailDensity::Compact.metrics(96).rail_width, 52);
         assert_eq!(RailDensity::Compact.metrics(192).rail_width, 104);
         assert_eq!(
             rail_tool_spec(RESET).map(|tool| tool.label),
             Some("제안명\n초기화")
         );
-        let reset = command_ui_spec(RESET).expect("name reset command");
+        let reset = command_ui_spec(RESET).ok_or("name reset command missing")?;
         assert_eq!(reset.menu_label, "제안 이름 초기화");
         assert_eq!(reset.rail_spoken_label(), "제안명 초기화");
         assert!(reset.tooltip_label.contains("제안 이름"));
@@ -1972,6 +1972,7 @@ mod tests {
                 .tooltip_label
                 .contains("완료된 파일 작업은 취소하지 않습니다")
         );
+        Ok(())
     }
 
     #[test]
