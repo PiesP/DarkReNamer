@@ -1,5 +1,5 @@
 use super::*;
-use crate::preview::PREVIEW_STATUS_LABELS;
+use crate::preview::{PREVIEW_STATUS_LABELS, PreviewRowInput};
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, DC_BRUSH, ExcludeClipRect, GetStockObject, GetWindowDC, NULL_PEN, Polygon,
@@ -1413,13 +1413,13 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         let update = state.preview_issue_cache.refresh_one_by(
             state.model.len(),
             *row,
-            (
-                item.root_path(),
-                item.current_name(),
-                item.proposed_name(),
-                item.is_directory(),
-                item.planned_change_kind(),
-            ),
+            PreviewRowInput {
+                parent: item.root_path(),
+                current: item.current_name(),
+                proposed: item.proposed_name(),
+                is_directory: item.is_directory(),
+                change: item.planned_change_kind(),
+            },
             preview_destination_key,
         );
         let Some(update) = update else {
@@ -1534,14 +1534,12 @@ fn refresh_preview_count_cache(state: &mut AppState) {
             .map(LegacyListItem::planned_change_kind),
     );
     state.preview_issue_cache.refresh_by(
-        state.model.items().iter().map(|item| {
-            (
-                item.root_path(),
-                item.current_name(),
-                item.proposed_name(),
-                item.is_directory(),
-                item.planned_change_kind(),
-            )
+        state.model.items().iter().map(|item| PreviewRowInput {
+            parent: item.root_path(),
+            current: item.current_name(),
+            proposed: item.proposed_name(),
+            is_directory: item.is_directory(),
+            change: item.planned_change_kind(),
         }),
         preview_destination_key,
     );
@@ -6491,9 +6489,17 @@ mod native_tests {
             let started = std::time::Instant::now();
 
             cache.refresh_by(
-                names
-                    .iter()
-                    .map(|(current, proposed)| (&parent, current, proposed, false)),
+                names.iter().map(|(current, proposed)| PreviewRowInput {
+                    parent: &parent,
+                    current,
+                    proposed,
+                    is_directory: false,
+                    change: if current == proposed {
+                        darknamer_core::PlannedChangeKind::None
+                    } else {
+                        darknamer_core::PlannedChangeKind::Rename
+                    },
+                }),
                 preview_destination_key,
             );
 
