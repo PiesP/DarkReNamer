@@ -1,61 +1,52 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
 use std::env;
-use std::ffi::c_void;
+
 use std::fs;
 use std::io;
 use std::marker::PhantomData;
+#[cfg(test)]
 use std::mem::size_of;
-use std::num::NonZeroIsize;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::AsRawHandle;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use std::os::windows::ffi::OsStrExt;
+
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::ptr::{null, null_mut};
+#[cfg(test)]
+use std::ptr::null;
+use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
-use std::thread::{self, JoinHandle};
 
-use crate::admission::{
-    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, PathBudget,
-    PathBudgetReservation, WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
-};
-use crate::icon_cache::{IconCacheKey, cache_icon_index, icon_cache_key};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(test)]
+use std::thread;
+
+use crate::icon_cache::IconCacheKey;
+
 use crate::preferences::lifecycle::PreferencePersistence;
+#[cfg(test)]
+use crate::preferences::{AppearancePreferencesWriter, PreferencesWriter};
 use crate::preferences::{
-    AppearancePreferencesWriter, PreferencesWriter, appearance_path_for_journal_root,
-    load_appearance_or_default, load_or_default as load_column_preferences, path_for_journal_root,
-    shown_columns,
+    appearance_path_for_journal_root, load_appearance_or_default,
+    load_or_default as load_column_preferences, path_for_journal_root, shown_columns,
 };
+#[cfg(test)]
 use crate::rename::{
-    CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
-    ExecutionOutcomePresentation, ExecutionPhase, ExecutionProgress, ExecutionReport,
-    ExistingJournalOpenError, FileJournal, FileJournalError, JournalCleanupDecision,
-    JournalOpenFailure, JournalRoot, MAX_PATH_UNITS, ModelRevision, PlanAttemptError, PlanError,
-    RecoveryJournalEvidence, RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan,
-    RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
-    build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
-    execution_outcome_presentation, next_model_revision, plan_error_korean,
-    preflight_plan_cancellable, process_is_elevated,
+    ExecutionControl, ExecutionPhase, ExecutionProgress, RenameExecutor, RenamePlanner,
+    WindowsRenameBackend,
 };
+use crate::rename::{FileJournal, JournalRoot, ModelRevision, next_model_revision};
+#[cfg(test)]
+use darknamer_core::LegacyListItem;
 use darknamer_core::{
-    DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList,
-    LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText, ProposalMutationError,
-    SortSemantics,
+    DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList, LegacyText,
+    ProposalMutationError,
 };
 use icon_worker::{BorrowedSystemImageList, IconShared};
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
-    Win32WindowHandle, WindowHandle,
-};
-#[cfg(test)]
-use windows_sys::core::GUID;
-use windows_sys::core::HRESULT;
 
 mod appearance;
 mod appearance_dialog;
@@ -131,10 +122,36 @@ use ::windows::core::Interface;
 #[cfg(test)]
 use application::take_attached_menu_for_destroy;
 use clipboard::copy_clipboard;
-use command_dispatch::*;
+use command_dispatch::{
+    AcceleratorTable, PreparedCommandAction, PreparedTaskDialogDisposition,
+    PreparedTaskDialogPolicy, PreparedTaskDialogSession, ProgrammaticListUpdateGuard,
+    begin_prepared_task_dialog, clear_selection, dispatch_command, finish_import_worker_result,
+    focused_index, programmatic_list_update_active, run_prepared_command_action, select_rows,
+    selected_indices, take_prepared_task_dialog,
+};
+#[cfg(test)]
+use command_dispatch::{legacy_atoi, prompt_spec, recovery_command_allowed};
+#[cfg(test)]
+use command_dispatch::{
+    run_prepared_file_dialog_with_destination_validation, run_prepared_preview_details,
+    select_rows_with_focus,
+};
+
 use command_rail::CommandRail;
-use dialog::*;
-use drag_drop::*;
+use dialog::{
+    OwnerEnableGuard, PreparedFileDialogKind, PreparedFileDialogSelection,
+    PreparedRecoveryExportDirectory, PreparedTaskDialogButton, PreparedTaskDialogSpec,
+    PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec, TEXT_DETAILS_BUTTON_ID,
+    TaskDialogButtonSpec, TaskDialogSpec, copy_clipboard_or_report, prompt_input_or_report,
+    select_prepared_file_dialog, select_prepared_task_dialog, set_status, task_dialog,
+    text_details,
+};
+#[cfg(test)]
+use dialog::{PromptState, create_prompt_children, modal_native_dialog};
+#[cfg(test)]
+use dialog::{prepare_recovery_export_directory_for_test, window_text};
+use drag_drop::{DropTargetRegistrations, register_drop_targets};
+
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
@@ -144,9 +161,40 @@ use list_view::{
     refresh_changed_rows, refresh_proposal_rows, remove_list_view_notification_subclass,
     schedule_icon_poll, update_column_visibility, update_dpi_metrics, update_primary_column_widths,
 };
-use menu::*;
-use popup_menu::*;
-use recovery_ui::*;
+#[cfg(test)]
+use menu::create_drop_overlay;
+use menu::{
+    OwnedFont, OwnedMenu, OwnerMenuDataStore, OwnerMenuKind, apply_cancel_control_state,
+    apply_command_states, arrange, child, create_children, create_message_font,
+    handle_focus_navigation, handle_owner_menu_char, measure_text, move_window_dip,
+    owner_menu_has_submenu, owner_menu_is_separator, owner_menu_kind, owner_menu_label,
+    owner_menu_uses_radio, place_list_view_below_siblings, prepare_menu_appearance,
+    query_high_contrast_active, record_child_focus, refresh_forced_colors, refresh_system_fonts,
+    restore_child_focus, schedule_focus_target, set_drop_overlay_control, update_controls,
+};
+#[cfg(test)]
+use menu::{
+    create_empty_state_controls, create_status_controls, measure_font_metrics,
+    set_empty_state_controls,
+};
+#[cfg(test)]
+use menu::{create_owner_draw_menu_for_test, create_status_font, owner_menu_accessibility_label};
+use popup_menu::{
+    PendingPopupMenuRequests, PopupMenuPalette, PopupMenuRequest, PopupMenuUpdate,
+    menu_belongs_to_root, refresh_installed_popup_menus, update_popup_menu,
+};
+#[cfg(test)]
+use popup_menu::{
+    popup_menu_test_counters, record_popup_menu_notification, reset_popup_menu_test_counters,
+};
+use recovery_ui::{
+    PreparedDiscardTaskDialog, PreparedRecoveryExport, confirm_startup_recovery,
+    prepare_discard_staged_journal, prepare_recovery_export, run_prepared_discard_task_dialog,
+    run_prepared_recovery_export, show_recovery_status,
+};
+#[cfg(test)]
+use recovery_ui::{recover_confirmed_active_journal, rediscover_after_staged_discard};
+
 #[cfg(test)]
 use safe_runtime::initialize_safe_runtime_at;
 use safe_runtime::{
@@ -158,12 +206,11 @@ use text_io::{
 };
 #[cfg(test)]
 use text_io::{read_legacy_text, write_legacy_text};
+
+use windows_sys::Win32::Foundation::{HWND, LRESULT};
 #[cfg(test)]
-use windows_sys::Win32::Foundation::E_NOINTERFACE;
-use windows_sys::Win32::Foundation::{
-    E_FAIL, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, RECT, S_OK, SYSTEMTIME, WPARAM,
-};
-use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
+use windows_sys::Win32::Foundation::{LPARAM, RECT, WPARAM};
+
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetBkMode,
@@ -171,128 +218,141 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{COLOR_INFOBK, COLOR_INFOTEXT};
+#[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
-    FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    TRANSPARENT, UpdateWindow,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, DeleteObject, GetDC, GetSysColor, GetSysColorBrush, HDC,
+    ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
-#[cfg(test)]
-use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
-use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
+
 #[cfg(test)]
-use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM};
-use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
 #[cfg(test)]
-use windows_sys::Win32::System::Memory::{
-    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
-    VirtualProtect,
-};
-use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize};
+use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+
 #[cfg(test)]
-use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW,
+    SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW,
 };
 #[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_SUNKEN, SS_TYPEMASK};
-use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
-use windows_sys::Win32::UI::Accessibility::{
-    HCF_HIGHCONTRASTON, HIGHCONTRASTW, MSAA_MENU_SIG, MSAAMENUINFO,
-};
+
 #[cfg(test)]
 use windows_sys::Win32::UI::Accessibility::{
     ROLE_SYSTEM_MENUITEM, ROLE_SYSTEM_MENUPOPUP, STATE_SYSTEM_HASPOPUP,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
+#[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED,
-    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT, HDI_WIDTH, HDITEMW, HDM_GETITEMCOUNT,
-    HDM_GETITEMRECT, HDM_GETITEMW, HDN_DIVIDERDBLCLICKW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW,
-    HDN_ITEMCHANGINGW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
-    LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMCOUNT,
-    LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETTOOLTIPS, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED,
-    LVN_MARQUEEBEGIN, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR,
-    NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG,
-    TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT,
-    TDF_USE_COMMAND_LINKS, TTM_ACTIVATE, TTM_POP,
+    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_SELECTED, CDRF_DODEFAULT,
+    CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT, ICC_LISTVIEW_CLASSES,
+    ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_TEXT, LVITEMW,
+    LVM_GETHEADER, LVM_INSERTITEMW, LVN_MARQUEEBEGIN, LVS_REPORT, NM_CUSTOMDRAW, NMCUSTOMDRAW,
+    NMHDR, NMLVCUSTOMDRAW,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
-    ODT_MENU, STATE_SYSTEM_UNAVAILABLE, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
+    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON, ODT_MENU,
+    STATE_SYSTEM_UNAVAILABLE, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
 };
-use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
-};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F2, VK_F6,
-    VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
-};
-use windows_sys::Win32::UI::Shell::{
-    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SetWindowSubclass,
-};
+
 #[cfg(test)]
-use windows_sys::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON,
-    BeginDeferWindowPos, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CheckMenuRadioItem,
-    CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DeferWindowPos, DestroyAcceleratorTable, DestroyMenu, DestroyWindow, DispatchMessageW,
-    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FALT, FCONTROL, FSHIFT,
-    FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW,
-    GetParent, GetSubMenu, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    HACCEL, HMENU, HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow,
-    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED,
-    MF_ENABLED, MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA,
-    MIIM_STRING, MIIM_SUBMENU, MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW,
-    MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
-    SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    TranslateAcceleratorW, TranslateMessage, USER_TIMER_MINIMUM, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NCACTIVATE, WM_NCCREATE, WM_NCDESTROY,
-    WM_NCPAINT, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus};
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, CHILDID_SELF, FindWindowExW, GW_CHILD,
     GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetMenu, GetWindow,
     GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE, OBJID_CLIENT, OBJID_MENU,
-    SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED, TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD,
-    TPM_TOPALIGN, TrackPopupMenuEx, UnregisterClassW, WM_CANCELMODE,
+    STATE_SYSTEM_CHECKED, TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD, TPM_TOPALIGN,
+    TrackPopupMenuEx, WM_CANCELMODE,
 };
-use worker::*;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BN_CLICKED, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON, CBS_DROPDOWNLIST, CheckMenuItem,
+    CreateWindowExW, DestroyMenu, DestroyWindow, ES_AUTOHSCROLL, EnableMenuItem, GetClientRect,
+    GetMenuItemCount, GetMenuItemInfoW, GetSubMenu, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IDCANCEL, IDOK, IsWindow, IsWindowVisible, KillTimer, MENUITEMINFOW,
+    MF_BYCOMMAND, MF_CHECKED, MF_GRAYED, MF_OWNERDRAW, MF_SEPARATOR, MIIM_DATA, MIIM_SUBMENU,
+    MNC_EXECUTE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+    SetForegroundWindow, SetMenu, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_COMMAND,
+    WM_NOTIFY, WM_TIMER, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GWLP_USERDATA, GetParent, GetWindowLongPtrW, HMENU, MessageBoxW, PostMessageW, SetTimer,
+    USER_TIMER_MINIMUM, WM_APP,
+};
+#[cfg(test)]
+use worker::{AdmissionProgressPhase, start_import_worker_from};
+use worker::{
+    AdmissionWorker, ApplyWorker, ImportKind, ImportWorker, PlanWorker, PreparedWorkerTaskDialog,
+    admit_paths, apply_changes, finalize_admission_start, finalize_admission_start_failure,
+    finish_apply_after_message_loop_failure, handle_admission_completion,
+    handle_admission_progress, handle_apply_completion, handle_apply_progress,
+    handle_import_completion, handle_plan_completion, handle_preferences_wake,
+    prepare_window_close, report_admission_start_error, request_active_worker_cancel,
+    request_window_close, request_worker_shutdown_after_message_loop_failure,
+    run_prepared_worker_task_dialog, start_import_worker, start_preferences_writers,
+    try_finish_window_close,
+};
+#[cfg(test)]
+use worker::{AdmissionWorkerResult, ApplyWorkerResult, PlanWorkerResult};
+#[cfg(test)]
+use worker::{install_controlled_admission_worker, publish_controlled_admission_progress};
 
-use appearance::*;
-use appearance_dialog::*;
+#[cfg(test)]
+use appearance::apply_tooltip_appearance;
+use appearance::{
+    AppearanceResources, SeparatorSurface, StaticControlColors, WinRtGuard,
+    apply_auxiliary_dwm_title_frame, apply_native_appearance_nonblocking, draw_custom_button,
+    draw_owner_button, draw_owner_menu, draw_owner_rail_button, draw_owner_separator,
+    erase_themed_background, measure_owner_menu, paint_menu_bottom_edge,
+    query_system_text_scale_factor, query_system_theme, refresh_system_theme,
+    static_control_colors,
+};
+#[cfg(test)]
+use appearance::{NativeThemeTarget, apply_native_appearance, apply_native_control_theme};
 
-use crate::*;
+use appearance_dialog::{
+    AppearanceDialogPlatform, AppearanceDialogSession, NativeAppearanceDialogPlatform,
+    PreparedAppearanceAction, active_appearance_dialog, cancel_appearance_dialog,
+    destroy_cancelled_appearance_dialog, finish_appearance_dialog, handle_appearance_preview,
+    notify_appearance_dialog_accessibility, prepare_appearance_dialog,
+    run_prepared_appearance_action,
+};
+
+#[cfg(test)]
+use crate::minimum_main_client_height;
+use crate::{
+    ADD_FILES, APPLY, BASE_DPI, COMMAND_UI_SPECS, ColumnState, CommandId, CommandPlacement,
+    CommandRailSpec, CommandUiSpec, FocusState, ForcedColorsState, LayoutRect, MeasuredFontMetrics,
+    NATIVE_STATUS_COLUMN_WIDTH_DIP, PresentationLocks, PreviewCountCache, PreviewCounts,
+    PreviewIssueCache, PreviewSynchronization, ResolvedTheme, ResolvedUiAppearance,
+    SemanticPalette, StatusChromeGeometry, StatusLayoutInput, UiAppearance, UiPresentation,
+    UiStatus, WorkerActivity, WorkspaceChromeGeometry, about_text,
+    calculate_command_rail_separator_layout, default_column_states, scale_dip,
+};
+#[cfg(test)]
+use crate::{
+    APPEARANCE_ADVANCED, AppThemeMode, DROP_ACCEPTING_TEXT, DROP_FULL_TEXT, DROP_LOCKED_TEXT,
+    DROP_UNSUPPORTED_TEXT, DropPresentation, EMPTY_STATE_ADD_LABEL, EMPTY_STATE_INSTRUCTION,
+    EmptyStatePresentation, GRAPHITE_DARK, IMPORT_PATHS, INITIAL_HEIGHT, INITIAL_WIDTH, LEFT_RAIL,
+    NATIVE_STATUS_COLUMN_INDEX, PreviewEmphasis, REPLACE, RESET, RIGHT_RAIL, RailDensity,
+    RailDensityPreference, RailMode, SHOW_FULL_PATH, STATUS_CANCEL_LABEL, THEME_DARK, THEME_LIGHT,
+    THEME_SYSTEM, UNIFY_PATH, VERSION, calculate_apply_readiness_indicator_rect,
+    calculate_command_rail_layout, command_menu_label, command_ui_spec, empty_state_safety_copy,
+    rail_tool_spec, semantic_palette,
+};
 
 const LIST_ID: usize = 1000;
 const STATUS_MESSAGE_ID: usize = 1007;

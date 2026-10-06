@@ -1,4 +1,310 @@
-use super::*;
+#[cfg(test)]
+use crate::ApplyPresentation;
+#[cfg(test)]
+use crate::BASE_DPI;
+#[cfg(test)]
+use crate::COLUMNS;
+#[cfg(test)]
+use crate::GRAPHITE_DARK;
+use crate::LayoutRect;
+use crate::NATIVE_LIST_COLUMN_COUNT;
+use crate::NATIVE_STATUS_COLUMN;
+use crate::NATIVE_STATUS_COLUMN_INDEX;
+use crate::NATIVE_STATUS_COLUMN_WIDTH_DIP;
+#[cfg(test)]
+use crate::PreviewIssueCache;
+use crate::PreviewRowIssue;
+use crate::ProposedNameVisualContext;
+#[cfg(test)]
+use crate::RailDensity;
+use crate::ResolvedTheme;
+use crate::SemanticPalette;
+use crate::allocate_primary_column_widths;
+use crate::calculate_blank_list_body_rect;
+use crate::calculate_header_chrome;
+use crate::calculate_scrollbar_parts;
+#[cfg(test)]
+use crate::default_column_states;
+use crate::format_exact_bytes;
+use crate::format_iec_file_size;
+use crate::format_timestamp_fallback;
+#[cfg(test)]
+use ::windows::Win32::System::Com::CoInitializeEx;
+#[cfg(test)]
+use ::windows::Win32::System::Com::CoUninitialize;
+
+use crate::icon_cache::IconCacheKey;
+use crate::icon_cache::cache_icon_index;
+use crate::icon_cache::icon_cache_key;
+#[cfg(test)]
+use crate::minimum_content_width_px;
+#[cfg(test)]
+use crate::preferences::PreferencesWriter;
+#[cfg(test)]
+use crate::preferences::lifecycle::PreferencePersistence;
+use crate::preview_item_details;
+use crate::preview_status_delta_rows;
+use crate::preview_status_label;
+use crate::proposal_refresh_plan;
+use crate::proposed_name_colors;
+use crate::proposed_name_visual_decision;
+
+use crate::rename::RenameBackend;
+use crate::rename::WindowsRenameBackend;
+use crate::scale_dip;
+use crate::semantic_palette;
+use crate::status_column_width_after_resize;
+#[cfg(test)]
+use darknamer_core::LegacyList;
+use darknamer_core::LegacyListItem;
+#[cfg(test)]
+use darknamer_core::LegacySortMode;
+use darknamer_core::LegacyText;
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
+use std::collections::HashMap;
+#[cfg(test)]
+use std::env;
+#[cfg(test)]
+use std::ffi::c_void;
+#[cfg(test)]
+use std::fs;
+use std::io;
+use std::mem::size_of;
+#[cfg(test)]
+use std::panic::AssertUnwindSafe;
+#[cfg(test)]
+use std::panic::catch_unwind;
+#[cfg(test)]
+use std::path::Path;
+use std::ptr::null;
+use std::ptr::null_mut;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::thread;
+use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::LPARAM;
+use windows_sys::Win32::Foundation::LRESULT;
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::Foundation::WPARAM;
+use windows_sys::Win32::Globalization::DATE_SHORTDATE;
+use windows_sys::Win32::Globalization::GetDateFormatEx;
+use windows_sys::Win32::Globalization::GetTimeFormatEx;
+use windows_sys::Win32::Graphics::Gdi::DT_END_ELLIPSIS;
+use windows_sys::Win32::Graphics::Gdi::DT_LEFT;
+use windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX;
+use windows_sys::Win32::Graphics::Gdi::DT_RIGHT;
+use windows_sys::Win32::Graphics::Gdi::DT_SINGLELINE;
+use windows_sys::Win32::Graphics::Gdi::DT_VCENTER;
+use windows_sys::Win32::Graphics::Gdi::DrawTextW;
+use windows_sys::Win32::Graphics::Gdi::FillRect;
+use windows_sys::Win32::Graphics::Gdi::HBRUSH;
+use windows_sys::Win32::Graphics::Gdi::HDC;
+use windows_sys::Win32::Graphics::Gdi::HFONT;
+use windows_sys::Win32::Graphics::Gdi::RDW_ALLCHILDREN;
+use windows_sys::Win32::Graphics::Gdi::RDW_ERASE;
+use windows_sys::Win32::Graphics::Gdi::RDW_INVALIDATE;
+use windows_sys::Win32::Graphics::Gdi::RedrawWindow;
+use windows_sys::Win32::Graphics::Gdi::ReleaseDC;
+use windows_sys::Win32::Graphics::Gdi::SelectObject;
+use windows_sys::Win32::Graphics::Gdi::SetBkMode;
+use windows_sys::Win32::Graphics::Gdi::SetTextColor;
+use windows_sys::Win32::Graphics::Gdi::TRANSPARENT;
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::UpdateWindow;
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+#[cfg(test)]
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::MEM_COMMIT;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::MEM_RELEASE;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::MEM_RESERVE;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::PAGE_NOACCESS;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::PAGE_READWRITE;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::VirtualAlloc;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::VirtualFree;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::VirtualProtect;
+#[cfg(test)]
+use windows_sys::Win32::System::Ole::OleInitialize;
+#[cfg(test)]
+use windows_sys::Win32::System::Ole::OleUninitialize;
+#[cfg(test)]
+use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
+#[cfg(test)]
+use windows_sys::Win32::System::SystemInformation::SYSTEM_INFO;
+use windows_sys::Win32::System::Time::FileTimeToSystemTime;
+use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTimeEx;
+use windows_sys::Win32::UI::Controls::CDDS_ITEMPREPAINT;
+use windows_sys::Win32::UI::Controls::CDDS_POSTPAINT;
+use windows_sys::Win32::UI::Controls::CDDS_PREPAINT;
+use windows_sys::Win32::UI::Controls::CDDS_SUBITEM;
+use windows_sys::Win32::UI::Controls::CDIS_HOT;
+use windows_sys::Win32::UI::Controls::CDIS_SELECTED;
+use windows_sys::Win32::UI::Controls::CDRF_DODEFAULT;
+use windows_sys::Win32::UI::Controls::CDRF_NEWFONT;
+use windows_sys::Win32::UI::Controls::CDRF_NOTIFYITEMDRAW;
+use windows_sys::Win32::UI::Controls::CDRF_NOTIFYPOSTPAINT;
+use windows_sys::Win32::UI::Controls::CDRF_NOTIFYSUBITEMDRAW;
+use windows_sys::Win32::UI::Controls::CDRF_SKIPDEFAULT;
+use windows_sys::Win32::UI::Controls::HDI_TEXT;
+use windows_sys::Win32::UI::Controls::HDI_WIDTH;
+use windows_sys::Win32::UI::Controls::HDITEMW;
+use windows_sys::Win32::UI::Controls::HDM_GETITEMCOUNT;
+use windows_sys::Win32::UI::Controls::HDM_GETITEMRECT;
+use windows_sys::Win32::UI::Controls::HDM_GETITEMW;
+use windows_sys::Win32::UI::Controls::HDN_DIVIDERDBLCLICKW;
+use windows_sys::Win32::UI::Controls::HDN_ENDTRACKW;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::ICC_LISTVIEW_CLASSES;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::InitCommonControlsEx;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVCF_FMT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVCF_TEXT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVCF_WIDTH;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVCFMT_LEFT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVCOLUMNW;
+use windows_sys::Win32::UI::Controls::LVIF_IMAGE;
+use windows_sys::Win32::UI::Controls::LVIF_TEXT;
+use windows_sys::Win32::UI::Controls::LVIR_BOUNDS;
+use windows_sys::Win32::UI::Controls::LVIS_FOCUSED;
+use windows_sys::Win32::UI::Controls::LVIS_SELECTED;
+use windows_sys::Win32::UI::Controls::LVITEMW;
+use windows_sys::Win32::UI::Controls::LVM_DELETEALLITEMS;
+use windows_sys::Win32::UI::Controls::LVM_DELETEITEM;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVM_ENSUREVISIBLE;
+use windows_sys::Win32::UI::Controls::LVM_GETCOLUMNWIDTH;
+use windows_sys::Win32::UI::Controls::LVM_GETHEADER;
+use windows_sys::Win32::UI::Controls::LVM_GETITEMCOUNT;
+use windows_sys::Win32::UI::Controls::LVM_GETITEMRECT;
+use windows_sys::Win32::UI::Controls::LVM_GETITEMSTATE;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVM_GETITEMTEXTW;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVM_GETTOOLTIPS;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVM_INSERTCOLUMNW;
+use windows_sys::Win32::UI::Controls::LVM_INSERTITEMW;
+use windows_sys::Win32::UI::Controls::LVM_SETCOLUMNWIDTH;
+use windows_sys::Win32::UI::Controls::LVM_SETEXTENDEDLISTVIEWSTYLE;
+use windows_sys::Win32::UI::Controls::LVM_SETIMAGELIST;
+use windows_sys::Win32::UI::Controls::LVM_SETITEMSTATE;
+use windows_sys::Win32::UI::Controls::LVM_SETITEMTEXTW;
+use windows_sys::Win32::UI::Controls::LVM_SETITEMW;
+use windows_sys::Win32::UI::Controls::LVN_GETINFOTIPW;
+use windows_sys::Win32::UI::Controls::LVS_EX_DOUBLEBUFFER;
+use windows_sys::Win32::UI::Controls::LVS_EX_FULLROWSELECT;
+use windows_sys::Win32::UI::Controls::LVS_EX_INFOTIP;
+use windows_sys::Win32::UI::Controls::LVS_EX_LABELTIP;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVS_NOSORTHEADER;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVS_REPORT;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::LVS_SHOWSELALWAYS;
+use windows_sys::Win32::UI::Controls::LVSIL_SMALL;
+use windows_sys::Win32::UI::Controls::NM_CUSTOMDRAW;
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::NM_SETFOCUS;
+use windows_sys::Win32::UI::Controls::NMCUSTOMDRAW;
+use windows_sys::Win32::UI::Controls::NMHDR;
+use windows_sys::Win32::UI::Controls::NMHEADERW;
+use windows_sys::Win32::UI::Controls::NMLVCUSTOMDRAW;
+use windows_sys::Win32::UI::Controls::NMLVGETINFOTIPW;
+#[cfg(test)]
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Shell::DefSubclassProc;
+use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SHFILEINFOW;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SHGFI_SMALLICON;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SHGFI_SYSICONINDEX;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SHGFI_USEFILEATTRIBUTES;
+#[cfg(test)]
+use windows_sys::Win32::UI::Shell::SHGetFileInfoW;
+use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::MSG;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SIF_PAGE;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SIF_RANGE;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER;
+use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage;
+
+#[cfg(test)]
+use super::initialize_safe_runtime_at;
+use super::{
+    AppState, ICON_POLL_TIMER_ID, IconShared, ProgrammaticListUpdateGuard, WM_APP_ICON_CONTINUE,
+    focused_index, icon_worker, measure_text, programmatic_list_update_active, selected_indices,
+    try_app_state, update_controls,
+};
+#[cfg(test)]
+use super::{
+    AppStateSlot, AppearanceResources, CallbackReclaimHold, CallbackState, LIST_ID,
+    NativeThemeTarget, OwnedFont, ReclaimDisposition, WM_APP_ICON_WAKE, WinRtGuard,
+    app_callback_is_busy, app_state_slot, application, apply_native_control_theme, compare_windows,
+    create_children, create_message_font, discard_deferred_messages, select_rows,
+    select_rows_with_focus, wide, worker,
+};
 use crate::preview::{PREVIEW_STATUS_LABELS, PreviewRowInput};
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -11,6 +317,20 @@ use windows_sys::Win32::UI::Controls::{
     I_IMAGENONE, LVM_GETTOPINDEX, LVM_SCROLL, STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN,
     STATE_SYSTEM_PRESSED,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCPAINT;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_NOTIFY;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETREDRAW;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_SIZE;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_CHILD;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetScrollBarInfo, GetScrollInfo, OBJID_HSCROLL, OBJID_VSCROLL, SB_HORZ,
     SCROLLBARINFO, SCROLLINFO, SIF_POS, WM_HSCROLL, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,

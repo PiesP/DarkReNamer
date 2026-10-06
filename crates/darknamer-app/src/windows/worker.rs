@@ -1,4 +1,88 @@
-use super::*;
+use super::{
+    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANDIDATE_JOURNAL_LEAF,
+    PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton, PreparedTaskDialogDisposition,
+    PreparedTaskDialogPolicy, PreparedTaskDialogSession, PreparedTaskDialogSpec,
+    PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE, WM_APP_APPLY_COMPLETE,
+    WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE, WM_APP_PLAN_COMPLETE,
+    WM_APP_PREFERENCES_WAKE, apply_cancel_control_state, begin_prepared_task_dialog,
+    cleanup_file_journal, clear_selection, compare_windows, finish_import_worker_result,
+    legacy_path, message, path_wide, proposal_mutation_error_korean, read_legacy_text_cancellable,
+    refresh, schedule_focus_target, schedule_icon_poll, select_rows, selected_indices,
+    take_prepared_task_dialog, try_app_state, update_controls,
+};
+use crate::APPLY_CONFIRM_BUTTON_ID;
+use crate::ActiveWorkerKind;
+use crate::ApplyConfirmationSummary;
+use crate::DIRECTORY_DIRECT_BUTTON_ID;
+use crate::DIRECTORY_RECURSE_BUTTON_ID;
+use crate::DestructivePromptChoice;
+use crate::DirectoryPromptChoice;
+use crate::PREVIEW_SYNC_BLOCK_MESSAGE;
+use crate::active_worker_kind;
+use crate::admission::AdmissionAdapter;
+use crate::admission::AdmissionMode;
+use crate::admission::AdmissionReport;
+use crate::admission::MAX_ADMITTED_SOURCES;
+use crate::admission::PathBudget;
+use crate::admission::PathBudgetReservation;
+use crate::admission::WindowsAdmissionAdapter;
+use crate::apply_confirmation_detail;
+use crate::apply_confirmation_examples;
+use crate::apply_confirmation_primary;
+use crate::apply_confirmation_scope;
+use crate::cancel_control_state;
+use crate::destructive_prompt_choice;
+use crate::directory_prompt_choice;
+use crate::preferences::AppearancePreferencesWriter;
+use crate::preferences::PreferencesWriter;
+use crate::preferences::lifecycle::PreferencePersistence;
+use crate::rename::CancellationToken;
+use crate::rename::ExecuteError;
+use crate::rename::ExecuteErrorKind;
+use crate::rename::ExecutionControl;
+use crate::rename::ExecutionOutcome;
+use crate::rename::ExecutionOutcomePresentation;
+use crate::rename::ExecutionPhase;
+use crate::rename::ExecutionProgress;
+use crate::rename::ExecutionReport;
+use crate::rename::FileJournal;
+use crate::rename::FileJournalError;
+use crate::rename::ModelRevision;
+use crate::rename::PlanAttemptError;
+use crate::rename::PlanError;
+use crate::rename::RenameBackend;
+use crate::rename::RenameExecutor;
+use crate::rename::RenamePlan;
+use crate::rename::RenamePlanner;
+use crate::rename::WindowsRenameBackend;
+use crate::rename::apply_execution_report;
+use crate::rename::build_plan_request;
+use crate::rename::execute_error_korean;
+use crate::rename::execution_outcome_korean;
+use crate::rename::execution_outcome_presentation;
+use crate::rename::plan_error_korean;
+use crate::rename::preflight_plan_cancellable;
+use darknamer_core::LegacyText;
+use std::io;
+use std::os::windows::io::AsRawHandle;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::sync_channel;
+use std::thread;
+use std::thread::JoinHandle;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
+use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
+
 use crate::apply_progress::ApplyProgress;
 
 pub(super) struct ApplyWorker {

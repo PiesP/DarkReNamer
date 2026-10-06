@@ -1,4 +1,26 @@
-use super::*;
+use super::{
+    ACTIVE_JOURNAL_LEAF, AppState, CANDIDATE_JOURNAL_LEAF, JournalRole, PreparedFileDialogKind,
+    PreparedFileDialogSelection, PreparedRecoveryExportDirectory, PreparedTaskDialogButton,
+    PreparedTaskDialogDisposition, PreparedTaskDialogPolicy, PreparedTaskDialogSession,
+    PreparedTaskDialogSpec, StartupJournalBlock, TaskDialogButtonSpec, TaskDialogSpec,
+    begin_prepared_task_dialog, cleanup_file_journal, message, queue_deferred_message,
+    take_prepared_task_dialog, task_dialog, try_app_state, try_finish_window_close,
+    update_controls,
+};
+use crate::DISCARD_CONFIRM_BUTTON_ID;
+use crate::DestructivePromptChoice;
+use crate::RECOVER_CONFIRM_BUTTON_ID;
+use crate::destructive_prompt_choice;
+use crate::rename::FileJournal;
+use crate::rename::JournalOpenFailure;
+use crate::rename::RecoveryOutcome;
+use crate::rename::RenameRecovery;
+use crate::rename::WindowsRenameBackend;
+use std::io;
+use std::path::PathBuf;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE;
 
 #[derive(Debug)]
 pub(super) struct ActiveRecoveryPresentation {
