@@ -694,6 +694,27 @@ def _v2_process_rows(value: object, sid: str, session: int, label: str) -> dict[
     return rows
 
 
+def _v2_matches_owned_lifetime(row: dict, starts: dict[int, list[int]]) -> bool:
+    """Match a live PID to an owned lifetime at CIM's microsecond precision."""
+    created = row["creation_time_utc"]
+    require(type(created) is str and _WINDOWS_UTC_TIMESTAMP.fullmatch(created) is not None and
+            created.endswith("0Z"), "V2 process creation time has invalid precision.")
+    try:
+        stamp = datetime.strptime(created[:-2], "%Y-%m-%dT%H:%M:%S.%f")
+    except ValueError as error:
+        raise EvidenceError("V2 process creation time is invalid.") from error
+    elapsed = stamp - datetime(1, 1, 1)
+    ticks = (elapsed.days * 86_400 + elapsed.seconds) * 10_000_000 + elapsed.microseconds * 10
+    for start in starts.get(row["pid"], ()):
+        if ticks <= start <= ticks + 9:
+            return True
+    for start in starts.get(row["parent_pid"], ()):
+        # A parent starting in the child's observed microsecond may be older.
+        if ticks >= start - start % 10:
+            return True
+    return False
+
+
 def _v2_task_rows(value: object, label: str) -> dict[str, str]:
     require(type(value) is list and len(value) <= 20_000, f"{label} task inventory is unavailable or oversized.")
     rows: dict[str, str] = {}
@@ -945,7 +966,11 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         require(rescue_lifetime not in owned_lifetimes,
                 "V2 rescue task repeats an owned process lifetime.")
         owned_lifetimes.add(rescue_lifetime)
-    owned_pids = {pid for pid, _ in owned_lifetimes}
+    owned_starts: dict[int, list[int]] = {}
+    for pid, start in owned_lifetimes:
+        require(start <= 3_155_378_975_999_999_999,
+                "V2 owned process creation time exceeds the UTC calendar range.")
+        owned_starts.setdefault(pid, []).append(start)
     receipt = require_exact_keys(host["runner_process_natural_exit"],
                                  {"schema_version", "status"}, "V2 ambient-process policy")
     require(type(receipt["schema_version"]) is int and receipt["schema_version"] == 2 and
@@ -953,7 +978,7 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
             "V2 cleanup reused a strict-v1 ambient process receipt.")
     for row in all_rows:
         scope = (row["executable_path"] + " " + row["command_line"]).casefold()
-        require(row["pid"] not in owned_pids and row["parent_pid"] not in owned_pids and
+        require(not _v2_matches_owned_lifetime(row, owned_starts) and
                 name.casefold() not in scope and not any(path in scope for path in paths),
                 "V2 process is owned or has an unresolved protected execution scope.")
     return evidence

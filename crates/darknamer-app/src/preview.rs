@@ -22,37 +22,12 @@ pub(crate) struct PreviewCountCache {
     changed: usize,
 }
 
-pub(crate) trait PreviewChangeProjection {
-    fn preview_change(self) -> PlannedChangeKind;
-}
-
-impl PreviewChangeProjection for PlannedChangeKind {
-    fn preview_change(self) -> PlannedChangeKind {
-        self
-    }
-}
-
-#[cfg(test)]
-impl<T: PartialEq + ?Sized> PreviewChangeProjection for (&T, &T) {
-    fn preview_change(self) -> PlannedChangeKind {
-        if self.0 == self.1 {
-            PlannedChangeKind::None
-        } else {
-            PlannedChangeKind::Rename
-        }
-    }
-}
-
 impl PreviewCountCache {
     /// Replaces the cache from the authoritative model projection.
-    pub(crate) fn refresh<T: PreviewChangeProjection>(
-        &mut self,
-        changes: impl IntoIterator<Item = T>,
-    ) {
+    pub(crate) fn refresh(&mut self, changes: impl IntoIterator<Item = PlannedChangeKind>) {
         let mut total = 0_usize;
         let mut changed = 0_usize;
         for change in changes {
-            let change = change.preview_change();
             total = total.saturating_add(1);
             changed = changed.saturating_add(usize::from(change.is_changed()));
         }
@@ -105,6 +80,23 @@ pub(crate) enum PreviewRowIssue {
     DuplicateDestination,
 }
 
+const RENAME_STATUS: &str = "이름 변경 예정";
+const MOVE_STATUS: &str = "이동 예정";
+const MOVE_AND_RENAME_STATUS: &str = "이동·이름 변경 예정";
+const EMPTY_STEM_STATUS: &str = "주의: 이름 본체";
+const INVALID_NAME_STATUS: &str = "차단: 이름";
+const DUPLICATE_DESTINATION_STATUS: &str = "차단: 충돌";
+
+/// Every nonempty row label measured by the native Status column.
+pub(crate) const PREVIEW_STATUS_LABELS: [&str; 6] = [
+    RENAME_STATUS,
+    MOVE_STATUS,
+    MOVE_AND_RENAME_STATUS,
+    EMPTY_STEM_STATUS,
+    INVALID_NAME_STATUS,
+    DUPLICATE_DESTINATION_STATUS,
+];
+
 /// Short, non-authorizing text rendered in the fixed native Status column.
 #[must_use]
 pub(crate) const fn preview_status_label(
@@ -112,15 +104,15 @@ pub(crate) const fn preview_status_label(
     change: PlannedChangeKind,
 ) -> &'static str {
     match issue {
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => "이름 변경 예정",
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => "이동 예정",
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => RENAME_STATUS,
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => MOVE_STATUS,
         PreviewRowIssue::None if matches!(change, PlannedChangeKind::MoveAndRename) => {
-            "이동·이름 변경 예정"
+            MOVE_AND_RENAME_STATUS
         }
         PreviewRowIssue::None => "",
-        PreviewRowIssue::EmptyStem => "주의: 이름 본체",
-        PreviewRowIssue::InvalidName(_) => "차단: 이름",
-        PreviewRowIssue::DuplicateDestination => "차단: 충돌",
+        PreviewRowIssue::EmptyStem => EMPTY_STEM_STATUS,
+        PreviewRowIssue::InvalidName(_) => INVALID_NAME_STATUS,
+        PreviewRowIssue::DuplicateDestination => DUPLICATE_DESTINATION_STATUS,
     }
 }
 
@@ -201,58 +193,14 @@ struct CachedPreviewRow {
     change: PlannedChangeKind,
 }
 
-pub(crate) trait PreviewRowProjection<'a> {
-    fn preview_row(
-        self,
-    ) -> (
-        &'a LegacyText,
-        &'a LegacyText,
-        &'a LegacyText,
-        bool,
-        PlannedChangeKind,
-    );
-}
-
-impl<'a> PreviewRowProjection<'a>
-    for (
-        &'a LegacyText,
-        &'a LegacyText,
-        &'a LegacyText,
-        bool,
-        PlannedChangeKind,
-    )
-{
-    fn preview_row(
-        self,
-    ) -> (
-        &'a LegacyText,
-        &'a LegacyText,
-        &'a LegacyText,
-        bool,
-        PlannedChangeKind,
-    ) {
-        self
-    }
-}
-
-#[cfg(test)]
-impl<'a> PreviewRowProjection<'a> for (&'a LegacyText, &'a LegacyText, &'a LegacyText, bool) {
-    fn preview_row(
-        self,
-    ) -> (
-        &'a LegacyText,
-        &'a LegacyText,
-        &'a LegacyText,
-        bool,
-        PlannedChangeKind,
-    ) {
-        let change = if self.1 == self.2 {
-            PlannedChangeKind::None
-        } else {
-            PlannedChangeKind::Rename
-        };
-        (self.0, self.1, self.2, self.3, change)
-    }
+/// Borrowed model input; movement semantics come from the authoritative model.
+#[derive(Clone, Copy)]
+pub(crate) struct PreviewRowInput<'a> {
+    pub(crate) parent: &'a LegacyText,
+    pub(crate) current: &'a LegacyText,
+    pub(crate) proposed: &'a LegacyText,
+    pub(crate) is_directory: bool,
+    pub(crate) change: PlannedChangeKind,
 }
 
 /// Exact preview-cache effects of one proposed-name edit.
@@ -276,20 +224,25 @@ pub(crate) struct PreviewIssueCache {
 }
 
 impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F, R>(
+    pub(crate) fn refresh_by<'a, F>(
         &mut self,
-        rows: impl IntoIterator<Item = R>,
+        rows: impl IntoIterator<Item = PreviewRowInput<'a>>,
         mut destination_key: F,
     ) where
         F: FnMut(&LegacyText, &LegacyText) -> PathKey,
-        R: PreviewRowProjection<'a>,
     {
         let mut next = Self {
             initialized: true,
             ..Self::default()
         };
-        for row_projection in rows {
-            let (parent, current, proposed, is_directory, change) = row_projection.preview_row();
+        for PreviewRowInput {
+            parent,
+            current,
+            proposed,
+            is_directory,
+            change,
+        } in rows
+        {
             let row = next.rows.len();
             let base_issue = preview_base_issue(current, proposed, is_directory, change);
             let computed_key = Rc::new(destination_key(parent, proposed));
@@ -339,21 +292,26 @@ impl PreviewIssueCache {
     /// The destination callback is invoked exactly once after the cache/model
     /// boundary has been validated. `None` requests a full-refresh fallback and
     /// leaves the cache unchanged.
-    pub(crate) fn refresh_one_by<'a, F, R>(
+    pub(crate) fn refresh_one_by<F>(
         &mut self,
         model_len: usize,
         row: usize,
-        values: R,
+        values: PreviewRowInput<'_>,
         mut destination_key: F,
     ) -> Option<PreviewIssueUpdate>
     where
         F: FnMut(&LegacyText, &LegacyText) -> PathKey,
-        R: PreviewRowProjection<'a>,
     {
         if !self.initialized || self.rows.len() != model_len || row >= model_len {
             return None;
         }
-        let (parent, current, proposed, is_directory, current_change) = values.preview_row();
+        let PreviewRowInput {
+            parent,
+            current,
+            proposed,
+            is_directory,
+            change: current_change,
+        } = values;
         let old_key = Rc::clone(&self.rows[row].destination_key);
         let old_group = self
             .destination_rows
@@ -590,6 +548,29 @@ fn preview_name_has_empty_stem(name: &LegacyText, is_directory: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn test_change<T: PartialEq + ?Sized>(current: &T, proposed: &T) -> PlannedChangeKind {
+        if current == proposed {
+            PlannedChangeKind::None
+        } else {
+            PlannedChangeKind::Rename
+        }
+    }
+
+    fn test_row_input<'a>(
+        parent: &'a LegacyText,
+        current: &'a LegacyText,
+        proposed: &'a LegacyText,
+        is_directory: bool,
+    ) -> PreviewRowInput<'a> {
+        PreviewRowInput {
+            parent,
+            current,
+            proposed,
+            is_directory,
+            change: test_change(current, proposed),
+        }
+    }
+
     #[test]
     fn details_preserve_full_korean_source_and_moved_destination() {
         let source = format!(r"C:\{}한글😀.txt", "긴경로\\".repeat(40));
@@ -649,8 +630,20 @@ mod tests {
         let mut cache = PreviewIssueCache::default();
         cache.refresh_by(
             [
-                (&target, &current, &current, false, PlannedChangeKind::Move),
-                (&target, &current, &current, false, PlannedChangeKind::Move),
+                PreviewRowInput {
+                    parent: &target,
+                    current: &current,
+                    proposed: &current,
+                    is_directory: false,
+                    change: PlannedChangeKind::Move,
+                },
+                PreviewRowInput {
+                    parent: &target,
+                    current: &current,
+                    proposed: &current,
+                    is_directory: false,
+                    change: PlannedChangeKind::Move,
+                },
             ],
             preview_test_destination_key,
         );
@@ -665,6 +658,67 @@ mod tests {
     }
 
     #[test]
+    fn incremental_preview_preserves_explicit_movement_kinds() {
+        let work = LegacyText::from(r"C:\work");
+        let target = LegacyText::from(r"C:\target");
+        let a = LegacyText::from("a.txt");
+        let b = LegacyText::from("b.txt");
+        let renamed = LegacyText::from("renamed.txt");
+        let mut rows = [
+            PreviewRowInput {
+                parent: &work,
+                current: &a,
+                proposed: &a,
+                is_directory: false,
+                change: PlannedChangeKind::None,
+            },
+            PreviewRowInput {
+                parent: &target,
+                current: &b,
+                proposed: &b,
+                is_directory: false,
+                change: PlannedChangeKind::None,
+            },
+        ];
+        let mut incremental = PreviewIssueCache::default();
+        incremental.refresh_by(rows, preview_test_destination_key);
+        for (parent, proposed, change, label) in [
+            (&work, &renamed, PlannedChangeKind::Rename, "이름 변경 예정"),
+            (
+                &target,
+                &renamed,
+                PlannedChangeKind::MoveAndRename,
+                "이동·이름 변경 예정",
+            ),
+            (&target, &a, PlannedChangeKind::Move, "이동 예정"),
+            (&target, &b, PlannedChangeKind::MoveAndRename, "차단: 충돌"),
+            (&work, &a, PlannedChangeKind::None, ""),
+        ] {
+            rows[0] = PreviewRowInput {
+                parent,
+                proposed,
+                change,
+                ..rows[0]
+            };
+            assert!(
+                incremental
+                    .refresh_one_by(2, 0, rows[0], preview_test_destination_key)
+                    .is_some()
+            );
+            let mut full = PreviewIssueCache::default();
+            full.refresh_by(rows, preview_test_destination_key);
+            assert_eq!(incremental, full);
+            assert_eq!(preview_status_label(incremental.issue(0), change), label);
+            let mut counts = PreviewCountCache::default();
+            counts.refresh(rows.map(|row| row.change));
+            assert_eq!(
+                counts.with_selected(0).changed,
+                usize::from(change.is_changed())
+            );
+        }
+    }
+
+    #[test]
     fn preview_count_cache_updates_only_at_the_authoritative_refresh_boundary() {
         let mut names = [
             ("photo.jpg", "photo.jpg"),
@@ -672,7 +726,11 @@ mod tests {
             ("한글.txt", "한글-01.txt"),
         ];
         let mut cache = PreviewCountCache::default();
-        cache.refresh(names.iter().copied());
+        cache.refresh(
+            names
+                .iter()
+                .map(|(current, proposed)| test_change(current, proposed)),
+        );
 
         assert_eq!(
             cache.with_selected(2),
@@ -685,7 +743,11 @@ mod tests {
 
         names[1].1 = "photo.jpg";
         assert_eq!(cache.with_selected(1).changed, 2);
-        cache.refresh(names.iter().copied());
+        cache.refresh(
+            names
+                .iter()
+                .map(|(current, proposed)| test_change(current, proposed)),
+        );
         assert_eq!(
             cache.with_selected(1),
             PreviewCounts {
@@ -702,7 +764,7 @@ mod tests {
         cache.refresh(
             [(1, 1), (2, 3), (4, 4)]
                 .iter()
-                .map(|(current, proposed)| (current, proposed)),
+                .map(|(current, proposed)| test_change(current, proposed)),
         );
 
         assert!(cache.refresh_one(3, true, false));
@@ -744,10 +806,20 @@ mod tests {
         is_directory: bool,
     }
 
+    impl PreviewTestRow {
+        fn input(&self) -> PreviewRowInput<'_> {
+            test_row_input(
+                &self.parent,
+                &self.current,
+                &self.proposed,
+                self.is_directory,
+            )
+        }
+    }
+
     fn refresh_test_rows(cache: &mut PreviewIssueCache, rows: &[PreviewTestRow]) {
         cache.refresh_by(
-            rows.iter()
-                .map(|row| (&row.parent, &row.current, &row.proposed, row.is_directory)),
+            rows.iter().map(PreviewTestRow::input),
             preview_test_destination_key,
         );
     }
@@ -847,12 +919,7 @@ mod tests {
             let update = incremental.refresh_one_by(
                 rows.len(),
                 edited_row,
-                (
-                    &rows[edited_row].parent,
-                    &rows[edited_row].current,
-                    &rows[edited_row].proposed,
-                    rows[edited_row].is_directory,
-                ),
+                rows[edited_row].input(),
                 |parent, leaf| {
                     calls.set(calls.get() + 1);
                     preview_test_destination_key(parent, leaf)
@@ -910,7 +977,12 @@ mod tests {
         let before_uninitialized = uninitialized.clone();
         assert!(
             uninitialized
-                .refresh_one_by(1, 0, (&parent, &current, &proposed, false), key)
+                .refresh_one_by(
+                    1,
+                    0,
+                    test_row_input(&parent, &current, &proposed, false),
+                    key
+                )
                 .is_none()
         );
         assert_eq!(uninitialized, before_uninitialized);
@@ -918,14 +990,19 @@ mod tests {
 
         let mut initialized = PreviewIssueCache::default();
         initialized.refresh_by(
-            [(&parent, &current, &current, false)],
+            [test_row_input(&parent, &current, &current, false)],
             preview_test_destination_key,
         );
         for (model_len, row) in [(2, 0), (1, 1)] {
             let before = initialized.clone();
             assert!(
                 initialized
-                    .refresh_one_by(model_len, row, (&parent, &current, &proposed, false), key,)
+                    .refresh_one_by(
+                        model_len,
+                        row,
+                        test_row_input(&parent, &current, &proposed, false),
+                        key,
+                    )
                     .is_none()
             );
             assert_eq!(initialized, before);
@@ -948,8 +1025,8 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &current_a, &proposed_b, false),
-                (&parent, &current_b, &current_b, false),
+                test_row_input(&parent, &current_a, &proposed_b, false),
+                test_row_input(&parent, &current_b, &current_b, false),
             ],
             |destination_parent, destination_leaf| {
                 calls.set(calls.get().saturating_add(1));
@@ -970,6 +1047,17 @@ mod tests {
     fn native_preview_status_labels_are_short_korean_text_without_filename_prefixes() {
         use darknamer_core::WindowsLeafNameError;
 
+        assert_eq!(
+            PREVIEW_STATUS_LABELS,
+            [
+                "이름 변경 예정",
+                "이동 예정",
+                "이동·이름 변경 예정",
+                "주의: 이름 본체",
+                "차단: 이름",
+                "차단: 충돌",
+            ]
+        );
         assert_eq!(
             preview_status_label(PreviewRowIssue::None, PlannedChangeKind::None),
             ""
@@ -1018,8 +1106,8 @@ mod tests {
         let mut cache = PreviewIssueCache::default();
         cache.refresh_by(
             [
-                (&parent, &current_a, &proposed_a, false),
-                (&parent, &current_b, &proposed_b, false),
+                test_row_input(&parent, &current_a, &proposed_a, false),
+                test_row_input(&parent, &current_b, &proposed_b, false),
             ],
             preview_test_destination_key,
         );
@@ -1033,8 +1121,8 @@ mod tests {
         proposed_b = proposed_a.clone();
         cache.refresh_by(
             [
-                (&parent, &current_a, &proposed_a, false),
-                (&parent, &current_b, &proposed_b, false),
+                test_row_input(&parent, &current_a, &proposed_a, false),
+                test_row_input(&parent, &current_b, &proposed_b, false),
             ],
             preview_test_destination_key,
         );
@@ -1053,8 +1141,8 @@ mod tests {
         proposed_b = LegacyText::from("second.txt");
         cache.refresh_by(
             [
-                (&parent, &current_a, &proposed_a, false),
-                (&parent, &current_b, &proposed_b, false),
+                test_row_input(&parent, &current_a, &proposed_a, false),
+                test_row_input(&parent, &current_b, &proposed_b, false),
             ],
             preview_test_destination_key,
         );
@@ -1090,7 +1178,7 @@ mod tests {
         cache.refresh_by(
             names
                 .iter()
-                .map(|(current, proposed)| (&parent, current, proposed, false)),
+                .map(|(current, proposed)| test_row_input(&parent, current, proposed, false)),
             |destination_parent, destination_leaf| {
                 calls.set(calls.get().saturating_add(1));
                 preview_test_destination_key(destination_parent, destination_leaf)
@@ -1122,7 +1210,7 @@ mod tests {
         cache.refresh_by(
             names
                 .iter()
-                .map(|(current, proposed)| (&parent, current, proposed, false)),
+                .map(|(current, proposed)| test_row_input(&parent, current, proposed, false)),
             preview_test_destination_key,
         );
         let elapsed = started.elapsed();
@@ -1143,8 +1231,8 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &current_a, &proposed_b, false),
-                (&parent, &current_b, &current_b, false),
+                test_row_input(&parent, &current_a, &proposed_b, false),
+                test_row_input(&parent, &current_b, &current_b, false),
             ],
             preview_test_destination_key,
         );
@@ -1176,24 +1264,27 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &a, &b, false),
-                (&parent, &b, &c, false),
-                (&parent, &c, &d, false),
+                test_row_input(&parent, &a, &b, false),
+                test_row_input(&parent, &b, &c, false),
+                test_row_input(&parent, &c, &d, false),
             ],
             preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a rename chain remains schedulable");
 
         cache.refresh_by(
-            [(&parent, &a, &b, false), (&parent, &b, &a, false)],
+            [
+                test_row_input(&parent, &a, &b, false),
+                test_row_input(&parent, &b, &a, false),
+            ],
             preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a swap remains schedulable");
 
         cache.refresh_by(
             [
-                (&parent, &a, &same, false),
-                (&other_parent, &b, &same, false),
+                test_row_input(&parent, &a, &same, false),
+                test_row_input(&other_parent, &b, &same, false),
             ],
             preview_test_destination_key,
         );
@@ -1203,7 +1294,7 @@ mod tests {
         );
 
         cache.refresh_by(
-            [(&parent, &a, &upper_a, false)],
+            [test_row_input(&parent, &a, &upper_a, false)],
             preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a case-only rename remains valid");
@@ -1224,9 +1315,9 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &current_a, &empty, false),
-                (&parent, &current_b, &reserved, false),
-                (&parent, &current_c, &forbidden, false),
+                test_row_input(&parent, &current_a, &empty, false),
+                test_row_input(&parent, &current_b, &reserved, false),
+                test_row_input(&parent, &current_c, &forbidden, false),
             ],
             preview_test_destination_key,
         );
@@ -1257,7 +1348,7 @@ mod tests {
 
         let trailing = LegacyText::from("trailing.");
         cache.refresh_by(
-            [(&parent, &current_a, &trailing, false)],
+            [test_row_input(&parent, &current_a, &trailing, false)],
             preview_test_destination_key,
         );
         assert_eq!(
@@ -1282,7 +1373,7 @@ mod tests {
         let mut cache = PreviewIssueCache::default();
 
         cache.refresh_by(
-            [(&parent, &current_a, &dot_jpg, false)],
+            [test_row_input(&parent, &current_a, &dot_jpg, false)],
             preview_test_destination_key,
         );
         assert_eq!(cache.issue(0), PreviewRowIssue::EmptyStem);
@@ -1290,8 +1381,8 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &current_a, &dot_jpg, false),
-                (&parent, &current_b, &dot_jpg, false),
+                test_row_input(&parent, &current_a, &dot_jpg, false),
+                test_row_input(&parent, &current_b, &dot_jpg, false),
             ],
             preview_test_destination_key,
         );
@@ -1299,7 +1390,7 @@ mod tests {
         assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
 
         cache.refresh_by(
-            [(&parent, &dot_env, &dot_env, false)],
+            [test_row_input(&parent, &dot_env, &dot_env, false)],
             preview_test_destination_key,
         );
         assert_eq!(cache.issue(0), PreviewRowIssue::None);
@@ -1322,10 +1413,10 @@ mod tests {
 
         cache.refresh_by(
             [
-                (&parent, &invalid_current, &empty, false),
-                (&parent, &duplicate_current_a, &duplicate, false),
-                (&parent, &duplicate_current_b, &duplicate, false),
-                (&parent, &warning_current, &warning, false),
+                test_row_input(&parent, &invalid_current, &empty, false),
+                test_row_input(&parent, &duplicate_current_a, &duplicate, false),
+                test_row_input(&parent, &duplicate_current_b, &duplicate, false),
+                test_row_input(&parent, &warning_current, &warning, false),
             ],
             preview_test_destination_key,
         );

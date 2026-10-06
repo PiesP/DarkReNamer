@@ -233,13 +233,15 @@ mod tests {
             let _released = wait.recv_timeout(Duration::from_secs(5));
         });
         let writer = PreferencesWriter {
-            queue: Arc::new((
-                Mutex::new(super::super::PreferenceQueue::default()),
-                Condvar::new(),
-            )),
-            events,
-            handle: Some(handle),
-            next_generation: 0,
+            writer: super::super::CoalescingWriter {
+                queue: Arc::new((
+                    Mutex::new(super::super::PreferenceQueue::default()),
+                    Condvar::new(),
+                )),
+                events,
+                handle: Some(handle),
+                next_generation: 0,
+            },
         };
         (writer, sender, release)
     }
@@ -255,13 +257,15 @@ mod tests {
             let _released = wait.recv_timeout(Duration::from_secs(5));
         });
         let writer = AppearancePreferencesWriter {
-            queue: Arc::new((
-                Mutex::new(super::super::AppearancePreferenceQueue::default()),
-                Condvar::new(),
-            )),
-            events,
-            handle: Some(handle),
-            next_generation: 0,
+            writer: super::super::CoalescingWriter {
+                queue: Arc::new((
+                    Mutex::new(super::super::PreferenceQueue::default()),
+                    Condvar::new(),
+                )),
+                events,
+                handle: Some(handle),
+                next_generation: 0,
+            },
         };
         (writer, sender, release)
     }

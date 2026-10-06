@@ -660,6 +660,66 @@ class V2OwnedResourceTests(unittest.TestCase):
         verify_controller_cleanup(cleanup, profile_id="vm-automated-v2-owned-resources",
                                   profile_sha256=V2_PROFILE_SHA256)
 
+    def cleanup_with_reused_parent(self, *, owned_start="639268888530000000",
+                                   child_created="2025-10-05T13:31:43.0000000Z"):
+        seed = clean_controller_cleanup_v2()
+        job = deepcopy(seed["owned_resource_evidence"]["process_job_cleanup"][0])
+        job["pid"] = 9432
+        job["process_start_time_utc_ticks"] = owned_start
+        ambient = deepcopy(seed["owned_resource_evidence"]["process_snapshots"]["after_delete"]["processes"])
+        ambient[0].update(identity="3636|" + child_created, pid=3636,
+                          creation_time_utc=child_created, parent_pid=9432,
+                          executable_path=r"C:\Windows\System32\OneDrive.exe",
+                          command_line=r"C:\Windows\System32\OneDrive.exe -Embedding")
+        return clean_controller_cleanup_v2(process_jobs=[job], ambient_processes=ambient)
+
+    def change_first_ambient(self, cleanup, **fields):
+        evidence = cleanup["owned_resource_evidence"]
+        for phase, host_key in (
+                ("before", "unexpected_runner_processes"),
+                ("after_intervention", "unexpected_runner_processes_after_intervention"),
+                ("after_delete", "unexpected_runner_processes_after_delete")):
+            row = evidence["process_snapshots"][phase]["processes"][0]
+            row.update(fields)
+            cleanup[host_key][0] = deepcopy(row)
+
+    def test_historical_child_with_reused_parent_pid_is_ambient(self):
+        self.verify(self.cleanup_with_reused_parent())
+
+    def test_owned_parent_boundary_and_invalid_creation_time_fail_closed(self):
+        for label, start, created in (
+                ("older parent", "639262368000000000", "2026-09-30T01:02:03.0000000Z"),
+                ("same microsecond", "639268888530000008", "2026-10-06T13:07:33.0000000Z"),
+                ("invalid date", "639268888530000000", "2026-13-06T13:07:33.0000000Z"),
+                ("unexpected precision", "639268888530000000", "2026-10-06T13:07:33.0000001Z")):
+            with self.subTest(label=label), self.assertRaises(EvidenceError):
+                self.verify(self.cleanup_with_reused_parent(owned_start=start, child_created=created))
+        # The next microsecond proves the numeric parent PID belongs to a later lifetime.
+        self.verify(self.cleanup_with_reused_parent(
+            owned_start="639268888530000010",
+            child_created="2026-10-06T13:07:33.0000000Z"))
+
+    def test_owned_pid_lifetime_and_protected_scope_remain_rejected(self):
+        owned = self.cleanup_with_reused_parent(
+            owned_start="639268888530000008",
+            child_created="2026-10-06T13:07:33.0000000Z")
+        self.change_first_ambient(owned, pid=9432,
+                                  identity="9432|2026-10-06T13:07:33.0000000Z", parent_pid=100)
+        with self.assertRaises(EvidenceError):
+            self.verify(owned)
+        # A different lifetime with the same PID is not the declared owned process.
+        reused = deepcopy(owned)
+        self.change_first_ambient(reused,
+                                  creation_time_utc="2026-10-06T13:07:34.0000000Z",
+                                  identity="9432|2026-10-06T13:07:34.0000000Z")
+        self.verify(reused)
+        protected = self.cleanup_with_reused_parent()
+        root = protected["owned_resource_evidence"]["root_records"]["guest"]["path"]
+        self.change_first_ambient(protected,
+                                  command_line=r"C:\Windows\System32\OneDrive.exe -Embedding " + root)
+        with self.assertRaises(EvidenceError):
+            self.verify(protected)
+
     def test_multiple_new_ambient_processes_can_remain_live(self):
         self.verify(clean_controller_cleanup_v2())
 

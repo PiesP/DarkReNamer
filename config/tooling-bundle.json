@@ -267,7 +267,7 @@
       "bundle": "tooling-contracts-platform.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.platform",
-      "sha256": "00c3fb630b58f1ab269e721ddde4599775023e277bff612ff5df3fd641dc269b",
+      "sha256": "31025eb833c7542c530abf1df6b6a9d1317ecc6ecdfe3a2fc7978bfd212f51fa",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -284,7 +284,7 @@
       "bundle": "tooling-contracts-owned-cleanup.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.owned_cleanup",
-      "sha256": "f28516d60719abc633e79bca4b59829152e96b00c2b4b1bc3fadcbe26a3e8a53",
+      "sha256": "23d4e8da6d1c958664aa30028107b0a0c03deb6170174519dae9274646a2d952",
       "dependencies": [
         "package-root",
         "package-contracts",
