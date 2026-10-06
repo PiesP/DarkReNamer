@@ -37,9 +37,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{
-    APPLY, AppearanceResources, CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
-    SeparatorSurface, calculate_command_rail_separator_layout, command_ui_spec,
-    draw_owner_separator, wide,
+    APPLY, AppearanceResources, CommandId, CommandPlacement, CommandRailSpec, CommandUiSpec,
+    LayoutRect, SeparatorSurface, calculate_command_rail_separator_layout, draw_owner_separator,
+    wide,
 };
 
 const RAIL_HOVER_SUBCLASS_ID: usize = 0xD4B6;
@@ -198,7 +198,6 @@ impl Drop for OwnedTooltip {
 /// Owns the native controls that render one side of the command rail.
 pub(super) struct CommandRail {
     parent: HWND,
-    spec: &'static CommandRailSpec,
     buttons: Vec<CommandButton>,
     separators: Vec<HWND>,
     rail_visible: Cell<bool>,
@@ -210,31 +209,34 @@ pub(super) struct CommandRail {
 
 impl CommandRail {
     pub(super) fn create(parent: HWND, spec: &'static CommandRailSpec) -> io::Result<Self> {
+        let commands = spec.ordered_command_specs();
+        let group_count = usize::from(!commands.is_empty())
+            + commands
+                .windows(2)
+                .filter(|pair| pair[0].rail.map(|p| p.group) != pair[1].rail.map(|p| p.group))
+                .count();
         let tooltip = create_tooltip(parent)?;
         let mut rail = Self {
             parent,
-            spec,
-            buttons: Vec::with_capacity(spec.command_count()),
-            separators: Vec::with_capacity(spec.group_count().saturating_sub(1)),
+            buttons: Vec::with_capacity(commands.len()),
+            separators: Vec::with_capacity(group_count.saturating_sub(1)),
             rail_visible: Cell::new(true),
             separators_requested: Cell::new(true),
             apply_readiness_requested: Cell::new(false),
             tooltip,
-            tooltip_texts: Vec::with_capacity(spec.command_count()),
+            tooltip_texts: Vec::with_capacity(commands.len()),
         };
 
-        if let Err(error) = rail.populate() {
+        if let Err(error) = rail.populate(&commands, group_count) {
             rail.destroy_partial();
             return Err(error);
         }
         Ok(rail)
     }
 
-    fn populate(&mut self) -> io::Result<()> {
-        for command in self.spec.commands() {
-            let command_spec = command_ui_spec(command)
-                .filter(|spec| spec.rail.is_some())
-                .ok_or_else(|| io::Error::other("command rail label is missing"))?;
+    fn populate(&mut self, commands: &[&CommandUiSpec], group_count: usize) -> io::Result<()> {
+        for command_spec in commands {
+            let command = command_spec.id;
             let label = wide(command_spec.menu_label);
             // A standard BUTTON exposes the full menu command as its accessible
             // name. Owner-draw painting resolves the shorter rail label from
@@ -276,7 +278,7 @@ impl CommandRail {
             install_rail_hover_subclass(button)?;
             self.add_tooltip(button, command_spec.tooltip_label)?;
         }
-        for _ in 1..self.spec.group_count() {
+        for _ in 1..group_count {
             // An owner-drawn STATIC separator is decorative and deliberately
             // omits WS_TABSTOP and an identifier. Owning the complete two-DIP
             // paint avoids the system etched renderer's light background in a

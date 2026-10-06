@@ -156,7 +156,7 @@ impl CommandRailSpec {
     /// Returns the total number of visible commands in this rail.
     #[must_use]
     pub fn command_count(self) -> usize {
-        self.command_specs().count()
+        self.unordered_command_specs().count()
     }
 
     /// Iterates over visible command identifiers in display order.
@@ -166,29 +166,37 @@ impl CommandRailSpec {
 
     /// Iterates over the catalog entries visible on this rail.
     pub fn command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
-        let mut specs = COMMAND_UI_SPECS
+        self.ordered_command_specs().into_iter()
+    }
+
+    fn unordered_command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
+        COMMAND_UI_SPECS
             .iter()
             .chain(core::iter::once(&DELETE_SELECTED_UI_SPEC))
             .filter(move |spec| {
                 spec.rail
                     .is_some_and(|placement| placement.side == self.side)
             })
-            .collect::<Vec<_>>();
+    }
+
+    fn ordered_command_specs(self) -> Vec<&'static CommandUiSpec> {
+        let mut specs = self.unordered_command_specs().collect::<Vec<_>>();
         specs.sort_by_key(|spec| {
             spec.rail.map_or((u8::MAX, u8::MAX), |placement| {
                 (placement.group, placement.order)
             })
         });
-        specs.into_iter()
+        specs
     }
 
     fn group_count(self) -> usize {
-        self.command_specs()
-            .fold((None, 0), |(previous, count), spec| {
-                let group = spec.rail.map(|placement| placement.group);
-                (group, count + usize::from(group != previous))
-            })
-            .1
+        let mut groups = [false; 256];
+        for spec in self.unordered_command_specs() {
+            if let Some(placement) = spec.rail {
+                groups[usize::from(placement.group)] = true;
+            }
+        }
+        groups.into_iter().filter(|present| *present).count()
     }
 }
 
