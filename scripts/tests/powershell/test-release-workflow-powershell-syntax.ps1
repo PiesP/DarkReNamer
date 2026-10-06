@@ -941,6 +941,26 @@ $candidateSbom = Assert-OneCommand `
         '-SerialNumber' = '$cycloneDxSerial'
     }) `
     -Message 'Candidate workflow must prepare the selected executable SBOM.'
+$candidateDebugArchive = Assert-OneCommand `
+    -Commands $candidateCommands `
+    -Name 'Compress-Archive' `
+    -RequiredOptions ([ordered]@{
+        '-Path' = 'dist/DarkReNamer.pdb'
+        '-DestinationPath' = 'dist/DarkReNamer-debug-symbols.zip'
+    }) `
+    -Message 'Candidate workflow must archive its selected debug symbols.'
+$candidateReleaseFiles = Assert-OneCommand `
+    -Commands $candidateCommands `
+    -Name './scripts/write-release-files.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-SourceRoot' = '$PWD'
+        '-HandoffRoot' = '(Join-Path $PWD ''dist'')'
+        '-SourceSha' = '${{ steps.source.outputs.source_commit }}'
+        '-RunId' = '$env:GITHUB_RUN_ID'
+        '-RunAttempt' = '$env:GITHUB_RUN_ATTEMPT'
+        '-TemporaryRoot' = '$env:RUNNER_TEMP'
+    }) `
+    -Message 'Candidate workflow must write source-bound release files.'
 Assert-InOrder `
     -Records @(
         $candidateSource,
@@ -950,6 +970,8 @@ Assert-InOrder `
         $candidateBuild,
         $candidateLicenses,
         $candidateSbom,
+        $candidateDebugArchive,
+        $candidateReleaseFiles,
         $candidateHandoff
     ) `
     -Message 'Candidate source validation, build, and handoff validation must remain ordered.'
@@ -985,6 +1007,7 @@ Assert-LineOrder `
     -Lines @(
         $candidateCheckoutLines[0],
         $candidateSource.line,
+        $candidateReleaseFiles.line,
         $candidateHandoff.line,
         $candidateAttestLines[0],
         $candidateAttestLines[1],

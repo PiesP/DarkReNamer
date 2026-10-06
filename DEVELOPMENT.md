@@ -132,9 +132,10 @@ language. Ten PowerShell module files contain embedded C# (`Add-Type`):
 and `ui-native.ps1`. This is a file count, not a count of C# blocks.
 The C# is a separate CLR/native-interop requirement, not PowerShell syntax or
 generated JavaScript. Product Rust and workflow configuration are outside these
-script-language counts. The source-metadata extraction adds one PowerShell
-helper and one registered PowerShell test, bringing that count to 78; the
-Python, Bash and embedded-C# file counts remain unchanged.
+script-language counts. The source-metadata and release-file extractions each
+add one PowerShell helper and one registered PowerShell test, bringing the
+PowerShell count to 80. Python, Bash and embedded-C# file counts remain
+unchanged. The release-file extraction removes its inline producer.
 
 The table names public command families and their effects; the complete test
 selection, platforms, scope and deadlines stay in
@@ -157,19 +158,21 @@ second command or asset registry.
 | `run-vm-automated-hosted.ps1` / PowerShell | Hosted Windows validation runner, authenticated candidate metadata and trusted source | Acquires/verifies handoff, invokes campaign and records gate outputs; `run-vm-automated-hosted` tests and `vm-acceptance.yaml` own this path. |
 | `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `get-git-blob-sha256.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release/profile workflows cover their callers. Candidate validation does not promote a release. |
 | `resolve-source-matrix-metadata.ps1` / PowerShell | PowerShell 7.4+ in the three manual size/profile matrix jobs; selected profile, checked-out Git source, pinned rustc and runner environment | Validates source SHA/epoch/rustc, rejects existing run/attempt output roots, creates the two roots and appends five `GITHUB_ENV` values; registered `resolve-source-matrix-metadata` and workflow syntax tests exercise the actual CLI. No guest or VM operation. |
+| `write-release-files.ps1` / PowerShell | PowerShell 7.4+ in the release candidate checkout; prepared handoff directory, source SHA, run ID/attempt, temporary root | Measures the prepared PE/PDB/archive, writes metrics, handoff and sorted checksums, and removes its temporary measurement; the release workflow validates the result before attestation. The registered release test covers actual CLI output and failure cleanup. |
 | `capture-local-visual-gallery.sh` → `diagnostics/capture-local-visual-gallery.sh` / Bash | Opt-in Linux/WSL diagnostic from repository root; Wine/Xvfb, cross-build tools, FFmpeg, jq, GNU tools, optional empty absolute output directory | Builds a Windows test executable, captures BMP/PNG and SHA256 manifest, and cleans temporary Wine state. `visual-gallery-diagnostics` tests its wrapper with inert tools; output is diagnostic only. |
 
-Workflow inline code remains owned by each workflow: `ci.yaml` invokes the
-registered test gate; `security.yaml` selects the scheduled audit; VM and
-release workflows authenticate candidates and invoke their PowerShell/Python
-commands; profile and size matrices use PowerShell for experiment-specific
-measurement. Their identical source/output preparation is owned by
-`resolve-source-matrix-metadata.ps1`; each workflow retains its profile and
-measurement authority. Review an inline block for extraction when two callers genuinely
-share an unprivileged contract, or when a block develops substantial independent
-logic. Keep trusted-source selection, secrets and publication authority in the
-workflow. Test subprocess callers live under `scripts/tests/`; registered tests
-may run a public CLI in temporary fixtures without becoming public commands.
+Workflow inline code remains owned by each workflow. The remaining bounded
+blocks have these owners and review triggers:
+
+| Inline owner | Why it remains inline; extraction trigger |
+| --- | --- |
+| `binary-size-matrix.yaml`, `profile-benchmark-matrix.yaml`, `profile-planning-matrix.yaml` | Each builds and measures its own experiment profile and emits experiment-specific results. Extract a producer when a second caller needs the same metric contract or the block acquires independently testable parsing or validation. |
+| `benchmark-planning.yaml` | Expands that workflow's benchmark parameters and invokes its Cargo loop. Extract if another benchmark stage shares the same input/result contract. |
+| `ci.yaml`, `security.yaml` | Route repository test jobs and scheduled audit outcomes from workflow events; the audit parser lives in `run-scheduled-rust-audit.py`. Extract repeated portable parsing, while keeping job permissions, triggers and failure reporting in the workflows. |
+| `release.yaml`, `vm-acceptance.yaml`, `promote-release.yaml` | Select trusted source and candidate identities, install pinned tools, attest or publish under workflow authority. The candidate workflow retains its build and information-only summary after the release-file producer extraction. Extract only a cohesive unprivileged calculation with its own fixture contract; keep provenance, secrets, API publication and promotion decisions here. |
+
+Test subprocess callers live under `scripts/tests/`; registered tests may run a
+public CLI in temporary fixtures without becoming public commands.
 
 The VM/evidence Python wrappers first re-execute in `-I` before file imports.
 They select exactly one checkout or flat-bundle layout, read the expected loader
