@@ -117,6 +117,104 @@ The retired standalone acceptance tools and their schema are available only at
 the immutable revision linked in
 [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md).
 
+## Tooling command ownership (issue #57, base `b691535b78c350d6fcbdb0afa73489e87c63bc23`)
+
+Python owns portable planning, parsing and verification; PowerShell owns host,
+guest, Hyper-V, UI Automation and Windows release integration. These are owners,
+not interchangeable runtimes. The tracked `scripts/` tree currently contains
+67 Python, 76 PowerShell (`.ps1`/`.psm1`) and two Bash files, including tests and
+fixtures. The nine workflow YAML files also contain handwritten Bash/default
+shell and PowerShell steps; moving those lines into YAML does not remove their
+language. Ten PowerShell module files contain embedded C# (`Add-Type`):
+`controller-entry.psm1`, `guest-native.ps1`, `guest-process.ps1`,
+`guest-runtime.ps1`, `recovery-journal.ps1`, `recovery-native.ps1`,
+`recovery-scenarios.ps1`, `runtimebroker-observer.ps1`, `ui-application.ps1`
+and `ui-native.ps1`. This is a file count, not a count of C# blocks.
+The C# is a separate CLR/native-interop requirement, not PowerShell syntax or
+generated JavaScript. Product Rust and workflow configuration are outside these
+script-language counts. This documentation stage changes none of those counts.
+
+The table names public command families and their effects; the complete test
+selection, platforms, scope and deadlines stay in
+[`config/tooling-tests.json`](config/tooling-tests.json). The authorized module
+roles, source/bundle names and dependencies stay in
+[`config/tooling-bundle.json`](config/tooling-bundle.json), with campaign profiles
+in `config/vm-automated-v1.json` and `config/vm-automated-v2.json`. Do not add a
+second command or asset registry.
+
+| Command / implementation | Runtime and stage; input | Output or side effect; verification |
+| --- | --- | --- |
+| `test-tooling.ps1` / PowerShell runner | PowerShell 7.4+ on actual Linux or Windows; registry `-Scope`, `-Id`, `-Category`, `-Runner`, `-List` | Validates discovery before selection, invokes registered subprocesses with timeout, returns failure status and optional external result JSON. CI calls it on Ubuntu/Windows; `tooling-registry` tests selection. |
+| `update-tooling-bundle.py` / Python generator | Python 3.11+ in the checkout; explicit source inventory and `--check` | Regenerates bundle manifest and wrapper pins, or reports drift without writes under `--check`; `tooling-bundle` and `tooling-bootstrap` tests cover closure and rejection. |
+| `tooling_bootstrap.py`, `tooling-bootstrap.ps1` / private authenticated loaders | Isolated Python or PowerShell 7.4+ after a public wrapper checks the pinned loader bytes; fixed manifest, role and layout | Validate and hold the required module closure, then expose verified import/scriptblock APIs. Bootstrap and bundle tests cover tampering, layouts and missing roles; neither loader is a general public CLI. |
+| `test-windows-vm.py`, `run-vm-automated-campaign.py` / Python `vm` and `campaign` modules | Isolated Python on host/WSL, prepared VM connection, selected profile/source/candidate | Prepare and run source-bound native tests/campaigns, producing private bundles and receipts; registered VM, campaign, authority and cleanup tests cover contracts. Actual VM evidence is a separate gate. |
+| `run-gui-regression.py`, `diagnose-runtimebroker.py` / Python `vm.gui` and diagnostic modules | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produce bounded GUI or RuntimeBroker diagnostic evidence. GUI/RuntimeBroker diagnostic tests are opt-in; neither command publishes acceptance by itself. |
+| `validate-gui-regression-evidence.py`, `validate-vm-automated-evidence.py`, `validate-vm-automated-authority.py` / Python `evidence`, `campaign`, `contracts` | Isolated Python, source identity and private evidence or authenticated hosted facts | Independent verdict/JSON or failure; evidence, binding, authority and GUI fixture tests cover malformed and successful input. Workflow callers retain artifact and GitHub authority. |
+| `run-scheduled-rust-audit.py` / Python | Python on scheduled/manual security runner; checked-out lockfile, pinned scanners, fresh advisory data | Runs scanner subprocesses and writes a bounded summary; `scheduled-rust-audit` tests and `security.yaml` own its policy. |
+| `run-windows-vm-tests.ps1`, `windows-vm-guest.ps1`, `windows-vm-acceptance.ps1`, `windows-vm-recovery-acceptance.ps1` / PowerShell modules | PowerShell 7.4+; verified checkout or bundle role closure, host transport or guest session | Launch/control bounded native, UI and recovery work, transfer private evidence, and clean owned resources; registered VM/observer tests cover contracts. Windows runtime acceptance still requires the prepared VM. |
+| `run-vm-automated-hosted.ps1` / PowerShell | Hosted Windows validation runner, authenticated candidate metadata and trusted source | Acquires/verifies handoff, invokes campaign and records gate outputs; `run-vm-automated-hosted` tests and `vm-acceptance.yaml` own this path. |
+| `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `get-git-blob-sha256.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release/profile workflows cover their callers. Candidate validation does not promote a release. |
+| `capture-local-visual-gallery.sh` → `diagnostics/capture-local-visual-gallery.sh` / Bash | Opt-in Linux/WSL diagnostic from repository root; Wine/Xvfb, cross-build tools, FFmpeg, jq, GNU tools, optional empty absolute output directory | Builds a Windows test executable, captures BMP/PNG and SHA256 manifest, and cleans temporary Wine state. `visual-gallery-diagnostics` tests its wrapper with inert tools; output is diagnostic only. |
+
+Workflow inline code remains owned by each workflow: `ci.yaml` invokes the
+registered test gate; `security.yaml` selects the scheduled audit; VM and
+release workflows authenticate candidates and invoke their PowerShell/Python
+commands; profile and size matrices use PowerShell for experiment-specific
+measurement. Review an inline block for extraction when two callers genuinely
+share an unprivileged contract, or when a block develops substantial independent
+logic. Keep trusted-source selection, secrets and publication authority in the
+workflow. Test subprocess callers live under `scripts/tests/`; registered tests
+may run a public CLI in temporary fixtures without becoming public commands.
+
+The VM/evidence Python wrappers first re-execute in `-I` before file imports.
+They select exactly one checkout or flat-bundle layout, read the expected loader
+as one bounded ordinary file without following links, check its SHA-256 pin, and
+only then execute the loader bytes. The loader checks the pinned manifest,
+authorized role and dependency closure, regular-file/reparse/symlink rules,
+bounded reads and read-time identity before importing frozen verified bytes.
+An ordinary adjacent import or `PYTHONPATH` replacement would cross this trust
+boundary. PowerShell entrypoints likewise choose one layout, check bounded
+ordinary manifest and loader bytes against embedded pins, create a temporary
+loader module, request the exact role closure, then create a temporary entry
+module from verified scriptblocks and remove both modules. The host controller
+transfers frozen verified records to the guest. Preserve these paths together
+when changing a wrapper, role or bundle; run both bootstrap tests and the
+checkout/bundle negative fixtures before any Windows campaign.
+
+The three large review candidates have different ownership. `controller-entry.psm1`
+is the sole exported `Invoke-DrWindowsVmController` implementation, called by
+`run-windows-vm-tests.ps1`; it composes verified contracts, transport, poll and
+rescue definitions while owning session/task state, output inventories and
+failure cleanup. Observer, VM and owned-root tests also inspect it directly.
+Extraction of independently changing inventory/cleanup policy is plausible,
+but requires a new bundle role/pin plus focused failure-order and Windows
+cleanup evidence; size alone does not justify a move. `evidence/gui.py` is the
+`evidence-gui` role behind `validate-gui-regression-evidence.py`; GUI evidence
+tests call its validators. It combines bounded file/JSON loading, source and
+transport checks, and distinct text, appearance, performance and icon verdicts.
+Scenario-specific verdicts are possible later extraction seams, while common
+format decoding already lives in `formats`/`evidence` modules; preserve the
+independent verifier and its cumulative bounds. `ui-context-scenarios.ps1` is
+the verified UI observer role called by `ui-regression.ps1`; it owns context,
+standard, appearance, performance and icon scenario definitions and capture
+steps. Its scenario families are plausible seams only when a behavior change
+needs independent maintenance and Windows UI evidence; do not split the shared
+session/capture state into forwarding files.
+
+The Bash gallery remains an explicit exception. Its public wrapper is called
+from the historical Windows acceptance documentation, its implementation runs a
+real Wine/Xvfb/FFmpeg pipeline, and its registered test remains in the
+`Diagnostics` scope. The prepared Windows VM does not supply the same local Wine
+rendering comparison. A Python port would still orchestrate those shell tools
+and their signal/cleanup behavior, so this stage retains the tested Bash chain.
+Revisit retirement if the local rendering diagnostic has no concrete consumer;
+then remove wrapper, implementation and exclusively dependent test/docs in one
+review. Revisit a port if a shared Python diagnostic contract demonstrably
+replaces the pipeline without changing its output or cleanup. Review embedded
+C# whenever a native signature, marshalling, handle lifetime or UI boundary
+changes; a separate stage must confirm that no portable policy is stranded in
+the CLR strings before calling the exception fully bounded.
+
 ## Authenticated tooling modules
 
 Public VM and evidence commands remain in `scripts/`. Their fixed bootstraps
