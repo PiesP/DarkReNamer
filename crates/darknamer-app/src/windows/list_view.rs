@@ -2955,8 +2955,9 @@ mod native_tests {
         ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, SetLastError,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
-        GetBkColor, GetObjectW, GetSysColor, GetTextColor, LOGFONTW,
+        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+        COLOR_WINDOWTEXT, CreateFontIndirectW, GetBkColor, GetClipBox, GetObjectW, GetPixel,
+        GetSysColor, GetTextColor, LOGFONTW,
     };
     use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
@@ -5870,8 +5871,38 @@ mod native_tests {
                         };
                         let item_state =
                             SendMessageW(list, LVM_GETITEMSTATE, 0, LVIS_SELECTED as LPARAM) as u32;
+                        let mut cell = RECT {
+                            left: LVIR_BOUNDS as i32,
+                            ..RECT::default()
+                        };
+                        let cell_available =
+                            SendMessageW(list, LVM_GETSUBITEMRECT, 0, (&raw mut cell) as LPARAM)
+                                != 0;
+                        let mut clip = RECT::default();
+                        let clip_result = GetClipBox((*custom).nmcd.hdc, &mut clip);
+                        // Subitem 0's LVIR_BOUNDS can span the whole row. Keep
+                        // both samples inside the first column and DC clip;
+                        // compare the upper margin with the text-line middle.
+                        let first_column_width = list_column_width(list, 0);
+                        let pixel_x = cell.left + first_column_width - 8;
+                        let pixel_top_y = cell.top + 2;
+                        let pixel_mid_y = (cell.top + cell.bottom) / 2;
+                        let cell_pixels = (cell_available
+                            && first_column_width > 16
+                            && clip_result > 1
+                            && pixel_x >= clip.left
+                            && pixel_x < clip.right
+                            && pixel_top_y >= clip.top
+                            && pixel_mid_y < clip.bottom)
+                            .then(|| {
+                                format!(
+                                    "x={pixel_x} top_y={pixel_top_y} top={:#x} mid_y={pixel_mid_y} mid={:#x}",
+                                    GetPixel((*custom).nmcd.hdc, pixel_x, pixel_top_y),
+                                    GetPixel((*custom).nmcd.hdc, pixel_x, pixel_mid_y),
+                                )
+                            });
                         Some(format!(
-                            "theme={theme:#x} theme_hr={theme_hr:?} theme_text={theme_color:#x} app_themed={} theme_active={} native_item_state={:#x} selected={} focus_is_list=false before_text={:#x} before_text_bk={:#x} dc_text={:#x} dc_bk={:#x} list_text={:#x} list_bk={:#x} sys_window={:#x} sys_window_text={:#x} sys_highlight={:#x} sys_highlight_text={:#x}",
+                            "theme={theme:#x} theme_hr={theme_hr:?} theme_text={theme_color:#x} app_themed={} theme_active={} native_item_state={:#x} selected={} focus_is_list=false before_text={:#x} before_text_bk={:#x} dc_text={:#x} dc_bk={:#x} list_text={:#x} list_bk={:#x} sys_window={:#x} sys_window_text={:#x} sys_highlight={:#x} sys_highlight_text={:#x} sys_btnface={:#x} sys_btntext={:#x} cell=({},{},{},{}) first_column_width={first_column_width} clip_result={clip_result} clip=({},{},{},{}) cell_pixels_top_mid={cell_pixels:?}",
                             IsAppThemed(),
                             IsThemeActive(),
                             (*custom).nmcd.uItemState,
@@ -5886,6 +5917,16 @@ mod native_tests {
                             GetSysColor(COLOR_WINDOWTEXT),
                             GetSysColor(COLOR_HIGHLIGHT),
                             GetSysColor(COLOR_HIGHLIGHTTEXT),
+                            GetSysColor(COLOR_BTNFACE),
+                            GetSysColor(COLOR_BTNTEXT),
+                            cell.left,
+                            cell.top,
+                            cell.right,
+                            cell.bottom,
+                            clip.left,
+                            clip.top,
+                            clip.right,
+                            clip.bottom,
                         ))
                     } else {
                         None
