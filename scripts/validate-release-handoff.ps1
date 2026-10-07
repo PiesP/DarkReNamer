@@ -10,8 +10,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$sourcePath = (Resolve-Path -LiteralPath $SourceRoot).Path
-$handoffPath = (Resolve-Path -LiteralPath $HandoffRoot).Path
+$sourcePath = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+$handoffPath = (Resolve-Path -LiteralPath $HandoffRoot).ProviderPath
 
 $expectedNames = @(
     'DarkReNamer-debug-symbols.zip'
