@@ -405,6 +405,8 @@ jobs:
           RELEASE_CHANNEL: ${{ inputs.release_channel }}
           MAKE_LATEST: ${{ inputs.make_latest }}
         run: |
+          $productNotes = & ./scripts/get-release-product-notes.ps1 `
+            -SourceRoot $PWD -ReleaseTag $env:RELEASE_TAG
           $profileDisclosure = switch -CaseSensitive ($env:PROFILE_ID) {
             'vm-automated-v1-win11-ntfs' {
               'Validation covers the fixed Windows 11 NTFS VM-Automated v1 profile, including its strict runner environment predicate.'
@@ -417,6 +419,12 @@ jobs:
           $channelLabel = if ($env:RELEASE_CHANNEL -ceq 'release') { 'stable release' } else { 'prerelease' }
           @(
             "VM-Automated Windows $channelLabel. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion."
+            ''
+            '## Changes'
+            ''
+            $productNotes
+            ''
+            '## Validation and support'
             ''
             'The automated VM profile passed its authenticated hosted validation gate. Human visual/accessibility review, physical-media performance, and physical-power-loss durability are outside that automated guarantee.'
             ''

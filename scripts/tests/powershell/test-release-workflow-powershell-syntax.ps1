@@ -949,6 +949,14 @@ $candidateDebugArchive = Assert-OneCommand `
         '-DestinationPath' = 'dist/DarkReNamer-debug-symbols.zip'
     }) `
     -Message 'Candidate workflow must archive its selected debug symbols.'
+$candidateProductNotes = Assert-OneCommand `
+    -Commands $candidateCommands `
+    -Name './scripts/get-release-product-notes.ps1' `
+    -RequiredOptions ([ordered]@{ '-SourceRoot' = '$PWD' }) `
+    -Message 'Candidate workflow must check its exact-version product release notes.'
+Assert-InOrder `
+    -Records @($candidateProductNotes, $candidateSbom) `
+    -Message 'Product release notes must be checked before packaging candidate files.'
 $candidateReleaseFiles = Assert-OneCommand `
     -Commands $candidateCommands `
     -Name './scripts/write-release-files.ps1' `
@@ -1551,6 +1559,11 @@ function Invoke-PromotionChannelFixture {
     }
     $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-channel-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $fixtureRoot)
+    $fixtureScripts = Join-Path $fixtureRoot 'scripts'
+    [void](New-Item -ItemType Directory -Path $fixtureScripts)
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts/get-release-product-notes.ps1') -Destination $fixtureScripts
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'Cargo.toml'), "[workspace.package]`nversion = `"0.2.0`"`n")
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'DISTRIBUTION.md'), "## Prepared 0.2.0 release notes`n`nProposed names can be reset; existing settings remain compatible.`n`n## Historical observations`nOld release only.`n")
     $script:promotionFixtureArgs = @()
     $exitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
     $savedExitCode = if ($null -ne $exitCodeVariable) { $exitCodeVariable.Value } else { $null }
@@ -1566,6 +1579,10 @@ function Invoke-PromotionChannelFixture {
         $expectedLabel = if ($Channel -ceq 'release') { 'stable release' } else { 'prerelease' }
         if (-not $notes.Contains("VM-Automated Windows $expectedLabel.", [StringComparison]::Ordinal)) {
             throw 'The release notes must disclose the selected channel.'
+        }
+        if (-not $notes.Contains('Proposed names can be reset; existing settings remain compatible.', [StringComparison]::Ordinal) -or
+            $notes.Contains('Old release only.', [StringComparison]::Ordinal)) {
+            throw 'Public release notes must include the selected product changes without historical observations.'
         }
         $arguments = $script:promotionFixtureArgs
         $expectedPrerelease = if ($Channel -ceq 'prerelease') { 1 } else { 0 }
