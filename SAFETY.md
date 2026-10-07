@@ -471,6 +471,15 @@ establish that a real Shell bootstrap succeeds in every environment; the
 production Shell lookup and its separate source-bound observations retain that
 coverage.
 
+The ordinary-close icon regression installs a test-only subclass on its owned
+production popup window. Its guard owns the boxed observation published as
+native refdata. The subclass records the tracked worker's joined state at
+`WM_DESTROY` and attempts exact detachment at `WM_NCDESTROY`. On an early exit
+with a live window, the guard frees the observation only after confirmed
+subclass removal; uncertain removal retains at most one inert test context
+rather than leave dangling refdata. Once window destruction completes, no
+callback can reach the observation.
+
 The native shutdown fixture owns one production popup window and its reclaim
 hold while a controlled icon class query, import read, Apply result, and
 settings save wait on independent test barriers. Its callback-free Apply timer
@@ -555,6 +564,25 @@ subclasses. The native blank-body regression routes real ListView custom-draw
 notifications through a test-owned parent subclass. Its boxed UI-thread context
 and brush remain live through confirmed parent destruction; failed destruction
 retains that bounded context instead of leaving dangling callback refdata.
+For a selected Dark FileList row, the native selection band can be light or
+dark with or without keyboard focus while the control's fixed Dark text color
+is white. The existing synchronous custom-draw callback checks authoritative
+ListView selection, then samples two fixed points inside the visible intersection
+of the current selected subitem and the callback DC clip, including a partial
+vertical dirty region or a persisted first column wider than the viewport.
+The ListView supplies the live HDC; only copied `COLORREF` values leave the callback.
+Invalid, fully clipped, narrow, or nonuniform samples retain native default drawing.
+For a uniform valid sample, true sRGB contrast chooses black or white text;
+the control still draws its selection background, icons, focus and input. No
+DC, bitmap, or theme handle is acquired or retained by this path. Resolved
+Light themes, Forced Colors and unknown high-contrast state keep
+native text behavior; System mode follows its cached resolved theme. A
+source-bound native raster regression checks a fresh, sentinel-cleared bitmap
+with one `WM_PRINT` and no fallback copy across active/inactive focus, row
+selection transitions, long ellipsized names, a clipped dirty region, and an
+oversized first column. The fixture validates observed text contrast, not a
+general Win32 paint-order guarantee; static
+checks alone do not establish desktop acceptance.
 
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.

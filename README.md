@@ -70,7 +70,7 @@ for all files).
   destinations are never overwritten.
 - The preview describes the current proposal. It does not validate the live
   filesystem or authorize a change until Apply performs its checks.
-- **편집 > 이름 미리보기 초기화** resets proposed names. It does not undo changes
+- **편집 > 제안 이름 초기화** resets proposed names. It does not undo changes
   already made on disk. Resetting a target folder also changes only the proposal.
 - If an operation is interrupted or journal state is uncertain, DarkReNamer can
   lock further Apply operations. Keep the journal evidence and follow the

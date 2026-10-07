@@ -1955,12 +1955,59 @@ mod tests {
     }
 
     #[test]
-    fn compact_rail_keeps_the_longest_two_line_label_width() {
+    fn compact_rail_keeps_the_longest_two_line_label_width() -> Result<(), &'static str> {
         assert_eq!(RailDensity::Compact.metrics(96).rail_width, 52);
         assert_eq!(RailDensity::Compact.metrics(192).rail_width, 104);
         assert_eq!(
             rail_tool_spec(RESET).map(|tool| tool.label),
-            Some("이름\n초기화")
+            Some("제안명\n초기화")
+        );
+        let reset = command_ui_spec(RESET).ok_or("name reset command missing")?;
+        assert_eq!(reset.menu_label, "제안 이름 초기화");
+        assert_eq!(reset.rail_spoken_label(), "제안명 초기화");
+        assert!(reset.tooltip_label.contains("제안 이름"));
+        assert!(reset.tooltip_label.contains("대상 폴더 변경은 유지"));
+        assert!(
+            reset
+                .tooltip_label
+                .contains("완료된 파일 작업은 취소하지 않습니다")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn name_reset_keeps_a_separate_destination_proposal_and_is_model_only() {
+        use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
+
+        let mut list = LegacyList::new();
+        assert_eq!(
+            list.append(LegacyListItem::new(r"C:\work\original.txt", false, 0, 0, 0)),
+            Ok(true)
+        );
+        assert_eq!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"C:\target"))
+                .map(|rows| rows.into_vec()),
+            Ok(vec![0])
+        );
+        assert_eq!(list.manual_change_changed(0, "draft.txt"), Ok(true));
+        assert_eq!(
+            list.reset_proposals_changed().map(|rows| rows.into_vec()),
+            Ok(vec![0])
+        );
+        let row = &list.items()[0];
+        assert_eq!(
+            row.source_path(),
+            &LegacyText::from(r"C:\work\original.txt")
+        );
+        assert_eq!(row.proposed_name(), row.current_name());
+        assert_eq!(row.destination_parent(), &LegacyText::from(r"C:\target"));
+        assert_eq!(
+            row.planned_path(),
+            LegacyText::from(r"C:\target\original.txt")
+        );
+        assert_eq!(
+            command_ui_spec(RESET).map(|spec| (spec.mutation, spec.display)),
+            Some((CommandMutationClass::Model, CommandUiPolicy::AllRows))
         );
     }
 
