@@ -108,6 +108,8 @@ jobs:
       - name: Generate release files
         shell: pwsh
         run: |
+          $productNotes = & ./scripts/get-release-product-notes.ps1 -SourceRoot $PWD
+          if ([string]::IsNullOrWhiteSpace($productNotes)) { throw 'Product release notes are missing.' }
           cargo cyclonedx --manifest-path crates/darknamer-app/Cargo.toml `
             --format json `
             --describe binaries `

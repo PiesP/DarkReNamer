@@ -52,9 +52,35 @@ latest designation are distinct; neither changes the supported environment.
 Regular-release status does not require a 1.0.0 version number; the tag must
 still match the chosen Cargo workspace version exactly.
 
-## Prepared 0.1.6 release notes
+## Prepared 0.1.7 release notes
 
-The next patch delivers [PR #45](https://github.com/PiesP/DarkReNamer/pull/45):
+This patch clarifies that Reset Names resets proposed names in the list; it does
+not undo changes already made on disk. Resetting target folders remains a
+separate command. Selected proposal names remain readable in light, dark and
+high-contrast themes, including when the list no longer has keyboard focus.
+Existing preferences remain compatible and do not need to be reset.
+
+The app's command, appearance, layout and preference code now uses smaller
+modules with shared preview-row formatting and ListView update mechanics.
+These changes preserve rename behavior, no-replacement mutation authority and
+Cancel-default confirmation. They do not establish a new speed, startup,
+memory, binary-size or native-paint performance improvement.
+
+Release preparation binds the candidate build to its workflow event source,
+retains source-bound metrics and provenance, and enforces private evidence
+archive parents and object-bound cleanup. Scheduled and manual dependency
+audits reject malformed scanner output. Shared tooling setup is consolidated
+without changing the fixed candidate validation profile or its first-attempt
+rules.
+
+A Shell or import provider that never returns can keep close pending. The
+executable remains intentionally unsigned (`NotSigned`); the supported
+environment and automated-validation limitations below remain unchanged.
+Preparation is not publication approval.
+
+## Historical 0.1.6 development observations
+
+Published v0.1.6 already includes [PR #45](https://github.com/PiesP/DarkReNamer/pull/45):
 full refresh streams one additional complete owned row instead of retaining a
 second complete formatted row list. All native column values, including hidden
 columns, remain available. Native-count mismatch or partial update failure
@@ -75,7 +101,7 @@ No general speed improvement is claimed.
 The [async-worker normal comparison remains deferred, not verified](https://github.com/PiesP/DarkReNamer/issues/32#issuecomment-5980518916).
 A Shell or import provider that never returns can keep close pending; the
 executable remains intentionally unsigned (`NotSigned`). Preparation is not
-publication approval: the exact new candidate and evidence tuple still require
+publication approval: every new candidate and evidence tuple still requires
 the existing validation and separate authorization. Historical v0.1.5 excluded
 this optimization and remains unchanged.
 
