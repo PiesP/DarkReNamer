@@ -55,6 +55,18 @@ try {
         -DebugSymbolsZipPath $symbols `
         -OutputPath $output
     $measurement = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+    $providerPrefix = 'Microsoft.PowerShell.Core\FileSystem::'
+    $providerOutput = Join-Path $testRoot 'provider-measurement.json'
+    & $measurer `
+        -ExecutablePath ($providerPrefix + $executable) `
+        -PdbPath ($providerPrefix + $pdb) `
+        -DebugSymbolsZipPath ($providerPrefix + $symbols) `
+        -OutputPath $providerOutput
+    $providerMeasurement = Get-Content -LiteralPath $providerOutput -Raw | ConvertFrom-Json
+    if ($providerMeasurement.executable.sha256 -cne $measurement.executable.sha256 -or
+        $providerMeasurement.debug_symbols.pdb_sha256 -cne $measurement.debug_symbols.pdb_sha256) {
+        throw 'Provider-qualified binary paths changed the measured inputs.'
+    }
     $outputBytes = [IO.File]::ReadAllBytes($output)
     $expectedExecutableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
     $expectedPdbHash = (Get-FileHash -LiteralPath $pdb -Algorithm SHA256).Hash.ToLowerInvariant()

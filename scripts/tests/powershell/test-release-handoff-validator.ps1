@@ -217,6 +217,17 @@ try {
         throw "Default validation did not retain its human success output: $defaultText"
     }
 
+    $providerPrefix = 'Microsoft.PowerShell.Core\FileSystem::'
+    $qualifiedOutput = @(
+        & $validator `
+            -SourceRoot ($providerPrefix + $sourceRoot) `
+            -HandoffRoot ($providerPrefix + $handoffRoot) 6>&1
+    )
+    $qualifiedText = (($qualifiedOutput | ForEach-Object { "$_" }) -join ' ')
+    if ($qualifiedText -notlike '*Validated unsigned release handoff*') {
+        throw "Provider-qualified handoff paths were not accepted: $qualifiedText"
+    }
+
     $passThruOutput = @(
         & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot -PassThru 6>&1
     )

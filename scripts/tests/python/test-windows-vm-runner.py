@@ -2140,10 +2140,54 @@ class VmRunnerTests(unittest.TestCase):
             for engine in (None, [], '7.4', {}, *(
                 {'version': version, 'edition': 'Core', 'effective_policy': 'RemoteSigned'}
                 for version in ('7.3.9', '8', '7.4.malformed', None, 7.4)
+            ), *(
+                {'version': '7.4', 'edition': 'Core', 'effective_policy': policy}
+                for policy in ('Bypass', 'Unrestricted', 'AllSigned')
             )):
                 output.return_value = json.dumps(engine)
                 with self.subTest(engine=engine), self.assertRaisesRegex(RuntimeError, 'Windows PowerShell 7.4'):
                     vm.require_windows_pwsh74()
+
+    def test_candidate_validators_confine_host_interop_settings_to_handoff_child(self):
+        source = self.root / 'candidate-source'
+        args = SimpleNamespace(candidate_workflow_run='10', candidate_run_attempt='1',
+                               candidate_artifact_id='20', candidate_source_sha='a' * 40)
+        windows_paths = {str(path): 'C:\\candidate\\' + path.name for path in (
+            source, self.root / 'handoff', self.root / 'run.json',
+            self.root / 'artifact.json', self.root / 'scripts' / 'validate-release-handoff.ps1',
+            self.root / 'scripts' / 'validate-release-candidate-metadata.ps1')}
+        inherited_wslenv = ('KEEP/u:GIT_CONFIG_COUNT/l:GIT_CONFIG_KEY_0/p:'
+                            'GIT_CONFIG_VALUE_0/u:SECOND')
+        with mock.patch.dict(os.environ, {
+                'WSLENV': inherited_wslenv, 'GIT_CONFIG_COUNT': '7',
+                'GIT_CONFIG_KEY_0': 'unrelated.key', 'GIT_CONFIG_VALUE_0': 'old-value'}), \
+             mock.patch.object(vm, 'require_windows_pwsh74', return_value=vm.WINDOWS_PWSH), \
+             mock.patch.object(vm, 'winpath', side_effect=lambda path: windows_paths[str(path)]), \
+             mock.patch.object(vm.subprocess, 'run') as run:
+            artifact_name = vm.run_candidate_validators(
+                self.root / 'scripts', source, self.root / 'handoff',
+                self.root / 'run.json', self.root / 'artifact.json', args)
+            self.assertEqual(os.environ['WSLENV'], inherited_wslenv)
+            self.assertEqual(os.environ['GIT_CONFIG_COUNT'], '7')
+            self.assertEqual(os.environ['GIT_CONFIG_VALUE_0'], 'old-value')
+        self.assertEqual(artifact_name, 'DarkReNamer-dry-run-10-1-windows')
+        self.assertEqual(run.call_count, 2)
+        handoff_call, metadata_call = run.call_args_list
+        for call in (handoff_call, metadata_call):
+            self.assertEqual(call.args[0][1:7], [
+                '-NoLogo', '-NoProfile', '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass', '-File'])
+            self.assertTrue(call.kwargs['check'])
+        self.assertEqual(handoff_call.args[0][7:11], [
+            windows_paths[str(self.root / 'scripts' / 'validate-release-handoff.ps1')],
+            '-SourceRoot', windows_paths[str(source)], '-HandoffRoot'])
+        handoff_env = handoff_call.kwargs['env']
+        self.assertEqual(handoff_env['GIT_CONFIG_COUNT'], '1')
+        self.assertEqual(handoff_env['GIT_CONFIG_KEY_0'], 'safe.directory')
+        self.assertEqual(handoff_env['GIT_CONFIG_VALUE_0'], windows_paths[str(source)])
+        self.assertEqual(handoff_env['WSLENV'],
+                         'KEEP/u:SECOND:GIT_CONFIG_COUNT:GIT_CONFIG_KEY_0:GIT_CONFIG_VALUE_0')
+        self.assertNotIn('env', metadata_call.kwargs)
 
     def test_ssh_plan_uses_local_pwsh_without_windows_host_calls(self):
         output = self.root / 'ssh-output'

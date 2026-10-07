@@ -32,7 +32,7 @@ function Resolve-RequiredFile {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "$Label must identify an existing file: $Path"
     }
-    (Resolve-Path -LiteralPath $Path).Path
+    (Resolve-Path -LiteralPath $Path).ProviderPath
 }
 
 function Read-UInt16LittleEndian {

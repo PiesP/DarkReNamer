@@ -1340,15 +1340,31 @@ def run_candidate_validators(validator_root, source_root, handoff_root, run_meta
     executable = require_windows_pwsh74()
     handoff_validator = validator_root / 'validate-release-handoff.ps1'
     metadata_validator = validator_root / 'validate-release-candidate-metadata.ps1'
+    # The caller already verified a clean source and froze these helper bytes.
+    # Trust only that cross-OS source path for this Git child; the engine's
+    # RemoteSigned probe stays intact while frozen UNC scripts run with Bypass.
+    source_winpath = winpath(source_root)
+    handoff_env = os.environ.copy()
+    git_config_names = ('GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0')
+    handoff_env.update({
+        'GIT_CONFIG_COUNT': '1',
+        'GIT_CONFIG_KEY_0': 'safe.directory',
+        'GIT_CONFIG_VALUE_0': source_winpath,
+    })
+    inherited_wslenv = [entry for entry in handoff_env.get('WSLENV', '').split(':')
+                        if entry and entry.split('/', 1)[0] not in git_config_names]
+    handoff_env['WSLENV'] = ':'.join((*inherited_wslenv, *git_config_names))
     subprocess.run([
-        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
-        winpath(handoff_validator), '-SourceRoot', winpath(source_root),
+        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass', '-File',
+        winpath(handoff_validator), '-SourceRoot', source_winpath,
         '-HandoffRoot', winpath(handoff_root),
-    ], text=True, check=True, timeout=300)
+    ], text=True, check=True, timeout=300, env=handoff_env)
     artifact_name = ('DarkReNamer-dry-run-' + args.candidate_workflow_run + '-'
                      + args.candidate_run_attempt + '-windows')
     subprocess.run([
-        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass', '-File',
         winpath(metadata_validator), '-RunMetadataPath', winpath(run_metadata),
         '-ArtifactMetadataPath', winpath(artifact_metadata),
         '-ExpectedRunId', args.candidate_workflow_run,
