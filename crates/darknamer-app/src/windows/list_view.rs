@@ -114,6 +114,8 @@ use windows_sys::Win32::Graphics::Gdi::DT_SINGLELINE;
 use windows_sys::Win32::Graphics::Gdi::DT_VCENTER;
 use windows_sys::Win32::Graphics::Gdi::DrawTextW;
 use windows_sys::Win32::Graphics::Gdi::FillRect;
+use windows_sys::Win32::Graphics::Gdi::GetClipBox;
+use windows_sys::Win32::Graphics::Gdi::GetPixel;
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
@@ -174,8 +176,6 @@ use windows_sys::Win32::UI::Controls::CDRF_NOTIFYITEMDRAW;
 use windows_sys::Win32::UI::Controls::CDRF_NOTIFYPOSTPAINT;
 use windows_sys::Win32::UI::Controls::CDRF_NOTIFYSUBITEMDRAW;
 use windows_sys::Win32::UI::Controls::CDRF_SKIPDEFAULT;
-use windows_sys::Win32::UI::Controls::GetThemeColor;
-use windows_sys::Win32::UI::Controls::GetWindowTheme;
 use windows_sys::Win32::UI::Controls::HDI_TEXT;
 use windows_sys::Win32::UI::Controls::HDI_WIDTH;
 use windows_sys::Win32::UI::Controls::HDITEMW;
@@ -192,7 +192,6 @@ use windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES;
 use windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::InitCommonControlsEx;
-use windows_sys::Win32::UI::Controls::LISS_SELECTEDNOTFOCUS;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVCF_FMT;
 #[cfg(test)]
@@ -220,7 +219,6 @@ use windows_sys::Win32::UI::Controls::LVM_GETITEMRECT;
 use windows_sys::Win32::UI::Controls::LVM_GETITEMSTATE;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVM_GETITEMTEXTW;
-#[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVM_GETSUBITEMRECT;
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::LVM_GETTOOLTIPS;
@@ -234,7 +232,6 @@ use windows_sys::Win32::UI::Controls::LVM_SETITEMSTATE;
 use windows_sys::Win32::UI::Controls::LVM_SETITEMTEXTW;
 use windows_sys::Win32::UI::Controls::LVM_SETITEMW;
 use windows_sys::Win32::UI::Controls::LVN_GETINFOTIPW;
-use windows_sys::Win32::UI::Controls::LVP_LISTITEM;
 use windows_sys::Win32::UI::Controls::LVS_EX_DOUBLEBUFFER;
 use windows_sys::Win32::UI::Controls::LVS_EX_FULLROWSELECT;
 use windows_sys::Win32::UI::Controls::LVS_EX_INFOTIP;
@@ -254,10 +251,8 @@ use windows_sys::Win32::UI::Controls::NMHDR;
 use windows_sys::Win32::UI::Controls::NMHEADERW;
 use windows_sys::Win32::UI::Controls::NMLVCUSTOMDRAW;
 use windows_sys::Win32::UI::Controls::NMLVGETINFOTIPW;
-use windows_sys::Win32::UI::Controls::TMT_TEXTCOLOR;
 #[cfg(test)]
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::Shell::DefSubclassProc;
 use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
 #[cfg(test)]
@@ -1227,30 +1222,78 @@ fn paint_blank_list_body(list: HWND, dc: HDC, brush: HBRUSH, expected_rows: usiz
     unsafe { FillRect(dc, &body, brush) };
 }
 
-/// Reads the live ListView theme's unfocused selection foreground, if defined.
-fn inactive_selected_list_text_color(list: HWND) -> Option<u32> {
-    // SAFETY: the live ListView owns this borrowed theme handle. The query
-    // copies one color synchronously; it neither retains nor closes the handle.
-    let theme = unsafe { GetWindowTheme(list) };
-    if theme == 0 {
+/// Samples only the native selection band already visible in this subitem's
+/// current paint DC. Unavailable, clipped, or nonuniform pixels leave native
+/// rendering in charge; no DC or bitmap ownership crosses this callback.
+fn selected_band_color(list: HWND, dc: HDC, row: usize, subitem: i32) -> Option<u32> {
+    if dc.is_null() {
         return None;
     }
-    let mut color = 0;
-    // SAFETY: theme is the ListView's current theme during this UI-thread
-    // paint callback, and color is writable stack storage for the result.
-    let result = unsafe {
-        GetThemeColor(
-            theme,
-            LVP_LISTITEM,
-            LISS_SELECTEDNOTFOCUS,
-            TMT_TEXTCOLOR as i32,
-            &mut color,
-        )
+    let column = usize::try_from(subitem).ok()?;
+    let width = list_column_width(list, column);
+    if width < 24 {
+        return None;
+    }
+    let mut cell = RECT {
+        left: LVIR_BOUNDS as i32,
+        top: subitem,
+        ..RECT::default()
     };
-    (result == 0).then_some(color)
+    // SAFETY: row names an item validated against the synchronized model;
+    // the live ListView writes this stack rectangle synchronously.
+    if unsafe { SendMessageW(list, LVM_GETSUBITEMRECT, row, (&raw mut cell) as LPARAM) } == 0 {
+        return None;
+    }
+    let mut clip = RECT::default();
+    // SAFETY: dc is the live NMLVCUSTOMDRAW paint DC, and clip is writable
+    // stack storage. Complex clips are validated again by GetPixel below.
+    if unsafe { GetClipBox(dc, &mut clip) } <= 1 {
+        return None;
+    }
+    // Subitem zero may report the whole row; trim it to the first column.
+    // Intersect with the current DC clip before choosing a point so a wide
+    // first column remains readable in a narrow visible viewport.
+    let cell_right = cell.left.checked_add(width)?.min(cell.right);
+    let visible_left = cell.left.max(clip.left);
+    let visible_right = cell_right.min(clip.right);
+    let visible_top = cell.top.max(clip.top);
+    let visible_bottom = cell.bottom.min(clip.bottom);
+    let x = visible_right.checked_sub(8)?;
+    let top_y = visible_top.checked_add(2)?;
+    let middle_y = visible_top.checked_add(visible_bottom.checked_sub(visible_top)? / 2)?;
+    if x < visible_left.checked_add(8)? || top_y >= visible_bottom || middle_y >= visible_bottom {
+        return None;
+    }
+    // SAFETY: both fixed points are inside the current visible cell and the
+    // clip bounds. GetPixel reports CLR_INVALID for unsupported/hole pixels.
+    let (upper, middle) = unsafe { (GetPixel(dc, x, top_y), GetPixel(dc, x, middle_y)) };
+    (upper != u32::MAX && upper == middle).then_some(upper)
 }
 
-/// Keeps native row rendering with a readable inactive Dark selection foreground.
+/// For any valid sRGB background, the higher-contrast of black and white is
+/// at least 4.5:1. COLORREF stores red in its least-significant byte.
+fn contrasting_black_or_white(background: u32) -> u32 {
+    let linear = |channel: u32| {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background & 0xff)
+        + 0.7152 * linear((background >> 8) & 0xff)
+        + 0.0722 * linear((background >> 16) & 0xff);
+    let black_contrast = (luminance + 0.05) / 0.05;
+    let white_contrast = 1.05 / (luminance + 0.05);
+    if black_contrast >= white_contrast {
+        0x000000
+    } else {
+        0xffffff
+    }
+}
+
+/// Keeps native row rendering with a readable Dark selection foreground.
 /// Unselected changed proposed names may receive restrained semantic colors.
 pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
     let header = lparam as *const NMHDR;
@@ -1316,19 +1359,22 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     let focused = item_state & LVIS_FOCUSED != 0;
     if selected {
         let resolved = state.resolved_appearance();
-        // The native inactive-selection band can be light or dark across
-        // visual styles. Match its current ListView theme text state, leaving
+        // The native selection band can be light or dark with either focus
+        // state. Use its already-painted visible pixels, leaving
         // native background/icon/focus painting and Forced Colors precedence.
-        // SAFETY: GetFocus returns only this UI thread's current HWND.
-        let list_has_focus = unsafe { GetFocus() } == state.list_window;
         if resolved.theme == ResolvedTheme::Dark
             && resolved.custom_colors_enabled
-            && !list_has_focus
-            && let Some(color) = inactive_selected_list_text_color(state.list_window)
+            && let Some(background) = selected_band_color(
+                state.list_window,
+                // SAFETY: validated custom-draw payload has a live paint DC.
+                unsafe { (*custom).nmcd.hdc },
+                row,
+                subitem,
+            )
         {
             // SAFETY: the validated custom-draw payload remains writable
-            // for this callback; the theme query returned a copied scalar.
-            unsafe { (*custom).clrText = color };
+            // for this callback; pixel reads return only copied color scalars.
+            unsafe { (*custom).clrText = contrasting_black_or_white(background) };
             return Some(CDRF_NEWFONT as LRESULT);
         }
         return Some(CDRF_DODEFAULT as LRESULT);
@@ -2949,21 +2995,19 @@ mod native_tests {
     use std::sync::mpsc::{self, Sender};
     use std::time::{Duration, Instant};
 
-    use super::super::visual_capture::{capture_window_pixels, write_window_bmp};
+    use super::super::visual_capture::{
+        capture_window_pixels, write_window_bmp, write_window_bmp_single_print,
+        write_window_bmp_single_print_clipped,
+    };
     use super::*;
     use windows_sys::Win32::Foundation::{
         ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, SetLastError,
     };
-    use windows_sys::Win32::Graphics::Gdi::{
-        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
-        COLOR_WINDOWTEXT, CreateFontIndirectW, GetBkColor, GetClipBox, GetObjectW, GetPixel,
-        GetSysColor, GetTextColor, LOGFONTW,
-    };
+    use windows_sys::Win32::Graphics::Gdi::{CreateFontIndirectW, GetObjectW, LOGFONTW};
     use windows_sys::Win32::System::Time::EnumDynamicTimeZoneInformation;
     use windows_sys::Win32::UI::Controls::{
-        IsAppThemed, IsThemeActive, LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT,
-        LVM_GETITEMW, LVM_GETTEXTCOLOR, LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR,
-        LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+        LVIR_BOUNDS, LVM_GETBKCOLOR, LVM_GETIMAGELIST, LVM_GETITEMRECT, LVM_GETITEMW,
+        LVM_GETTOPINDEX, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -5823,10 +5867,6 @@ mod native_tests {
         Ok(())
     }
 
-    thread_local! {
-        static INACTIVE_SELECTION_PAINT_DIAGNOSTIC: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
     unsafe extern "system" fn inactive_selection_test_parent(
         window: HWND,
         message: u32,
@@ -5838,117 +5878,9 @@ mod native_tests {
         if message == WM_NOTIFY
             && lparam != 0
             && let Some(lease) = try_app_state(window)
+            && let Some(result) = handle_list_custom_draw(lease.state(), lparam)
         {
-            let list = lease.state().list_window;
-            let header = lparam as *const NMHDR;
-            // SAFETY: every WM_NOTIFY payload has the readable NMHDR prefix;
-            // source and code are copied before any larger payload read.
-            let source_is_list =
-                unsafe { (*header).hwndFrom == list && (*header).code == NM_CUSTOMDRAW };
-            let custom = lparam as *const NMLVCUSTOMDRAW;
-            let probe = if source_is_list {
-                // SAFETY: this ListView's NM_CUSTOMDRAW supplies the synchronous
-                // NMLVCUSTOMDRAW payload. Only pre-v6 fields are read. Theme,
-                // DC and color queries copy scalars from live UI-thread handles.
-                unsafe {
-                    if (*custom).nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)
-                        && (*custom).nmcd.dwItemSpec == 0
-                        && (*custom).iSubItem == 0
-                        && GetFocus() != list
-                    {
-                        let theme = GetWindowTheme(list);
-                        let mut theme_color = 0;
-                        let theme_hr = if theme != 0 {
-                            Some(GetThemeColor(
-                                theme,
-                                LVP_LISTITEM,
-                                LISS_SELECTEDNOTFOCUS,
-                                TMT_TEXTCOLOR as i32,
-                                &mut theme_color,
-                            ))
-                        } else {
-                            None
-                        };
-                        let item_state =
-                            SendMessageW(list, LVM_GETITEMSTATE, 0, LVIS_SELECTED as LPARAM) as u32;
-                        let mut cell = RECT {
-                            left: LVIR_BOUNDS as i32,
-                            ..RECT::default()
-                        };
-                        let cell_available =
-                            SendMessageW(list, LVM_GETSUBITEMRECT, 0, (&raw mut cell) as LPARAM)
-                                != 0;
-                        let mut clip = RECT::default();
-                        let clip_result = GetClipBox((*custom).nmcd.hdc, &mut clip);
-                        // Subitem 0's LVIR_BOUNDS can span the whole row. Keep
-                        // both samples inside the first column and DC clip;
-                        // compare the upper margin with the text-line middle.
-                        let first_column_width = list_column_width(list, 0);
-                        let pixel_x = cell.left + first_column_width - 8;
-                        let pixel_top_y = cell.top + 2;
-                        let pixel_mid_y = (cell.top + cell.bottom) / 2;
-                        let cell_pixels = (cell_available
-                            && first_column_width > 16
-                            && clip_result > 1
-                            && pixel_x >= clip.left
-                            && pixel_x < clip.right
-                            && pixel_top_y >= clip.top
-                            && pixel_mid_y < clip.bottom)
-                            .then(|| {
-                                format!(
-                                    "x={pixel_x} top_y={pixel_top_y} top={:#x} mid_y={pixel_mid_y} mid={:#x}",
-                                    GetPixel((*custom).nmcd.hdc, pixel_x, pixel_top_y),
-                                    GetPixel((*custom).nmcd.hdc, pixel_x, pixel_mid_y),
-                                )
-                            });
-                        Some(format!(
-                            "theme={theme:#x} theme_hr={theme_hr:?} theme_text={theme_color:#x} app_themed={} theme_active={} native_item_state={:#x} selected={} focus_is_list=false before_text={:#x} before_text_bk={:#x} dc_text={:#x} dc_bk={:#x} list_text={:#x} list_bk={:#x} sys_window={:#x} sys_window_text={:#x} sys_highlight={:#x} sys_highlight_text={:#x} sys_btnface={:#x} sys_btntext={:#x} cell=({},{},{},{}) first_column_width={first_column_width} clip_result={clip_result} clip=({},{},{},{}) cell_pixels_top_mid={cell_pixels:?}",
-                            IsAppThemed(),
-                            IsThemeActive(),
-                            (*custom).nmcd.uItemState,
-                            item_state & LVIS_SELECTED != 0,
-                            (*custom).clrText,
-                            (*custom).clrTextBk,
-                            GetTextColor((*custom).nmcd.hdc),
-                            GetBkColor((*custom).nmcd.hdc),
-                            SendMessageW(list, LVM_GETTEXTCOLOR, 0, 0),
-                            SendMessageW(list, LVM_GETBKCOLOR, 0, 0),
-                            GetSysColor(COLOR_WINDOW),
-                            GetSysColor(COLOR_WINDOWTEXT),
-                            GetSysColor(COLOR_HIGHLIGHT),
-                            GetSysColor(COLOR_HIGHLIGHTTEXT),
-                            GetSysColor(COLOR_BTNFACE),
-                            GetSysColor(COLOR_BTNTEXT),
-                            cell.left,
-                            cell.top,
-                            cell.right,
-                            cell.bottom,
-                            clip.left,
-                            clip.top,
-                            clip.right,
-                            clip.bottom,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let result = handle_list_custom_draw(lease.state(), lparam);
-            if let Some(probe) = probe {
-                INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| {
-                    *slot.borrow_mut() = Some(format!(
-                        "{probe} after_text={:#x} return={result:?}",
-                        // SAFETY: this validated synchronous ListView payload
-                        // remains live until the parent callback returns.
-                        unsafe { (*custom).clrText }
-                    ));
-                });
-            }
-            if let Some(result) = result {
-                return result;
-            }
+            return result;
         }
         // SAFETY: unhandled notifications retain the native parent chain.
         unsafe { DefSubclassProc(window, message, wparam, lparam) }
@@ -5957,9 +5889,11 @@ mod native_tests {
     fn name_raster_contrast(
         list: HWND,
         root: &Path,
+        scenario: &str,
         row: i32,
         subitem: i32,
         selected: bool,
+        clip: Option<RECT>,
     ) -> Result<(usize, [u8; 3]), Box<dyn std::error::Error>> {
         let mut cell = RECT {
             left: LVIR_BOUNDS as i32,
@@ -5981,24 +5915,32 @@ mod native_tests {
         }
         // Exclude the native icon gutter, cell border and focus outline. This
         // interior still contains the nonempty filename at 150% text.
-        let left = cell.left + if subitem == 0 { 35 } else { 6 };
-        let right = (cell.left + 180).min(cell.right - 6);
-        let top = cell.top + 3;
-        let bottom = cell.bottom - 3;
-        // SAFETY: no AppState lease is held; repaint completes before capture.
-        if unsafe {
-            RedrawWindow(
-                list,
-                null(),
-                null_mut(),
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error().into());
+        let mut left = cell.left + if subitem == 0 { 35 } else { 6 };
+        let cell_right = if subitem == 0 {
+            (cell.left + list_column_width(list, 0)).min(cell.right)
+        } else {
+            cell.right
+        };
+        let mut right = (cell.left + 180).min(cell_right - 6);
+        let mut top = cell.top + 3;
+        let mut bottom = cell.bottom - 3;
+        if let Some(clip) = clip {
+            left = left.max(clip.left);
+            right = right.min(clip.right);
+            top = top.max(clip.top);
+            bottom = bottom.min(clip.bottom);
         }
-        let output = root.join(format!("inactive-name-{row}-{subitem}.bmp"));
-        let measurement = write_window_bmp(list, &output)?;
+        // A sentinel-cleared fresh bitmap receives one WM_PRINT. A second
+        // paint or window-DC copy cannot hide a first-pass background error.
+        let output = root.join(format!("{scenario}-name-{row}-{subitem}.bmp"));
+        let measurement = if let Some(clip) = clip {
+            write_window_bmp_single_print_clipped(list, &output, clip)?
+        } else {
+            write_window_bmp_single_print(list, &output)?
+        };
+        if measurement.used_window_dc_fallback {
+            return Err(io::Error::other("single-pass capture used a fallback copy").into());
+        }
         if left < 0
             || top < 0
             || right <= left
@@ -6018,6 +5960,19 @@ mod native_tests {
         {
             return Err(io::Error::other("unexpected name BMP format").into());
         }
+        if let Some(clip) = clip {
+            let outside_x = usize::try_from(cell.left + 40)?;
+            let outside_y = usize::try_from(cell.top + 2)?;
+            let outside_at = BMP_OFFSET + ((outside_y * width + outside_x) * 4);
+            if outside_y >= usize::try_from(clip.top)?
+                || bytes.get(outside_at..outside_at + 3) != Some(&[255, 255, 255][..])
+            {
+                return Err(io::Error::other(
+                    "single-print clip did not preserve sentinel outside dirty region",
+                )
+                .into());
+            }
+        }
         let mut colors = HashMap::<[u8; 3], usize>::new();
         let mut pixels = Vec::new();
         for y in top..bottom {
@@ -6033,6 +5988,12 @@ mod native_tests {
             .max_by_key(|(_, count)| *count)
             .ok_or("name raster is empty")?
             .0;
+        if background == [255, 255, 255] {
+            return Err(io::Error::other(format!(
+                "{scenario} row {row} name retained the fresh capture sentinel"
+            ))
+            .into());
+        }
         let workspace = semantic_palette(ResolvedTheme::Dark)
             .ok_or("Dark palette missing")?
             .surface_workspace;
@@ -6069,6 +6030,31 @@ mod native_tests {
             })
             .count();
         Ok((readable_pixels, background))
+    }
+
+    fn assert_name_raster_contrast(
+        list: HWND,
+        root: &Path,
+        scenario: &str,
+        rows: [(i32, bool); 2],
+        subitems: &[(i32, &str)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (row, selected) in rows {
+            for &(subitem, name) in subitems {
+                let (readable_pixels, background) =
+                    name_raster_contrast(list, root, scenario, row, subitem, selected, None)?;
+                println!(
+                    "native-selection-single-print: scenario={scenario} row={row} subitem={subitem} selected={selected} contrast_pixels={readable_pixels} background={background:?}"
+                );
+                if readable_pixels < 20 {
+                    return Err(io::Error::other(format!(
+                        "{scenario} row {row} {name} name has only {readable_pixels} high-contrast pixels against {background:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn run_native_inactive_selection_contrast_regression() -> Result<(), Box<dyn std::error::Error>>
@@ -6186,30 +6172,126 @@ mod native_tests {
             if unsafe { GetFocus() } != list {
                 return Err(io::Error::other("ListView did not receive keyboard focus").into());
             }
+            assert_name_raster_contrast(
+                list,
+                app._directory.path(),
+                "active-row0",
+                [(0, true), (1, false)],
+                &[(0, "original"), (1, "proposed")],
+            )?;
             // SAFETY: button is a live test-owned child on this UI thread.
             unsafe { SetFocus(button) };
             // SAFETY: the scalar query reads this UI thread's current focus.
             if unsafe { GetFocus() } != button || selected_indices(list) != [0] {
                 return Err(io::Error::other("button focus did not retain row selection").into());
             }
-            INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow_mut().take());
-            for (row, selected) in [(0, true), (1, false)] {
-                for (subitem, name) in [(0, "original"), (1, "proposed")] {
-                    let (readable_pixels, background) =
-                        name_raster_contrast(list, app._directory.path(), row, subitem, selected)?;
-                    println!(
-                        "native-inactive-selection-paint: row={row} subitem={subitem} selected={selected} contrast_pixels={readable_pixels} background={background:?} original_cell_probe={:?}",
-                        INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow().clone())
-                    );
-                    if readable_pixels < 20 {
-                        return Err(io::Error::other(format!(
-                            "row {row} {name} name has only {readable_pixels} high-contrast pixels against {background:?}; paint probe {:?}",
-                            INACTIVE_SELECTION_PAINT_DIAGNOSTIC.with(|slot| slot.borrow().clone())
-                        ))
-                        .into());
-                    }
+            assert_name_raster_contrast(
+                list,
+                app._directory.path(),
+                "inactive-row0",
+                [(0, true), (1, false)],
+                &[(0, "original"), (1, "proposed")],
+            )?;
+            {
+                let _selection_guard = ProgrammaticListUpdateGuard::begin();
+                restore_refresh_selection(list, &[1], Some(1), 2);
+            }
+            // SAFETY: this scalar query reads the current UI-thread focus.
+            if unsafe { GetFocus() } != button || selected_indices(list) != [1] {
+                return Err(io::Error::other("button focus did not retain row 1 selection").into());
+            }
+            assert_name_raster_contrast(
+                list,
+                app._directory.path(),
+                "inactive-row1",
+                [(0, false), (1, true)],
+                &[(0, "original"), (1, "proposed")],
+            )?;
+            // Force both nonempty selected names to ellipsize at the installed
+            // 150% font, then check the native text against its actual band.
+            for column in [0, 1] {
+                // SAFETY: this live ListView copies the scalar column width.
+                if unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, column, 120) } == 0 {
+                    return Err(io::Error::other("could not narrow native name column").into());
                 }
             }
+            let (text_width, _) = measure_text(
+                list,
+                font.replacement.as_raw(),
+                "01-한국어-日本語-next-row-name.txt",
+                true,
+            )
+            .ok_or("could not measure long native name")?;
+            if text_width <= list_column_width(list, 0) || text_width <= list_column_width(list, 1)
+            {
+                return Err(io::Error::other("native name did not exceed narrow columns").into());
+            }
+            assert_name_raster_contrast(
+                list,
+                app._directory.path(),
+                "inactive-ellipsized-row1",
+                [(0, false), (1, true)],
+                &[(0, "original"), (1, "proposed")],
+            )?;
+            // A dirty clip omitting the original cell's top still needs two
+            // samples from the visible intersection. The capture keeps its
+            // outside pixels white to prove the single WM_PRINT was clipped.
+            let mut cell = RECT {
+                left: LVIR_BOUNDS as i32,
+                top: 0,
+                ..RECT::default()
+            };
+            // SAFETY: row 1 is live and writes only the stack rectangle.
+            if unsafe { SendMessageW(list, LVM_GETSUBITEMRECT, 1, (&raw mut cell) as LPARAM) } == 0
+            {
+                return Err(io::Error::other("selected original cell is unavailable").into());
+            }
+            let clip = RECT {
+                left: cell.left,
+                top: cell.top + 6,
+                right: cell.left + list_column_width(list, 0),
+                bottom: cell.bottom - 3,
+            };
+            let (readable_pixels, background) = name_raster_contrast(
+                list,
+                app._directory.path(),
+                "inactive-clipped-row1",
+                1,
+                0,
+                true,
+                Some(clip),
+            )?;
+            println!(
+                "native-selection-single-print: scenario=inactive-clipped-row1 row=1 subitem=0 selected=true contrast_pixels={readable_pixels} background={background:?}"
+            );
+            if readable_pixels < 20 {
+                return Err(io::Error::other(format!(
+                    "clipped selected original name has only {readable_pixels} high-contrast pixels against {background:?}"
+                ))
+                .into());
+            }
+            // A persisted first-column width can exceed the visible list
+            // viewport. The selected original-name cell still needs a sample
+            // from its visible portion; proposed names are now offscreen.
+            // SAFETY: this live ListView copies the scalar column width.
+            if unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, 0, 900) } == 0 {
+                return Err(io::Error::other("could not widen first native column").into());
+            }
+            let mut client = RECT::default();
+            // SAFETY: the live ListView writes this stack client rectangle.
+            if unsafe { GetClientRect(list, &mut client) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            if list_column_width(list, 0) <= client.right.saturating_sub(client.left) {
+                return Err(io::Error::other("first column did not exceed the viewport").into());
+            }
+            assert_name_raster_contrast(
+                list,
+                app._directory.path(),
+                "inactive-wide-first-column",
+                [(0, false), (1, true)],
+                &[(0, "original")],
+            )?;
         }
         if !restored.get() {
             return Err(io::Error::other("original ListView font was not restored").into());

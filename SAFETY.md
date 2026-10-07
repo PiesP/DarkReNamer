@@ -564,20 +564,25 @@ subclasses. The native blank-body regression routes real ListView custom-draw
 notifications through a test-owned parent subclass. Its boxed UI-thread context
 and brush remain live through confirmed parent destruction; failed destruction
 retains that bounded context instead of leaving dangling callback refdata.
-For a selected Dark FileList row after keyboard focus moves elsewhere, the
-native inactive-selection band can be light or dark while the control's fixed
-Dark text color is white. The existing synchronous custom-draw callback checks
-authoritative ListView selection and actual control focus, then copies the
-current ListView theme's `LVP_LISTITEM/LISS_SELECTEDNOTFOCUS` text color into
-the foreground field for every selected subitem. If the theme handle or color
-is unavailable, it preserves native default drawing. The control still draws
-its selection background, icons, focus and input; the borrowed theme handle is
-never retained or closed. Active selection, resolved Light themes, Forced Colors
-and unknown high-contrast state keep native text behavior; System mode follows
-its cached resolved theme. A
-source-bound native raster regression checks nonempty original/proposed names
-after focus moves to a button; static checks alone do not establish desktop
-acceptance.
+For a selected Dark FileList row, the native selection band can be light or
+dark with or without keyboard focus while the control's fixed Dark text color
+is white. The existing synchronous custom-draw callback checks authoritative
+ListView selection, then samples two fixed points inside the visible intersection
+of the current selected subitem and the callback DC clip, including a partial
+vertical dirty region or a persisted first column wider than the viewport.
+The ListView supplies the live HDC; only copied `COLORREF` values leave the callback.
+Invalid, fully clipped, narrow, or nonuniform samples retain native default drawing.
+For a uniform valid sample, true sRGB contrast chooses black or white text;
+the control still draws its selection background, icons, focus and input. No
+DC, bitmap, or theme handle is acquired or retained by this path. Resolved
+Light themes, Forced Colors and unknown high-contrast state keep
+native text behavior; System mode follows its cached resolved theme. A
+source-bound native raster regression checks a fresh, sentinel-cleared bitmap
+with one `WM_PRINT` and no fallback copy across active/inactive focus, row
+selection transitions, long ellipsized names, a clipped dirty region, and an
+oversized first column. The fixture validates observed text contrast, not a
+general Win32 paint-order guarantee; static
+checks alone do not establish desktop acceptance.
 
 Appearance group boxes use a local UI-thread `Rc` ownership protocol. The parent
 owns each group state, and subclass refdata owns one separate strong share.

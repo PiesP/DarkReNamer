@@ -5,11 +5,11 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::ptr::{NonNull, null_mut};
 
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
     CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP, HDC,
-    HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
+    HGDIOBJ, IntersectClipRect, PatBlt, ReleaseDC, SRCCOPY, SelectObject, WHITENESS,
 };
 use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -20,6 +20,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const BMP_HEADER_BYTES: usize = 14;
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const MINIMUM_DISTINCT_COLORS: usize = 8;
+
+#[derive(Clone, Copy)]
+enum CapturePass {
+    Combined,
+    SinglePrintMessage { clip: Option<RECT> },
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CaptureMeasurement {
@@ -189,6 +195,13 @@ impl Drop for CaptureResources {
 }
 
 pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPixels> {
+    capture_window_pixels_with_pass(window, CapturePass::Combined)
+}
+
+fn capture_window_pixels_with_pass(
+    window: HWND,
+    pass: CapturePass,
+) -> io::Result<CapturedWindowPixels> {
     if window.is_null() {
         return Err(io::Error::other("visual capture requires a live window"));
     }
@@ -214,14 +227,47 @@ pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPi
         .filter(|bytes| *bytes <= MAX_CAPTURE_BYTES)
         .ok_or_else(|| io::Error::other("visual capture exceeds the 64 MiB pixel budget"))?;
     let mut resources = CaptureResources::create(width, height)?;
-    // SAFETY: the destination DC owns a compatible selected bitmap and the
-    // synchronous PrintWindow call retains no caller pointers after returning.
-    if unsafe { PrintWindow(window, resources.memory_dc, 0) } == 0 {
-        return Err(io::Error::last_os_error());
+    if matches!(pass, CapturePass::SinglePrintMessage { .. }) {
+        // SAFETY: the fresh compatible bitmap is selected into this owned DC;
+        // one bounded fill creates a known sentinel before the sole WM_PRINT.
+        if unsafe { PatBlt(resources.memory_dc, 0, 0, width, height, WHITENESS) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if let CapturePass::SinglePrintMessage { clip: Some(clip) } = pass {
+            if clip.left < 0
+                || clip.top < 0
+                || clip.right > width
+                || clip.bottom > height
+                || clip.left >= clip.right
+                || clip.top >= clip.bottom
+            {
+                return Err(io::Error::other("single-print clip is outside capture"));
+            }
+            // SAFETY: the test-owned memory DC and bounded rectangle remain
+            // live through the one synchronous WM_PRINT below.
+            if unsafe {
+                IntersectClipRect(
+                    resources.memory_dc,
+                    clip.left,
+                    clip.top,
+                    clip.right,
+                    clip.bottom,
+                )
+            } <= 1
+            {
+                return Err(io::Error::other("single-print clip is empty"));
+            }
+        }
+    } else {
+        // SAFETY: the destination DC owns a compatible selected bitmap and the
+        // synchronous PrintWindow call retains no caller pointers afterward.
+        if unsafe { PrintWindow(window, resources.memory_dc, 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
-    // Wine and some native child configurations do not recurse through every
-    // child after PrintWindow. WM_PRINT explicitly requests the same live window
-    // plus its non-client, owned, and child surfaces into the selected bitmap.
+    // Combined capture paints children after PrintWindow. The single-pass
+    // regression uses only this WM_PRINT on a sentinel-cleared fresh bitmap.
+    // Both request the live window and its non-client and child surfaces.
     // SAFETY: window and destination DC remain live for this synchronous message;
     // lparam contains only documented pointer-free PRF flags.
     unsafe {
@@ -252,7 +298,7 @@ pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPi
     let mut used_window_dc_fallback = false;
     let mut pixels = read_pixels(&resources, &mut info, height, pixel_bytes)?;
     let mut colors = distinct_colors(&pixels);
-    if colors.len() < MINIMUM_DISTINCT_COLORS {
+    if colors.len() < MINIMUM_DISTINCT_COLORS && matches!(pass, CapturePass::Combined) {
         used_window_dc_fallback = true;
         resources.select_bitmap()?;
         // SAFETY: window is live and this DC is released below after the bounded
@@ -309,7 +355,38 @@ pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPi
 }
 
 pub(super) fn write_window_bmp(window: HWND, output: &Path) -> io::Result<CaptureMeasurement> {
-    let capture = capture_window_pixels(window)?;
+    write_window_bmp_with_pass(window, output, CapturePass::Combined)
+}
+
+pub(super) fn write_window_bmp_single_print(
+    window: HWND,
+    output: &Path,
+) -> io::Result<CaptureMeasurement> {
+    write_window_bmp_with_pass(
+        window,
+        output,
+        CapturePass::SinglePrintMessage { clip: None },
+    )
+}
+
+pub(super) fn write_window_bmp_single_print_clipped(
+    window: HWND,
+    output: &Path,
+    clip: RECT,
+) -> io::Result<CaptureMeasurement> {
+    write_window_bmp_with_pass(
+        window,
+        output,
+        CapturePass::SinglePrintMessage { clip: Some(clip) },
+    )
+}
+
+fn write_window_bmp_with_pass(
+    window: HWND,
+    output: &Path,
+    pass: CapturePass,
+) -> io::Result<CaptureMeasurement> {
+    let capture = capture_window_pixels_with_pass(window, pass)?;
     let measurement = capture.measurement;
     let pixel_bytes = capture.pixels.len();
     let info = BITMAPINFOHEADER {
