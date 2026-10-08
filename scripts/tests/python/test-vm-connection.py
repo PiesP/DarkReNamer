@@ -68,7 +68,7 @@ class VmConnectionTests(unittest.TestCase):
             self.assertEqual(keywords["env"]["DARKRENAMER_GUI_SSH_HOST"], "vm-alias")
             return json.dumps(remote, separators=(",", ":"))
 
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
                 mock.patch.object(runner.subprocess, "check_output", side_effect=check_output):
             observed = runner.guest_preflight(profile)
         self.assertEqual(observed["system"], "windows")
@@ -90,7 +90,7 @@ class VmConnectionTests(unittest.TestCase):
             "RunspaceId": "00000000-0000-0000-0000-000000000000",
             "PSShowComputerName": True,
         }
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
                 mock.patch.object(runner.subprocess, "check_output", return_value=json.dumps(remote)):
             with self.assertRaisesRegex(ValueError, "invalid document"):
                 runner.guest_preflight({
@@ -119,7 +119,7 @@ class VmConnectionTests(unittest.TestCase):
                                  ({"product_caption": "Windows 10 Pro"}, "supported Windows 11"),
                                  ({"build": "21999"}, "supported Windows 11"),
                                  ({"build": ""}, "version/build is missing")):
-            with self.subTest(changes=changes), mock.patch.object(runner.shutil, "which", return_value="pwsh"), \
+            with self.subTest(changes=changes), mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
                     mock.patch.object(runner.subprocess, "check_output", return_value=json.dumps({**remote, **changes})):
                 with self.assertRaisesRegex(ValueError, message):
                     runner.guest_preflight(profile)

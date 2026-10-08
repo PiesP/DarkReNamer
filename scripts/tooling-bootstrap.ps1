@@ -12,6 +12,7 @@
         @('formats-png', 'python', 'darkrenamer_tooling.formats.png'),
         @('vm-connection', 'python', 'darkrenamer_tooling.vm.connection'),
         @('package-vm', 'python-package', 'darkrenamer_tooling.vm'),
+        @('vm-host-tools', 'python', 'darkrenamer_tooling.vm.host_tools'),
         @('vm-launcher', 'python', 'darkrenamer_tooling.vm.launcher'),
         @('vm-runtimebroker-diagnostic', 'python', 'darkrenamer_tooling.vm.runtimebroker_diagnostic'),
         @('vm-gui', 'python', 'darkrenamer_tooling.vm.gui'),
