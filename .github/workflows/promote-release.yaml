@@ -15,6 +15,10 @@ on:
         description: Immutable candidate artifact ID
         required: true
         type: string
+      expected_artifact_sha256:
+        description: Independently approved complete candidate artifact ZIP SHA-256
+        required: true
+        type: string
       candidate_source_sha:
         description: Full candidate source SHA
         required: true
@@ -129,6 +133,7 @@ jobs:
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
           CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -159,6 +164,9 @@ jobs:
           }
           if ($env:EXPECTED_EXE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'EXPECTED_EXE_SHA256 must be a lowercase SHA-256 digest.'
+          }
+          if ($env:EXPECTED_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'EXPECTED_ARTIFACT_SHA256 must be a lowercase SHA-256 digest.'
           }
           if ($env:INGRESS_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'INGRESS_ARCHIVE_SHA256 must be a lowercase SHA-256 digest.'
@@ -222,12 +230,28 @@ jobs:
             | Out-File -LiteralPath candidate-artifact.json -Encoding utf8
           if ($LASTEXITCODE -ne 0) { throw 'Candidate artifact metadata could not be downloaded.' }
 
+      - name: Download complete candidate archive bytes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
+          EXPECTED_ARTIFACT_NAME: ${{ steps.authority.outputs.artifact_name }}
+        run: |
+          ./scripts/download-verified-candidate-artifact.ps1 `
+            -Repository $env:GITHUB_REPOSITORY `
+            -ArtifactId $env:CANDIDATE_ARTIFACT_ID `
+            -ExpectedArtifactSha256 $env:EXPECTED_ARTIFACT_SHA256 `
+            -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME `
+            -ArchivePath candidate-artifact.zip
+
       - name: Validate immutable candidate metadata
         shell: pwsh
         env:
           EXPECTED_RUN_ID: ${{ inputs.candidate_run_id }}
           EXPECTED_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
           EXPECTED_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
           EXPECTED_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           EXPECTED_ARTIFACT_NAME: ${{ steps.authority.outputs.artifact_name }}
         run: >-
@@ -237,17 +261,15 @@ jobs:
           -ExpectedRunId $env:EXPECTED_RUN_ID
           -ExpectedRunAttempt $env:EXPECTED_RUN_ATTEMPT
           -ExpectedArtifactId $env:EXPECTED_ARTIFACT_ID
+          -ExpectedArtifactSha256 $env:EXPECTED_ARTIFACT_SHA256
+          -ArtifactArchivePath candidate-artifact.zip
           -ExpectedSourceSha $env:EXPECTED_SOURCE_SHA
           -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME
 
-      - name: Download exact immutable candidate artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ inputs.candidate_artifact_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.candidate_run_id }}
-          path: dist
+      - name: Extract verified immutable candidate archive
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath candidate-artifact.zip -DestinationPath dist
 
       - name: Revalidate handoff bytes and provenance
         shell: pwsh
@@ -270,19 +292,41 @@ jobs:
             throw 'Release handoff executable digest does not match the expected candidate digest.'
           }
 
-      - name: Verify original candidate attestation
+      - name: Verify original provenance of every published candidate asset
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
         run: |
-          gh attestation verify dist/DarkReNamer.exe `
-            --repo $env:GITHUB_REPOSITORY `
-            --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yaml" `
-            --source-digest $env:CANDIDATE_SOURCE_SHA `
-            --source-ref refs/heads/master `
-            --deny-self-hosted-runners
-          if ($LASTEXITCODE -ne 0) { throw 'Original candidate attestation verification failed.' }
+          New-Item -ItemType Directory -Path verified-candidate | Out-Null
+          $files = @(python -I ./scripts/validate-release-publication.py list --candidate-root dist)
+          if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
+            throw 'Candidate publication list could not be loaded.'
+          }
+          for ($index = 0; $index -lt $files.Count; $index++) {
+            $verified = Join-Path verified-candidate "$index.json"
+            gh attestation verify $files[$index] `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yaml" `
+              --source-digest $env:CANDIDATE_SOURCE_SHA `
+              --source-ref refs/heads/master `
+              --deny-self-hosted-runners `
+              --limit 128 `
+              --format json | Out-File -LiteralPath $verified -Encoding utf8
+            if ($LASTEXITCODE -ne 0) {
+              throw "Original candidate attestation verification failed: $($files[$index])"
+            }
+          }
+          python -I ./scripts/validate-release-publication.py verify-candidate `
+            --candidate-root dist `
+            --verified-root verified-candidate `
+            --repository $env:GITHUB_REPOSITORY `
+            --source-sha $env:CANDIDATE_SOURCE_SHA `
+            --run-id $env:CANDIDATE_RUN_ID `
+            --run-attempt $env:CANDIDATE_RUN_ATTEMPT
+          if ($LASTEXITCODE -ne 0) { throw 'Original candidate provenance policy failed.' }
 
       - name: Recompute canonical automated VM validation statement
         shell: pwsh
@@ -399,6 +443,7 @@ jobs:
           CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
+          EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
           PROFILE_ID: ${{ inputs.profile_id }}
@@ -440,6 +485,7 @@ jobs:
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"
             "Candidate artifact ID: $env:CANDIDATE_ARTIFACT_ID"
+            "Candidate artifact ZIP SHA-256: $env:EXPECTED_ARTIFACT_SHA256"
             "DarkReNamer.exe SHA-256: $env:EXPECTED_EXE_SHA256"
             "Automated validation workflow: $env:VALIDATION_RUN_ID (attempt $env:VALIDATION_RUN_ATTEMPT)"
             ''
@@ -448,21 +494,37 @@ jobs:
 
           $channelFlags = @(if ($env:RELEASE_CHANNEL -ceq 'prerelease') { '--prerelease' })
           $latestFlag = "--latest=$env:MAKE_LATEST"
+          $candidateFiles = @(python -I ./scripts/validate-release-publication.py list --candidate-root dist)
+          if ($LASTEXITCODE -ne 0 -or $candidateFiles.Count -eq 0) {
+            throw 'Candidate publication list could not be loaded.'
+          }
+          python -I ./scripts/validate-release-publication.py verify-candidate `
+            --candidate-root dist `
+            --verified-root verified-candidate `
+            --repository $env:GITHUB_REPOSITORY `
+            --source-sha $env:CANDIDATE_SOURCE_SHA `
+            --run-id $env:CANDIDATE_RUN_ID `
+            --run-attempt $env:CANDIDATE_RUN_ATTEMPT
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate bytes changed before publication.' }
           gh release create $env:RELEASE_TAG `
             --verify-tag `
             $latestFlag `
             @channelFlags `
             --title "DarkReNamer $env:RELEASE_TAG" `
             --notes-file release-notes.md `
-            dist/DarkReNamer.exe `
-            dist/DarkReNamer.cdx.json `
-            dist/DarkReNamer-debug-symbols.zip `
-            dist/SHA256SUMS.txt `
-            dist/LICENSE `
-            dist/THIRD_PARTY_LICENSES.html `
-            dist/THIRD_PARTY_NOTICES.md `
-            dist/DISTRIBUTION.md `
-            dist/release-handoff.json `
-            dist/release-metrics.json `
+            @candidateFiles `
             validation-statement.json
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed.' }
+
+      - name: Read back exact public release bytes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          ./scripts/verify-release-public-readback.ps1 `
+            -Repository $env:GITHUB_REPOSITORY `
+            -ReleaseTag $env:RELEASE_TAG `
+            -CandidateRoot dist `
+            -StatementPath validation-statement.json `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP 'darkrenamer-public-readback')

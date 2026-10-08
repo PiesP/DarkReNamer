@@ -10,6 +10,8 @@ param(
     [string] $ExpectedRunAttempt,
     [Parameter(Mandatory)]
     [string] $ExpectedArtifactId,
+    [string] $ExpectedArtifactSha256,
+    [string] $ArtifactArchivePath,
     [Parameter(Mandatory)]
     [string] $ExpectedSourceSha,
     [Parameter(Mandatory)]
@@ -118,6 +120,12 @@ Assert-PositiveNumericInput `
     -Value $ExpectedArtifactId `
     -Name 'ExpectedArtifactId' `
     -Description 'GitHub Actions artifact ID'
+if ([bool]$ExpectedArtifactSha256 -ne [bool]$ArtifactArchivePath) {
+    throw 'ExpectedArtifactSha256 and ArtifactArchivePath must be supplied together.'
+}
+if ($ExpectedArtifactSha256 -and $ExpectedArtifactSha256 -cnotmatch '^[0-9a-f]{64}$') {
+    throw 'ExpectedArtifactSha256 must be a lowercase SHA-256 digest.'
+}
 if ($ExpectedSourceSha -cnotmatch '^[0-9a-f]{40}$') {
     throw 'ExpectedSourceSha must be a full lowercase 40-character Git SHA.'
 }
@@ -174,6 +182,20 @@ if ($expired -isnot [bool]) {
 }
 if ($expired) {
     throw 'Candidate artifact is expired.'
+}
+if ($ExpectedArtifactSha256) {
+    $artifactDigest = Get-RequiredProperty -Object $artifact -Name 'digest' -Location 'artifact metadata'
+    if ($artifactDigest -isnot [string] -or
+        $artifactDigest -cne "sha256:$ExpectedArtifactSha256") {
+        throw 'Candidate artifact metadata digest does not match independently approved SHA-256.'
+    }
+    if (-not (Test-Path -LiteralPath $ArtifactArchivePath -PathType Leaf)) {
+        throw 'Candidate artifact archive is missing.'
+    }
+    $archiveDigest = (Get-FileHash -LiteralPath $ArtifactArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($archiveDigest -cne $ExpectedArtifactSha256) {
+        throw 'Downloaded candidate artifact archive digest does not match independently approved SHA-256.'
+    }
 }
 $artifactRun = Get-RequiredProperty `
     -Object $artifact `
