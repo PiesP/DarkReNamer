@@ -60,6 +60,73 @@ pub(crate) struct NativeParent {
     pub identity: NativeIdentity,
 }
 
+/// Pins the current namespace from the local drive root through one parent.
+/// Dropping this value releases every sharing restriction together.
+#[derive(Debug)]
+pub(crate) struct NativeParentChain {
+    _ancestors: Vec<NativeParent>,
+    parent: NativeParent,
+}
+
+impl NativeParentChain {
+    pub(crate) fn open_legacy(path: &LegacyText) -> io::Result<Self> {
+        let path = std::ffi::OsString::from_wide(path.units());
+        let path = Path::new(&path);
+        reject_unsupported_drive_type(path)?;
+        let (root, components) = traversal_parts(path)?;
+        let capacity = components
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let mut directories = Vec::new();
+        directories
+            .try_reserve_exact(capacity)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+
+        let root_file = open_root_directory(&root, SHARE_READ_WRITE)?;
+        validate_directory_handle(&root_file)?;
+        reject_case_sensitive_directory(&root_file)?;
+        reject_remote_protocol_if_reported(&root_file)?;
+        reject_unsupported_filesystem(&root_file)?;
+        let root_identity = file_identity(&root_file)?;
+        directories.push(NativeParent {
+            file: root_file,
+            identity: root_identity,
+        });
+        for component in components {
+            let leaf = component.encode_wide().collect::<Vec<_>>();
+            let previous = directories
+                .last()
+                .ok_or_else(|| io::Error::other("mutation directory chain is empty"))?;
+            let file = open_relative(
+                previous.file(),
+                &leaf,
+                FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                SHARE_READ_WRITE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            )?;
+            validate_directory_handle(&file)?;
+            reject_case_sensitive_directory(&file)?;
+            reject_remote_protocol_if_reported(&file)?;
+            let identity = file_identity(&file)?;
+            directories.push(NativeParent { file, identity });
+        }
+        let parent = directories
+            .pop()
+            .ok_or_else(|| io::Error::other("mutation directory chain is empty"))?;
+        reject_unsupported_filesystem(parent.file())?;
+        Ok(Self {
+            _ancestors: directories,
+            parent,
+        })
+    }
+
+    pub(crate) fn parent(&self) -> &NativeParent {
+        &self.parent
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct TextExportTarget {
     parents: Arc<Vec<NativeParent>>,

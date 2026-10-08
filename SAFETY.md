@@ -60,6 +60,16 @@ requires its snapshot, actual source spelling, and entry key to match the plan.
 An identity-preserving external case or long-name change is therefore stale
 source evidence and cannot begin a mutation.
 
+Each primitive retains both parent chains from the local drive root without
+delete sharing before checking their frozen identities. Every ancestor and
+final parent stays open through the native rename and destination identity
+check, so a concurrent parent relocation cannot redirect the confirmed raw
+path while a handle-relative mutation succeeds. The chains are released when
+the primitive returns, including validation failures. Observation does not
+hold these restrictions for the lifetime of a plan. Forward execution,
+rollback, and recovery all use this same primitive; historical journal paths
+are not rewritten or guessed after a relocation.
+
 Each primitive then opens its source with DELETE access while withholding
 delete sharing. The retained mutation handle blocks competing rename and delete
 opens through the native sink. Before mutation, the backend reads the actual
