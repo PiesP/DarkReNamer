@@ -84,6 +84,31 @@ class PngCodecTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_chunk_work_limit_counts_empty_ancillary_before_crc(self):
+        policy = replace(RGB_POLICY, maximum_chunks=5)
+        for extra, accepted in ((2, True), (3, False)):
+            image = png_bytes(1, 1, 6, b"\0\x11\x22\x33\xff",
+                              before_idat=(png_chunk(b"abCD", b"") for _ in range(extra)))
+            with self.subTest(extra=extra), patch.object(codec.zlib, "crc32", wraps=zlib.crc32) as crc:
+                if accepted:
+                    self.assertEqual(codec.decode_png_bytes(image, policy=policy),
+                                     (1, 1, b"\x11\x22\x33\xff"))
+                else:
+                    with self.assertRaisesRegex(codec.PngError, "chunk-count") as caught:
+                        codec.decode_png_bytes(image, policy=policy)
+                    self.assertEqual(caught.exception.code, "chunks")
+                self.assertEqual(crc.call_count, 5)
+
+    def test_consumer_chunk_limit_and_evidence_diagnostic(self):
+        image = png_bytes(1, 1, 6, b"\0\x11\x22\x33\xff",
+                          before_idat=(png_chunk(b"abCD", b"") for _ in range(4094)))
+        with self.assertRaisesRegex(ValueError, "PNG chunk-count budget"):
+            evidence.decode_png(image, "fixture")
+        self.assertEqual(evidence.EVIDENCE_PNG_POLICY.maximum_chunks, 4096)
+        for count in (None, 0, -1, True):
+            with self.subTest(count=count), self.assertRaisesRegex(codec.PngError, "policy"):
+                codec.decode_png_bytes(image, policy=replace(RGB_POLICY, maximum_chunks=count))
+
     def test_decode_png_preserves_rgb_rgba_and_all_supported_filters(self):
         filters = (0, 1, 2, 3, 4)
         for color_type, channels in ((2, 3), (6, 4)):

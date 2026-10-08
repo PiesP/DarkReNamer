@@ -17,6 +17,7 @@ class PngPolicy:
     maximum_decoded_bytes: int | None = None
     maximum_chunk_bytes: int | None = None
     require_opaque: bool = False
+    maximum_chunks: int = 4096
 
 
 class PngError(ValueError):
@@ -42,11 +43,18 @@ def decode_png_bytes(
     reserve_pixels: Callable[[int], None] | None = None,
 ) -> tuple[int, int, bytes]:
     require(data.startswith(b"\x89PNG\r\n\x1a\n"), "signature", "Raster screenshot is not PNG.")
+    require(type(policy.maximum_chunks) is int and policy.maximum_chunks > 0,
+            "chunk_policy", "PNG chunk-count policy is invalid.")
     offset = 8
+    chunks = 0
     width = height = color_type = None
     compressed = bytearray()
     saw_idat = ended_idat = saw_iend = False
     while offset < len(data):
+        # Count every chunk before header, payload, or CRC work, including empty
+        # ancillary chunks. This work bound is independent of raster size.
+        require(chunks < policy.maximum_chunks, "chunks", "PNG exceeds its chunk-count budget.")
+        chunks += 1
         require(offset + 12 <= len(data), "header", "PNG chunk header is truncated.")
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]

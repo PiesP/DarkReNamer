@@ -230,6 +230,7 @@ GUI_PNG_POLICY = PngPolicy(
     color_types=frozenset({2, 6}), maximum_pixels=MAX_PNG_PIXELS,
     maximum_dimension=8192, maximum_decoded_bytes=MAX_PNG_DECODED_BYTES,
     maximum_compressed_bytes=128 * 1024 * 1024,
+    maximum_chunks=4096,
 )
 
 

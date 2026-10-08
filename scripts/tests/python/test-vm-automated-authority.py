@@ -3,6 +3,7 @@
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -109,6 +110,26 @@ class AuthorityTests(unittest.TestCase):
                             ('asset_sha256', '../escape')]:
             with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                 self.check_ingress(*self.ingress_fixture(), **{name: value})
+
+    def test_metadata_only_cli_authenticates_before_transfer_without_claiming_bytes(self):
+        release, asset = self.ingress_fixture()
+        with tempfile.TemporaryDirectory() as root:
+            paths = [Path(root) / name for name in ('repository.json', 'release.json', 'asset.json')]
+            for path, value in zip(paths, (REPOSITORY, release, asset), strict=True):
+                path.write_text(json.dumps(value), encoding='utf-8')
+            args = ['--repository-metadata', str(paths[0]), '--repository', REPO, '--source-sha', SOURCE,
+                    '--release-metadata', str(paths[1]), '--asset-metadata', str(paths[2]),
+                    '--release-id', '37', '--asset-id', '41', '--asset-sha256', DIGEST, '--asset-size', '100']
+            with patch.object(authority, 'verify_archive_bytes') as verify:
+                self.assertEqual(authority.main(Path(root), ['ingress-metadata', *args]), 0)
+                verify.assert_not_called()
+                self.assertEqual(authority.main(Path(root), ['ingress', *args, '--archive', root + '/archive.zip']), 0)
+                verify.assert_called_once()
+            asset['size'] = 512 * 1024 * 1024 + 1
+            paths[2].write_text(json.dumps(asset), encoding='utf-8')
+            with patch.object(authority, 'verify_archive_bytes') as verify, self.assertRaises(ValueError):
+                authority.main(Path(root), ['ingress-metadata', *args])
+            verify.assert_not_called()
 
     def test_archive_bytes_are_checked_independently_of_metadata(self):
         with tempfile.TemporaryDirectory() as root:

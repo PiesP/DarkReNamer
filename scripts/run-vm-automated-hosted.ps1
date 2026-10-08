@@ -19,7 +19,8 @@ param(
     [string] $TrustedSourceRoot,
     [string] $OutputPath,
     [string] $RunnerTemp = $env:RUNNER_TEMP,
-    [string] $PythonExecutable = 'python'
+    [string] $PythonExecutable = 'python',
+    [Net.Http.HttpClient] $DownloadClient
 )
 
 Set-StrictMode -Version Latest
@@ -418,17 +419,29 @@ try {
             [Text.UTF8Encoding]::new($false)
         )
 
-        $headers = @{
-            Accept = 'application/octet-stream'
-            Authorization = "Bearer $($env:GH_TOKEN)"
-            'X-GitHub-Api-Version' = '2022-11-28'
-            'User-Agent' = 'DarkReNamer-hosted-validator'
+        # Authenticate the release/asset authority and approved ceiling before
+        # any body transfer. The independent byte/digest check still runs later.
+        & $PythonExecutable -I (Join-Path $trusted 'scripts/validate-vm-automated-authority.py') ingress-metadata `
+            --repository-metadata $repositoryPath `
+            --repository $Repository `
+            --source-sha $CandidateSourceSha `
+            --release-metadata $releasePath `
+            --asset-metadata $assetPath `
+            --release-id $IngressReleaseId `
+            --asset-id $IngressAssetId `
+            --asset-sha256 $IngressArchiveSha256 `
+            --asset-size $IngressArchiveSize *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'Private ingress metadata authority validation failed.' }
+        . (Join-Path $trusted 'scripts/download-bounded-github-data.ps1') -LibraryOnly
+        $assetMetadata = Read-HostedJson $assetPath
+        Assert-BoundedDownloadSize -Size $assetMetadata.size -Maximum 512MB -Label 'Ingress archive'
+        if ($assetMetadata.size -ne [long]$IngressArchiveSize) {
+            throw 'Authenticated ingress size differs from its approval.'
         }
-        Invoke-WebRequest `
-            -Uri "https://api.github.com/repos/$Repository/releases/assets/$IngressAssetId" `
-            -Headers $headers `
-            -OutFile $archivePath `
-            -MaximumRedirection 5 | Out-Null
+        Save-BoundedGitHubData `
+            -ApiUri "https://api.github.com/repos/$Repository/releases/assets/$IngressAssetId" `
+            -OutputPath $archivePath -ExpectedSize ([long]$IngressArchiveSize) `
+            -MaximumBytes 512MB -Token $env:GH_TOKEN -Client $DownloadClient
 
         & $PythonExecutable -I (Join-Path $trusted 'scripts/validate-vm-automated-authority.py') ingress `
             --repository-metadata $repositoryPath `

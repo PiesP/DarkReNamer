@@ -278,17 +278,19 @@ def main(repo: Path, argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     ingress = commands.add_parser('ingress')
+    ingress_metadata = commands.add_parser('ingress-metadata')
     authority = commands.add_parser('validation-run')
-    for command in (ingress, authority):
+    for command in (ingress, ingress_metadata, authority):
         command.add_argument('--repository-metadata', type=Path, required=True)
         command.add_argument('--repository', required=True)
         command.add_argument('--source-sha', required=True)
-    ingress.add_argument('--release-metadata', type=Path, required=True)
-    ingress.add_argument('--asset-metadata', type=Path, required=True)
-    ingress.add_argument('--release-id', required=True)
-    ingress.add_argument('--asset-id', required=True)
-    ingress.add_argument('--asset-sha256', required=True)
-    ingress.add_argument('--asset-size', required=True)
+    for command in (ingress, ingress_metadata):
+        command.add_argument('--release-metadata', type=Path, required=True)
+        command.add_argument('--asset-metadata', type=Path, required=True)
+        command.add_argument('--release-id', required=True)
+        command.add_argument('--asset-id', required=True)
+        command.add_argument('--asset-sha256', required=True)
+        command.add_argument('--asset-size', required=True)
     ingress.add_argument('--archive', type=Path, required=True)
     authority.add_argument('--run-metadata', type=Path, required=True)
     authority.add_argument('--verified-attestations', type=Path, required=True)
@@ -303,12 +305,13 @@ def main(repo: Path, argv=None):
     authority.add_argument('--expected-exe-sha256', required=True)
     args = parser.parse_args(argv)
     repository = read_json(args.repository_metadata)
-    if args.command == 'ingress':
+    if args.command in ('ingress', 'ingress-metadata'):
         validate_ingress(repository, read_json(args.release_metadata), read_json(args.asset_metadata),
                          expected_repository=args.repository, source_sha=args.source_sha,
                          release_id=args.release_id, asset_id=args.asset_id,
                          asset_sha256=args.asset_sha256, asset_size=args.asset_size)
-        verify_archive_bytes(args.archive, args.asset_sha256, args.asset_size)
+        if args.command == 'ingress':
+            verify_archive_bytes(args.archive, args.asset_sha256, args.asset_size)
     else:
         require(args.statement.is_file() and not args.statement.is_symlink(), 'Statement must be an ordinary file.')
         with args.statement.open('rb') as stream:
@@ -329,7 +332,10 @@ def main(repo: Path, argv=None):
                                run_id=args.run_id, run_attempt=args.run_attempt,
                                statement_sha256=hashlib.sha256(data).hexdigest(),
                                profile_id=args.profile_id)
-    print('GitHub authority bindings verified; raw evidence derivation remains a separate required gate.')
+    if args.command == 'ingress-metadata':
+        print('Private ingress metadata verified; archive bytes remain unverified.')
+    else:
+        print('GitHub authority bindings verified; raw evidence derivation remains a separate required gate.')
     return 0
 
 
