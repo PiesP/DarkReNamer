@@ -207,6 +207,21 @@ impl RenameBackend for WindowsRenameBackend {
     }
 
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.rename_with_boundaries(operation, || Ok(()), || Ok(()))
+    }
+}
+
+impl WindowsRenameBackend {
+    fn rename_with_boundaries<F, G>(
+        &mut self,
+        operation: &RenameOperation,
+        before_source_open: F,
+        before_native_sink: G,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce() -> std::io::Result<()>,
+        G: FnOnce() -> std::io::Result<()>,
+    {
         if let Some(error) = operation.authorization_error() {
             return Err(error);
         }
@@ -229,6 +244,8 @@ impl RenameBackend for WindowsRenameBackend {
                 certainty: MutationCertainty::NotApplied,
             });
         }
+        before_source_open()
+            .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
         let source = open_entry(&source_parent, source_leaf.units(), true)
             .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
         let metadata = source
@@ -294,6 +311,8 @@ impl RenameBackend for WindowsRenameBackend {
             });
         }
 
+        before_native_sink()
+            .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
         rename_noreplace(&source, destination_parent.file(), destination_leaf.units())
             .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
 
@@ -486,7 +505,222 @@ fn io_code() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::process::Command;
+
     use super::*;
+    use crate::rename::MoveScope;
+
+    fn legacy_path(path: &Path) -> LegacyText {
+        LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
+    }
+
+    // A separate process exercises the OS sharing rule at a deterministic primitive boundary.
+    #[test]
+    #[ignore = "owned subprocess helper; invoked by parent_namespace_boundary_probe"]
+    fn namespace_relocation_child() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(root) = std::env::var_os("DARKRENAMER_PARENT_PROBE_ROOT") else {
+            return Ok(());
+        };
+        let root = Path::new(&root);
+        if !root.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with("darkrenamer-parent-probe-")
+        }) || fs::read(root.join("owned-probe.marker"))? != b"owned parent namespace test"
+        {
+            return Err(io::Error::other("parent probe ownership differs").into());
+        }
+        let relative = std::env::var("DARKRENAMER_PARENT_PROBE_FROM")?;
+        if !matches!(
+            relative.replace('\\', "/").as_str(),
+            "source-tree" | "source-tree/parent" | "destination-tree" | "destination-tree/parent"
+        ) {
+            return Err(io::Error::other("parent probe source is not a fixed fixture path").into());
+        }
+        let from = root.join(relative);
+        let to = root.join("relocated");
+        if !from.starts_with(root) || from == root || to.exists() {
+            return Err(io::Error::other("parent probe paths differ").into());
+        }
+        let code = match fs::rename(&from, &to) {
+            Ok(()) => 0,
+            Err(error) => error.raw_os_error().ok_or(error)?,
+        };
+        if code == 0 {
+            let relative = std::env::var("DARKRENAMER_PARENT_PROBE_RECREATE_PARENT")?;
+            if !matches!(
+                relative.replace('\\', "/").as_str(),
+                "source-tree/parent" | "destination-tree/parent"
+            ) {
+                return Err(io::Error::other(
+                    "parent probe recreation is not a fixed fixture path",
+                )
+                .into());
+            }
+            let parent = root.join(relative);
+            if !parent.starts_with(root) {
+                return Err(io::Error::other("parent probe recreation escapes its root").into());
+            }
+            fs::create_dir_all(&parent)?;
+            let occupant = std::env::var("DARKRENAMER_PARENT_PROBE_OCCUPANT")?;
+            if !matches!(occupant.as_str(), "source.bin" | "destination.bin") {
+                return Err(
+                    io::Error::other("parent probe occupant is not a fixed fixture leaf").into(),
+                );
+            }
+            fs::write(parent.join(occupant), b"unconfirmed occupant")?;
+        }
+        println!("PARENT_MOVE_CODE={code}");
+        Ok(())
+    }
+
+    #[test]
+    fn parent_namespace_boundary_probe() -> Result<(), Box<dyn std::error::Error>> {
+        for before_open in [true, false] {
+            for source_side in [true, false] {
+                for ancestor in [false, true] {
+                    let directory = tempfile::Builder::new()
+                        .prefix("darkrenamer-parent-probe-")
+                        .tempdir()?;
+                    let root = directory.path();
+                    fs::write(
+                        root.join("owned-probe.marker"),
+                        b"owned parent namespace test",
+                    )?;
+                    let source_parent = root.join("source-tree").join("parent");
+                    let destination_parent = root.join("destination-tree").join("parent");
+                    fs::create_dir_all(&source_parent)?;
+                    fs::create_dir_all(&destination_parent)?;
+                    let source = source_parent.join("source.bin");
+                    let destination = destination_parent.join("destination.bin");
+                    fs::write(&source, b"confirmed source")?;
+                    let mut backend = WindowsRenameBackend;
+                    let original = backend.observe(&legacy_path(&source))?;
+                    let vacant = backend.observe(&legacy_path(&destination))?;
+                    let identity = original
+                        .entry
+                        .ok_or_else(|| io::Error::other("source identity missing"))?
+                        .identity;
+                    let operation = RenameOperation::with_authorization(
+                        legacy_path(&source),
+                        legacy_path(&destination),
+                        identity,
+                        original.parent,
+                        vacant.parent,
+                        EntryKind::File,
+                        MoveScope::SameVolumeFilesOnly,
+                    );
+                    let parent = if source_side {
+                        &source_parent
+                    } else {
+                        &destination_parent
+                    };
+                    let moved = if ancestor {
+                        parent
+                            .parent()
+                            .ok_or_else(|| io::Error::other("fixture ancestor missing"))?
+                    } else {
+                        parent
+                    };
+                    let relative = moved.strip_prefix(root)?;
+                    let occupant = if source_side {
+                        "source.bin"
+                    } else {
+                        "destination.bin"
+                    };
+                    let mut move_code = None;
+                    let mut relocate = || -> io::Result<()> {
+                        let output = Command::new(std::env::current_exe()?)
+                            .args([
+                                "--ignored",
+                                "--exact",
+                                "rename::windows_backend::tests::namespace_relocation_child",
+                                "--nocapture",
+                            ])
+                            .env("DARKRENAMER_PARENT_PROBE_ROOT", root)
+                            .env("DARKRENAMER_PARENT_PROBE_FROM", relative)
+                            .env(
+                                "DARKRENAMER_PARENT_PROBE_RECREATE_PARENT",
+                                parent.strip_prefix(root).map_err(io::Error::other)?,
+                            )
+                            .env("DARKRENAMER_PARENT_PROBE_OCCUPANT", occupant)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()?;
+                        let mut child = output;
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(10);
+                        while child.try_wait()?.is_none() {
+                            if std::time::Instant::now() >= deadline {
+                                child.kill()?;
+                                child.wait()?;
+                                return Err(io::Error::other("owned mover exceeded its deadline"));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        let output = child.wait_with_output()?;
+                        if !output.status.success() {
+                            return Err(io::Error::other("owned mover process failed"));
+                        }
+                        let stdout = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+                        let code = stdout
+                            .lines()
+                            .find_map(|line| line.strip_prefix("PARENT_MOVE_CODE="))
+                            .ok_or_else(|| io::Error::other("native move result missing"))?
+                            .parse::<i32>()
+                            .map_err(io::Error::other)?;
+                        move_code = Some(code);
+                        Ok(())
+                    };
+                    if before_open {
+                        backend.rename_with_boundaries(&operation, &mut relocate, || Ok(()))?;
+                    } else {
+                        backend.rename_with_boundaries(&operation, || Ok(()), &mut relocate)?;
+                    }
+                    let code = move_code
+                        .ok_or_else(|| io::Error::other("move boundary was not reached"))?;
+                    let actual_destination = if code == 0 && !source_side {
+                        if ancestor {
+                            root.join("relocated/parent/destination.bin")
+                        } else {
+                            root.join("relocated/destination.bin")
+                        }
+                    } else {
+                        destination.clone()
+                    };
+                    assert_eq!(fs::read(&actual_destination)?, b"confirmed source");
+                    let actual = backend.observe(&legacy_path(&actual_destination))?;
+                    assert_eq!(
+                        actual
+                            .entry
+                            .ok_or_else(|| io::Error::other("destination identity missing"))?
+                            .identity,
+                        identity
+                    );
+                    if code == 0 {
+                        assert_eq!(fs::read(parent.join(occupant))?, b"unconfirmed occupant");
+                    }
+                    println!(
+                        "PARENT_NAMESPACE_RESULT={{\"before_source_open\":{before_open},\"source_side\":{source_side},\"ancestor\":{ancestor},\"move_code\":{code},\"at_confirmed_destination\":{},\"source_file_id\":\"{:032x}\",\"volume_id\":\"{:016x}\",\"identity_preserved\":true,\"contents_preserved\":true,\"occupant_preserved\":true}}",
+                        actual_destination == destination,
+                        identity.file_id(),
+                        identity.volume()
+                    );
+                    // Handles must be released when the primitive returns, including the pinned source.
+                    let release_parent = if code == 0 {
+                        root.join("relocated")
+                    } else {
+                        moved.to_path_buf()
+                    };
+                    fs::rename(release_parent, root.join("released-after-primitive"))?;
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn verbatim_drive_leaf_preserves_the_root_separator_in_its_parent() -> Result<(), BackendError>
