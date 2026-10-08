@@ -742,7 +742,12 @@ $planningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$planningPa
 $binarySizeCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$binarySizePath])
 $profileBenchmarkCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$profileBenchmarkPath])
 $profilePlanningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$profilePlanningPath])
-$candidateCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$candidatePath])
+$candidateSigningLine = @(Get-Content -LiteralPath $candidatePath | Select-String -Pattern '^  attest:$')
+if ($candidateSigningLine.Count -ne 1) { throw 'Candidate must have one separate attestation job.' }
+$candidateBuildBlocks = @($workflowBlocks[$candidatePath] | Where-Object { $_.line -lt $candidateSigningLine[0].LineNumber })
+$candidateSigningBlocks = @($workflowBlocks[$candidatePath] | Where-Object { $_.line -gt $candidateSigningLine[0].LineNumber })
+$candidateCommands = @(Get-ExecutableCommands -Blocks $candidateBuildBlocks)
+$candidateSigningCommands = @(Get-ExecutableCommands -Blocks $candidateSigningBlocks)
 $promotionCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$promotionPath])
 $validationCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$validationPath])
 
@@ -834,14 +839,9 @@ $candidateBuild = Assert-OneCommand `
     -Message 'Candidate validation must build the selected release executable.'
 $null = Assert-OneCommand `
     -Commands $candidateCommands `
-    -Name 'cargo' `
-    -Subcommand 'install' `
-    -BeforeDelimiter @('install', '--locked', 'cargo-about', '--version', '0.9.2', '--features', 'cli') `
-    -RequiredOptions ([ordered]@{
-        '--version' = '0.9.2'
-        '--features' = 'cli'
-    }) `
-    -Message 'Candidate validation must install the pinned cargo-about CLI.'
+    -Name './scripts/install-verified-release-tools.ps1' `
+    -RequiredOptions @{ '-DestinationRoot' = '(Join-Path $env:RUNNER_TEMP ''verified-release-tools'')' } `
+    -Message 'Candidate build must install only approved release-tool bytes.'
 $candidateLicenses = Assert-OneCommand `
     -Commands $candidateCommands `
     -Name 'cargo' `
@@ -907,7 +907,7 @@ $candidateSource = Assert-OneCommand `
     -Name 'git' `
     -BeforeDelimiter @('rev-parse', 'HEAD') `
     -Message 'Candidate workflow must resolve the selected source commit.'
-$candidateSourceBlocks = @($workflowBlocks[$candidatePath] | Where-Object {
+$candidateSourceBlocks = @($candidateBuildBlocks | Where-Object {
     $_.script.Contains('git ls-remote origin refs/heads/master', [StringComparison]::Ordinal)
 })
 if ($candidateSourceBlocks.Count -ne 1) {
@@ -998,13 +998,15 @@ Assert-BinaryGuard `
 $candidateCheckoutLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/checkout')
 $candidateAttestLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/attest')
 $candidateUploadLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/upload-artifact')
-if ($candidateCheckoutLines.Count -ne 1 -or $candidateAttestLines.Count -ne 2 -or
+if ($candidateCheckoutLines.Count -ne 2 -or $candidateAttestLines.Count -ne 2 -or
     $candidateUploadLines.Count -ne 1) {
     throw 'Candidate action line mapping must match the YAML action policy.'
 }
 $candidateYamlLines = @(Get-Content -LiteralPath $candidatePath)
-if ($candidateYamlLines[$candidateCheckoutLines[0] + 1] -cne '          ref: ${{ github.sha }}') {
-    throw 'Candidate checkout must use the exact workflow event SHA.'
+foreach ($checkoutLine in $candidateCheckoutLines) {
+    if ($candidateYamlLines[$checkoutLine + 1] -cne '          ref: ${{ github.sha }}') {
+        throw 'Both candidate jobs must check out the exact workflow event SHA.'
+    }
 }
 $candidateInstallLine = @($candidateYamlLines | Select-String -Pattern '^      - name: Install pinned Rust and verified release tools$')
 if ($candidateInstallLine.Count -ne 1 -or
@@ -1017,11 +1019,76 @@ Assert-LineOrder `
         $candidateSource.line,
         $candidateReleaseFiles.line,
         $candidateHandoff.line,
+        $candidateUploadLines[0],
+        $candidateCheckoutLines[1],
         $candidateAttestLines[0],
-        $candidateAttestLines[1],
-        $candidateUploadLines[0]
+        $candidateAttestLines[1]
     ) `
-    -Message 'Candidate checkout, source proof, handoff validation, attestations, and upload must remain ordered.'
+    -Message 'Candidate build and immutable upload must precede fresh-job attestations.'
+
+function Assert-SigningDataOnly {
+    param([Parameter(Mandatory)][object[]] $Blocks)
+    $allowedCommands = @(
+        'git', 'Join-Path', './scripts/download-verified-candidate-artifact.ps1',
+        'Expand-Archive', './scripts/validate-release-handoff.ps1',
+        'Get-Content', 'ConvertFrom-Json', 'Out-File'
+    )
+    foreach ($block in $Blocks) {
+        foreach ($node in $block.ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.CommandAst]
+        }, $true)) {
+            $name = $node.GetCommandName()
+            if ($null -eq $name -or $name -cnotin $allowedCommands) {
+                throw 'Signing job must consume candidate data through approved commands only.'
+            }
+        }
+        if (@($block.ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -or
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -or
+            $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+        }, $true)).Count -ne 0) {
+            throw 'Signing job must not introduce dynamic code or candidate execution.'
+        }
+    }
+}
+Assert-SigningDataOnly -Blocks $candidateSigningBlocks
+$signingDownload = Assert-OneCommand `
+    -Commands $candidateSigningCommands `
+    -Name './scripts/download-verified-candidate-artifact.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-ArtifactId' = '$env:BUILD_ARTIFACT_ID'
+        '-ExpectedArtifactSha256' = '$env:BUILD_ARTIFACT_DIGEST'
+        '-ExpectedArtifactName' = '$expectedName'
+        '-ArchivePath' = '$archive'
+    }) `
+    -Message 'Signing must download the unchanged immutable build artifact by ID and digest.'
+$signingHandoff = Assert-OneCommand `
+    -Commands $candidateSigningCommands `
+    -Name './scripts/validate-release-handoff.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-SourceRoot' = '$PWD'
+        '-HandoffRoot' = '(Join-Path $PWD ''dist'')'
+    }) `
+    -Message 'Signing must validate candidate bytes as data before attestation.'
+Assert-LineOrder -Lines @(
+    $candidateCheckoutLines[1], $signingDownload.line,
+    $signingHandoff.line, $candidateAttestLines[0], $candidateAttestLines[1]
+) -Message 'Fresh-job source and unchanged candidate validation must precede signing.'
+foreach ($unapproved in @(
+    "& (Join-Path dist 'DarkReNamer.exe')",
+    'Start-Process dist/DarkReNamer.exe',
+    '[Diagnostics.Process]::Start(''dist/DarkReNamer.exe'')',
+    '& { & dist/DarkReNamer.exe }'
+)) {
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($unapproved, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'Signing mutation fixture must parse.' }
+    $rejected = $false
+    try { Assert-SigningDataOnly -Blocks @([pscustomobject]@{ ast = $ast }) }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw 'Candidate execution mutation escaped the signing command allowlist.' }
+}
 
 function Invoke-CandidateSourceFixture {
     param(
@@ -1180,7 +1247,7 @@ $promotionHandoff = Assert-OneCommand `
 $promotionAttestation = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name 'gh' `
-    -BeforeDelimiter @('attestation', 'verify', 'dist/DarkReNamer.exe', '--signer-workflow', '--source-digest', '--source-ref', 'refs/heads/master', '--deny-self-hosted-runners') `
+    -BeforeDelimiter @('attestation', 'verify', '$files[$index]', '--signer-workflow', '--source-digest', '--source-ref', 'refs/heads/master', '--deny-self-hosted-runners', '--format', 'json') `
     -RequiredOptions ([ordered]@{
         '--repo' = '$env:GITHUB_REPOSITORY'
         '--signer-workflow' = '$env:GITHUB_REPOSITORY/.github/workflows/release.yaml'
@@ -1188,6 +1255,14 @@ $promotionAttestation = Assert-OneCommand `
         '--source-ref' = 'refs/heads/master'
     }) `
     -Message 'Promotion must verify the original candidate attestation.'
+$promotionAllSubjects = @($promotionCommands | Where-Object {
+    Test-CommandContract -Record $_ -Name 'python' `
+        -BeforeDelimiter @('-I', './scripts/validate-release-publication.py', 'verify-candidate')
+})
+if ($promotionAllSubjects.Count -ne 2 -or
+    $promotionAllSubjects[0].sequence -le $promotionAttestation.sequence) {
+    throw 'Promotion must verify the exact candidate publication list and recheck it before release creation.'
+}
 $promotionVmStatement = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name './scripts/run-vm-automated-hosted.ps1' `
@@ -1244,7 +1319,7 @@ $promotionLightweightTag = $promotionLightweightTags[-1]
 $promotionPublish = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name 'gh' `
-    -BeforeDelimiter @('release', 'create', '$env:RELEASE_TAG', '--verify-tag', '$latestFlag', '@channelFlags', '--notes-file', 'release-notes.md', 'dist/THIRD_PARTY_LICENSES.html') `
+    -BeforeDelimiter @('release', 'create', '$env:RELEASE_TAG', '--verify-tag', '$latestFlag', '@channelFlags', '--notes-file', 'release-notes.md', '@candidateFiles', 'validation-statement.json') `
     -RequiredOptions ([ordered]@{
         '--title' = 'DarkReNamer $env:RELEASE_TAG'
         '--notes-file' = 'release-notes.md'
@@ -1253,6 +1328,16 @@ $promotionPublish = Assert-OneCommand `
 Assert-ImmediateNativeExitCheck `
     -Record $promotionPublish `
     -Message 'Promotion must fail immediately when publication fails.'
+$promotionReadback = Assert-OneCommand `
+    -Commands $promotionCommands `
+    -Name './scripts/verify-release-public-readback.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-Repository' = '$env:GITHUB_REPOSITORY'
+        '-ReleaseTag' = '$env:RELEASE_TAG'
+        '-CandidateRoot' = 'dist'
+        '-StatementPath' = 'validation-statement.json'
+    }) `
+    -Message 'Promotion must read back the published names and bytes.'
 Assert-InOrder `
     -Records @(
         $promotionMetadata,
@@ -1263,7 +1348,9 @@ Assert-InOrder `
         $promotionMasterChecks[0],
         $promotionAnnotatedTag,
         $promotionLightweightTag,
-        $promotionPublish
+        $promotionAllSubjects[-1],
+        $promotionPublish,
+        $promotionReadback
     ) `
     -Message 'Promotion validation, live source recheck, and publication must remain ordered.'
 
@@ -1342,20 +1429,27 @@ Assert-BinaryGuard `
     -Right '$env:CANDIDATE_SOURCE_SHA' `
     -Message 'Promotion must reject a release tag that differs from the candidate source.'
 $promotionCheckoutLines = @(Get-ActionLines -Path $promotionPath -Name 'actions/checkout')
-$promotionDownloadLines = @(Get-ActionLines -Path $promotionPath -Name 'actions/download-artifact')
-if ($promotionCheckoutLines.Count -ne 1 -or $promotionDownloadLines.Count -ne 1) {
+$promotionDownload = Assert-OneCommand `
+    -Commands $promotionCommands `
+    -Name './scripts/download-verified-candidate-artifact.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-ExpectedArtifactSha256' = '$env:EXPECTED_ARTIFACT_SHA256'
+        '-ArchivePath' = 'candidate-artifact.zip'
+    }) `
+    -Message 'Promotion must download and hash the complete immutable candidate archive.'
+if ($promotionCheckoutLines.Count -ne 1) {
     throw 'Promotion action line mapping must match the YAML action policy.'
 }
 Assert-LineOrder `
     -Lines @(
         $promotionCheckoutLines[0],
+        $promotionDownload.line,
         $promotionMetadata.line,
-        $promotionDownloadLines[0],
         $promotionHandoff.line,
         $promotionAttestation.line,
         $promotionPublish.line
     ) `
-    -Message 'Promotion checkout, metadata validation, download, handoff, attestation, and publication must remain ordered.'
+    -Message 'Promotion checkout, archive download, metadata validation, handoff, attestation, and publication must remain ordered.'
 
 Assert-Assignment `
     -Blocks $workflowBlocks[$planningPath] `
@@ -1549,6 +1643,7 @@ function Invoke-PromotionChannelFixture {
         RELEASE_CHANNEL = $Channel; MAKE_LATEST = $Latest; PROFILE_ID = $Profile
         RELEASE_TAG = 'v0.2.0'; CANDIDATE_SOURCE_SHA = ('a' * 40)
         EXPECTED_EXE_SHA256 = ('b' * 64); CANDIDATE_RUN_ID = '11'
+        EXPECTED_ARTIFACT_SHA256 = ('c' * 64)
         CANDIDATE_RUN_ATTEMPT = '1'; CANDIDATE_ARTIFACT_ID = '12'
         VALIDATION_RUN_ID = '13'; VALIDATION_RUN_ATTEMPT = '1'
     }
@@ -1570,6 +1665,18 @@ function Invoke-PromotionChannelFixture {
     function gh {
         $script:promotionFixtureArgs = @($args)
         $global:LASTEXITCODE = $PublishExitCode
+    }
+    function python {
+        $global:LASTEXITCODE = 0
+        if ($args -contains 'list') {
+            @(
+                'dist/DarkReNamer.exe', 'dist/DarkReNamer.cdx.json',
+                'dist/DarkReNamer-debug-symbols.zip', 'dist/SHA256SUMS.txt',
+                'dist/LICENSE', 'dist/THIRD_PARTY_LICENSES.html',
+                'dist/THIRD_PARTY_NOTICES.md', 'dist/DISTRIBUTION.md',
+                'dist/release-handoff.json', 'dist/release-metrics.json'
+            )
+        }
     }
     Push-Location $fixtureRoot
     try {
@@ -1593,12 +1700,8 @@ function Invoke-PromotionChannelFixture {
             throw 'The publication flags must preserve the selected channel, latest decision and existing tag.'
         }
         $assets = @($arguments | Where-Object { $_ -like 'dist/*' -or $_ -ceq 'validation-statement.json' })
-        $expectedAssets = @(
-            'dist/DarkReNamer.exe', 'dist/DarkReNamer.cdx.json', 'dist/DarkReNamer-debug-symbols.zip',
-            'dist/SHA256SUMS.txt', 'dist/LICENSE', 'dist/THIRD_PARTY_LICENSES.html',
-            'dist/THIRD_PARTY_NOTICES.md', 'dist/DISTRIBUTION.md', 'dist/release-handoff.json',
-            'dist/release-metrics.json', 'validation-statement.json'
-        )
+        $expectedAssets = @(python -I ./scripts/validate-release-publication.py list --candidate-root dist) +
+            @('validation-statement.json')
         if ($assets.Count -ne $expectedAssets.Count -or
             ($assets -join '|') -cne ($expectedAssets -join '|')) {
             throw 'Both channels must publish the same complete candidate and statement set.'

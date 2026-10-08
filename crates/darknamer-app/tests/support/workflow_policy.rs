@@ -62,6 +62,10 @@ struct Job {
     permissions: BTreeMap<String, String>,
     environment: Option<Environment>,
     strategy: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    needs: Vec<String>,
+    #[serde(default)]
+    outputs: BTreeMap<String, String>,
     steps: Vec<Step>,
 }
 
@@ -317,7 +321,7 @@ fn candidate_source_policy(path: &str, job: &Job) -> Result<(), String> {
         .position(|step| {
             step.run
                 .as_deref()
-                .is_some_and(|run| run.contains("rustup toolchain install"))
+                .is_some_and(|run| run.contains("install-verified-release-tools.ps1"))
         })
         .ok_or_else(|| format!("{path} candidate tool installation is missing"))?;
     require(
@@ -704,16 +708,190 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
         )?;
         steps_are_mandatory(path, job)?;
         let allowed_actions = if path.ends_with("release.yaml") {
-            &[
-                "actions/checkout",
-                "actions/attest",
-                "actions/upload-artifact",
-            ][..]
+            &["actions/checkout", "actions/upload-artifact"][..]
         } else {
             &["actions/checkout"][..]
         };
         action_policy(path, job, allowed_actions)?;
     }
+    Ok(())
+}
+
+fn candidate_isolation_policy(path: &str, workflow: &Workflow) -> Result<(), String> {
+    permissions(path, &workflow.permissions, &[("contents", "read")])?;
+    require(
+        workflow.jobs.len() == 2,
+        "candidate must separate build and attestation jobs",
+    )?;
+    let build = workflow
+        .jobs
+        .get("windows")
+        .ok_or("missing candidate build job")?;
+    let sign = workflow
+        .jobs
+        .get("attest")
+        .ok_or("missing candidate signing job")?;
+    permissions(path, &build.permissions, &[("contents", "read")])?;
+    permissions(
+        path,
+        &sign.permissions,
+        &[
+            ("actions", "read"),
+            ("contents", "read"),
+            ("id-token", "write"),
+            ("attestations", "write"),
+            ("artifact-metadata", "write"),
+        ],
+    )?;
+    require(
+        sign.needs == ["windows"]
+            && sign.condition.as_deref()
+                == Some("github.ref == 'refs/heads/master' && needs.windows.result == 'success'")
+            && is_hosted_windows_runner(&sign.runs_on),
+        "signing must require the successful build in a fresh hosted job",
+    )?;
+    for (name, value) in [
+        ("source_commit", "${{ steps.source.outputs.source_commit }}"),
+        ("handoff_name", "${{ steps.source.outputs.handoff_name }}"),
+        (
+            "artifact_id",
+            "${{ steps.candidate_artifact.outputs.artifact-id }}",
+        ),
+        (
+            "artifact_digest",
+            "${{ steps.candidate_artifact.outputs.artifact-digest }}",
+        ),
+    ] {
+        require(
+            build.outputs.get(name).map(String::as_str) == Some(value),
+            format!("candidate build must expose immutable output {name}"),
+        )?;
+    }
+    checkout_is_read_only(path, sign)?;
+    steps_are_mandatory(path, sign)?;
+    action_policy(path, sign, &["actions/checkout", "actions/attest"])?;
+    require(
+        actions(build, "actions/attest").is_empty()
+            && actions(sign, "actions/upload-artifact").is_empty()
+            && action_sequence(sign) == ["actions/checkout", "actions/attest", "actions/attest"]
+            && sign.steps.len() == 5
+            && sign.steps[1].id.as_deref() == Some("verified_candidate"),
+        "signing must validate immutable data, attest it, and preserve the original artifact",
+    )?;
+    let verify = &sign.steps[1];
+    for (name, value) in [
+        (
+            "BUILD_SOURCE_SHA",
+            "${{ needs.windows.outputs.source_commit }}",
+        ),
+        (
+            "BUILD_ARTIFACT_ID",
+            "${{ needs.windows.outputs.artifact_id }}",
+        ),
+        (
+            "BUILD_ARTIFACT_DIGEST",
+            "${{ needs.windows.outputs.artifact_digest }}",
+        ),
+        (
+            "BUILD_ARTIFACT_NAME",
+            "${{ needs.windows.outputs.handoff_name }}",
+        ),
+    ] {
+        require(
+            verify.env.get(name).map(Scalar::text).as_deref() == Some(value),
+            format!("signing must bind {name} to the successful build output"),
+        )?;
+    }
+    script_contract(
+        path,
+        &script(build),
+        &["install-verified-release-tools.ps1"],
+        &["cargo install", "rustup toolchain install", "gh release"],
+    )?;
+    script_contract(
+        path,
+        &script(sign),
+        &[
+            "download-verified-candidate-artifact.ps1",
+            "-ArtifactId $env:BUILD_ARTIFACT_ID",
+            "-ExpectedArtifactSha256 $env:BUILD_ARTIFACT_DIGEST",
+            "validate-release-handoff.ps1",
+            "$sourceCommit -cne $eventSha",
+            "$env:BUILD_SOURCE_SHA -cne $eventSha",
+            "git ls-remote origin refs/heads/master",
+            "$env:BUILD_ARTIFACT_NAME -cne $expectedName",
+            "$handoff.workflow_run -cne $env:GITHUB_RUN_ID",
+        ],
+        &[
+            "cargo ",
+            "rustup ",
+            "Start-Process",
+            "Invoke-Expression",
+            "./dist/",
+            "& dist/",
+            "install-verified-release-tools.ps1",
+            "gh release",
+        ],
+    )
+}
+
+#[test]
+fn candidate_isolation_rejects_privilege_and_handoff_drift() -> Result<(), String> {
+    let path = ".github/workflows/release.yaml";
+    let source = include_str!("../../../../.github/workflows/release.yaml");
+    candidate_isolation_policy(path, &parse(path, source)?)?;
+    for permission in ["id-token", "attestations", "contents", "artifact-metadata"] {
+        let mut changed = parse(path, source)?;
+        changed
+            .jobs
+            .get_mut("windows")
+            .ok_or("missing build job")?
+            .permissions
+            .insert(permission.to_owned(), "write".to_owned());
+        assert!(candidate_isolation_policy(path, &changed).is_err());
+    }
+    let mut inherited = parse(path, source)?;
+    inherited
+        .jobs
+        .get_mut("windows")
+        .ok_or("missing build job")?
+        .permissions
+        .clear();
+    inherited
+        .permissions
+        .insert("id-token".to_owned(), "write".to_owned());
+    assert!(candidate_isolation_policy(path, &inherited).is_err());
+    for (old, new) in [
+        ("needs.windows.result == 'success'", "always()"),
+        ("${{ needs.windows.outputs.artifact_id }}", "123"),
+        ("${{ needs.windows.outputs.artifact_digest }}", "unapproved"),
+        ("$sourceCommit -cne $eventSha", "$false"),
+        ("$env:BUILD_SOURCE_SHA -cne $eventSha", "$false"),
+        ("$env:BUILD_ARTIFACT_NAME -cne $expectedName", "$false"),
+    ] {
+        require(source.contains(old), format!("fixture must contain {old}"))?;
+        assert!(
+            candidate_isolation_policy(path, &parse(path, &source.replace(old, new))?).is_err()
+        );
+    }
+    let mut execute = parse(path, source)?;
+    execute
+        .jobs
+        .get_mut("attest")
+        .ok_or("missing signing job")?
+        .steps[1]
+        .run
+        .as_mut()
+        .ok_or("missing signing validation")?
+        .push_str("\nStart-Process dist/DarkReNamer.exe");
+    assert!(candidate_isolation_policy(path, &execute).is_err());
+    let mut skip = parse(path, source)?;
+    skip.jobs
+        .get_mut("attest")
+        .ok_or("missing signing job")?
+        .steps[2]
+        .condition = Some(Scalar::Bool(false));
+    assert!(candidate_isolation_policy(path, &skip).is_err());
     Ok(())
 }
 
@@ -729,7 +907,11 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         &candidate.permissions,
         &[("contents", "read")],
     )?;
-    let candidate_job = only_job(candidate_path, &candidate, "windows")?;
+    candidate_isolation_policy(candidate_path, &candidate)?;
+    let candidate_job = candidate
+        .jobs
+        .get("windows")
+        .ok_or("missing candidate build job")?;
     require(
         candidate_job.condition.as_deref() == Some("github.ref == 'refs/heads/master'")
             && is_hosted_windows_runner(&candidate_job.runs_on),
@@ -738,26 +920,21 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     permissions(
         candidate_path,
         &candidate_job.permissions,
-        &[
-            ("artifact-metadata", "write"),
-            ("attestations", "write"),
-            ("contents", "read"),
-            ("id-token", "write"),
-        ],
+        &[("contents", "read")],
     )?;
     checkout_is_read_only(candidate_path, candidate_job)?;
     steps_are_mandatory(candidate_path, candidate_job)?;
     action_policy(
         candidate_path,
         candidate_job,
-        &[
-            "actions/checkout",
-            "actions/attest",
-            "actions/upload-artifact",
-        ],
+        &["actions/checkout", "actions/upload-artifact"],
     )?;
     candidate_source_policy(candidate_path, candidate_job)?;
-    let attestations = actions(candidate_job, "actions/attest");
+    let signing_job = candidate
+        .jobs
+        .get("attest")
+        .ok_or("missing candidate signing job")?;
+    let attestations = actions(signing_job, "actions/attest");
     let uploads = actions(candidate_job, "actions/upload-artifact");
     require(
         attestations.len() == 2
@@ -772,13 +949,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             && uploads[0].id.as_deref() == Some("candidate_artifact")
             && with_is(uploads[0], "path", "dist/")
             && with_is(uploads[0], "if-no-files-found", "error")
-            && action_sequence(candidate_job)
-                == [
-                    "actions/checkout",
-                    "actions/attest",
-                    "actions/attest",
-                    "actions/upload-artifact",
-                ],
+            && action_sequence(candidate_job) == ["actions/checkout", "actions/upload-artifact"],
         "candidate must attest and retain an addressable immutable handoff",
     )?;
     script_contract(candidate_path, &script(candidate_job), &[], &["gh release"])?;
@@ -1151,7 +1322,13 @@ fn candidate_source_policy_rejects_mutable_ref_and_removed_guards() -> Result<()
     let source = include_str!("../../../../.github/workflows/release.yaml");
     let fresh = || parse(path, source);
     let valid = fresh()?;
-    candidate_source_policy(path, only_job(path, &valid, "windows")?)?;
+    candidate_source_policy(
+        path,
+        valid
+            .jobs
+            .get("windows")
+            .ok_or("missing fixture build job")?,
+    )?;
 
     let mut mutable_checkout = fresh()?;
     let job = mutable_checkout
@@ -1218,7 +1395,7 @@ fn candidate_source_policy_rejects_mutable_ref_and_removed_guards() -> Result<()
         .position(|step| {
             step.run
                 .as_deref()
-                .is_some_and(|run| run.contains("rustup toolchain install"))
+                .is_some_and(|run| run.contains("install-verified-release-tools.ps1"))
         })
         .ok_or("missing fixture install step")?;
     job.steps.swap(source_index, install_index);

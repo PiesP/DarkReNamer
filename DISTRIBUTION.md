@@ -26,8 +26,9 @@ option. Both channels require the same five gates and exact identity checks.
 Selecting a channel does not authorize publication or bypass validation.
 
 Before creating the tag or dispatching promotion, obtain explicit maintainer
-authorization for the version, source SHA, EXE SHA-256, candidate run/attempt/
-artifact, campaign/profile, hosted validation run/attempt and statement digest,
+authorization for the version, source SHA, EXE SHA-256, candidate run/attempt,
+immutable artifact ID and complete artifact ZIP SHA-256, campaign/profile,
+hosted validation run/attempt and statement digest,
 and chosen channel. Record the approval in an issue comment or the existing
 handoff, including ignored or unexecuted tests and the documented limitations.
 The regular-release decision accepts the current unsigned `NotSigned` policy.
@@ -171,6 +172,34 @@ summary before creating a release tag. The summary identifies the immutable
 artifact ID, run ID, and run attempt required by the promotion workflow;
 `release-handoff.json` identifies the source and executable digest.
 
+The build job has only read access to repository contents. It uploads one
+immutable artifact after finalizing and validating the handoff. A fresh hosted
+job holds attestation authority, checks the exact successful build's artifact
+ID, approved ZIP digest, source and run/attempt name, and downloads those same
+bytes. It treats the candidate as data, validates it using the checked-out
+source, and attests the unchanged files and executable SBOM. It does not install
+Cargo tools, execute candidate code, rebuild files, or upload another handoff.
+A failed or skipped signing job cannot produce a successful candidate run.
+
+Candidate builds use `config/release-tool-integrity.json` to approve the official
+Windows Rust components and Cargo utility archives by SHA-256 before extraction,
+installation or version probes. Rust's version and component owners remain
+`rust-toolchain.toml`; scanner versions remain bound to the maintained security
+workflow. The installer assembles the verified components as data and links the
+release-only `darkrenamer-release` toolchain using the hosted image's rustup.
+Product registry source packages retain the reviewed `Cargo.lock` checksums.
+No Cargo utility is compiled from an externally resolved source closure here.
+
+The hosted Windows image, its PowerShell, Git, tar, rustup, Windows SDK and MSVC
+tools, and the pinned Actions runtime remain bootstrap trust anchors. Digest
+approval constrains selected upstream bytes; it does not establish that compiler
+output is harmless or defeat a compromised trusted signer. To update a pin,
+review the exact official version/asset and its bytes, record its URL and digest
+with the version owner's change, inspect archive layout, run the integrity
+fixtures, and exercise a non-publishing hosted candidate. A downloaded checksum
+alone is not repository approval. Stale pins and corrupt retained archives fail
+closed instead of reinstalling a floating alternative.
+
 After handoff validation, the workflow copies the effective values from
 `release-metrics.json` into the Actions job summary. Use the retained JSON as
 the machine-readable record for the build; the summary is an informational
@@ -188,7 +217,8 @@ After inspecting the candidate, create the version tag on that exact `master`
 commit and dispatch the Promote portable release workflow. Select the approved
 `release_channel` (`release` by default) and `make_latest` decision. Supply the
 candidate run ID, run attempt, immutable artifact ID, source SHA, executable
-SHA-256 from `release-handoff.json`, and version tag. Also supply the private
+SHA-256 from `release-handoff.json`, complete artifact ZIP SHA-256 from the
+independently approved workflow artifact digest, and version tag. Also supply the private
 evidence release ID, asset ID, archive SHA-256 and size, and the exact successful
 VM validation run ID and attempt. Select the profile explicitly for both hosted
 validation and promotion: `vm-automated-v1-win11-ntfs` or
@@ -198,7 +228,13 @@ Promotion fails unless the selected profile ID, typed revision, source blob
 digest and statement schema agree, and all pinned values agree with current
 `origin/master`, the successful candidate workflow metadata, the unexpired
 artifact metadata, the downloaded handoff
-bytes, the original candidate attestation, and the existing remote tag.
+bytes, the original candidate attestations, and the existing remote tag. The
+authenticated artifact API digest and the actual downloaded original ZIP bytes
+must both match the approved digest; a re-created ZIP or executable digest is
+not an equivalent artifact selection. Every candidate-derived public asset,
+including checksums and generated metadata, must pass the original candidate
+provenance gate. The publication list and verified subject list have one owner.
+The validation statement retains its separate hosted verifier attestation.
 
 Before collecting new raw evidence, use the local POSIX owner-only destination
 procedure in [campaign development](DEVELOPMENT.md#vm-automated-campaign-development).
@@ -273,6 +309,9 @@ replace an artifact, or create new product provenance. It publishes the exact
 candidate handoff files and the verified validation statement. An existing
 release for the tag is rejected instead of being overwritten. Private raw
 journals, local paths, screenshots and machine identities are never published.
+After an authorized publication, bounded readback checks require the exact
+public asset set and unchanged downloaded digests. Missing, unexpected or
+substituted assets fail closeout without deleting or replacing public assets.
 
 The published item is a **VM-Automated validated release or prerelease**,
 according to its approved channel, limited to the

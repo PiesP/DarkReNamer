@@ -350,6 +350,20 @@ checking, and disabled agent forwarding; it never prompts for a password. Put
 the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
 not in `--ssh-host`.
 
+VM host tools use `/usr/bin/pwsh` and `/usr/bin/wslpath` by default. For another
+installed location, set `DARKRENAMER_PWSH_PATH` or `DARKRENAMER_WSLPATH_PATH` to
+its absolute executable path. The resolver checks every parent, symlink and
+target for root/current-user ownership and rejects group/other writable paths
+before any version probe. It never falls back to ambient `PATH`. If an installed
+tool is rejected, inspect its ownership and permissions and select a protected
+installation; the tooling does not change host ACLs or SSH settings.
+
+The SSH PowerShell child searches only `/usr/bin:/bin` and preserves required
+`HOME`, `SSH_AUTH_SOCK` and WSL interop inputs. Unneeded private environment
+values are not inherited. The current user and administrator remain trusted;
+pathname checks are not a general race-free execution guarantee against a
+fully compromised host.
+
 The VM needs the PowerShell 7.4 or newer SSH subsystem and `sshd`, NTFS with 8.3
 short names available for the isolated ProgramData test path, the Microsoft Visual
 C++ x64 runtime, Developer Mode for symlink fixtures, and one unlocked
@@ -1137,3 +1151,11 @@ Candidate creation, promotion, signing policy, checksums, SBOMs, and
 attestations are documented in `DISTRIBUTION.md`. Publishing or changing GitHub
 repository settings is an explicit release operation, not part of local
 development validation.
+
+Candidate tool installation uses `config/release-tool-integrity.json` and
+`scripts/install-verified-release-tools.ps1`. Update the canonical version owner
+and review the official archive URL, full-byte SHA-256 and layout together.
+The release-tool integrity fixtures cover wrong bytes before execution, stale
+pins, unsupported assets and corrupt retained inputs. Complete the registered
+release category and a non-publishing hosted candidate after pin changes;
+fixture passes alone do not establish Windows installation or signing success.
