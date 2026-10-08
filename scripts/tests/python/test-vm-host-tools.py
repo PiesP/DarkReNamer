@@ -22,13 +22,23 @@ class HostToolTests(unittest.TestCase):
             tool.chmod(0o700)
 
     def test_hostile_path_is_ignored_before_probe_preflight_and_conversion(self):
+        approved = self.root / "approved"
+        approved.mkdir()
+        fixture_tools = {name: str(approved / name) for name in ("pwsh", "wslpath")}
+        Path(fixture_tools["pwsh"]).write_text("#!/bin/sh\nprintf '7.4.0\\n'\n")
+        Path(fixture_tools["wslpath"]).write_text("#!/bin/sh\nprintf '%s\\n' 'C:\\'\n")
+        for path in fixture_tools.values():
+            Path(path).chmod(0o700)
         environment = {**os.environ, "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
         environment.pop(host_tools.OVERRIDES["pwsh"], None)
         environment.pop(host_tools.OVERRIDES["wslpath"], None)
-        with mock.patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(launcher.require_pwsh74(), "/usr/bin/pwsh")
+        # Keep the resolver and execution real, without assuming the test host
+        # has a trusted PowerShell package installation or a WSL-only utility.
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.dict(host_tools.DEFAULT_TOOLS, fixture_tools, clear=True):
+            self.assertEqual(launcher.require_pwsh74(), fixture_tools["pwsh"])
             self.assertEqual(launcher.winpath(Path("/mnt/c")), "C:\\")
-            self.assertEqual(host_tools.resolve_tool("wslpath"), "/usr/bin/wslpath")
+            self.assertEqual(host_tools.resolve_tool("wslpath"), fixture_tools["wslpath"])
             remote = {"system": "windows", "os_version": "Windows NT 10.0.26200.0",
                       "build": "26200", "architecture": "X64",
                       "product_caption": "Microsoft Windows 11 Pro",
@@ -37,13 +47,13 @@ class HostToolTests(unittest.TestCase):
                                    side_effect=["7.4.0\n", json.dumps(remote)]) as run:
                 connection.guest_preflight({"ssh_host": "vm-alias", "expected_vm_id": remote["vm_id"]})
                 self.assertEqual([call.args[0][0] for call in run.call_args_list],
-                                 ["/usr/bin/pwsh", "/usr/bin/pwsh"])
+                                 [fixture_tools["pwsh"], fixture_tools["pwsh"]])
                 self.assertEqual(run.call_args.kwargs["env"]["PATH"], "/usr/bin:/bin")
             (self.root / "bundle.json").write_text("{}")
             args = launcher.parse_arguments(["--ssh-host", "vm-alias", "--desktop-mode", "existing",
                                              "--acceptance-profile-id", launcher.V1_PROFILE_ID])
             command = launcher.controller_invocation(self.root, args)
-            self.assertEqual(command[0], "/usr/bin/pwsh")
+            self.assertEqual(command[0], fixture_tools["pwsh"])
         self.assertFalse(self.marker.exists())
 
     def test_explicit_trusted_installation_and_symlink_target(self):
