@@ -69,6 +69,12 @@ the primitive returns, including validation failures. Observation does not
 hold these restrictions for the lifetime of a plan. Forward execution,
 rollback, and recovery all use this same primitive; historical journal paths
 are not rewritten or guessed after a relocation.
+Each chain retains at most one handle per component plus the root, within the
+supported 32,767 UTF-16-unit path bound. Acquisition conflicts fail before the
+sink. This protects ordinary NTFS rename/delete operations that honor Windows
+sharing; it does not authenticate same-token code, constrain privileged
+filesystem intervention, or extend support to remote/provider paths. Once the
+primitive returns, other processes may move the directories again.
 
 Each primitive then opens its source with DELETE access while withholding
 delete sharing. The retained mutation handle blocks competing rename and delete

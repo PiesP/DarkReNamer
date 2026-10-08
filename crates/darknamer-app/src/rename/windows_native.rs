@@ -70,6 +70,10 @@ pub(crate) struct NativeParentChain {
 
 impl NativeParentChain {
     pub(crate) fn open_legacy(path: &LegacyText) -> io::Result<Self> {
+        // Bound the number of retained components by the supported native path limit.
+        if path.units().len() >= MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS as usize {
+            return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
+        }
         let path = std::ffi::OsString::from_wide(path.units());
         let path = Path::new(&path);
         reject_unsupported_drive_type(path)?;

@@ -22,15 +22,183 @@ use darknamer_app::rename::{
     FileJournal, FileJournalErrorKind, JournalDirection, JournalError, JournalRecord, JournalRoot,
     JournalStep, JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision,
     MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest,
-    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, ResolvedSource,
-    WindowsRenameBackend, apply_execution_report, build_plan_request, preflight_plan,
-    process_is_elevated,
+    RecoveryOutcome, RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner,
+    RenameRecovery, ResolvedSource, WindowsRenameBackend, apply_execution_report,
+    build_plan_request, preflight_plan, process_is_elevated,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText, validate_windows_leaf_name};
 use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
 fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
+}
+
+/// Injects an ambiguous return only after the production native primitive succeeds.
+struct AmbiguousNativeBackend {
+    inner: WindowsRenameBackend,
+    fail_after_next_move: bool,
+}
+
+impl RenameBackend for AmbiguousNativeBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
+    }
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)?;
+        if std::mem::take(&mut self.fail_after_next_move) {
+            return Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: 995,
+                certainty: MutationCertainty::MayHaveApplied,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn authentic_native_recovery_preserves_namespace_occupancy_and_ambiguous_journals()
+-> Result<(), Box<dyn std::error::Error>> {
+    for scenario in 0..3 {
+        let directory = tempfile::tempdir()?;
+        let source_parent = directory.path().join("source-parent");
+        let target_parent = directory.path().join("target-parent");
+        let journal_parent = directory.path().join("journal");
+        for parent in [&source_parent, &target_parent, &journal_parent] {
+            fs::create_dir(parent)?;
+        }
+        let source = source_parent.join("source.bin");
+        let destination = target_parent.join("destination.bin");
+        fs::write(&source, b"confirmed native recovery source")?;
+        let mut backend = AmbiguousNativeBackend {
+            inner: WindowsRenameBackend,
+            fail_after_next_move: true,
+        };
+        let original = backend
+            .observe(&legacy_path(&source))?
+            .entry
+            .ok_or_else(|| std::io::Error::other("source identity missing"))?
+            .identity;
+        let plan = RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+            ModelRevision::new(1),
+            vec![RenameIntent::new(
+                EntryId::new(0),
+                legacy_path(&source),
+                legacy_path(&target_parent),
+                "destination.bin",
+                EntryKind::File,
+            )],
+            MoveScope::SameVolumeFilesOnly,
+        ))?;
+        let id = plan.id();
+        let revision = plan.revision();
+        let root = JournalRoot::open(&journal_parent)?;
+        let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
+        let report = RenameExecutor::new(&mut backend, &mut journal)
+            .execute(plan.confirm_presented(id, revision)?)?;
+        assert!(matches!(
+            report.outcome(),
+            ExecutionOutcome::RecoveryRequired { .. }
+        ));
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination)?, b"confirmed native recovery source");
+        assert!(matches!(
+            journal.records().last(),
+            Some(JournalRecord::Prepared {
+                direction: JournalDirection::Forward,
+                ..
+            })
+        ));
+        drop(journal);
+        let active = journal_parent.join("active.drj");
+        let retained = fs::read(&active)?;
+        if scenario == 1 {
+            fs::write(&source, b"unconfirmed occupant")?;
+        }
+        let mut journal = FileJournal::open_existing(&root, "active.drj")?;
+        backend.fail_after_next_move = scenario == 2;
+        let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+        match scenario {
+            0 => assert_eq!(
+                outcome,
+                RecoveryOutcome::Recovered {
+                    plan: id,
+                    restored_steps: 1
+                }
+            ),
+            1 => {
+                assert!(matches!(outcome, RecoveryOutcome::Blocked { .. }));
+                drop(journal);
+                assert_eq!(fs::read(&active)?, retained);
+                assert_eq!(fs::read(&source)?, b"unconfirmed occupant");
+                assert_eq!(fs::read(&destination)?, b"confirmed native recovery source");
+                fs::rename(source_parent, directory.path().join("released-source"))?;
+                fs::rename(target_parent, directory.path().join("released-target"))?;
+                continue;
+            }
+            _ => {
+                assert!(matches!(outcome, RecoveryOutcome::RecoveryRequired { .. }));
+                assert!(matches!(
+                    journal.records().last(),
+                    Some(JournalRecord::Prepared {
+                        direction: JournalDirection::Rollback,
+                        ..
+                    })
+                ));
+                drop(journal);
+                let ambiguous = fs::read(&active)?;
+                assert!(!ambiguous.is_empty());
+                journal = FileJournal::open_existing(&root, "active.drj")?;
+                assert_eq!(
+                    RenameRecovery::new(&mut backend, &mut journal).rollback(),
+                    RecoveryOutcome::Recovered {
+                        plan: id,
+                        restored_steps: 0
+                    }
+                );
+            }
+        }
+        assert!(journal.is_terminal());
+        assert_eq!(fs::read(&source)?, b"confirmed native recovery source");
+        assert!(!destination.exists());
+        assert_eq!(
+            backend
+                .observe(&legacy_path(&source))?
+                .entry
+                .ok_or_else(|| std::io::Error::other("recovered source identity missing"))?
+                .identity,
+            original
+        );
+        fs::rename(source_parent, directory.path().join("released-source"))?;
+        fs::rename(target_parent, directory.path().join("released-target"))?;
+    }
+    Ok(())
 }
 
 fn verbatim_legacy_path(path: &std::path::Path) -> LegacyText {
