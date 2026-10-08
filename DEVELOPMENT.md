@@ -350,7 +350,8 @@ checking, and disabled agent forwarding; it never prompts for a password. Put
 the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
 not in `--ssh-host`.
 
-VM host tools use `/usr/bin/pwsh` and `/usr/bin/wslpath` by default. For another
+VM host tools use `/usr/bin/pwsh` and `/usr/bin/wslpath` by default and require
+trusted `/usr/bin/ssh` for transport. For another
 installed location, set `DARKRENAMER_PWSH_PATH` or `DARKRENAMER_WSLPATH_PATH` to
 its absolute executable path. The resolver checks every parent, symlink and
 target for root/current-user ownership and rejects group/other writable paths

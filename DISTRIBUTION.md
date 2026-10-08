@@ -190,7 +190,7 @@ release-only `darkrenamer-release` toolchain using the hosted image's rustup.
 Product registry source packages retain the reviewed `Cargo.lock` checksums.
 No Cargo utility is compiled from an externally resolved source closure here.
 
-The hosted Windows image, its PowerShell, Git, tar, rustup, Windows SDK and MSVC
+The hosted Windows image, its PowerShell, Git, rustup, Windows SDK and MSVC
 tools, and the pinned Actions runtime remain bootstrap trust anchors. Digest
 approval constrains selected upstream bytes; it does not establish that compiler
 output is harmless or defeat a compromised trusted signer. To update a pin,

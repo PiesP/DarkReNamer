@@ -966,6 +966,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         "candidate_run_id",
         "candidate_source_sha",
         "expected_exe_sha256",
+        "expected_artifact_sha256",
         "ingress_archive_sha256",
         "ingress_archive_size",
         "ingress_asset_id",
@@ -1003,25 +1004,10 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     )?;
     checkout_is_read_only(promotion_path, job)?;
     steps_are_mandatory(promotion_path, job)?;
-    action_policy(
-        promotion_path,
-        job,
-        &["actions/checkout", "actions/download-artifact"],
-    )?;
-    let downloads = actions(job, "actions/download-artifact");
+    action_policy(promotion_path, job, &["actions/checkout"])?;
     require(
-        downloads.len() == 1
-            && with_is(
-                downloads[0],
-                "artifact-ids",
-                "${{ inputs.candidate_artifact_id }}",
-            )
-            && with_is(downloads[0], "run-id", "${{ inputs.candidate_run_id }}")
-            && with_is(downloads[0], "github-token", "${{ github.token }}")
-            && with_is(downloads[0], "repository", "${{ github.repository }}")
-            && with_is(downloads[0], "path", "dist")
-            && action_sequence(job) == ["actions/checkout", "actions/download-artifact"],
-        "promotion must download the exact artifact from the selected candidate run",
+        action_sequence(job) == ["actions/checkout"],
+        "promotion must download approved original ZIP bytes through the bounded digest verifier",
     )?;
     require(
         actions(job, "actions/attest").is_empty(),
@@ -1033,6 +1019,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ("CANDIDATE_ARTIFACT_ID", "candidate_artifact_id"),
         ("CANDIDATE_SOURCE_SHA", "candidate_source_sha"),
         ("EXPECTED_EXE_SHA256", "expected_exe_sha256"),
+        ("EXPECTED_ARTIFACT_SHA256", "expected_artifact_sha256"),
         ("INGRESS_ARCHIVE_SHA256", "ingress_archive_sha256"),
         ("INGRESS_ARCHIVE_SIZE", "ingress_archive_size"),
         ("INGRESS_ASSET_ID", "ingress_asset_id"),
@@ -1057,6 +1044,10 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         &promotion_script,
         &[
             "run-vm-automated-hosted.ps1",
+            "download-verified-candidate-artifact.ps1",
+            "-ExpectedArtifactSha256 $env:EXPECTED_ARTIFACT_SHA256",
+            "validate-release-publication.py verify-candidate",
+            "verify-release-public-readback.ps1",
             "validate-vm-automated-authority.py validation-run",
             ".github/workflows/vm-acceptance.yaml",
             "--source-ref refs/heads/master",
@@ -1595,6 +1586,7 @@ fn promotion_profile_contract_rejects_missing_or_unbound_choices() -> Result<(),
         "candidate_run_id",
         "candidate_source_sha",
         "expected_exe_sha256",
+        "expected_artifact_sha256",
         "ingress_archive_sha256",
         "ingress_archive_size",
         "ingress_asset_id",

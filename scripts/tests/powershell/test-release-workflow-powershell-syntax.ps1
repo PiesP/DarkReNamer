@@ -1072,8 +1072,10 @@ $signingHandoff = Assert-OneCommand `
     -Message 'Signing must validate candidate bytes as data before attestation.'
 Assert-LineOrder -Lines @(
     $candidateCheckoutLines[1], $signingDownload.line,
-    $signingHandoff.line, $candidateAttestLines[0], $candidateAttestLines[1]
+    $candidateAttestLines[0], $candidateAttestLines[1]
 ) -Message 'Fresh-job source and unchanged candidate validation must precede signing.'
+Assert-SourceOrder -Records @($signingDownload, $signingHandoff) `
+    -Message 'Signing must download the verified archive before validating its handoff.'
 foreach ($unapproved in @(
     "& (Join-Path dist 'DarkReNamer.exe')",
     'Start-Process dist/DarkReNamer.exe',
