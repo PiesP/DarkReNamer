@@ -205,7 +205,8 @@ class Bridge:
             self.process = subprocess.Popen(
                 [launcher.require_pwsh74(), '-NoLogo', '-NoProfile', '-NonInteractive',
                  '-File', str(bridge_path), '-Configuration', str(config_path)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=launcher.host_tools.child_environment())
         except Exception:
             self.stderr.close()
             raise

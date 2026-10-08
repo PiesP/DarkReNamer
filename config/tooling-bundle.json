@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "36092211f50cec00750827fc06412a143a0b06562f914970ed3dc194b8d601cf",
+      "sha256": "e1fa9acec8d287cb3a37379ec5a6176e900ec1f69ec65c354b11556b1aaba3e9",
       "dependencies": [
         "package-root"
       ]
@@ -144,10 +144,11 @@
       "bundle": "tooling-vm-connection.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.connection",
-      "sha256": "14e33bef1aa710b988b75545a2f96fe0d32ef36c4a7afbe6a5aeeffc421e0ac3",
+      "sha256": "2e11451dca61cd202efaed9effe914870610019d667f507f397ea48c562a47d3",
       "dependencies": [
         "package-root",
-        "package-vm"
+        "package-vm",
+        "vm-host-tools"
       ]
     },
     {
@@ -162,16 +163,29 @@
       ]
     },
     {
+      "role": "vm-host-tools",
+      "source": "scripts/darkrenamer_tooling/vm/host_tools.py",
+      "bundle": "tooling-vm-host-tools.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.vm.host_tools",
+      "sha256": "f50b6a9b0dff6f53c3f8164041b8eac7b68943407c683f51ad2401b482cb5fba",
+      "dependencies": [
+        "package-root",
+        "package-vm"
+      ]
+    },
+    {
       "role": "vm-launcher",
       "source": "scripts/darkrenamer_tooling/vm/launcher.py",
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "2ec69708cf1639e1b48fe15ac239dc1b267f642fe5a88d3f52dc06ecb1a2f1c0",
+      "sha256": "0ee4d02778436108872ffef02fefd7c474dc99060e9abec372d310d51c891239",
       "dependencies": [
         "tooling-loader",
         "package-root",
         "package-vm",
+        "vm-host-tools",
         "package-contracts",
         "contracts-platform",
         "contracts-tooling",
@@ -186,7 +200,7 @@
       "bundle": "tooling-vm-runtimebroker-diagnostic.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.runtimebroker_diagnostic",
-      "sha256": "b549f622cf1b81c1a870ba0052a73abaf06fe7a2a34bfa265d2856ab362ac469",
+      "sha256": "3d6f9a5bc3702626e8634f402eab62374ddcb6a23134621e76822e85a3cf74a0",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -205,12 +219,13 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "ff40937d0d1b4320b1542091e0e7808f992ce4fa19ac2854d2c444e4ba01cf69",
+      "sha256": "4cd5ac102c637e979021d77a852a7c970602be7ca7d0e229de018f50b9a9c0f4",
       "dependencies": [
         "tooling-loader",
         "package-root",
         "package-vm",
         "vm-launcher",
+        "vm-host-tools",
         "package-contracts",
         "contracts-tooling",
         "package-evidence",
@@ -457,7 +472,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "62dee0d9cfd12cfe887fd7411a0f547f6c5560b25c911184dd0ff35bd1c2a28a",
+      "sha256": "355bc675f7ea3dd1baa6532ca3ab0b3e6e6a969a319214c2f256d58206380e43",
       "dependencies": []
     },
     {

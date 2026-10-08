@@ -2110,8 +2110,8 @@ class VmRunnerTests(unittest.TestCase):
         self.assert_arguments_rejected(['--ssh-host', 'darkrenamer-vm', '--credential-helper', 'helper.ps1'])
 
     def test_ssh_local_pwsh_requires_version_7_4_or_newer(self):
-        with mock.patch.object(vm.shutil, 'which', return_value='/usr/bin/pwsh'), \
-             mock.patch.object(vm.subprocess, 'check_output') as check_output:
+        with mock.patch.object(vm.host_tools, 'resolve_tool', return_value='/usr/bin/pwsh'), \
+             mock.patch.object(vm.host_tools.subprocess, 'check_output') as check_output:
             for version in ('7.4', '7.4.0', '7.5.2', '8.0.0'):
                 with self.subTest(version=version):
                     check_output.return_value = version + '\n'
@@ -2121,8 +2121,8 @@ class VmRunnerTests(unittest.TestCase):
             self.assertEqual(check_output.call_args.kwargs['timeout'], 10)
 
     def test_ssh_local_pwsh_rejects_older_or_malformed_versions(self):
-        with mock.patch.object(vm.shutil, 'which', return_value='/usr/bin/pwsh'), \
-             mock.patch.object(vm.subprocess, 'check_output') as check_output:
+        with mock.patch.object(vm.host_tools, 'resolve_tool', return_value='/usr/bin/pwsh'), \
+             mock.patch.object(vm.host_tools.subprocess, 'check_output') as check_output:
             for version in ('7.3.9', '7', '8', '7.4.malformed', '7.4-preview.1', 'not-a-version', ''):
                 with self.subTest(version=version):
                     check_output.return_value = version + '\n'

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import uuid
+
+from darkrenamer_tooling.vm import host_tools
 
 
 WINDOWS_PATH = re.compile(r"[A-Za-z]:\\[^\r\n]+")
@@ -71,8 +71,7 @@ def load_connection_profile(path: Path) -> tuple[dict, str]:
 
 
 def guest_preflight(profile: dict) -> dict:
-    pwsh = shutil.which("pwsh")
-    require(pwsh is not None, "VM preflight requires PowerShell 7.4 or newer as pwsh.")
+    pwsh = host_tools.require_pwsh74()
     script = r"""
 $ErrorActionPreference = 'Stop'
 $options = @{BatchMode='yes';StrictHostKeyChecking='yes';ForwardAgent='no'}
@@ -92,8 +91,8 @@ try {
 }
 finally { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
 """
-    environment = dict(os.environ)
-    environment["DARKRENAMER_GUI_SSH_HOST"] = profile["ssh_host"]
+    environment = host_tools.child_environment(
+        DARKRENAMER_GUI_SSH_HOST=profile["ssh_host"])
     raw = subprocess.check_output(
         [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         env=environment, text=True,
@@ -119,5 +118,3 @@ finally { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
         "vm_identity_kind": "hyper-v-guest-parameters-virtual-machine-id-v1",
         "vm_identity_sha256": digest_text(canonical_id),
     }
-
-

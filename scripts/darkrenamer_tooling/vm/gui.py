@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 from darkrenamer_tooling.vm import launcher
+from darkrenamer_tooling.vm import host_tools
 from darkrenamer_tooling.vm.connection import load_connection_profile, guest_preflight
 from darkrenamer_tooling.formats.png import PngPolicy, decode_png_bytes
 from darkrenamer_tooling.contracts.tooling import (
@@ -1053,8 +1054,7 @@ def host_preflight() -> dict:
 
 def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                        profile: dict, lease: dict) -> list[str]:
-    pwsh = shutil.which("pwsh")
-    require(pwsh is not None, "GUI regression transport requires PowerShell 7.4 or newer as pwsh.")
+    pwsh = host_tools.require_pwsh74()
     command = [
         pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
         str(repo / "scripts" / "run-windows-vm-tests.ps1"),
@@ -1297,6 +1297,7 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
                 completed = subprocess.run(
                     controller_command(repo, bundle, run_root, run, profile, lease),
                     cwd=repo,
+                    env=host_tools.child_environment(),
                     text=True,
                     stdout=stdout,
                     stderr=stderr,
