@@ -4,11 +4,14 @@ param(
     [Parameter(Mandatory)][string] $ArtifactId,
     [Parameter(Mandatory)][string] $ExpectedArtifactSha256,
     [Parameter(Mandatory)][string] $ExpectedArtifactName,
-    [Parameter(Mandatory)][string] $ArchivePath
+    [Parameter(Mandatory)][string] $ArchivePath,
+    [Net.Http.HttpClient] $DownloadClient
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'download-bounded-github-data.ps1') -LibraryOnly
+$maximumArchiveBytes = [long]512 * 1024 * 1024
 
 if ($Repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
     $ArtifactId -cnotmatch '^[1-9][0-9]*$' -or
@@ -36,17 +39,16 @@ if ($artifact.id -isnot [long] -or [string]$artifact.id -cne $ArtifactId -or
     $artifact.digest -cne "sha256:$ExpectedArtifactSha256") {
     throw 'Authenticated candidate artifact identity or digest differs from approval.'
 }
-$headers = @{
-    Accept = 'application/vnd.github+json'
-    Authorization = "Bearer $env:GH_TOKEN"
-    'X-GitHub-Api-Version' = '2022-11-28'
-    'User-Agent' = 'DarkReNamer-release-artifact-download'
-}
-Invoke-WebRequest `
-    -Uri "https://api.github.com/repos/$Repository/actions/artifacts/$ArtifactId/zip" `
-    -Headers $headers `
-    -OutFile $ArchivePath `
-    -MaximumRedirection 5 | Out-Null
+Assert-BoundedDownloadSize -Size $artifact.size_in_bytes `
+    -Maximum $maximumArchiveBytes -Label 'Candidate artifact size_in_bytes'
+Save-BoundedGitHubData `
+    -ApiUri "https://api.github.com/repos/$Repository/actions/artifacts/$ArtifactId/zip" `
+    -OutputPath $ArchivePath `
+    -ExpectedSize $artifact.size_in_bytes `
+    -MaximumBytes $maximumArchiveBytes `
+    -Token $env:GH_TOKEN `
+    -Accept 'application/vnd.github+json' `
+    -Client $DownloadClient
 $actualDigest = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualDigest -cne $ExpectedArtifactSha256) {
     throw 'Downloaded candidate ZIP bytes differ from the independently approved digest.'
