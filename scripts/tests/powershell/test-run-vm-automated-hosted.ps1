@@ -147,7 +147,18 @@ if ($MockArguments[2] -ceq 'ingress-metadata') {
     if ($env:MOCK_HOSTED_SCENARIO -ceq 'ingress-metadata-failure') { $global:LASTEXITCODE = 17; return }
     if ($env:MOCK_HOSTED_SCENARIO -ceq 'real-ingress-metadata-failure') {
         [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-metadata-cli`n")
-        & $env:MOCK_HOSTED_REAL_PYTHON -I $env:MOCK_HOSTED_REAL_AUTHORITY @($MockArguments[2..($MockArguments.Count - 1)])
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $diagnostic = @(& $env:MOCK_HOSTED_REAL_PYTHON -I $env:MOCK_HOSTED_REAL_AUTHORITY @($MockArguments[2..($MockArguments.Count - 1)]) 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $previousErrorPreference }
+        [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-diagnostic:$($diagnostic | Out-String)`n")
+        if ($exitCode -ne 0 -and (($diagnostic | Out-String) -match 'Release ID must be a positive integer\.')) {
+            [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-domain-rejection`n")
+        }
+        $global:LASTEXITCODE = $exitCode
         return
     }
 }
@@ -245,7 +256,7 @@ function Invoke-HostedInvocationScenario {
     $env:MOCK_HOSTED_LOG = $fixture.log
     $env:MOCK_HOSTED_RUNNER = $fixture.runner
     $env:MOCK_HOSTED_SCENARIO = $Scenario
-    $env:MOCK_HOSTED_REAL_PYTHON = (Get-Command $(if ($IsWindows) { 'python' } else { 'python3' }) -CommandType Application).Source
+    $env:MOCK_HOSTED_REAL_PYTHON = (Get-Command $(if ($IsWindows) { 'python' } else { 'python3' }) -CommandType Application | Select-Object -First 1).Source
     $env:MOCK_HOSTED_REAL_AUTHORITY = Join-Path $toolingScriptsRoot 'validate-vm-automated-authority.py'
     function global:git {
         param(
@@ -434,8 +445,10 @@ foreach ($scenario in @('ingress-metadata-failure', 'real-ingress-metadata-failu
         $failure.events -notcontains 'ingress-metadata') {
         throw "Hosted ingress $scenario did not reject before validation/signing and clean owned scratch."
     }
-    if ($scenario -ceq 'real-ingress-metadata-failure' -and $failure.events -notcontains 'real-ingress-metadata-cli') {
-        throw 'Hosted wrapper must reach the actual isolated metadata CLI before refusing invalid authority.'
+    if ($scenario -ceq 'real-ingress-metadata-failure' -and
+        ($failure.events -notcontains 'real-ingress-metadata-cli' -or
+         $failure.events -notcontains 'real-ingress-domain-rejection')) {
+        throw "Hosted wrapper must reach the actual isolated metadata CLI before refusing invalid authority. Events: $($failure.events -join '; ')"
     }
 }
 
