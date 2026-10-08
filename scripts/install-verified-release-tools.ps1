@@ -313,7 +313,11 @@ foreach ($required in @('rustc', 'cargo')) {
     }
 }
 foreach ($tool in $record.tools) {
-    $output = & (Join-Path $toolsRoot "$($tool.id).exe") --version
+    $versionArguments = @('--version')
+    if ($tool.id -ceq 'cargo-cyclonedx') {
+        $versionArguments = @('cyclonedx', '--version')
+    }
+    $output = & (Join-Path $toolsRoot "$($tool.id).exe") @versionArguments
     if ($LASTEXITCODE -ne 0 -or $output -cnotmatch "\b$([regex]::Escape($tool.version))\b") {
         throw "Verified $($tool.id) version probe failed: $output"
     }
