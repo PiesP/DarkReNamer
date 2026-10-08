@@ -77,6 +77,19 @@ scope before it shows the final confirmation. The confirmation separates
 rename-only, move-only, and combined changes and states that existing
 destinations are not overwritten.
 
+Confirmation examples and selected-row diagnostics show lone UTF-16 surrogates,
+literal replacement characters, bidi/control characters, brackets and literal
+ellipses as `[U+XXXX]`. For example, a lone `D800` unit appears as `[U+D800]`,
+while a filename containing those literal brackets appears as
+`[U+005B]U+D800[U+005D]`. This describes the original name; it is not text to
+enter as a replacement. Ordinary Korean, Japanese, RTL text and valid surrogate
+pairs remain readable. Long fields use an explicit ellipsis without splitting
+an escape token. When elision hides a difference, the diagnostic also states
+the raw UTF-16 lengths and first differing code unit. **예시 전체 정보 · 복사**
+shows up to two frozen examples; exceptionally long escaped paths are explicitly
+elided in both the details window and its copy. Name/path exports retain the
+original UTF-16 units rather than this diagnostic notation.
+
 Cancelling the confirmation leaves files unchanged. Cancellation after
 execution begins is observed only between complete primitive steps and may
 start journaled rollback. The progress window reports the outcome that actually

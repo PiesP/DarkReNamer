@@ -1453,7 +1453,6 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
         preview_item_details(item, state.preview_issue_cache.issue(row)),
         format_exact_bytes(item.actual_size())
     );
-    let mut text = text.encode_utf16().collect::<Vec<_>>();
     // SAFETY: notification is live writable storage and its buffer/count pair
     // belongs to the ListView for this synchronous callback.
     let destination = unsafe { (*notification).pszText };
@@ -1462,10 +1461,12 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     if destination.is_null() || capacity <= 0 {
         return true;
     }
-    let copy_len = text
-        .len()
-        .min(usize::try_from(capacity - 1).unwrap_or_default());
-    text.truncate(copy_len);
+    let text = crate::confirmation_display::clip_diagnostic(
+        &text,
+        usize::try_from(capacity - 1).unwrap_or_default(),
+    );
+    let text: Vec<u16> = text.encode_utf16().collect();
+    let copy_len = text.len();
     // SAFETY: destination has capacity UTF-16 units, copy_len is at most one
     // less, source is live and non-overlapping, and the terminator is in-bounds.
     unsafe {

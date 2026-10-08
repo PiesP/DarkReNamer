@@ -145,13 +145,36 @@ pub(crate) fn preview_item_details(
     } else {
         status
     };
+    let names = crate::confirmation_display::pair(
+        item.current_name().units(),
+        item.proposed_name().units(),
+        crate::confirmation_display::DETAIL_FIELD_UNITS,
+    );
+    let source = item.source_path();
+    let destination = item.planned_path();
+    let paths = crate::confirmation_display::pair(
+        source.units(),
+        destination.units(),
+        crate::confirmation_display::DETAIL_FIELD_UNITS,
+    );
     let mut text = format!(
         "{status}\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n대상 전체 경로: {}",
-        item.current_name(),
-        item.proposed_name(),
-        item.source_path(),
-        item.planned_path(),
+        names.before, names.after, paths.before, paths.after,
     );
+    if names.elided || paths.elided {
+        text.push_str(
+            "\n\n표시 길이를 넘는 부분은 …으로 생략합니다. 복사한 정보에도 같은 축약이 적용됩니다.",
+        );
+    }
+    if names.hidden || paths.hidden {
+        text.push_str("\n축약문에 차이가 드러나지 않습니다.\n");
+        text.push_str(&crate::confirmation_display::difference_evidence(
+            source.units(),
+            destination.units(),
+        ));
+    }
+    text.push_str("\n\n");
+    text.push_str(crate::confirmation_display::DISPLAY_NOTE);
     if let Some(description) = preview_issue_description(issue) {
         text.push_str("\n\n");
         text.push_str(&description);
@@ -569,6 +592,49 @@ mod tests {
             is_directory,
             change: test_change(current, proposed),
         }
+    }
+
+    #[test]
+    fn details_preserve_raw_utf16_while_rendering_injective_diagnostics() {
+        let mut units: Vec<_> = r"C:\work\日本語-".encode_utf16().collect();
+        units.extend_from_slice(&[0xD800, 0x202E, 0xFFFD]);
+        units.extend("-[U+D800]-𠮷.txt".encode_utf16());
+        let source = LegacyText::from_units(units);
+        let mut list = darknamer_core::LegacyList::default();
+        assert!(
+            list.append(darknamer_core::LegacyListItem::new(
+                source.clone(),
+                false,
+                1,
+                0,
+                0
+            ))
+            .is_ok()
+        );
+        let original_export = list.export_paths();
+        assert!(
+            list.prefix_complete(&LegacyText::from_units(vec![0xD801]))
+                .is_ok()
+        );
+        let item = &list.items()[0];
+        let proposed = item.proposed_name().clone();
+        let text = preview_item_details(item, PreviewRowIssue::None);
+        for expected in [
+            "[U+D800]",
+            "[U+D801]",
+            "[U+202E]",
+            "[U+FFFD]",
+            "[U+005B]U+D800[U+005D]",
+            "日本語",
+            "𠮷",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(!text.contains('\u{202E}'));
+        assert!(!text.contains('\u{FFFD}'));
+        assert_eq!(list.items()[0].source_path().units(), source.units());
+        assert_eq!(list.items()[0].proposed_name().units(), proposed.units());
+        assert_eq!(list.export_paths(), original_export);
     }
 
     #[test]

@@ -11,6 +11,8 @@ mod apply_progress;
 mod appearance_model;
 mod command_catalog;
 #[cfg(any(windows, test))]
+mod confirmation_display;
+#[cfg(any(windows, test))]
 mod focus_navigation;
 mod ui_layout;
 
@@ -431,10 +433,13 @@ pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> 
     }
     if summary.move_only != 0 || summary.move_and_rename != 0 {
         if let Some(parent) = &summary.common_destination_parent {
-            let parent = parent.to_string_lossy();
-            let chars: Vec<char> = parent.chars().collect();
-            let snippet = bounded_difference_snippet(&chars, chars.len(), chars.len());
-            let label = if snippet == parent {
+            let snippet =
+                confirmation_display::tail(parent.units(), APPLY_CONFIRMATION_SNIPPET_CHARS);
+            let complete = confirmation_display::tail(
+                parent.units(),
+                confirmation_display::DETAIL_FIELD_UNITS,
+            );
+            let label = if snippet == complete {
                 "대상 폴더"
             } else {
                 "대상 폴더 (축약)"
@@ -468,40 +473,59 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
         format!("변경 예시 ({shown}/{}개)", plan.rows().len())
     };
     for row in plan.rows().iter().take(shown) {
+        let (source_parent, source_leaf) = split_windows_path(row.source());
+        let (destination_parent, destination_leaf) = split_windows_path(row.destination());
         if full {
-            let (_, source_leaf) = split_windows_path(row.source());
-            let (_, destination_leaf) = split_windows_path(row.destination());
+            let names = confirmation_display::pair(
+                source_leaf,
+                destination_leaf,
+                confirmation_display::DETAIL_FIELD_UNITS,
+            );
+            let paths = confirmation_display::pair(
+                row.source().units(),
+                row.destination().units(),
+                confirmation_display::DETAIL_FIELD_UNITS,
+            );
+            elided |= names.elided || paths.elided;
             text.push_str(&format!(
                 "\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n변경 후 전체 경로: {}",
-                String::from_utf16_lossy(source_leaf),
-                String::from_utf16_lossy(destination_leaf),
-                row.source(),
-                row.destination()
+                names.before, names.after, paths.before, paths.after
             ));
+            if names.hidden || paths.hidden {
+                text.push_str("\n축약문에 차이가 드러나지 않습니다.\n");
+                text.push_str(&confirmation_display::difference_evidence(
+                    row.source().units(),
+                    row.destination().units(),
+                ));
+            }
         } else {
-            let (source_parent, source_leaf) = split_windows_path(row.source());
-            let (destination_parent, destination_leaf) = split_windows_path(row.destination());
             let (source, destination) =
                 if source_parent != destination_parent || source_leaf == destination_leaf {
-                    (
-                        row.source().to_string_lossy(),
-                        row.destination().to_string_lossy(),
-                    )
+                    (row.source().units(), row.destination().units())
                 } else {
-                    (
-                        String::from_utf16_lossy(source_leaf),
-                        String::from_utf16_lossy(destination_leaf),
-                    )
+                    (source_leaf, destination_leaf)
                 };
-            let (source_snippet, destination_snippet) =
-                difference_centered_snippets(&source, &destination);
-            elided |= source != source_snippet || destination != destination_snippet;
-            comparison_hidden |=
-                source_snippet == destination_snippet && row.source() != row.destination();
+            let display =
+                confirmation_display::pair(source, destination, APPLY_CONFIRMATION_SNIPPET_CHARS);
+            elided |= display.elided;
+            comparison_hidden |= display.hidden;
             text.push_str(&format!(
-                "\n\n현재: {source_snippet}\n변경 후: {destination_snippet}"
+                "\n\n현재: {}\n변경 후: {}",
+                display.before, display.after
             ));
+            if display.hidden {
+                text.push('\n');
+                text.push_str(&confirmation_display::difference_evidence(
+                    source,
+                    destination,
+                ));
+            }
         }
+    }
+    if full && elided {
+        text.push_str(
+            "\n\n표시 길이를 넘는 부분은 …으로 생략합니다. 복사한 정보에도 같은 축약이 적용됩니다.",
+        );
     }
     if !full {
         if comparison_hidden {
@@ -511,98 +535,22 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
         }
         text.push_str("\n전체 이름과 경로: '예시 전체 정보 · 복사'");
     }
+    text.push_str("\n\n");
+    text.push_str(confirmation_display::DISPLAY_NOTE);
     text
 }
 
 #[cfg(any(windows, test))]
-const APPLY_CONFIRMATION_SNIPPET_CHARS: usize = 56;
+const APPLY_CONFIRMATION_SNIPPET_CHARS: usize = confirmation_display::COMPACT_UNITS;
 
-/// Keeps the differing region and nearby context visible without changing filename data.
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn difference_centered_snippets(current: &str, after: &str) -> (String, String) {
-    let current: Vec<char> = current.chars().collect();
-    let after: Vec<char> = after.chars().collect();
-    let common_prefix = current
-        .iter()
-        .zip(&after)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let maximum_suffix = current
-        .len()
-        .saturating_sub(common_prefix)
-        .min(after.len().saturating_sub(common_prefix));
-    let common_suffix = current
-        .iter()
-        .rev()
-        .zip(after.iter().rev())
-        .take(maximum_suffix)
-        .take_while(|(left, right)| left == right)
-        .count();
-
-    (
-        bounded_difference_snippet(
-            &current,
-            common_prefix,
-            current.len().saturating_sub(common_suffix),
-        ),
-        bounded_difference_snippet(
-            &after,
-            common_prefix,
-            after.len().saturating_sub(common_suffix),
-        ),
-    )
-}
-
-#[cfg(any(windows, test))]
-fn bounded_difference_snippet(chars: &[char], focus_start: usize, focus_end: usize) -> String {
-    if chars.len() <= APPLY_CONFIRMATION_SNIPPET_CHARS {
-        return chars.iter().collect();
-    }
-
-    let focus_start = focus_start.min(chars.len());
-    let focus_end = focus_end.clamp(focus_start, chars.len());
-    let focus_len = focus_end - focus_start;
-    if focus_len.saturating_add(2) <= APPLY_CONFIRMATION_SNIPPET_CHARS {
-        let mut available_context = APPLY_CONFIRMATION_SNIPPET_CHARS - focus_len - 2;
-        let mut left_context = focus_start.min(available_context / 2);
-        let mut right_context = (chars.len() - focus_end).min(available_context - left_context);
-        available_context -= left_context + right_context;
-        if available_context != 0 {
-            let extra_left = (focus_start - left_context).min(available_context);
-            left_context += extra_left;
-            available_context -= extra_left;
-            right_context += (chars.len() - focus_end - right_context).min(available_context);
-        }
-        let shown_start = focus_start - left_context;
-        let shown_end = focus_end + right_context;
-        let mut text = String::with_capacity(APPLY_CONFIRMATION_SNIPPET_CHARS);
-        if shown_start != 0 {
-            text.push('…');
-        }
-        text.extend(&chars[shown_start..shown_end]);
-        if shown_end != chars.len() {
-            text.push('…');
-        }
-        return text;
-    }
-
-    let leading_ellipsis = usize::from(focus_start != 0);
-    let trailing_ellipsis = usize::from(focus_end != chars.len());
-    let visible_focus =
-        APPLY_CONFIRMATION_SNIPPET_CHARS.saturating_sub(leading_ellipsis + trailing_ellipsis + 1);
-    let leading_focus = visible_focus / 2;
-    let trailing_focus = visible_focus - leading_focus;
-    let mut text = String::with_capacity(APPLY_CONFIRMATION_SNIPPET_CHARS);
-    if leading_ellipsis != 0 {
-        text.push('…');
-    }
-    text.extend(&chars[focus_start..focus_start + leading_focus]);
-    text.push('…');
-    text.extend(&chars[focus_end - trailing_focus..focus_end]);
-    if trailing_ellipsis != 0 {
-        text.push('…');
-    }
-    text
+    let display = confirmation_display::pair(
+        &current.encode_utf16().collect::<Vec<_>>(),
+        &after.encode_utf16().collect::<Vec<_>>(),
+        APPLY_CONFIRMATION_SNIPPET_CHARS,
+    );
+    (display.before, display.after)
 }
 
 #[cfg(any(windows, test))]
@@ -3969,6 +3917,21 @@ mod tests {
     fn confirmation_plan(
         pairs: &[(String, String)],
     ) -> Result<crate::rename::RenamePlan, crate::rename::PlanError> {
+        let pairs: Vec<_> = pairs
+            .iter()
+            .map(|(source, destination)| {
+                (
+                    darknamer_core::LegacyText::from(source.as_str()),
+                    darknamer_core::LegacyText::from(destination.as_str()),
+                )
+            })
+            .collect();
+        confirmation_utf16_plan(&pairs)
+    }
+
+    fn confirmation_utf16_plan(
+        pairs: &[(darknamer_core::LegacyText, darknamer_core::LegacyText)],
+    ) -> Result<crate::rename::RenamePlan, crate::rename::PlanError> {
         use crate::rename::{
             EntryId, EntryKind, MemoryBackend, ModelRevision, MoveScope, PlanRequest, RenameIntent,
             RenamePlanner,
@@ -3976,17 +3939,16 @@ mod tests {
 
         let mut backend = MemoryBackend::new();
         for (index, (source, _)) in pairs.iter().enumerate() {
-            backend = backend.with_file(source.as_str(), index as u128 + 1);
+            backend = backend.with_file(source.clone(), index as u128 + 1);
         }
         let intents = pairs
             .iter()
             .enumerate()
             .map(|(index, (source, destination))| {
-                let destination = darknamer_core::LegacyText::from(destination.as_str());
-                let (parent, leaf) = split_windows_path(&destination);
+                let (parent, leaf) = split_windows_path(destination);
                 RenameIntent::new(
                     EntryId::new(index as u32),
-                    source.as_str(),
+                    source.clone(),
                     darknamer_core::LegacyText::from_units(parent.to_vec()),
                     darknamer_core::LegacyText::from_units(leaf.to_vec()),
                     EntryKind::File,
@@ -3998,6 +3960,92 @@ mod tests {
             intents,
             MoveScope::SameVolumeFilesOnly,
         ))
+    }
+
+    #[test]
+    fn confirmation_exact_surrogates_bidi_and_literal_escapes_preserve_the_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = |leaf: &[u16]| {
+            let mut units: Vec<_> = r"C:\work\".encode_utf16().collect();
+            units.extend_from_slice(leaf);
+            darknamer_core::LegacyText::from_units(units)
+        };
+        for (before, after, expected_before, expected_after) in [
+            (vec![0xD800], vec![0xD801], "[U+D800]", "[U+D801]"),
+            (vec![0xDC00], vec![0xFFFD], "[U+DC00]", "[U+FFFD]"),
+            (
+                vec![0x202E, 0x0061],
+                vec![0x0061, 0x2066],
+                "[U+202E]a",
+                "a[U+2066]",
+            ),
+            (
+                "[U+D800]".encode_utf16().collect(),
+                vec![0xD800],
+                "[U+005B]U+D800[U+005D]",
+                "[U+D800]",
+            ),
+        ] {
+            let source = path(&before);
+            let destination = path(&after);
+            let plan = confirmation_utf16_plan(&[(source.clone(), destination.clone())])?;
+            let fingerprint = plan.fingerprint();
+            for full in [false, true] {
+                let text = apply_confirmation_examples(&plan, full);
+                assert!(text.contains(expected_before), "{text}");
+                assert!(text.contains(expected_after), "{text}");
+                assert!(
+                    !text
+                        .chars()
+                        .any(|value| matches!(value, '\u{202E}' | '\u{2066}' | '\u{FFFD}'))
+                );
+                assert!(text.contains("입력할 이름이 아닙니다"));
+            }
+            assert_eq!(plan.fingerprint(), fingerprint);
+            assert_eq!(plan.rows()[0].source().units(), source.units());
+            assert_eq!(plan.rows()[0].destination().units(), destination.units());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_worst_case_two_rows_fit_native_details_without_path_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parent = {
+            let mut units: Vec<_> = r"C:\".encode_utf16().collect();
+            for _ in 0..125 {
+                units.extend(std::iter::repeat_n(0xD800, 250));
+                units.push(u16::from(b'\\'));
+            }
+            units
+        };
+        let mut pairs = Vec::new();
+        for suffix in *b"ab" {
+            let mut source = parent.clone();
+            source.extend(std::iter::repeat_n(0xD800, 250));
+            source.push(u16::from(suffix));
+            let mut destination = source.clone();
+            destination[parent.len() + 100] = 0xD801;
+            pairs.push((
+                darknamer_core::LegacyText::from_units(source),
+                darknamer_core::LegacyText::from_units(destination),
+            ));
+        }
+        let plan = confirmation_utf16_plan(&pairs)?;
+        let text = apply_confirmation_examples(&plan, true);
+        let normalized = text.encode_utf16().count() + text.matches('\n').count();
+        assert!(
+            normalized < crate::rename::MAX_PATH_UNITS * 8,
+            "{normalized}"
+        );
+        assert!(text.contains("복사한 정보에도 같은 축약"));
+        assert!(text.contains("[U+D801]"));
+        assert_eq!(text.matches("\n현재 전체 경로: ").count(), 2);
+        for (row, (source, destination)) in plan.rows().iter().zip(&pairs) {
+            assert_eq!(row.source().units(), source.units());
+            assert_eq!(row.destination().units(), destination.units());
+        }
+        Ok(())
     }
 
     #[test]
