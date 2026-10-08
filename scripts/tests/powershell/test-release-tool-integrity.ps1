@@ -324,6 +324,53 @@ try {
         throw 'Production fixture changed the PowerShell platform flag outside its call.'
     }
 
+    # Exercise the installer's actual version-probe loop with strict command
+    # fixtures. Cargo plugin binaries may require their subcommand argument.
+    $parseTokens = $null
+    $parseErrors = $null
+    $installerAst = [Management.Automation.Language.Parser]::ParseFile(
+        $installer, [ref]$parseTokens, [ref]$parseErrors)
+    if ($parseErrors.Count -ne 0) { throw 'The release installer did not parse.' }
+    $probeLoops = @($installerAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.ForEachStatementAst] -and
+            $node.Variable.VariablePath.UserPath -ceq 'tool' -and
+            $node.Extent.Text.Contains('version probe failed')
+    }, $true))
+    if ($probeLoops.Count -ne 1) { throw 'The release-tool version probe loop is ambiguous.' }
+    $record = $productionRecord
+    $toolsRoot = Join-Path $testRoot 'version-probe-commands'
+    $observedProbes = [Collections.Generic.List[string]]::new()
+    $probeFunctions = @()
+    try {
+        foreach ($tool in $record.tools) {
+            $id = $tool.id
+            $version = $tool.version
+            $expectedArguments = @('--version')
+            if ($id -ceq 'cargo-cyclonedx') { $expectedArguments = @('cyclonedx', '--version') }
+            $executable = Join-Path $toolsRoot "$id.exe"
+            $fixtureCommand = {
+                if ($args.Count -ne $expectedArguments.Count -or
+                        ($args -join "`0") -cne ($expectedArguments -join "`0")) {
+                    throw "Expected $id arguments ($($expectedArguments.Count)): $($expectedArguments -join ' '); observed ($($args.Count)): $($args -join ' ')."
+                }
+                $observedProbes.Add($id)
+                $global:LASTEXITCODE = 0
+                return "$id $version"
+            }.GetNewClosure()
+            $functionPath = "Function:script:$executable"
+            Set-Item -LiteralPath $functionPath -Value $fixtureCommand
+            $probeFunctions += $functionPath
+        }
+        & ([scriptblock]::Create($probeLoops[0].Extent.Text))
+        if (($observedProbes -join ',') -cne (($record.tools.id) -join ',')) {
+            throw 'The version probe did not execute every verified release tool in order.'
+        }
+    }
+    finally {
+        foreach ($functionPath in $probeFunctions) { Remove-Item -LiteralPath $functionPath }
+    }
+
     Write-Host 'Release-tool integrity tests passed.'
 }
 finally {
