@@ -39,6 +39,73 @@ struct AmbiguousNativeBackend {
     fail_after_next_move: bool,
 }
 
+#[test]
+fn native_parent_chain_conflicts_are_not_applied_and_release_acquired_handles()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    for source_side in [true, false] {
+        let directory = tempfile::tempdir()?;
+        let source_parent = directory.path().join("source-parent");
+        let target_parent = directory.path().join("target-parent");
+        fs::create_dir(&source_parent)?;
+        fs::create_dir(&target_parent)?;
+        let source = source_parent.join("source.bin");
+        let destination = target_parent.join("destination.bin");
+        fs::write(&source, b"confirmed source")?;
+        let mut backend = WindowsRenameBackend;
+        let original = backend.observe(&legacy_path(&source))?;
+        let vacant = backend.observe(&legacy_path(&destination))?;
+        let identity = original
+            .entry
+            .ok_or_else(|| std::io::Error::other("source identity missing"))?
+            .identity;
+        let operation = RenameOperation::with_authorization(
+            legacy_path(&source),
+            legacy_path(&destination),
+            identity,
+            original.parent,
+            vacant.parent,
+            EntryKind::File,
+            MoveScope::SameVolumeFilesOnly,
+        );
+        let competing = fs::OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(if source_side {
+                &source_parent
+            } else {
+                &target_parent
+            })?;
+        let error = backend.rename_no_replace(&operation).err().ok_or_else(|| {
+            std::io::Error::other("existing parent DELETE handle must block chain acquisition")
+        })?;
+        assert_eq!(error.code, 32);
+        assert_eq!(error.certainty, MutationCertainty::NotApplied);
+        assert_eq!(fs::read(&source)?, b"confirmed source");
+        assert!(!destination.exists());
+        drop(competing);
+        backend.rename_no_replace(&operation)?;
+        assert_eq!(fs::read(&destination)?, b"confirmed source");
+        assert!(!source.exists());
+        assert_eq!(
+            backend
+                .observe(&legacy_path(&destination))?
+                .entry
+                .ok_or_else(|| std::io::Error::other("destination identity missing"))?
+                .identity,
+            identity
+        );
+        fs::rename(source_parent, directory.path().join("released-source"))?;
+        fs::rename(target_parent, directory.path().join("released-target"))?;
+    }
+    Ok(())
+}
+
 impl RenameBackend for AmbiguousNativeBackend {
     fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
         self.inner.validate_path_environment(path)

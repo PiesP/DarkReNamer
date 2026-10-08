@@ -803,6 +803,17 @@ mod tests {
     }
 
     #[test]
+    fn parent_namespace_chain_rejects_overlong_input_before_acquisition() {
+        let path = LegacyText::from_units(vec![u16::from(b'a'); 32_768]);
+        assert_eq!(
+            NativeParentChain::open_legacy(&path)
+                .err()
+                .and_then(|error| error.raw_os_error()),
+            Some(206)
+        );
+    }
+
+    #[test]
     fn verbatim_drive_leaf_preserves_the_root_separator_in_its_parent() -> Result<(), BackendError>
     {
         let (parent, leaf) = split_absolute_path(
