@@ -132,7 +132,7 @@
       "bundle": "tooling-formats-png.py",
       "kind": "python",
       "module": "darkrenamer_tooling.formats.png",
-      "sha256": "5b267489396ad9f661e8128aeaeef0afba4fcacd2116b9e72130a0410c9a1330",
+      "sha256": "8aa7bed5d567c277214df66592520c92e29e61af87df2b9172038bd42ba9ddef",
       "dependencies": [
         "package-root",
         "package-formats"
@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "0ee4d02778436108872ffef02fefd7c474dc99060e9abec372d310d51c891239",
+      "sha256": "6f0ac630a77690d80f10125f16b8625da32a9d7125fb97ee21ccd6085de81c6d",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -219,7 +219,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "4cd5ac102c637e979021d77a852a7c970602be7ca7d0e229de018f50b9a9c0f4",
+      "sha256": "e75bc1ecb4c0e7b440b8116aeb8b474fc4d32a863dbbad7974333e0b5c91acf6",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -330,7 +330,7 @@
       "bundle": "tooling-contracts-authority.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.authority",
-      "sha256": "7bffbedf2d5d8717f705646b1ffa50ce634346c10c6be381ff9e8ab891d63feb",
+      "sha256": "58b1a560105e6854771c06e4e70f95746eb4425aa885eb419b7c09b159f2a695",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -393,7 +393,7 @@
       "bundle": "tooling-evidence-png.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.png",
-      "sha256": "760deaa743fe35e3278feccab42e4a5ce36b1b6123670b5b7a77be61a078675b",
+      "sha256": "16405e5e8513ce8b42048e6154de7930ecc6a32a0a1aa7df15ce75bec4ac46b0",
       "dependencies": [
         "package-root",
         "package-evidence",

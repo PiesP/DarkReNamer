@@ -37,9 +37,12 @@ EVIDENCE_PNG_POLICY = PngPolicy(
     color_types=frozenset({0, 2, 4, 6}), maximum_pixels=MAX_PNG_PIXELS,
     maximum_compressed_bytes=MAX_COMPRESSED_BYTES,
     maximum_chunk_bytes=MAX_COMPRESSED_BYTES, require_opaque=True,
+    maximum_chunks=4096,
 )
 
 _ERROR_MESSAGES = {
+    "chunk_policy": "has an invalid chunk-count policy",
+    "chunks": "exceeds its PNG chunk-count budget",
     "signature": "has an invalid PNG signature",
     "header": "has a truncated PNG chunk",
     "length": "has an invalid PNG chunk length",

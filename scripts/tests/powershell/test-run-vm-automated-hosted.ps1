@@ -1,4 +1,5 @@
 . (Join-Path $PSScriptRoot '../support/paths.ps1')
+. (Join-Path $PSScriptRoot '../support/bounded_http_fixture.ps1')
 $toolingTestPaths = Get-ToolingTestPaths
 $toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
 
@@ -123,6 +124,7 @@ function New-HostedInvocationFixture {
     foreach ($directory in @($trusted, $candidate, $runner, (Join-Path $trusted 'scripts'))) {
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
+    Copy-Item -LiteralPath (Join-Path $toolingScriptsRoot 'download-bounded-github-data.ps1') -Destination (Join-Path $trusted 'scripts')
     [void](New-Item -ItemType Directory -Path (Join-Path $trusted 'config') -Force)
     foreach ($profile in @(
         @{ Id = 'vm-automated-v1-win11-ntfs'; Revision = 1 },
@@ -140,6 +142,26 @@ $MockArguments = @($args)
 if ($MockArguments[0] -cne '-I') { throw 'Hosted Python must start in isolated mode.' }
 $validator = [string]$MockArguments[1]
 [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "python:$validator`n")
+if ($MockArguments[2] -ceq 'ingress-metadata') {
+    [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "ingress-metadata`n")
+    if ($env:MOCK_HOSTED_SCENARIO -ceq 'ingress-metadata-failure') { $global:LASTEXITCODE = 17; return }
+    if ($env:MOCK_HOSTED_SCENARIO -ceq 'real-ingress-metadata-failure') {
+        [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-metadata-cli`n")
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $diagnostic = @(& $env:MOCK_HOSTED_REAL_PYTHON -I $env:MOCK_HOSTED_REAL_AUTHORITY @($MockArguments[2..($MockArguments.Count - 1)]) 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $previousErrorPreference }
+        [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-diagnostic:$($diagnostic | Out-String)`n")
+        if ($exitCode -ne 0 -and (($diagnostic | Out-String) -match 'Release ID must be a positive integer\.')) {
+            [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-domain-rejection`n")
+        }
+        $global:LASTEXITCODE = $exitCode
+        return
+    }
+}
 if ($validator.EndsWith('validate-vm-automated-evidence.py', [StringComparison]::Ordinal)) {
     $profileIndex = [Array]::IndexOf($MockArguments, '--profile-id')
     if ($profileIndex -lt 0 -or $profileIndex + 1 -ge $MockArguments.Count) {
@@ -202,7 +224,8 @@ param(`$SourceRoot, `$HandoffRoot, [switch] `$PassThru)
 function Invoke-HostedInvocationScenario {
     param(
         [Parameter(Mandatory)][ValidateSet(
-            'success', 'candidate-attestation-failure', 'raw-validator-failure', 'cleanup-failure'
+            'success', 'candidate-attestation-failure', 'raw-validator-failure', 'cleanup-failure',
+            'ingress-metadata-failure', 'real-ingress-metadata-failure', 'oversized-ingress', 'stream-overflow'
         )][string] $Scenario,
         [string] $ProfileId = 'vm-automated-v2-owned-resources',
         [switch] $ExplicitProfile
@@ -222,6 +245,8 @@ function Invoke-HostedInvocationScenario {
         MOCK_HOSTED_LOG = $env:MOCK_HOSTED_LOG
         MOCK_HOSTED_RUNNER = $env:MOCK_HOSTED_RUNNER
         MOCK_HOSTED_SCENARIO = $env:MOCK_HOSTED_SCENARIO
+        MOCK_HOSTED_REAL_PYTHON = $env:MOCK_HOSTED_REAL_PYTHON
+        MOCK_HOSTED_REAL_AUTHORITY = $env:MOCK_HOSTED_REAL_AUTHORITY
     }
     $env:GH_TOKEN = 'test-token'
     $env:GITHUB_ACTOR = 'PiesP'
@@ -231,6 +256,8 @@ function Invoke-HostedInvocationScenario {
     $env:MOCK_HOSTED_LOG = $fixture.log
     $env:MOCK_HOSTED_RUNNER = $fixture.runner
     $env:MOCK_HOSTED_SCENARIO = $Scenario
+    $env:MOCK_HOSTED_REAL_PYTHON = (Get-Command $(if ($IsWindows) { 'python' } else { 'python3' }) -CommandType Application | Select-Object -First 1).Source
+    $env:MOCK_HOSTED_REAL_AUTHORITY = Join-Path $toolingScriptsRoot 'validate-vm-automated-authority.py'
     function global:git {
         param(
             [Alias('C')][string] $RepositoryPath,
@@ -313,13 +340,12 @@ function Invoke-HostedInvocationScenario {
                 head_repository = [ordered]@{ id = [long]29 }
             }
         }
+        elseif ($endpoint -like '*/releases/assets/47') {
+            [ordered]@{ size = if ($env:MOCK_HOSTED_SCENARIO -ceq 'oversized-ingress') { [long]536870913 } else { [long]3 } }
+        }
         else { [ordered]@{} }
         $global:LASTEXITCODE = 0
         $document | ConvertTo-Json -Depth 8 -Compress
-    }
-    function global:Invoke-WebRequest {
-        param($Uri, $Headers, $OutFile, $MaximumRedirection)
-        [IO.File]::WriteAllBytes([string]$OutFile, [byte[]](1, 2, 3))
     }
     function global:Remove-Item {
         param([string] $LiteralPath, [switch] $Recurse, [switch] $Force)
@@ -332,6 +358,9 @@ function Invoke-HostedInvocationScenario {
         Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
     }
 
+    $download = New-BoundedHttpFixture
+    $body = if ($Scenario -ceq 'stream-overflow') { [byte[]](1, 2, 3, 4) } else { [byte[]](1, 2, 3) }
+    $download.Handler.Responses.Enqueue((New-BoundedHttpResponse -Status 200 -Bytes $body -ContentLength 3))
     $wrapperSucceeded = $false
     $candidateAttestationAttempted = $false
     $statementAttestationReached = $false
@@ -356,7 +385,7 @@ function Invoke-HostedInvocationScenario {
                 -TrustedSourceRoot $fixture.trusted `
                 -OutputPath $fixture.output `
                 -RunnerTemp $fixture.runner `
-                -PythonExecutable $fixture.python *> $null
+                -PythonExecutable $fixture.python -DownloadClient $download.Client *> $null
             $wrapperSucceeded = $true
         }
         catch {
@@ -385,7 +414,10 @@ function Invoke-HostedInvocationScenario {
             @(Get-Content -LiteralPath $fixture.log)
         }
         else { @() }
+        $download.Client.Dispose()
+        $download.Handler.Dispose()
         $outcome = [pscustomobject]@{
+            download_requests = $download.Handler.RequestUris.Count
             wrapper_succeeded = $wrapperSucceeded
             output_exists = Test-Path -LiteralPath $fixture.output -PathType Leaf
             candidate_attestation_attempted = $candidateAttestationAttempted
@@ -393,7 +425,7 @@ function Invoke-HostedInvocationScenario {
             scratch_count = $scratchCount
             events = $events
         }
-        foreach ($name in @('git', 'gh', 'Invoke-WebRequest', 'Remove-Item')) {
+        foreach ($name in @('git', 'gh', 'Remove-Item')) {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath ("Function:\$name") `
                 -Force -ErrorAction SilentlyContinue
         }
@@ -403,6 +435,21 @@ function Invoke-HostedInvocationScenario {
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force
     }
     $outcome
+}
+
+foreach ($scenario in @('ingress-metadata-failure', 'real-ingress-metadata-failure', 'oversized-ingress', 'stream-overflow')) {
+    $failure = Invoke-HostedInvocationScenario -Scenario $scenario
+    $expectedRequests = if ($scenario -ceq 'stream-overflow') { 1 } else { 0 }
+    if ($failure.wrapper_succeeded -or $failure.output_exists -or $failure.candidate_attestation_attempted -or
+        $failure.scratch_count -ne 0 -or $failure.download_requests -ne $expectedRequests -or
+        $failure.events -notcontains 'ingress-metadata') {
+        throw "Hosted ingress $scenario did not reject before validation/signing and clean owned scratch."
+    }
+    if ($scenario -ceq 'real-ingress-metadata-failure' -and
+        ($failure.events -notcontains 'real-ingress-metadata-cli' -or
+         $failure.events -notcontains 'real-ingress-domain-rejection')) {
+        throw "Hosted wrapper must reach the actual isolated metadata CLI before refusing invalid authority. Events: $($failure.events -join '; ')"
+    }
 }
 
 $success = Invoke-HostedInvocationScenario -Scenario success

@@ -181,6 +181,16 @@ source, and attests the unchanged files and executable SBOM. It does not install
 Cargo tools, execute candidate code, rebuild files, or upload another handoff.
 A failed or skipped signing job cannot produce a successful candidate run.
 
+Candidate extraction preflights the fixed 11 flat ASCII files before opening a
+decompressor. Compressed bytes and total expanded bytes are each limited to
+512 MiB, one member to 256 MiB, and central-directory bytes to 32 KiB. Names
+are at most 64 bytes; member extra fields/comments and the archive comment are
+at most 1024 bytes each. ZIP64, encryption, unsupported compression, links,
+directories, collisions and incomplete layouts fail closed. Extraction counts
+actual output using a 64 KiB buffer and a 300-second deadline, refuses existing
+destinations, and leaves failed partial files only in the new task directory.
+Existing metadata/digest, complete handoff and attestation checks remain required.
+
 Candidate builds use `config/release-tool-integrity.json` to approve the official
 Windows Rust components and Cargo utility archives by SHA-256 before extraction,
 installation or version probes. Rust's version and component owners remain
@@ -251,7 +261,10 @@ or the newer parent/cleanup boundaries of historical evidence archives.
 The manual VM validation workflow obtains raw evidence from one dedicated,
 never-published draft release asset owned and uploaded by the repository owner.
 Its numeric identity, digest and length are pinned; arbitrary download URLs are
-not accepted. The archive remains private and is not uploaded as an Actions
+not accepted. Hosted ingestion validates these source-owned metadata bounds
+before transfer, then streams at most the approved length and 512 MiB with a
+300-second deadline; size and SHA-256 checks follow the transfer. The archive
+remains private and is not uploaded as an Actions
 artifact. The workflow independently downloads and verifies the immutable
 candidate, validates the bounded archive, re-derives the full profile from raw
 observations, and cleans up its private scratch and extracted archive before it
