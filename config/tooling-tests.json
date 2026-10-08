@@ -9,6 +9,7 @@
     ]
   },
   "tests": [
+    { "id": "release-tool-integrity", "path": "scripts/tests/powershell/test-release-tool-integrity.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 300 },
     { "id": "tooling-registry", "path": "scripts/tests/powershell/test-tooling-registry.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "registry", "requiresVm": false, "timeout": 120 },
     { "id": "tooling-powershell-bootstrap", "path": "scripts/tests/powershell/test-tooling-powershell-bootstrap.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "automation-invocation-lifecycle", "path": "scripts/tests/powershell/test-automation-invocation-lifecycle.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 120 },
@@ -37,6 +38,10 @@
     { "id": "resolve-source-matrix-metadata", "path": "scripts/tests/powershell/test-resolve-source-matrix-metadata.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "workflow", "requiresVm": false, "timeout": 120 },
     { "id": "run-vm-automated-hosted", "path": "scripts/tests/powershell/test-run-vm-automated-hosted.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
     { "id": "release-candidate-metadata-validator", "path": "scripts/tests/powershell/test-release-candidate-metadata-validator.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 120 },
+    { "id": "download-verified-candidate-artifact", "path": "scripts/tests/powershell/test-download-verified-candidate-artifact.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 120 },
+    { "id": "bounded-github-download", "path": "scripts/tests/powershell/test-bounded-github-download.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 120 },
+    { "id": "release-public-readback", "path": "scripts/tests/powershell/test-release-public-readback.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 120 },
+    { "id": "release-publication", "path": "scripts/tests/python/test-release-publication.py", "runner": "Python", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "release", "requiresVm": false, "timeout": 120 },
     { "id": "runtimebroker-observer", "path": "scripts/tests/powershell/test-runtimebroker-observer.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "diagnostics", "category": "diagnostics", "requiresVm": false, "timeout": 120 },
     { "id": "runtimebroker-bridge", "path": "scripts/tests/powershell/test-runtimebroker-bridge.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "scope": "diagnostics", "category": "diagnostics", "requiresVm": false, "timeout": 120 },
     { "id": "runtimebroker-orchestration", "path": "scripts/tests/python/test-runtimebroker-orchestration.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "diagnostics", "category": "diagnostics", "requiresVm": false, "timeout": 120 },
@@ -62,6 +67,7 @@
     { "id": "vm-automated-cli", "path": "scripts/tests/python/test-vm-automated-cli.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
     { "id": "vm-evidence-cli-smoke", "path": "scripts/tests/python/test-vm-evidence-cli-smoke.py", "runner": "Python", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
     { "id": "png-codec", "path": "scripts/tests/python/test-png-codec.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 300 },
-    { "id": "vm-connection", "path": "scripts/tests/python/test-vm-connection.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 300 }
+    { "id": "vm-connection", "path": "scripts/tests/python/test-vm-connection.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 300 },
+    { "id": "vm-host-tools", "path": "scripts/tests/python/test-vm-host-tools.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 120 }
   ]
 }

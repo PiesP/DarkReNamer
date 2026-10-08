@@ -39,6 +39,7 @@ function Assert-ValidatorFails {
         [string] $ExpectedRunId = '33465335192',
         [string] $ExpectedRunAttempt = '2',
         [string] $ExpectedArtifactId = '9123456789',
+        [string] $ExpectedArtifactSha256 = $artifactDigest,
         [string] $ExpectedSourceSha = ('a' * 40),
         [string] $ExpectedArtifactName = 'DarkReNamer-dry-run-33465335192-2-windows'
     )
@@ -50,6 +51,8 @@ function Assert-ValidatorFails {
             -ExpectedRunId $ExpectedRunId `
             -ExpectedRunAttempt $ExpectedRunAttempt `
             -ExpectedArtifactId $ExpectedArtifactId `
+            -ExpectedArtifactSha256 $ExpectedArtifactSha256 `
+            -ArtifactArchivePath $artifactArchivePath `
             -ExpectedSourceSha $ExpectedSourceSha `
             -ExpectedArtifactName $ExpectedArtifactName
     }
@@ -65,6 +68,10 @@ function Assert-ValidatorFails {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-candidate-metadata-$([Guid]::NewGuid())"
 $runMetadataPath = Join-Path $testRoot 'run.json'
 $artifactMetadataPath = Join-Path $testRoot 'artifact.json'
+$artifactArchivePath = Join-Path $testRoot 'artifact.zip'
+$artifactDigest = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('candidate ZIP bytes'))
+).ToLowerInvariant()
 $sourceSha = 'a' * 40
 $runId = '33465335192'
 $runAttempt = '2'
@@ -88,6 +95,7 @@ function New-ArtifactMetadata {
     [pscustomobject][ordered]@{
         id = [Int64]$artifactId
         name = $artifactName
+        digest = "sha256:$artifactDigest"
         expired = $false
         workflow_run = [pscustomobject][ordered]@{
             id = [Int64]$runId
@@ -99,6 +107,7 @@ function New-ArtifactMetadata {
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+    [IO.File]::WriteAllText($artifactArchivePath, 'candidate ZIP bytes')
     Write-JsonObject -Path $runMetadataPath -Value (New-RunMetadata)
     Write-JsonObject -Path $artifactMetadataPath -Value (New-ArtifactMetadata)
 
@@ -109,6 +118,8 @@ try {
             -ExpectedRunId $runId `
             -ExpectedRunAttempt $runAttempt `
             -ExpectedArtifactId $artifactId `
+            -ExpectedArtifactSha256 $artifactDigest `
+            -ArtifactArchivePath $artifactArchivePath `
             -ExpectedSourceSha $sourceSha `
             -ExpectedArtifactName $artifactName 6>&1
     )
@@ -164,6 +175,28 @@ try {
         -ArtifactMetadataPath $artifactMetadataPath
 
     Write-JsonObject -Path $runMetadataPath -Value (New-RunMetadata)
+    $artifact = New-ArtifactMetadata
+    $artifact.digest = 'sha256:' + ('b' * 64)
+    Write-JsonObject -Path $artifactMetadataPath -Value $artifact
+    Assert-ValidatorFails `
+        -ExpectedFragment 'metadata digest does not match' `
+        -RunMetadataPath $runMetadataPath `
+        -ArtifactMetadataPath $artifactMetadataPath
+
+    Write-JsonObject -Path $artifactMetadataPath -Value (New-ArtifactMetadata)
+    Assert-ValidatorFails `
+        -ExpectedFragment 'metadata digest does not match' `
+        -RunMetadataPath $runMetadataPath `
+        -ArtifactMetadataPath $artifactMetadataPath `
+        -ExpectedArtifactSha256 ('b' * 64)
+
+    [IO.File]::WriteAllText($artifactArchivePath, 'changed candidate ZIP bytes')
+    Assert-ValidatorFails `
+        -ExpectedFragment 'Downloaded candidate artifact archive digest does not match' `
+        -RunMetadataPath $runMetadataPath `
+        -ArtifactMetadataPath $artifactMetadataPath
+    [IO.File]::WriteAllText($artifactArchivePath, 'candidate ZIP bytes')
+
     $artifact = New-ArtifactMetadata
     $artifact.id = [Int64]9123456790
     Write-JsonObject -Path $artifactMetadataPath -Value $artifact

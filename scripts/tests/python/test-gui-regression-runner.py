@@ -69,7 +69,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["command"].count("--diagnostic"), 1)
         self.assertEqual(manifest["command"][manifest["command"].index("--diagnostic") + 1],
                          "performance-sample")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "run", run,
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -117,7 +117,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(pair["mode"], "appearance-pair")
         self.assertEqual(pair["run_id"], runner.APPEARANCE_PAIR_ID)
         self.assertEqual(len(runner.RUNS), 4)
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "pair", pair,
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -142,7 +142,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         pair = {**runner.appearance_pair_run(1366, 768, 96),
                 "acceptance_profile_id": runner.V2_PROFILE_ID,
                 "acceptance_profile_sha256": profile_hash}
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", run_root, pair,
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -151,7 +151,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-AcceptanceProfileId") + 1], runner.V2_PROFILE_ID)
         self.assertEqual(command[command.index("-AcceptanceProfileSha256") + 1], profile_hash)
         (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             with self.assertRaisesRegex(ValueError, "immutable staged manifest"):
                 runner.controller_command(
                     self.root, self.root / "bundle", run_root, pair,
@@ -189,7 +189,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V2_PROFILE_ID])
         self.assertEqual(manifest["acceptance_profile_sha256"], profile_hash)
         self.write_json(run_root / "input-manifest.json", manifest)
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", run_root, run,
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -198,7 +198,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-AcceptanceProfileSha256") + 1], profile_hash)
         self.assertNotIn("-TestTimeoutSeconds", command)
         (self.root / "config" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             with self.assertRaisesRegex(ValueError, "changed after its immutable staging"):
                 runner.controller_command(
                     self.root, self.root / "bundle", run_root, run,
@@ -206,7 +206,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
         (self.root / "config" / runner.V2_PROFILE_FILE).write_bytes(profile)
         (run_root / "inputs" / runner.V2_PROFILE_FILE).write_bytes(profile + b" ")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             with self.assertRaisesRegex(ValueError, "immutable staged manifest"):
                 runner.controller_command(
                     self.root, self.root / "bundle", run_root, run,
@@ -324,7 +324,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                           (96, 150, False), (96, 100, True)])
         self.assertTrue(all((row["width"], row["height"]) == (1920, 1080) for row in runs))
         self.assertEqual(runs[-1]["appearance"], "system")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "forced", runs[-1],
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -381,7 +381,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         manifest["bundle_manifest"]["sha256"] = runner.digest(bundle_root / "bundle.json")
         (self.root / "run").mkdir()
         self.write_json(self.root / "run" / "input-manifest.json", manifest)
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"):
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
             command = runner.controller_command(
                 self.root, self.root / "bundle", self.root / "run", run,
                 {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
@@ -393,7 +393,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-ExpectedBundleManifestSha256") + 1],
                          manifest["bundle_manifest"]["sha256"])
         (bundle_root / "bundle.json").write_bytes(b"changed bundle")
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
              self.assertRaisesRegex(ValueError, "Focused controller bundle differs"):
             runner.controller_command(
                 self.root, bundle_root, self.root / "run", run,

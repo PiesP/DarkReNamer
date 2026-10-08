@@ -32,7 +32,7 @@ if ($LASTEXITCODE -ne 0 -or
 $workflows = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot '.github/workflows') -File -Include '*.yaml', '*.yml'
 $expectedInstallCounts = @{
     'ci.yaml' = 4
-    'release.yaml' = 1
+    'release.yaml' = 0
     'security.yaml' = 1
     'benchmark-planning.yaml' = 1
     'binary-size-matrix.yaml' = 1
@@ -56,8 +56,14 @@ foreach ($workflow in $workflows) {
         }
     }
 }
-if ($installCount -ne 10) {
-    throw "Expected ten workflow toolchain installations, found $installCount."
+if ($installCount -ne 9) {
+    throw "Expected nine bootstrap workflow toolchain installations, found $installCount."
+}
+
+$candidateText = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/release.yaml') -Raw
+if ([regex]::Matches($candidateText, '(?m)^\s*\./scripts/install-verified-release-tools\.ps1\s*`$').Count -ne 1 -or
+    $candidateText -match '\bcargo\s+install\b') {
+    throw 'Candidate builds must use the reviewed byte-verified release installer once.'
 }
 
 Write-Host "Toolchain consistency tests passed for Rust $channel ($installCount workflow installs)."

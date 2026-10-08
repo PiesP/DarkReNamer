@@ -17,6 +17,7 @@ from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
 )
 from darkrenamer_tooling.contracts.tooling import stage_verified_tooling
+from darkrenamer_tooling.vm import host_tools
 
 TARGET = 'x86_64-pc-windows-msvc'
 POWERSHELL = Path('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe')
@@ -217,25 +218,13 @@ def is_supported_powershell_version(version):
 
 
 def require_pwsh74():
-    executable = shutil.which('pwsh')
-    if not executable:
-        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
-    try:
-        version = subprocess.check_output(
-            [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-             '$PSVersionTable.PSVersion.ToString()'],
-            text=True,
-            timeout=10,
-        ).strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError('Unable to verify that pwsh is PowerShell 7.4 or newer.') from error
-    if not is_supported_powershell_version(version):
-        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
-    return executable
+    return host_tools.require_pwsh74()
 
 
 def winpath(path):
-    return subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
+    return subprocess.check_output(
+        [host_tools.resolve_tool('wslpath'), '-w', str(path)],
+        env=host_tools.child_environment(), text=True).strip()
 
 
 def safe_ordinary_segment(value):
@@ -499,7 +488,9 @@ def resolve_output_root(repo, args, defaults=None):
     else:
         if defaults is None:
             raise ValueError('PowerShell Direct output resolution requires Windows host defaults.')
-        host_temp = subprocess.check_output(['wslpath', '-u', defaults['temp']], text=True).strip()
+        host_temp = subprocess.check_output(
+            [host_tools.resolve_tool('wslpath'), '-u', defaults['temp']],
+            env=host_tools.child_environment(), text=True).strip()
         root = Path(host_temp) / ('DarkReNamer-native-' + uuid.uuid4().hex)
     if root.exists() or root.is_symlink() or root.resolve().is_relative_to(repo):
         raise RuntimeError('Output must be a new directory outside the checkout.')
@@ -780,7 +771,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
             command = controller_invocation(root, args, defaults, pwsh,
                                             desktop['expectedGuestSid'] if desktop else None)
             cwd = root if args.ssh_host else Path('/mnt/c')
-            environment = os.environ.copy()
+            environment = (host_tools.child_environment() if args.ssh_host
+                           else os.environ.copy())
             environment.pop('DR_VM_OWNED_CLEANUP_HANDSHAKE', None)
             if desktop:
                 handshake = {
