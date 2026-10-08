@@ -181,6 +181,19 @@ create a rename plan or journal capability. Modal sessions prevent concurrent
 model edits. The final confirmation defaults to Cancel and rechecks the original
 session, revision, and plan fingerprint before execution; display expansion and
 clipboard operations cannot rewrite the model or frozen plan.
+Their app-owned diagnostic formatter compares raw UTF-16 before rendering.
+Lone surrogates, literal replacement characters, bidi controls, line/control
+characters, brackets and literal ellipses use injective `[U+XXXX]` code-unit
+tokens; ordinary text and valid surrogate pairs remain readable. These tokens
+are display descriptions, never proposed names or filesystem inputs. Compact
+examples allow 56 rendered UTF-16 units per field; expanded examples allow
+49,152 per field and still sample only two frozen rows. Escapes and scalar pairs
+are indivisible when eliding, including in native infotips. If different raw
+values have identical elided representations, their lengths and first differing
+code units are disclosed. Expanded text and its diagnostic clipboard copy share
+the same explicit elision; four sampled paths, four bounded leaves and labels
+fit the existing native details budget. Raw name/path exports, model values,
+plans, journals and recovery retain their exact original units.
 Clipboard copy fully allocates, fills, and unlocks its data block before opening
 or emptying the clipboard, so preparation failures preserve the previous data.
 
