@@ -13,19 +13,8 @@ $ErrorActionPreference = 'Stop'
 $sourcePath = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
 $handoffPath = (Resolve-Path -LiteralPath $HandoffRoot).ProviderPath
 
-$expectedNames = @(
-    'DarkReNamer-debug-symbols.zip'
-    'DarkReNamer.cdx.json'
-    'DarkReNamer.exe'
-    'DarkReNamer.pdb'
-    'DISTRIBUTION.md'
-    'LICENSE'
-    'release-handoff.json'
-    'release-metrics.json'
-    'SHA256SUMS.txt'
-    'THIRD_PARTY_LICENSES.html'
-    'THIRD_PARTY_NOTICES.md'
-)
+. (Join-Path $PSScriptRoot 'expand-bounded-candidate-archive.ps1') -LibraryOnly
+$expectedNames = @(Get-CandidateHandoffNames)
 $actualFiles = @(Get-ChildItem -LiteralPath $handoffPath -Force | Sort-Object Name)
 $actualNames = @($actualFiles | ForEach-Object Name)
 $actualNameSet = [Collections.Generic.HashSet[string]]::new(

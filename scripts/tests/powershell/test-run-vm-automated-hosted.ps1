@@ -145,6 +145,11 @@ $validator = [string]$MockArguments[1]
 if ($MockArguments[2] -ceq 'ingress-metadata') {
     [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "ingress-metadata`n")
     if ($env:MOCK_HOSTED_SCENARIO -ceq 'ingress-metadata-failure') { $global:LASTEXITCODE = 17; return }
+    if ($env:MOCK_HOSTED_SCENARIO -ceq 'real-ingress-metadata-failure') {
+        [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "real-ingress-metadata-cli`n")
+        & $env:MOCK_HOSTED_REAL_PYTHON -I $env:MOCK_HOSTED_REAL_AUTHORITY @($MockArguments[2..($MockArguments.Count - 1)])
+        return
+    }
 }
 if ($validator.EndsWith('validate-vm-automated-evidence.py', [StringComparison]::Ordinal)) {
     $profileIndex = [Array]::IndexOf($MockArguments, '--profile-id')
@@ -209,7 +214,7 @@ function Invoke-HostedInvocationScenario {
     param(
         [Parameter(Mandatory)][ValidateSet(
             'success', 'candidate-attestation-failure', 'raw-validator-failure', 'cleanup-failure',
-            'ingress-metadata-failure', 'oversized-ingress', 'stream-overflow'
+            'ingress-metadata-failure', 'real-ingress-metadata-failure', 'oversized-ingress', 'stream-overflow'
         )][string] $Scenario,
         [string] $ProfileId = 'vm-automated-v2-owned-resources',
         [switch] $ExplicitProfile
@@ -229,6 +234,8 @@ function Invoke-HostedInvocationScenario {
         MOCK_HOSTED_LOG = $env:MOCK_HOSTED_LOG
         MOCK_HOSTED_RUNNER = $env:MOCK_HOSTED_RUNNER
         MOCK_HOSTED_SCENARIO = $env:MOCK_HOSTED_SCENARIO
+        MOCK_HOSTED_REAL_PYTHON = $env:MOCK_HOSTED_REAL_PYTHON
+        MOCK_HOSTED_REAL_AUTHORITY = $env:MOCK_HOSTED_REAL_AUTHORITY
     }
     $env:GH_TOKEN = 'test-token'
     $env:GITHUB_ACTOR = 'PiesP'
@@ -238,6 +245,8 @@ function Invoke-HostedInvocationScenario {
     $env:MOCK_HOSTED_LOG = $fixture.log
     $env:MOCK_HOSTED_RUNNER = $fixture.runner
     $env:MOCK_HOSTED_SCENARIO = $Scenario
+    $env:MOCK_HOSTED_REAL_PYTHON = (Get-Command $(if ($IsWindows) { 'python' } else { 'python3' }) -CommandType Application).Source
+    $env:MOCK_HOSTED_REAL_AUTHORITY = Join-Path $toolingScriptsRoot 'validate-vm-automated-authority.py'
     function global:git {
         param(
             [Alias('C')][string] $RepositoryPath,
@@ -417,13 +426,16 @@ function Invoke-HostedInvocationScenario {
     $outcome
 }
 
-foreach ($scenario in @('ingress-metadata-failure', 'oversized-ingress', 'stream-overflow')) {
+foreach ($scenario in @('ingress-metadata-failure', 'real-ingress-metadata-failure', 'oversized-ingress', 'stream-overflow')) {
     $failure = Invoke-HostedInvocationScenario -Scenario $scenario
     $expectedRequests = if ($scenario -ceq 'stream-overflow') { 1 } else { 0 }
     if ($failure.wrapper_succeeded -or $failure.output_exists -or $failure.candidate_attestation_attempted -or
         $failure.scratch_count -ne 0 -or $failure.download_requests -ne $expectedRequests -or
         $failure.events -notcontains 'ingress-metadata') {
         throw "Hosted ingress $scenario did not reject before validation/signing and clean owned scratch."
+    }
+    if ($scenario -ceq 'real-ingress-metadata-failure' -and $failure.events -notcontains 'real-ingress-metadata-cli') {
+        throw 'Hosted wrapper must reach the actual isolated metadata CLI before refusing invalid authority.'
     }
 }
 

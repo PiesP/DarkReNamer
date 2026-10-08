@@ -1030,7 +1030,7 @@ function Assert-SigningDataOnly {
     param([Parameter(Mandatory)][object[]] $Blocks)
     $allowedCommands = @(
         'git', 'Join-Path', './scripts/download-verified-candidate-artifact.ps1',
-        'Expand-Archive', './scripts/validate-release-handoff.ps1',
+        './scripts/expand-bounded-candidate-archive.ps1', './scripts/validate-release-handoff.ps1',
         'Get-Content', 'ConvertFrom-Json', 'Out-File'
     )
     foreach ($block in $Blocks) {
@@ -1062,6 +1062,11 @@ $signingDownload = Assert-OneCommand `
         '-ArchivePath' = '$archive'
     }) `
     -Message 'Signing must download the unchanged immutable build artifact by ID and digest.'
+$signingExtract = Assert-OneCommand `
+    -Commands $candidateSigningCommands `
+    -Name './scripts/expand-bounded-candidate-archive.ps1' `
+    -RequiredOptions ([ordered]@{ '-ArchivePath' = '$archive'; '-DestinationPath' = 'dist' }) `
+    -Message 'Signing must bound candidate metadata and actual expansion before handoff validation.'
 $signingHandoff = Assert-OneCommand `
     -Commands $candidateSigningCommands `
     -Name './scripts/validate-release-handoff.ps1' `
@@ -1074,7 +1079,7 @@ Assert-LineOrder -Lines @(
     $candidateCheckoutLines[1], $signingDownload.line,
     $candidateAttestLines[0], $candidateAttestLines[1]
 ) -Message 'Fresh-job source and unchanged candidate validation must precede signing.'
-Assert-SourceOrder -Records @($signingDownload, $signingHandoff) `
+Assert-SourceOrder -Records @($signingDownload, $signingExtract, $signingHandoff) `
     -Message 'Signing must download the verified archive before validating its handoff.'
 foreach ($unapproved in @(
     "& (Join-Path dist 'DarkReNamer.exe')",
@@ -1238,6 +1243,11 @@ $promotionMetadata = Assert-OneCommand `
         '-ExpectedArtifactName' = '$env:EXPECTED_ARTIFACT_NAME'
     }) `
     -Message 'Promotion must validate candidate metadata.'
+$promotionExtract = Assert-OneCommand `
+    -Commands $promotionCommands `
+    -Name './scripts/expand-bounded-candidate-archive.ps1' `
+    -RequiredOptions ([ordered]@{ '-ArchivePath' = 'candidate-artifact.zip'; '-DestinationPath' = 'dist' }) `
+    -Message 'Promotion must bound candidate expansion before handoff validation.'
 $promotionHandoff = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name './scripts/validate-release-handoff.ps1' `
@@ -1447,6 +1457,7 @@ Assert-LineOrder `
         $promotionCheckoutLines[0],
         $promotionDownload.line,
         $promotionMetadata.line,
+        $promotionExtract.line,
         $promotionHandoff.line,
         $promotionAttestation.line,
         $promotionPublish.line

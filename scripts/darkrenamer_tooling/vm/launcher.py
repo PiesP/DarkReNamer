@@ -42,6 +42,7 @@ CANDIDATE_HARNESS_FILES = (
     'windows-vm-acceptance.ps1',
     'windows-vm-recovery-acceptance.ps1',
     'validate-release-handoff.ps1',
+    'expand-bounded-candidate-archive.ps1',
     'validate-release-candidate-metadata.ps1',
     'measure-windows-binary.ps1',
 )

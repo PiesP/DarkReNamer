@@ -258,7 +258,8 @@ verifies observations. The campaign and diagnostic GUI use `vm.connection` for
 connection profiles and guest preflight. PNG consumers supply separate format,
 opacity and resource policies; evidence verification retains expected dimensions
 and its cumulative decoded-pixel budget. Sharing format mechanics does not share
-producer verdicts with the independent verifier.
+producer verdicts with the independent verifier. Both consumers cap all PNG
+chunks, including zero-length ancillary chunks, at 4096 before header/CRC work.
 PowerShell definitions live under `scripts/modules/powershell/`, grouped by guest,
 UI observer, recovery observer and host controller. Each invocation creates its
 own module scope and removes that module after completion.

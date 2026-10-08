@@ -269,7 +269,7 @@ jobs:
       - name: Extract verified immutable candidate archive
         shell: pwsh
         run: |
-          Expand-Archive -LiteralPath candidate-artifact.zip -DestinationPath dist
+          ./scripts/expand-bounded-candidate-archive.ps1 -ArchivePath candidate-artifact.zip -DestinationPath dist
 
       - name: Revalidate handoff bytes and provenance
         shell: pwsh

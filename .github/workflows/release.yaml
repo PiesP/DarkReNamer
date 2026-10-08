@@ -224,7 +224,7 @@ jobs:
             -ExpectedArtifactSha256 $env:BUILD_ARTIFACT_DIGEST `
             -ExpectedArtifactName $expectedName `
             -ArchivePath $archive
-          Expand-Archive -LiteralPath $archive -DestinationPath dist
+          ./scripts/expand-bounded-candidate-archive.ps1 -ArchivePath $archive -DestinationPath dist
           ./scripts/validate-release-handoff.ps1 -SourceRoot $PWD -HandoffRoot (Join-Path $PWD 'dist')
           $handoff = Get-Content -LiteralPath dist/release-handoff.json -Raw | ConvertFrom-Json
           if ($handoff.source_sha -cne $eventSha -or
