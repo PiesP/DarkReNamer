@@ -62,15 +62,10 @@ try {
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) {
         throw 'Complete artifact archive digest changed.'
     }
-    Remove-Item -LiteralPath $archive
-    & $helper -Repository PiesP/DarkReNamer -ArtifactId 20 `
-        -ExpectedArtifactSha256 "sha256:$digest" -ExpectedArtifactName $name `
-        -ArchivePath $archive
-    Assert-Fails -Expected 'inputs are invalid' -ApprovedDigest "sha512:$digest"
     Assert-Fails -Expected 'identity or digest differs' -ApprovedDigest ('b' * 64)
     $global:mockDownloadedBytes = [Text.Encoding]::UTF8.GetBytes('modified archive bytes')
     Assert-Fails -Expected 'ZIP bytes differ'
-    if ($global:mockGhCalls -ne 4 -or $global:mockWebCalls -ne 3) {
+    if ($global:mockGhCalls -ne 3 -or $global:mockWebCalls -ne 2) {
         throw 'Artifact mismatch should fail before download; byte mismatch must fail after download.'
     }
     Write-Host 'Verified candidate archive download tests passed.'

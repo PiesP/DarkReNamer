@@ -10,12 +10,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# The upload action emits an algorithm-qualified digest; promotion approval
-# supplies the same SHA-256 as bare hex. Normalize only these two exact forms.
-$digestMatch = [regex]::Match($ExpectedArtifactSha256, '^(?:sha256:)?([0-9a-f]{64})$')
-if (-not $digestMatch.Success) { throw 'Verified candidate artifact download inputs are invalid.' }
-$ExpectedArtifactSha256 = $digestMatch.Groups[1].Value
-
 if ($Repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
     $ArtifactId -cnotmatch '^[1-9][0-9]*$' -or
     $ExpectedArtifactSha256 -cnotmatch '^[0-9a-f]{64}$' -or
