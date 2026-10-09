@@ -844,7 +844,7 @@ function Save-AcceptanceNativeMenuScreenshot {
         $bitmap = [Drawing.Bitmap]::new(
             $width,
             $height,
-            [Drawing.Imaging.PixelFormat]::Format32bppArgb
+            [Drawing.Imaging.PixelFormat]::Format24bppRgb
         )
         $graphics = [Drawing.Graphics]::FromImage($bitmap)
         $graphics.CopyFromScreen(

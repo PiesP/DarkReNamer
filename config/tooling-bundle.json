@@ -517,7 +517,7 @@
       "bundle": "guest-uia.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b338ff129fb5c214429240142a6b6c3365480e7b06261ff2c072f8ab9fc881b5",
+      "sha256": "9ee30fd41f8b0d52a100ac9facf8b531bacfb4f8dd5fede02cb16c4d51515208",
       "dependencies": []
     },
     {
@@ -535,7 +535,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e9c4b6dd7397661d3d2274930f505cf6d9837cc96257471c05d2bc47e313627c",
+      "sha256": "a1b4c03ecc46ed91792342c9135254a7928742846284b85cf5521c6f84cdcd86",
       "dependencies": []
     },
     {
@@ -608,7 +608,7 @@
       "bundle": "ui-input.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "7e8de4c9955bc8d256802eb8206b4410484350174bedbf38dc950c2aa3322ce2",
+      "sha256": "9ba88f41f2d8b5c680444a0936a36a5822ab977c76150c331926562ad143937e",
       "dependencies": []
     },
     {
