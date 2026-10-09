@@ -53,7 +53,31 @@ latest designation are distinct; neither changes the supported environment.
 Regular-release status does not require a 1.0.0 version number; the tag must
 still match the chosen Cargo workspace version exactly.
 
-## Prepared 0.1.7 release notes
+## Prepared 0.1.8 release notes
+
+Confirmation details distinguish exact UTF-16 names, including control code
+units, ambiguous whitespace and unpaired surrogates, so distinct selected names
+do not collapse into the same displayed spelling. This changes diagnostic
+presentation without changing names on disk or mutation authorization.
+
+Supported native rename and recovery operations retain the confirmed parent
+namespaces while their primitive runs. Parent protection ends when that primitive
+returns; supported same-parent renames and same-volume regular-file moves remain
+the documented scope.
+
+Release tooling authenticates the original candidate and every handoff file,
+pins downloaded tool bytes, and separates read-only building from fresh signing
+and attestation authority. Candidate and private-evidence downloads, ZIP
+extraction and PNG ingestion enforce bounded sizes before expansion. The
+CycloneDX probe uses its maintained version command before generating the SBOM.
+
+The executable remains intentionally unsigned (`NotSigned`). Existing preferences
+remain compatible. These changes do not establish measured performance gains,
+human Explorer/IME or visual/accessibility acceptance, physical-media performance,
+or power-loss guarantees. Preparation is not publication approval; the complete
+same-source VM-Automated v2 campaign and hosted evidence remain required.
+
+## Historical 0.1.7 release notes
 
 This patch clarifies that Reset Names resets proposed names in the list; it does
 not undo changes already made on disk. Resetting target folders remains a
