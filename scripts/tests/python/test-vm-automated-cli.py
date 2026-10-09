@@ -164,7 +164,7 @@ class CliFixture:
                            "owner": {"login": "PiesP", "id": 56, "type": "User"}},
             "candidate": {
                 "run": run(12, ".github/workflows/release.yaml", "workflow_dispatch"),
-                "jobs": jobs(["candidate/build-windows"]),
+                "jobs": jobs(["candidate/build-windows", "candidate/attest"]),
                 "artifact_sha256": "d" * 64,
                 "artifact": {
                     "id": 34, "name": "DarkReNamer-dry-run-12-1-windows",

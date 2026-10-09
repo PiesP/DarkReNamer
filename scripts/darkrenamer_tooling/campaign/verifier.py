@@ -144,7 +144,8 @@ def verify_authenticated_gate_metadata(value: object, candidate: Candidate) -> d
 
     source = require_exact_keys(top["candidate"], {"run", "jobs", "artifact", "artifact_sha256"}, "Candidate gate")
     candidate_gate = workflow({"run": source["run"], "jobs": source["jobs"]},
-                              ".github/workflows/release.yaml", "workflow_dispatch", {"candidate/build-windows"})
+                              ".github/workflows/release.yaml", "workflow_dispatch",
+                              {"candidate/build-windows", "candidate/attest"})
     require(source["run"]["id"] == int(candidate.workflow_run) and
             source["run"]["run_attempt"] == int(candidate.run_attempt), "Candidate gate belongs to another run attempt.")
     artifact = require_exact_keys(source["artifact"], {"id", "name", "digest", "size", "expired", "workflow_run"}, "Candidate artifact")

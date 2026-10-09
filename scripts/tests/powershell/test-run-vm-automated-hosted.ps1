@@ -49,28 +49,52 @@ Assert-HostedRun -Run $candidateRun `
     -ExpectedRunId '31' `
     -ExpectedRunAttempt '2'
 
+$candidateJobNames = @('candidate/build-windows', 'candidate/attest')
 $candidateJobs = [pscustomobject]@{
-    total_count = [long]1
-    jobs = @([pscustomobject]@{
-        name = 'candidate/build-windows'; status = 'completed'; conclusion = 'success'
+    total_count = [long]2
+    jobs = @($candidateJobNames | ForEach-Object {
+        [pscustomobject]@{ name = $_; status = 'completed'; conclusion = 'success' }
     })
 }
 $reducedCandidateJobs = @(Get-HostedGateJobs `
     -Document $candidateJobs `
-    -ExpectedNames @('candidate/build-windows'))
-foreach ($mutation in @('extra', 'failed', 'wrong')) {
+    -ExpectedNames $candidateJobNames)
+if ($reducedCandidateJobs.Count -ne 2 -or
+    @($reducedCandidateJobs | ForEach-Object name) -cnotcontains 'candidate/attest') {
+    throw 'Hosted candidate gate omitted the successful attestation job.'
+}
+foreach ($mutation in @('extra', 'missing', 'duplicate', 'pending', 'skipped', 'failed', 'wrong', 'case')) {
     $fixture = $candidateJobs | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     if ($mutation -eq 'extra') {
-        $fixture.total_count = [long]2
+        $fixture.total_count = [long]3
+        $fixture.jobs += [pscustomobject]@{
+            name = 'candidate/untrusted'; status = 'completed'; conclusion = 'success'
+        }
+    }
+    elseif ($mutation -eq 'missing') {
+        $fixture.total_count = [long]1
+        $fixture.jobs = @($fixture.jobs[0])
+    }
+    elseif ($mutation -eq 'duplicate') {
+        $fixture.jobs[1].name = $fixture.jobs[0].name
+    }
+    elseif ($mutation -eq 'pending') {
+        $fixture.jobs[1].status = 'in_progress'
+    }
+    elseif ($mutation -eq 'skipped') {
+        $fixture.jobs[1].conclusion = 'skipped'
     }
     elseif ($mutation -eq 'failed') {
-        $fixture.jobs[0].conclusion = 'failure'
+        $fixture.jobs[1].conclusion = 'failure'
+    }
+    elseif ($mutation -eq 'wrong') {
+        $fixture.jobs[1].name = 'candidate/untrusted'
     }
     else {
-        $fixture.jobs[0].name = 'untrusted/job'
+        $fixture.jobs[1].name = 'Candidate/attest'
     }
     Assert-Fails {
-        Get-HostedGateJobs -Document $fixture -ExpectedNames @('candidate/build-windows')
+        Get-HostedGateJobs -Document $fixture -ExpectedNames $candidateJobNames
     } 'job'
 }
 
@@ -100,6 +124,7 @@ $gate = New-HostedGateMetadata `
     -CiJobs $ciJobs
 if ($gate.candidate.artifact_sha256 -cne ('b' * 64) -or
     $gate.candidate.run.id -ne 31 -or
+    @($gate.candidate.jobs).Count -ne 2 -or
     @($gate.ci.jobs).Count -ne 4 -or
     $gate.repository.owner.login -cne 'PiesP') {
     throw 'Reduced hosted gate metadata omitted an authenticated binding.'
@@ -289,8 +314,9 @@ function Invoke-HostedInvocationScenario {
             }
         }
         elseif ($endpoint -like '*/actions/runs/31/attempts/2/jobs*') {
-            [ordered]@{ total_count = [long]1; jobs = @(
+            [ordered]@{ total_count = [long]2; jobs = @(
                 [ordered]@{ name = 'candidate/build-windows'; status = 'completed'; conclusion = 'success' }
+                [ordered]@{ name = 'candidate/attest'; status = 'completed'; conclusion = 'success' }
             ) }
         }
         elseif ($endpoint -like '*/actions/runs/31/attempts/2') {
