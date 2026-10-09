@@ -157,7 +157,7 @@ function Get-HostedGateJobs {
     } | Sort-Object name)
     $actual = @($rows | ForEach-Object { $_.name })
     $expected = @($ExpectedNames | Sort-Object)
-    if (Compare-Object -ReferenceObject $expected -DifferenceObject $actual) {
+    if (Compare-Object -ReferenceObject $expected -DifferenceObject $actual -CaseSensitive) {
         throw 'Authenticated workflow job set is invalid.'
     }
     $rows
@@ -357,7 +357,7 @@ try {
             -ExpectedRunAttempt $CandidateRunAttempt
         $candidateJobs = @(Get-HostedGateJobs `
             -Document (Read-HostedJson $candidateJobsPath) `
-            -ExpectedNames @('candidate/build-windows'))
+            -ExpectedNames @('candidate/build-windows', 'candidate/attest'))
         $candidateArtifact = Read-HostedJson $candidateArtifactPath
 
         $ciList = Read-HostedJson $ciRunsPath

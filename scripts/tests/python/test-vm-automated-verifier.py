@@ -60,7 +60,8 @@ class GateTests(unittest.TestCase):
             'repository': {'full_name': 'PiesP/DarkReNamer', 'id': 45,
                            'owner': {'login': 'PiesP', 'id': 56, 'type': 'User'}},
             'candidate': {'run': run(12, 'release.yaml', 'workflow_dispatch'),
-                          'jobs': jobs(['candidate/build-windows']), 'artifact_sha256': 'd' * 64,
+                          'jobs': jobs(['candidate/build-windows', 'candidate/attest']),
+                          'artifact_sha256': 'd' * 64,
                           'artifact': {'id': 34, 'name': 'DarkReNamer-dry-run-12-1-windows',
                                        'digest': 'sha256:' + 'd' * 64, 'size': 1234, 'expired': False,
                                        'workflow_run': {'id': 12, 'head_sha': 'a' * 40}}},
@@ -69,9 +70,24 @@ class GateTests(unittest.TestCase):
 
     def test_authenticated_gate_reduction_is_order_independent(self):
         expected = verify_authenticated_gate_metadata(self.facts, self.candidate)
+        self.facts['candidate']['jobs'].reverse()
         self.facts['ci']['jobs'].reverse()
         self.assertEqual(verify_authenticated_gate_metadata(self.facts, self.candidate), expected)
         self.assertEqual(expected['artifact_sha256'], 'd' * 64)
+
+    def test_incomplete_or_unexpected_attestation_job_rejected(self):
+        for mode in ('missing', 'duplicate', 'pending', 'skipped', 'failed', 'unexpected', 'case'):
+            changed = deepcopy(self.facts)
+            jobs = changed['candidate']['jobs']
+            if mode == 'missing': jobs.pop()
+            elif mode == 'duplicate': jobs[-1]['name'] = jobs[0]['name']
+            elif mode == 'pending': jobs[-1]['status'] = 'in_progress'
+            elif mode == 'skipped': jobs[-1]['conclusion'] = 'skipped'
+            elif mode == 'failed': jobs[-1]['conclusion'] = 'failure'
+            elif mode == 'unexpected': jobs[-1]['name'] = 'candidate/untrusted'
+            else: jobs[-1]['name'] = 'Candidate/attest'
+            with self.subTest(mode=mode), self.assertRaises(EvidenceError):
+                verify_authenticated_gate_metadata(changed, self.candidate)
 
     def test_wrong_source_attempt_event_or_repository_fails(self):
         for field, value in (('head_sha', 'e' * 40), ('run_attempt', 2),
