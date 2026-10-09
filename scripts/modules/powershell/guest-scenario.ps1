@@ -634,7 +634,7 @@ function Invoke-GuiSmoke {
                     $row.failure_reason = 'window_bounds_invalid'
                     return
                 }
-                $captureState.bitmap = [Drawing.Bitmap]::new($width, $height, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                $captureState.bitmap = [Drawing.Bitmap]::new($width, $height, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
                 $captureState.graphics = [Drawing.Graphics]::FromImage($captureState.bitmap)
                 $captureState.graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $captureState.bitmap.Size, [Drawing.CopyPixelOperation]::SourceCopy)
                 if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
