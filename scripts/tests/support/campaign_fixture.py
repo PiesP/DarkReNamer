@@ -615,5 +615,3 @@ class CampaignFixture:
             self.files[path] = original_pin
             (self.root / "campaign.json").write_bytes(campaign_data)
             self.files["campaign.json"] = campaign_pin
-
-

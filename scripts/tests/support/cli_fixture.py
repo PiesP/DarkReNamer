@@ -194,4 +194,3 @@ class CliFixture:
             release_id="37", asset_id="41", validation_run_id="90",
             validation_run_attempt="1",
         )
-

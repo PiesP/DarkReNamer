@@ -205,4 +205,3 @@ def layout_for_environment(raw_environment: dict) -> dict:
             entry["file_identity"]["volume_serial"] = \
                 raw_environment["fixture_volume"]["root_identity"]["volume_serial"]
     return result
-

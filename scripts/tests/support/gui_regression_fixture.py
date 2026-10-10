@@ -1075,4 +1075,3 @@ class Fixture:
             "result_sha256": digest((target / "output/run-result.json").read_bytes()),
             "scope": list(FIXTURE_REFERENCE_SCOPE),
         }
-
