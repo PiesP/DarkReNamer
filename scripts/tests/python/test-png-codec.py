@@ -1,9 +1,12 @@
 """Default offline coverage for shared PNG decoding and consumer policies."""
 
 from dataclasses import replace
+import base64
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -83,6 +86,31 @@ class PngCodecTests(unittest.TestCase):
         path = self.root / name
         path.write_bytes(value)
         return path
+
+    @unittest.skipUnless(os.name == "nt", "requires the Windows System.Drawing encoder")
+    def test_capture_constructors_encode_opaque_png_for_independent_verifier(self):
+        result = subprocess.run(
+            ["pwsh", "-NoLogo", "-NoProfile", "-File", str(
+                SCRIPT_ROOT / "tests/support/capture_png_fixture.ps1")],
+            capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = json.loads(result.stdout)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["source"] for row in rows}, {
+            "guest-uia.ps1", "ui-input.ps1", "guest-scenario.ps1", "legacy-default",
+        })
+        expected = (2, 2, bytes((255, 0, 0, 255, 0, 255, 0, 255,
+                                 0, 0, 255, 255, 0, 0, 0, 255)))
+        for row in rows:
+            with self.subTest(source=row["source"]):
+                data = base64.b64decode(row["png"], validate=True)
+                if row["source"] == "legacy-default":
+                    with self.assertRaisesRegex(evidence.EvidenceError, "non-opaque"):
+                        evidence.decode_png(data, "legacy capture", expected_dimensions=(2, 2))
+                else:
+                    self.assertEqual(evidence.decode_png(
+                        data, row["source"], expected_dimensions=(2, 2)), expected)
 
     def test_chunk_work_limit_counts_empty_ancillary_before_crc(self):
         policy = replace(RGB_POLICY, maximum_chunks=5)

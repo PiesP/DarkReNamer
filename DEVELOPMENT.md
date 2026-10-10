@@ -109,10 +109,19 @@ Tests live in `scripts/tests/powershell` and `scripts/tests/python`, with shared
 fixtures and path helpers in `scripts/tests/support`. The runner sets Python
 import paths only in each test subprocess. `Get-ToolingTestPaths` in `paths.ps1`
 and `tooling_test_paths.py` resolve production scripts and repository paths.
+Shared Python fixtures are imported from support modules: `cli_fixture` builds
+on `campaign_fixture`, which uses `menu_layout_fixture` and
+`recovery_profile_fixture` (backed by `recovery_fixture`);
+GUI suites use `gui_regression_fixture`. These helpers own sample data and
+builders; their consuming suites own assertions and create fresh mutable state.
 The current scope includes shared PNG/connection tests and a real evidence CLI
 subprocess smoke test on Ubuntu and Windows. The smoke test uses synthetic
 archives to check successful canonical output, incomplete-campaign rejection,
 exit codes and private extraction cleanup; it does not execute a VM campaign.
+On Windows, the PNG suite also executes the production capture bitmap
+constructors with synthetic pixels through System.Drawing's encoder and the
+independent evidence decoder. This checks format compatibility, without claiming
+desktop capture or candidate acceptance.
 The retired standalone acceptance tools and their schema are available only at
 the immutable revision linked in
 [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md).

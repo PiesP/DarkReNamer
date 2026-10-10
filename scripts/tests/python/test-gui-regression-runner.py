@@ -1,9 +1,7 @@
 """Offline contract tests for the tracked GUI regression runner."""
 
 import hashlib
-import importlib.util
 import json
-import os
 import struct
 import zlib
 from pathlib import Path
@@ -16,6 +14,10 @@ from unittest import mock
 from darkrenamer_tooling.vm import gui as runner
 from darkrenamer_tooling.evidence import png as evidence
 from darkrenamer_tooling.formats import png as codec
+from gui_regression_fixture import (
+    Fixture as EvidenceFixture, SCRIPT as EVIDENCE_SCRIPT,
+    SOURCE as EVIDENCE_SOURCE, TREE as EVIDENCE_TREE,
+)
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -894,19 +896,11 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 self.assertTrue(cleanup["text_scale_restore"])
 
     def test_four_finalized_producer_fixtures_pass_independent_validator_cli(self):
-        default = Path(__file__).with_name("test-gui-regression-evidence.py")
-        fixture_script = Path(os.environ.get("GUI_REGRESSION_EVIDENCE_TEST", default))
-        self.assertTrue(fixture_script.is_file(), "independent evidence fixture script is required")
-        spec = importlib.util.spec_from_file_location("gui_evidence_fixture", fixture_script)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        evidence_fixture = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(evidence_fixture)
-        validator = evidence_fixture.SCRIPT
+        validator = EVIDENCE_SCRIPT
         self.assertTrue(validator.is_file(), "independent evidence validator is required")
         runs_root = self.root / "runs"
         runs_root.mkdir()
-        fixture = evidence_fixture.Fixture(runs_root)
+        fixture = EvidenceFixture(runs_root)
 
         def finalize(run_root):
             output = run_root / "output"
@@ -975,7 +969,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             runner.RUNS[3]["run_id"], "tooltip", reference=runner.reference_for(full)
         ))
         with mock.patch.object(
-            runner, "source_identity", return_value=(evidence_fixture.SOURCE, evidence_fixture.TREE)
+            runner, "source_identity", return_value=(EVIDENCE_SOURCE, EVIDENCE_TREE)
         ):
             runner.validate_all(validator.parent.parent, runs_root, self.root)
         report = json.loads((self.root / "validation-result.json").read_text())
@@ -986,10 +980,6 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         )
 
     def test_text_scale_raw_normalization_requires_same_profile_text100_reference(self):
-        fixture_script = Path(__file__).with_name("test-gui-regression-evidence.py")
-        spec = importlib.util.spec_from_file_location("gui_evidence_fixture", fixture_script)
-        fixture_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(fixture_module)
         profile_bytes = (Path(__file__).parents[3] / "config" / runner.V2_PROFILE_FILE).read_bytes()
         profile_hash = hashlib.sha256(profile_bytes).hexdigest()
 
@@ -1011,7 +1001,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             with self.subTest(profile=selected):
                 root = self.root / selected
                 root.mkdir()
-                fixture = fixture_module.Fixture(root)
+                fixture = EvidenceFixture(root)
                 standard = fixture.build(family[1]["run_id"], "standard")
                 text_scale = fixture.build(family[2]["run_id"], "text-scale")
                 if selected == runner.V2_PROFILE_ID:

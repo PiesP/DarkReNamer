@@ -2,7 +2,6 @@
 """Run the authenticated evidence CLI with portable success/failure fixtures."""
 
 from copy import deepcopy
-import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -10,16 +9,8 @@ import tempfile
 import unittest
 
 from tooling_test_paths import REPOSITORY_ROOT
+from cli_fixture import CliFixture
 from darkrenamer_tooling.evidence.archive import parse_canonical_statement_bytes
-
-
-def load_fixture():
-    path = Path(__file__).with_name("test-vm-automated-cli.py")
-    spec = importlib.util.spec_from_file_location("vm_cli_smoke_fixture", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.CliFixture
 
 
 class EvidenceCliSmokeTests(unittest.TestCase):
@@ -27,7 +18,7 @@ class EvidenceCliSmokeTests(unittest.TestCase):
     def setUpClass(cls):
         # Exercise argument and Git path handling on the hosted Windows path too.
         cls.temporary = tempfile.TemporaryDirectory(prefix="darkrenamer cli 한글 ")
-        cls.fixture = load_fixture()(Path(cls.temporary.name))
+        cls.fixture = CliFixture(Path(cls.temporary.name))
 
     @classmethod
     def tearDownClass(cls):

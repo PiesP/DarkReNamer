@@ -2,58 +2,26 @@
 """Journal-to-filesystem joins, with adversarial full-identity mutations."""
 
 from copy import deepcopy
-import hashlib
 import struct
 import unittest
-import zlib
 
 from darkrenamer_tooling.evidence.archive import EvidenceError
 from darkrenamer_tooling.evidence.recovery import (
     verify_crash_prefix, verify_recovery_invariance, verify_recovery_export,
     verify_intent_candidate,
 )
-
-
-VOLUME = 0xAABBCCDD11223344
-PARENT = 1 << 120
-ROOT = r"C:\fixture"
-
-
-def identity(index):
-    return struct.pack("<Q", VOLUME) + index.to_bytes(16, "little")
-
-
-def text(value):
-    encoded = value.encode("utf-16-le")
-    return struct.pack("<I", len(encoded) // 2) + encoded
-
-
-def frame(kind, sequence, payload):
-    header = struct.pack("<HBBQI", 2, kind, 0, sequence, len(payload))
-    return b"DRJ1" + header + struct.pack("<I", zlib.crc32(header + payload)) + payload
+from recovery_fixture import ROOT, frame, build_recovery_fixture
 
 
 class RecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.initial = []
-        steps = []
-        for index in range(4096):
-            name = f"item-{index:05}.txt"
-            file_id = (1 << 96) + index
-            steps.append(struct.pack("<I", index) + text(ROOT + "\\" + name) +
-                         text(ROOT + "\\vm-recovered-" + name) + identity(file_id) +
-                         identity(PARENT) * 2 + bytes((0, 0, 0)))
-            cls.initial.append({"name": name, "kind": "file", "bytes": 65,
-                                "content_sha256": hashlib.sha256(name.encode()).hexdigest(),
-                                "file_identity": {"volume_serial": f"{VOLUME:016x}", "file_id": f"{file_id:032x}"}})
-        cls.initial.append({"name": "sentinel.bin", "kind": "file", "bytes": 9,
-                            "content_sha256": hashlib.sha256(b"sentinel\n").hexdigest(),
-                            "file_identity": {"volume_serial": f"{VOLUME:016x}", "file_id": f"{PARENT + 1:032x}"}})
-        cls.intent = frame(1, 0, struct.pack("<QI", 42, 4096) + b"".join(steps))
-        cls.completed = cls.intent + frame(2, 1, struct.pack("<IB", 0, 0)) + frame(3, 2, struct.pack("<IB", 0, 0))
-        cls.prepared = cls.completed + frame(2, 3, struct.pack("<IB", 1, 0))
-        cls.parent = {"volume_serial": f"{VOLUME:016x}", "file_id": f"{PARENT:032x}"}
+        fixture = build_recovery_fixture()
+        cls.initial = fixture.initial
+        cls.intent = fixture.intent
+        cls.completed = fixture.completed
+        cls.prepared = fixture.prepared
+        cls.parent = fixture.parent
 
     def partial(self, count):
         rows = deepcopy(self.initial)
