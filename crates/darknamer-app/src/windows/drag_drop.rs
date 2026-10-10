@@ -685,12 +685,13 @@ mod tests {
     use ::windows::Win32::System::Com::STGMEDIUM_0 as ComStgMediumUnion;
     use ::windows::Win32::System::Ole::IDropTarget_Vtbl;
     use windows_core::{IUnknown, Interface};
-    use windows_sys::Win32::Foundation::{DV_E_FORMATETC, E_NOTIMPL, HGLOBAL};
+    use windows_sys::Win32::Foundation::{DV_E_FORMATETC, E_NOTIMPL, GlobalFree, HGLOBAL};
     use windows_sys::Win32::System::Memory::{
         GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
     };
     use windows_sys::Win32::System::Ole::OleInitialize;
     use windows_sys::Win32::UI::Shell::DROPFILES;
+    use windows_sys::core::{IID_IUnknown, IUnknown_Vtbl};
 
     #[repr(C)]
     struct FakeDataObject {
@@ -700,6 +701,7 @@ mod tests {
         get_status: HRESULT,
         transferred_tymed: u32,
         global: HGLOBAL,
+        release_unknown: *mut c_void,
         lock_owner_during_get: HWND,
         revoke_during_get: Option<DropTargetRegistration>,
         drop_observer: Option<Arc<AtomicUsize>>,
@@ -717,6 +719,7 @@ mod tests {
                 get_status,
                 transferred_tymed: TYMED_HGLOBAL as u32,
                 global: null_mut(),
+                release_unknown: null_mut(),
                 lock_owner_during_get: null_mut(),
                 revoke_during_get: None,
                 drop_observer: None,
@@ -755,6 +758,97 @@ mod tests {
         d_unadvise: fake_d_unadvise,
         enum_d_advise: fake_enum_d_advise,
     };
+
+    #[repr(C)]
+    struct MediumReleaseObserver {
+        vtable: *const IUnknown_Vtbl,
+        refs: AtomicUsize,
+        releases: AtomicUsize,
+        global: HGLOBAL,
+        freed: AtomicBool,
+    }
+
+    impl MediumReleaseObserver {
+        fn new(global: HGLOBAL) -> Self {
+            Self {
+                vtable: &raw const MEDIUM_RELEASE_VTABLE,
+                refs: AtomicUsize::new(1),
+                releases: AtomicUsize::new(0),
+                global,
+                freed: AtomicBool::new(false),
+            }
+        }
+
+        fn interface(&mut self) -> *mut c_void {
+            (self as *mut Self).cast()
+        }
+
+        fn assert_released_once(&self) {
+            assert_eq!(self.releases.load(Ordering::Acquire), 1);
+            assert_eq!(self.refs.load(Ordering::Acquire), 0);
+            assert!(self.freed.load(Ordering::Acquire));
+        }
+    }
+
+    static MEDIUM_RELEASE_VTABLE: IUnknown_Vtbl = IUnknown_Vtbl {
+        QueryInterface: medium_release_query_interface,
+        AddRef: medium_release_add_ref,
+        Release: medium_release_release,
+    };
+
+    unsafe extern "system" fn medium_release_query_interface(
+        this: *mut c_void,
+        iid: *const GUID,
+        object: *mut *mut c_void,
+    ) -> HRESULT {
+        if this.is_null() || iid.is_null() || object.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: COM supplied a writable output and a readable IID for this call.
+        unsafe { *object = null_mut() };
+        // SAFETY: iid was checked and remains live throughout this callback.
+        let requested = unsafe { &*iid };
+        if requested.data1 != IID_IUnknown.data1
+            || requested.data2 != IID_IUnknown.data2
+            || requested.data3 != IID_IUnknown.data3
+            || requested.data4 != IID_IUnknown.data4
+        {
+            return E_NOINTERFACE;
+        }
+        // SAFETY: the observer remains live until the medium releases its reference.
+        unsafe {
+            medium_release_add_ref(this);
+            *object = this;
+        }
+        S_OK
+    }
+
+    unsafe extern "system" fn medium_release_add_ref(this: *mut c_void) -> u32 {
+        // SAFETY: the test keeps the observer allocation live through COM calls.
+        let observer = unsafe { &*(this as *const MediumReleaseObserver) };
+        u32::try_from(observer.refs.fetch_add(1, Ordering::AcqRel) + 1).unwrap_or(u32::MAX)
+    }
+
+    unsafe extern "system" fn medium_release_release(this: *mut c_void) -> u32 {
+        // SAFETY: the test keeps the observer allocation live through COM calls.
+        let observer = unsafe { &*(this as *const MediumReleaseObserver) };
+        observer.releases.fetch_add(1, Ordering::AcqRel);
+        let previous = observer
+            .refs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |refs| {
+                refs.checked_sub(1)
+            })
+            .unwrap_or(0);
+        if previous == 1 {
+            // SAFETY: this final reference owns the live HGLOBAL. GlobalFree is
+            // observed here, before the handle can be reused by another owner.
+            observer.freed.store(
+                unsafe { GlobalFree(observer.global) }.is_null(),
+                Ordering::Release,
+            );
+        }
+        u32::try_from(previous.saturating_sub(1)).unwrap_or(u32::MAX)
+    }
 
     unsafe extern "system" fn fake_query_interface(
         _this: *mut c_void,
@@ -815,18 +909,20 @@ mod tests {
                     .store(observer.load(Ordering::Acquire), Ordering::Release);
             }
         }
-        // SAFETY: medium is writable provider output. Ownership of global is
-        // transferred to the receiver exactly once.
+        // SAFETY: medium is writable provider output. Its release obligation
+        // transfers once: NULL pUnkForRelease lets the receiver free global;
+        // otherwise the provider observer frees it on IUnknown::Release.
         unsafe {
             *medium = STGMEDIUM {
                 tymed: fake.transferred_tymed,
                 u: windows_sys::Win32::System::Com::STGMEDIUM_0 {
                     hGlobal: fake.global,
                 },
-                pUnkForRelease: null_mut(),
+                pUnkForRelease: fake.release_unknown,
             };
         }
         fake.global = null_mut();
+        fake.release_unknown = null_mut();
         S_OK
     }
 
@@ -1083,8 +1179,10 @@ mod tests {
     fn successful_medium_is_released_exactly_once() -> Result<(), Box<dyn std::error::Error>> {
         let path = PathBuf::from(r"C:\drop\sample.txt");
         let global = create_drop_global(&[path])?;
+        let mut release = MediumReleaseObserver::new(global);
         let mut fake = FakeDataObject::new(S_OK, S_OK);
         fake.global = global;
+        fake.release_unknown = release.interface();
         let medium = get_file_drop_medium(&fake.owned_interface())
             .ok_or_else(|| io::Error::other("fake GetData did not return a medium"))?;
         assert!(medium.file_drop_handle().is_some());
@@ -1092,8 +1190,23 @@ mod tests {
         // SAFETY: global remains live while the medium owns it.
         assert!(unsafe { GlobalSize(global) } > 0);
         drop(medium);
-        // SAFETY: ReleaseStgMedium must have freed the transferred HGLOBAL.
-        assert_eq!(unsafe { GlobalSize(global) }, 0);
+        release.assert_released_once();
+        Ok(())
+    }
+
+    #[test]
+    fn null_release_unknown_medium_uses_default_receiver_owned_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let global = create_drop_global(&[PathBuf::from(r"C:\drop\default.txt")])?;
+        let mut fake = FakeDataObject::new(S_OK, S_OK);
+        fake.global = global;
+        let medium = get_file_drop_medium(&fake.owned_interface())
+            .ok_or_else(|| io::Error::other("fake GetData did not return a medium"))?;
+        assert!(medium.file_drop_handle().is_some());
+        assert!(fake.global.is_null());
+        // SAFETY: the medium still owns the live HGLOBAL before it is dropped.
+        assert!(unsafe { GlobalSize(global) } > 0);
+        drop(medium);
         Ok(())
     }
 
@@ -1174,8 +1287,10 @@ mod tests {
         };
 
         let global = create_drop_global(&[local.path().join("reentrant.txt")])?;
+        let mut release = MediumReleaseObserver::new(global);
         let mut fake = FakeDataObject::new(S_OK, S_OK);
         fake.global = global;
+        fake.release_unknown = release.interface();
         fake.lock_owner_during_get = owner;
         fake.revoke_during_get = Some(registration);
         fake.drop_observer = Some(Arc::clone(&observer));
@@ -1213,8 +1328,7 @@ mod tests {
         assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
         assert!(fake.revoke_during_get.is_none());
         assert!(fake.global.is_null());
-        // SAFETY: ReleaseStgMedium has consumed the transferred HGLOBAL once.
-        assert_eq!(unsafe { GlobalSize(global) }, 0);
+        release.assert_released_once();
 
         unpublish_test_state(owner, state_slot);
         // SAFETY: registration was revoked during the callback.
