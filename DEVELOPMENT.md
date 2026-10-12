@@ -322,6 +322,12 @@ Hyper-V VM through an OpenSSH configuration alias:
 python3 -I scripts/test-windows-vm.py --ssh-host darkrenamer-vm
 ```
 
+Pass `--expected-vm-id <guid>` to bind an ordinary SSH native run to that exact
+Hyper-V guest. The controller reads the guest parameters from its own PSSession
+and rejects a different identity before guest staging or task execution.
+Without this option, ordinary source-built runs retain their existing behavior;
+candidate and observer runs still require the expected identity.
+
 The default `--desktop-mode rdp` starts a managed RDP desktop before the SSH
 controller runs and disconnects its client after the controller finishes,
 including failures. It requires WSL Windows interop and a separately configured
