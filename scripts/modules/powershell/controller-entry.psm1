@@ -1062,6 +1062,32 @@ function Complete-DrControllerV2TaskExecution {
     }
 }
 
+function Assert-DrControllerGuestVmIdentity {
+    param(
+        [guid] $ExpectedGuestVmId,
+        [object] $Endpoint,
+        [Collections.IDictionary] $Transport,
+        [bool] $Acceptance,
+        [object] $AcceptanceInput
+    )
+    if ($ExpectedGuestVmId -eq [guid]::Empty) { return }
+    $expectedGuestId = $ExpectedGuestVmId.ToString('D').ToLowerInvariant()
+    try { $actualGuestId = ([guid]$Endpoint.vm_id).ToString('D').ToLowerInvariant() }
+    catch { throw 'The guest did not expose a canonical Hyper-V Guest Parameters VM identity.' }
+    if ($actualGuestId -cne $expectedGuestId) {
+        throw 'The controller session Hyper-V VM identity differs from the expected VM identity.'
+    }
+    $guestIdentitySha256 = Get-LowerTextSha256 $actualGuestId
+    if ($Acceptance -and
+        ($AcceptanceInput.guest_preflight.vm_identity_kind -cne 'hyper-v-guest-parameters-virtual-machine-id-v1' -or
+         $AcceptanceInput.guest_preflight.vm_identity_sha256 -cne $guestIdentitySha256)) {
+        throw 'The post-connection guest VM identity differs from the immutable preflight.'
+    }
+    $Transport.vm_id = $actualGuestId
+    $Transport.vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
+    $Transport.vm_identity_sha256 = $guestIdentitySha256
+}
+
 function Invoke-DrWindowsVmController {
     [CmdletBinding(DefaultParameterSetName = 'Direct')]
     param(
@@ -1207,6 +1233,7 @@ function Write-DrDiagnosticPhase {
     }
 }
 $acceptance = $taskSelection.kind -ceq 'ui'
+$acceptanceInput = $null
 $recovery = $taskSelection.kind -ceq 'recovery'
 $observerTask = [bool]$taskSelection.is_observer
 if ($observerTask -and $ExpectedGuestVmId -eq [guid]::Empty) {
@@ -1518,23 +1545,9 @@ try {
     if (-not $endpoint.is_administrator) {
         throw 'The VM controller account must be a local administrator so it can register the limited interactive test task.'
     }
-    if ($observerTask -or $candidateLane) {
-        $expectedGuestId = $ExpectedGuestVmId.ToString('D').ToLowerInvariant()
-        try { $actualGuestId = ([guid]$endpoint.vm_id).ToString('D').ToLowerInvariant() }
-        catch { throw 'The guest did not expose a canonical Hyper-V Guest Parameters VM identity.' }
-        if ($actualGuestId -cne $expectedGuestId) {
-            throw 'The SSH endpoint Hyper-V VM identity differs from the private connection profile.'
-        }
-        $guestIdentitySha256 = Get-LowerTextSha256 $actualGuestId
-        if ($acceptance -and
-            ($acceptanceInput.guest_preflight.vm_identity_kind -cne 'hyper-v-guest-parameters-virtual-machine-id-v1' -or
-             $acceptanceInput.guest_preflight.vm_identity_sha256 -cne $guestIdentitySha256)) {
-            throw 'The post-connection guest VM identity differs from the immutable preflight.'
-        }
-        $transport.vm_id = $actualGuestId
-        $transport.vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
-        $transport.vm_identity_sha256 = $guestIdentitySha256
-    }
+    Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId $ExpectedGuestVmId `
+        -Endpoint $endpoint -Transport $transport -Acceptance $acceptance `
+        -AcceptanceInput $acceptanceInput
     $desktop = Invoke-Command -Session $session -ArgumentList $ExpectedDesktopSid -ScriptBlock {
         param($expectedSid)
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value

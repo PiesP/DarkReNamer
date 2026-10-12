@@ -2079,7 +2079,7 @@ class VmRunnerTests(unittest.TestCase):
                  '--desktop-width', '800', '--desktop-height', '600']):
             self.assert_arguments_rejected(arguments)
 
-    def test_direct_vm_identity_is_validated_and_passed_to_the_controller(self):
+    def test_vm_identity_is_validated_and_passed_to_both_controller_transports(self):
         identity = '12345678-1234-5678-9abc-1234567890ab'
         args = vm.parse_arguments(['--vm-name', 'VM', '--expected-vm-id', identity.upper()])
         args.acceptance_profile_sha256 = 'b' * 64
@@ -2087,10 +2087,20 @@ class VmRunnerTests(unittest.TestCase):
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
             command = vm.controller_invocation(self.root, args, {'helper': 'C:\\helper.ps1'})
         self.assertIn("-ExpectedVmId '" + identity + "'", command[-1])
+        self.assertIn("-ExpectedGuestVmId '" + identity + "'", command[-1])
         self.assertIn('-ExpectedBundleManifestSha256', command[-1])
+        ssh = vm.parse_arguments(['--ssh-host', 'alias', '--expected-vm-id', identity.upper()])
+        ssh.acceptance_profile_sha256 = 'b' * 64
+        ssh_command = vm.controller_invocation(self.root, ssh, pwsh='/usr/bin/pwsh')
+        self.assertEqual(ssh.expected_vm_id, identity)
+        self.assertEqual(ssh_command[ssh_command.index('-ExpectedGuestVmId') + 1], identity)
+        unbound = vm.parse_arguments(['--ssh-host', 'alias'])
+        unbound.acceptance_profile_sha256 = 'b' * 64
+        self.assertNotIn('-ExpectedGuestVmId',
+                         vm.controller_invocation(self.root, unbound, pwsh='/usr/bin/pwsh'))
         for value in ('not-a-guid', '00000000-0000-0000-0000-000000000000'):
             self.assert_arguments_rejected(['--vm-name', 'VM', '--expected-vm-id', value])
-        self.assert_arguments_rejected(['--ssh-host', 'alias', '--expected-vm-id', identity])
+            self.assert_arguments_rejected(['--ssh-host', 'alias', '--expected-vm-id', value])
 
     def test_direct_result_must_match_the_requested_vm_identity(self):
         identity = '12345678-1234-5678-9abc-1234567890ab'

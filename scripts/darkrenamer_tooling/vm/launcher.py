@@ -249,7 +249,7 @@ def argument_parser():
     transport = parser.add_mutually_exclusive_group()
     transport.add_argument('--vm-name', help='Existing local Hyper-V VM with an unlocked test-user desktop.')
     transport.add_argument('--ssh-host', help='OpenSSH config alias for the configured VM test account.')
-    parser.add_argument('--expected-vm-id', help='Require this exact Hyper-V VM GUID when using --vm-name.')
+    parser.add_argument('--expected-vm-id', help='Require this exact Hyper-V VM GUID in the controller session.')
     parser.add_argument('--credential-helper', help='Windows path to a private helper returning PSCredential with -Action Load.')
     parser.add_argument('--desktop-mode', choices=('rdp', 'existing'), default='rdp',
                         help='Prepare a managed RDP desktop (default), or use an existing unlocked desktop.')
@@ -446,8 +446,6 @@ def parse_arguments(argv=None):
     if args.ssh_host and args.credential_helper:
         parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
     if args.expected_vm_id is not None:
-        if args.ssh_host and not args.candidate_mode and args.task_kind == 'core':
-            parser.error('--expected-vm-id can only be used with --vm-name PowerShell Direct transport.')
         try:
             identity = uuid.UUID(args.expected_vm_id)
             if identity.int == 0:
@@ -629,7 +627,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         common += ['-SuiteTimeoutSeconds', '600']
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
-    if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core'):
+    if args.expected_vm_id:
         common += ['-ExpectedGuestVmId', args.expected_vm_id]
     if args.ssh_host:
         executable = pwsh or require_pwsh74()
@@ -656,7 +654,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
                   for value in task_arguments)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
         + (' -ExpectedGuestVmId ' + psquote(args.expected_vm_id)
-           if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core') else '')
+           if args.expected_vm_id else '')
         + ' -ExpectedBundleManifestSha256 ' + psquote(expected_bundle_manifest_sha256)
     )
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '

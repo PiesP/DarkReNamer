@@ -2470,6 +2470,49 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     if ($controllerEntryErrors.Count -ne 0) {
         throw 'The controller entrypoint must parse before its cleanup contract is exercised.'
     }
+    $identityDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Assert-DrControllerGuestVmIdentity'
+    }, $true))
+    if ($identityDefinitions.Count -ne 1) {
+        throw 'Expected one controller session identity guard.'
+    }
+    . ([scriptblock]::Create($identityDefinitions[0].Extent.Text))
+    $expectedGuestId = [guid]'12345678-1234-5678-9abc-1234567890ab'
+    $sessionTransport = [ordered]@{}
+    Assert-Fails {
+        Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId $expectedGuestId `
+            -Endpoint ([pscustomobject]@{vm_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'}) `
+            -Transport $sessionTransport -Acceptance $false -AcceptanceInput $null
+    } 'controller session Hyper-V VM identity differs'
+    if ($sessionTransport.Count -ne 0) {
+        throw 'A wrong controller session identity changed the transport receipt.'
+    }
+    Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId $expectedGuestId `
+        -Endpoint ([pscustomobject]@{vm_id=$expectedGuestId.ToString().ToUpperInvariant()}) `
+        -Transport $sessionTransport -Acceptance $false -AcceptanceInput $null
+    if ($sessionTransport.vm_id -cne $expectedGuestId.ToString() -or
+        $sessionTransport.vm_identity_sha256 -cne (Get-LowerTextSha256 $expectedGuestId.ToString())) {
+        throw 'The matching controller session identity was not recorded.'
+    }
+    $unboundTransport = [ordered]@{}
+    Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId ([guid]::Empty) `
+        -Endpoint ([pscustomobject]@{vm_id='not-a-guid'}) `
+        -Transport $unboundTransport -Acceptance $false -AcceptanceInput $null
+    if ($unboundTransport.Count -ne 0) {
+        throw 'An ordinary unbound session unexpectedly required a guest identity.'
+    }
+    $sessionOpenOffset = $hostRunnerText.IndexOf('$session = New-SshControllerSession', [StringComparison]::Ordinal)
+    $endpointOffset = $hostRunnerText.IndexOf('$endpoint = Invoke-Command -Session $session', [StringComparison]::Ordinal)
+    $identityOffset = $hostRunnerText.IndexOf('Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId', [StringComparison]::Ordinal)
+    $desktopOffset = $hostRunnerText.IndexOf('$desktop = Invoke-Command -Session $session', [StringComparison]::Ordinal)
+    $stagingOffset = $hostRunnerText.IndexOf('$guestRuntimeRoot = Invoke-Command -Session $session', [StringComparison]::Ordinal)
+    if ($sessionOpenOffset -lt 0 -or $endpointOffset -le $sessionOpenOffset -or
+        $identityOffset -le $endpointOffset -or $desktopOffset -le $identityOffset -or
+        $stagingOffset -le $desktopOffset) {
+        throw 'Controller session identity must be checked before guest staging.'
+    }
     foreach ($functionName in @(
         'Add-DrControllerLifecycleIdentity'
         'Test-DrControllerProcessJobCleanupLedger'
