@@ -5,6 +5,10 @@ use darknamer_core::LegacyText;
 use super::{EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot, ResolvedSource};
 use super::{JournalDirection, JournalStep, JournalTerminal, PlanId};
 
+// Keep authorization failures compatible with native-style backend codes.
+const ERROR_NOT_SAME_DEVICE: u32 = 17;
+const ERROR_ACCESS_DENIED: u32 = 5;
+
 /// Backend operation associated with a structured error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendOperation {
@@ -167,7 +171,7 @@ impl RenameOperation {
         {
             return Some(BackendError {
                 operation: BackendOperation::Rename,
-                code: 17,
+                code: ERROR_NOT_SAME_DEVICE,
                 certainty: MutationCertainty::NotApplied,
             });
         }
@@ -176,7 +180,7 @@ impl RenameOperation {
         {
             return Some(BackendError {
                 operation: BackendOperation::Rename,
-                code: 5,
+                code: ERROR_ACCESS_DENIED,
                 certainty: MutationCertainty::NotApplied,
             });
         }

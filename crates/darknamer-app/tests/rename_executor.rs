@@ -1087,6 +1087,7 @@ fn backend_rejects_cross_parent_operations_without_matching_authorization()
         .rename_no_replace(&default_operation)
         .err()
         .ok_or_else(|| std::io::Error::other("default operation authorized cross-parent move"))?;
+    assert_eq!(error.code, 5);
     assert_eq!(error.certainty, MutationCertainty::NotApplied);
     assert_eq!(file_backend.mutation_count(), 0);
 
@@ -1120,6 +1121,7 @@ fn backend_rejects_cross_parent_operations_without_matching_authorization()
         .rename_no_replace(&directory_operation)
         .err()
         .ok_or_else(|| std::io::Error::other("file-only scope authorized a directory move"))?;
+    assert_eq!(error.code, 5);
     assert_eq!(error.certainty, MutationCertainty::NotApplied);
     assert_eq!(directory_backend.mutation_count(), 0);
 
@@ -1143,6 +1145,7 @@ fn backend_rejects_cross_parent_operations_without_matching_authorization()
         .rename_no_replace(&mislabeled_operation)
         .err()
         .ok_or_else(|| std::io::Error::other("mislabeled directory move succeeded"))?;
+    assert_eq!(error.code, 5);
     assert_eq!(error.certainty, MutationCertainty::NotApplied);
     assert_eq!(directory_backend.mutation_count(), 0);
     Ok(())
