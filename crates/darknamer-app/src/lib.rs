@@ -75,18 +75,23 @@ pub(crate) use appearance_model::{
 };
 
 #[cfg(any(windows, test))]
-#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
+#[allow(
+    unused_imports,
+    reason = "native callers use this alias only on Windows"
+)]
 pub(crate) use appearance_model::SemanticPalette;
 
-// These crate-root aliases existed before extraction; retain them for internal callers.
 #[cfg(any(windows, test))]
-#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
-pub(crate) use appearance_model::{ProposedNameColors, ProposedNameVisual, theme_mode_for_command};
+#[allow(
+    unused_imports,
+    reason = "root cross-module tests share these appearance selectors"
+)]
+pub(crate) use appearance_model::{ProposedNameVisual, theme_mode_for_command};
 #[cfg(any(windows, test))]
-#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
-pub(crate) use ui_layout::{ButtonPaintGeometry, HeaderChromeGeometry, MainLayout};
-#[cfg(any(windows, test))]
-#[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
+#[allow(
+    unused_imports,
+    reason = "root and native cross-module tests share these layout helpers"
+)]
 pub(crate) use ui_layout::{adaptive_primary_column_widths, minimum_content_width_px};
 
 #[cfg(any(windows, test))]
