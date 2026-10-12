@@ -50,9 +50,14 @@ function Test-HighContrastIdentityEqual {
         )) {
         return $false
     }
-    foreach ($name in @(
-        'ThemePath','ThemeColor','ThemeSize'
+    if (-not [string]::Equals(
+        [string]$Expected.ThemePath,
+        [string]$Actual.ThemePath,
+        [StringComparison]::OrdinalIgnoreCase
     )) {
+        return $false
+    }
+    foreach ($name in @('ThemeColor','ThemeSize')) {
         if (-not [string]::Equals(
             [string]$Expected.$name,
             [string]$Actual.$name,
