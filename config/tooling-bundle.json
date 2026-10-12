@@ -581,7 +581,7 @@
       "bundle": "ui-appearance.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "52dc5bbba7f8942d8f410040f350234cbf765984c3a1a7b19c835caaf6f9537e",
+      "sha256": "e6e0e4c29d8959d11e0a37be991781411a1f43dab752a20f20ab81ae190bdf07",
       "dependencies": []
     },
     {

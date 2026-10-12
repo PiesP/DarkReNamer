@@ -2444,6 +2444,29 @@ try {
     if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $sameSnapshot)) {
         throw 'Equal High Contrast snapshots must prove restoration.'
     }
+    $caseOnlySnapshot = $highContrastSnapshot | Select-Object *
+    $caseOnlySnapshot.ThemePath = 'c:\WINDOWS\RESOURCES\themes\AERO\aero.MSSTYLES'
+    if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $caseOnlySnapshot)) {
+        throw 'Case-only Windows theme path changes must preserve restoration identity.'
+    }
+    $caseOnlyState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $caseOnlyDiagnosticPath = Join-Path $temporaryRoot 'case-only-restore-error.json'
+    $caseOnlyRestore = Wait-HighContrastRestoration `
+        -Expected $highContrastSnapshot `
+        -ReadSnapshot {
+            $caseOnlyState.reads++
+            $caseOnlySnapshot | Select-Object *
+        } `
+        -SetCapturedColors { param($expected) $caseOnlyState.writes++ } `
+        -Label 'case-only theme path restoration fixture' `
+        -DiagnosticPath $caseOnlyDiagnosticPath `
+        -AllowPaletteRestore `
+        -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    if ($caseOnlyState.reads -ne 2 -or $caseOnlyState.writes -ne 0 -or
+        (Test-Path -LiteralPath $caseOnlyDiagnosticPath) -or
+        -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $caseOnlyRestore)) {
+        throw 'Case-only theme path restoration must settle in two reads without palette writes.'
+    }
     $changedSnapshot = $highContrastSnapshot | Select-Object *
     $changedSnapshot.Highlight = 9
     if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedSnapshot) {
@@ -2490,6 +2513,13 @@ try {
                 -not (Test-HighContrastSnapshotEqual -Expected $changedThemeSnapshot -Actual $diagnosticObserved)) {
                 throw 'Failed restoration diagnostics must retain the actual mismatched state.'
             }
+        }
+    }
+    foreach ($name in @('Scheme', 'ThemeColor', 'ThemeSize')) {
+        $changedTextSnapshot = $highContrastSnapshot | Select-Object *
+        $changedTextSnapshot.$name = $changedTextSnapshot.$name.ToUpperInvariant()
+        if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedTextSnapshot) {
+            throw "Case-only $name changes must fail restoration proof."
         }
     }
     $settlementState = [pscustomobject]@{ reads = 0 }
