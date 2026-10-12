@@ -502,9 +502,11 @@ python3 -I scripts/test-windows-vm.py \
   --output /absolute/private/new-refresh-stage-attempt
 ```
 
-The helper profile must bind the SSH alias to the prepared VM. Do not pass
-`--expected-vm-id` on this source-built SSH core path; that option belongs to
-the `--vm-name` PowerShell Direct path. The selector fixes a managed 1366×768,
+The helper profile must bind the SSH alias to the prepared VM. An ordinary
+source-built SSH diagnostic may also supply `--expected-vm-id <guid>` to have
+the controller check the connected guest before staging or task execution.
+See [Native tests in a local Hyper-V VM](#native-tests-in-a-local-hyper-v-vm)
+for the transport and identity requirements. The selector fixes a managed 1366×768,
 96-DPI RDP desktop, the v2 owned-resource cleanup profile, a 600-second test
 and suite limit per pass, and a 32 MiB aggregate output limit per pass. It
 builds one optimized app-library test binary and an uninstrumented production
