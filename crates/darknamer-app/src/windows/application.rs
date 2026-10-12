@@ -1,78 +1,3 @@
-#[cfg(test)]
-use super::DEFERRED_MESSAGES;
-#[cfg(test)]
-use crate::ADD_FILES;
-#[cfg(test)]
-use crate::APPEARANCE_ADVANCED;
-#[cfg(test)]
-use crate::APPLY;
-#[cfg(test)]
-use crate::APPLY_CONFIRM_BUTTON_ID;
-#[cfg(test)]
-use crate::AppThemeMode;
-use crate::BASE_DPI;
-#[cfg(test)]
-use crate::CancelControlState;
-#[cfg(test)]
-use crate::DIRECTORY_DIRECT_BUTTON_ID;
-#[cfg(test)]
-use crate::DISCARD_CONFIRM_BUTTON_ID;
-use crate::DropPresentation;
-#[cfg(test)]
-use crate::EXIT_COMMAND;
-#[cfg(test)]
-use crate::ForcedColorsState;
-#[cfg(test)]
-use crate::IMPORT_NAMES;
-#[cfg(test)]
-use crate::IMPORT_PATHS;
-use crate::INITIAL_HEIGHT;
-use crate::INITIAL_WIDTH;
-use crate::MANUAL_CHANGE;
-#[cfg(test)]
-use crate::NATIVE_STATUS_COLUMN_INDEX;
-#[cfg(test)]
-use crate::PREVIEW_DETAILS;
-#[cfg(test)]
-use crate::RESET;
-#[cfg(test)]
-use crate::RESET_PATH;
-use crate::RailMode;
-#[cfg(test)]
-use crate::ResolvedTheme;
-#[cfg(test)]
-use crate::SAVE_NAMES;
-#[cfg(test)]
-use crate::SAVE_PATHS;
-#[cfg(test)]
-use crate::UNIFY_PATH;
-#[cfg(test)]
-use crate::UiAppearance;
-use crate::WindowOrigin;
-use crate::WindowPlacement;
-use crate::WindowTrackSize;
-use crate::WorkAreaBounds;
-#[cfg(test)]
-use crate::cancel_control_state;
-use crate::constrain_minimum_track_size_to_work_area;
-use crate::empty_state_safety_copy;
-use crate::fit_widened_window_to_work_area;
-use crate::fit_window_to_work_area;
-use crate::minimum_main_client_height_with_safety;
-use crate::minimum_main_client_width;
-#[cfg(test)]
-use crate::preferences::shown_columns;
-
-#[cfg(test)]
-use super::{
-    ACTIVE_JOURNAL_LEAF, AdmissionProgressPhase, AppearanceDialogSession, CANDIDATE_JOURNAL_LEAF,
-    DISCARD_STAGED_JOURNAL, DeferredMessage, EXPORT_RECOVERY_JOURNAL, ImportKind, JournalRole,
-    OwnerEnableGuard, StartupJournalBlock, TEXT_DETAILS_BUTTON_ID, admit_paths, apply_changes,
-    apply_native_appearance, clear_selection, defer_message_if_callback_busy,
-    drain_deferred_messages_with, legacy_path, refresh, refresh_all_rows,
-    run_prepared_file_dialog_with_destination_validation, run_prepared_preview_details,
-    select_rows, start_import_worker_from, take_deferred_message,
-};
 use super::{
     APPLY_POLL_TIMER_ID, AcceleratorTable, AppState, AppStateSlot, AppearanceDialogPlatform,
     CANCEL_WORKER_ID, CallbackReclaimHold, CallbackState, CallbackStateLease, CommandRail,
@@ -110,177 +35,65 @@ use super::{
     show_message_now, start_preferences_writers, static_control_colors, try_app_state,
     try_finish_window_close, update_controls, update_dpi_metrics, update_popup_menu, wide,
 };
-#[cfg(test)]
-use super::{
-    initialize_safe_runtime_at, install_controlled_admission_worker,
-    prepare_recovery_export_directory_for_test, publish_controlled_admission_progress,
-    record_popup_menu_notification, write_legacy_text,
-};
-use crate::recommended_main_client_height_with_safety;
-#[cfg(test)]
-use crate::rename::FileJournal;
-#[cfg(test)]
-use crate::rename::JournalOpenFailure;
 use crate::rename::process_is_elevated;
-use crate::scale_dip;
-use crate::selection_command_state_changed;
-#[cfg(test)]
-use darknamer_core::LegacyListItem;
-#[cfg(test)]
-use darknamer_core::LegacyText;
-#[cfg(test)]
-use darknamer_core::ProposalMutationError;
-#[cfg(test)]
-use std::cell::Cell;
-#[cfg(test)]
-use std::cell::RefCell;
+use crate::{
+    BASE_DPI, DropPresentation, INITIAL_HEIGHT, INITIAL_WIDTH, MANUAL_CHANGE, RailMode,
+    WindowOrigin, WindowPlacement, WindowTrackSize, WorkAreaBounds,
+    constrain_minimum_track_size_to_work_area, empty_state_safety_copy,
+    fit_widened_window_to_work_area, fit_window_to_work_area,
+    minimum_main_client_height_with_safety, minimum_main_client_width,
+    recommended_main_client_height_with_safety, scale_dip, selection_command_state_changed,
+};
 use std::ffi::c_void;
-#[cfg(test)]
-use std::fs;
 use std::io;
 use std::mem::size_of;
+use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    COLOR_WINDOW, COLOR_WINDOWTEXT, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetBkColor, SetTextColor,
+    UpdateWindow,
+};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows_sys::Win32::UI::Controls::{
+    HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVM_GETITEMCOUNT, LVM_GETTOOLTIPS, LVN_ITEMCHANGED,
+    LVN_MARQUEEBEGIN, NM_DBLCLK, NM_SETFOCUS, NMHDR, NMLISTVIEW, TTM_ACTIVATE, TTM_POP,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{IsWindowEnabled, SetFocus};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BN_CLICKED, BN_SETFOCUS, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, DrawMenuBar, GWLP_USERDATA,
+    GetClientRect, GetMessageW, GetParent, GetSubMenu, GetWindowRect, HMENU, IDC_ARROW,
+    IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MF_POPUP,
+    MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageW, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_INITMENUPOPUP,
+    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NCACTIVATE, WM_NCCREATE, WM_NCDESTROY,
+    WM_NCPAINT, WM_NOTIFY, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+};
+
+#[cfg(test)]
+use super::{
+    apply_native_appearance, initialize_safe_runtime_at, record_popup_menu_notification, refresh,
+};
+#[cfg(test)]
+use crate::preferences::shown_columns;
+#[cfg(test)]
+use crate::{AppThemeMode, ForcedColorsState};
 #[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
-use std::path::PathBuf;
-use std::ptr::null;
-use std::ptr::null_mut;
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
-#[cfg(test)]
-use std::sync::mpsc::sync_channel;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::thread;
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::Foundation::LPARAM;
-use windows_sys::Win32::Foundation::LRESULT;
-use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::Foundation::WPARAM;
-use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
-use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
-use windows_sys::Win32::Graphics::Gdi::GetMonitorInfoW;
-use windows_sys::Win32::Graphics::Gdi::GetSysColor;
-use windows_sys::Win32::Graphics::Gdi::GetSysColorBrush;
-use windows_sys::Win32::Graphics::Gdi::HBRUSH;
-use windows_sys::Win32::Graphics::Gdi::HDC;
-use windows_sys::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST;
-use windows_sys::Win32::Graphics::Gdi::MONITORINFO;
-use windows_sys::Win32::Graphics::Gdi::MonitorFromWindow;
-use windows_sys::Win32::Graphics::Gdi::SetBkColor;
-use windows_sys::Win32::Graphics::Gdi::SetTextColor;
-use windows_sys::Win32::Graphics::Gdi::UpdateWindow;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Ole::OleInitialize;
-use windows_sys::Win32::System::Ole::OleUninitialize;
-use windows_sys::Win32::UI::Controls::HDN_ITEMCHANGEDW;
-use windows_sys::Win32::UI::Controls::HDN_ITEMCHANGINGW;
-use windows_sys::Win32::UI::Controls::ICC_LISTVIEW_CLASSES;
-use windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES;
-use windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX;
-use windows_sys::Win32::UI::Controls::InitCommonControlsEx;
-use windows_sys::Win32::UI::Controls::LVM_GETITEMCOUNT;
-use windows_sys::Win32::UI::Controls::LVM_GETTOOLTIPS;
-use windows_sys::Win32::UI::Controls::LVN_ITEMCHANGED;
-use windows_sys::Win32::UI::Controls::LVN_MARQUEEBEGIN;
-use windows_sys::Win32::UI::Controls::NM_DBLCLK;
-use windows_sys::Win32::UI::Controls::NM_SETFOCUS;
-use windows_sys::Win32::UI::Controls::NMHDR;
-use windows_sys::Win32::UI::Controls::NMLISTVIEW;
-use windows_sys::Win32::UI::Controls::TTM_ACTIVATE;
-use windows_sys::Win32::UI::Controls::TTM_POP;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-#[cfg(test)]
-use windows_sys::Win32::UI::Shell::DefSubclassProc;
-#[cfg(test)]
-use windows_sys::Win32::UI::Shell::RemoveWindowSubclass;
-#[cfg(test)]
-use windows_sys::Win32::UI::Shell::SetWindowSubclass;
-use windows_sys::Win32::UI::WindowsAndMessaging::BN_CLICKED;
-use windows_sys::Win32::UI::WindowsAndMessaging::BN_SETFOCUS;
-use windows_sys::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
-use windows_sys::Win32::UI::WindowsAndMessaging::CS_HREDRAW;
-use windows_sys::Win32::UI::WindowsAndMessaging::CS_VREDRAW;
-use windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT;
-use windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW;
-use windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW;
-use windows_sys::Win32::UI::WindowsAndMessaging::DestroyMenu;
-use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
-use windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW;
-use windows_sys::Win32::UI::WindowsAndMessaging::DrawMenuBar;
-use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetSubMenu;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
-use windows_sys::Win32::UI::WindowsAndMessaging::HMENU;
-use windows_sys::Win32::UI::WindowsAndMessaging::IDC_ARROW;
-#[cfg(test)]
-use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
-use windows_sys::Win32::UI::WindowsAndMessaging::IsDialogMessageW;
-use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
-use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
-use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
-use windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW;
-use windows_sys::Win32::UI::WindowsAndMessaging::LoadIconW;
-use windows_sys::Win32::UI::WindowsAndMessaging::MF_POPUP;
-use windows_sys::Win32::UI::WindowsAndMessaging::MINMAXINFO;
-use windows_sys::Win32::UI::WindowsAndMessaging::MSG;
-use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
-use windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage;
-use windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassExW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE;
-use windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER;
-use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SetMenu;
-use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
-use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos;
-use windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow;
-use windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage;
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::UnregisterClassW;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_APP;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_COMMAND;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_CREATE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORSTATIC;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_DESTROY;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_DPICHANGED;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_DRAWITEM;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_FONTCHANGE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_INITMENUPOPUP;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_MEASUREITEM;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_MENUCHAR;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_MENUSELECT;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCACTIVATE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCCREATE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCPAINT;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_NOTIFY;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETFOCUS;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_SIZE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED;
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER;
-use windows_sys::Win32::UI::WindowsAndMessaging::WNDCLASSEXW;
-use windows_sys::Win32::UI::WindowsAndMessaging::WS_CLIPCHILDREN;
-use windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_APPWINDOW;
-use windows_sys::Win32::UI::WindowsAndMessaging::WS_MAXIMIZEBOX;
-use windows_sys::Win32::UI::WindowsAndMessaging::WS_MINIMIZEBOX;
-use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
 
 struct WindowInit {
     state: *mut AppStateSlot,
@@ -2208,7 +2021,35 @@ pub(super) fn route_static_control_colors(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        ACTIVE_JOURNAL_LEAF, AdmissionProgressPhase, AppearanceDialogSession,
+        CANDIDATE_JOURNAL_LEAF, DEFERRED_MESSAGES, DISCARD_STAGED_JOURNAL, DeferredMessage,
+        EXPORT_RECOVERY_JOURNAL, ImportKind, JournalRole, OwnerEnableGuard, StartupJournalBlock,
+        TEXT_DETAILS_BUTTON_ID, admit_paths, apply_changes, clear_selection,
+        defer_message_if_callback_busy, drain_deferred_messages_with,
+        install_controlled_admission_worker, legacy_path,
+        prepare_recovery_export_directory_for_test, publish_controlled_admission_progress,
+        refresh_all_rows, run_prepared_file_dialog_with_destination_validation,
+        run_prepared_preview_details, select_rows, start_import_worker_from, take_deferred_message,
+        write_legacy_text,
+    };
     use super::*;
+    use crate::rename::{FileJournal, JournalOpenFailure};
+    use crate::{
+        ADD_FILES, APPEARANCE_ADVANCED, APPLY, APPLY_CONFIRM_BUTTON_ID, CancelControlState,
+        DIRECTORY_DIRECT_BUTTON_ID, DISCARD_CONFIRM_BUTTON_ID, EXIT_COMMAND, IMPORT_NAMES,
+        IMPORT_PATHS, NATIVE_STATUS_COLUMN_INDEX, PREVIEW_DETAILS, RESET, RESET_PATH,
+        ResolvedTheme, SAVE_NAMES, SAVE_PATHS, UNIFY_PATH, UiAppearance, cancel_control_state,
+    };
+    use darknamer_core::{LegacyListItem, LegacyText, ProposalMutationError};
+    use std::cell::{Cell, RefCell};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::sync_channel;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
 
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
     const LIST_INFOTIP_MODAL_SUBCLASS_ID: usize = 0xD4B5;
