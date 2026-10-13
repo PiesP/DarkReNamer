@@ -9,6 +9,15 @@ import sys
 import tempfile
 
 
+DENY_CHECKS = ("advisories", "bans", "licenses", "sources")
+# cargo-audit 0.22.2 auditor.rs logs these failures outside its JSON report.
+AUDIT_INDEX_FAILURES = (
+    "warning: couldn't update crates.io index:",
+    "warning: couldn't open crates.io index:",
+    "error: couldn't check if the package is yanked:",
+)
+
+
 def command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(arguments, capture_output=True, text=True, check=False)
@@ -38,9 +47,15 @@ def audit_result(process: subprocess.CompletedProcess[str]) -> str:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return "tool or advisory-data failure (missing or malformed cargo-audit report)"
 
+    index_errors = sum(
+        line.strip().startswith(AUDIT_INDEX_FAILURES) for line in process.stderr.splitlines()
+    )
     warning_count = sum(len(entries) for entries in warnings.values())
     if count or warning_count:
-        return f"findings ({count} vulnerabilities, {warning_count} warnings)"
+        findings = f"findings ({count} vulnerabilities, {warning_count} warnings)"
+        return f"{findings}; cargo-audit registry-index data unavailable" if index_errors else findings
+    if index_errors:
+        return f"tool or advisory-data failure ({index_errors} cargo-audit registry-index errors)"
     if process.returncode:
         return "tool or advisory-data failure (cargo-audit exited without findings)"
     return "clean"
@@ -71,8 +86,10 @@ def deny_record_error(item: object) -> str | None:
             return "missing or invalid log timestamp or message"
     else:
         for check, counts in fields.items():
-            if check not in ("advisories", "bans", "licenses", "sources") or not isinstance(counts, dict):
+            if check not in DENY_CHECKS or not isinstance(counts, dict):
                 return "invalid summary check"
+            if set(counts) != {"errors", "warnings", "notes", "helps"}:
+                return "missing or invalid summary count"
             for name in ("errors", "warnings", "notes", "helps"):
                 count = counts.get(name)
                 if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 0xFFFFFFFF:
@@ -85,16 +102,25 @@ def deny_result(process: subprocess.CompletedProcess[str]) -> str:
     data_errors = 0
     tool_errors = 0
     summary_errors = 0
+    summaries: list[dict] = []
 
     def reject_constant(value: str) -> None:
         raise ValueError("non-JSON numeric constant")
+
+    def unique_fields(pairs: list[tuple[str, object]]) -> dict:
+        fields = {}
+        for name, value in pairs:
+            if name in fields:
+                raise ValueError("duplicate JSON field")
+            fields[name] = value
+        return fields
 
     for stream, output in (("stdout", process.stdout), ("stderr", process.stderr)):
         for number, line in enumerate(output.splitlines(), 1):
             if not line.strip():
                 continue
             try:
-                item = json.loads(line, parse_constant=reject_constant)
+                item = json.loads(line, parse_constant=reject_constant, object_pairs_hook=unique_fields)
                 reason = deny_record_error(item)
             except ValueError:
                 reason = "invalid JSON"
@@ -102,17 +128,17 @@ def deny_result(process: subprocess.CompletedProcess[str]) -> str:
                 return f"tool or output-validation failure (malformed cargo-deny output: {stream} line {number}: {reason})"
             fields = item["fields"]
             if item["type"] == "diagnostic":
-                if fields["severity"] == "bug":
+                code = fields.get("code", "")
+                if code.rsplit(":", 1)[-1] in ("index-failure", "index-cache-load-failure"):
+                    data_errors += 1
+                elif fields["severity"] == "bug":
                     tool_errors += 1
                 elif fields["severity"] == "error":
-                    code = fields.get("code", "")
-                    if code.rsplit(":", 1)[-1] in ("index-failure", "index-cache-load-failure"):
-                        data_errors += 1
-                    else:
-                        errors += 1
+                    errors += 1
             elif item["type"] == "log":
                 tool_errors += fields["level"] == "ERROR"
             else:
+                summaries.append(fields)
                 summary_errors += sum(counts["errors"] for counts in fields.values())
     if data_errors:
         return f"tool or advisory-data failure ({data_errors} cargo-deny index errors)"
@@ -120,11 +146,18 @@ def deny_result(process: subprocess.CompletedProcess[str]) -> str:
         return f"tool or advisory-data failure ({tool_errors} cargo-deny error logs or bug diagnostics)"
     if errors:
         return f"policy violations ({errors} error diagnostics)"
+    if len(summaries) > 1:
+        return "tool or output-validation failure (ambiguous cargo-deny completion summaries)"
     if summary_errors:
         return "tool or advisory-data failure (cargo-deny summary errors without error diagnostics)"
-    if process.returncode == 0:
-        return "clean"
-    return "tool or advisory-data failure (cargo-deny exited without policy diagnostics)"
+    if process.returncode:
+        return "tool or advisory-data failure (cargo-deny exited without policy diagnostics)"
+    if not summaries:
+        return "tool or output-validation failure (missing cargo-deny completion summary)"
+    # The pinned full-check invocation emits exactly one summary of all four checks.
+    if set(summaries[0]) != set(DENY_CHECKS):
+        return "tool or output-validation failure (incomplete cargo-deny completion summary)"
+    return "clean"
 
 
 def main() -> int:
@@ -172,10 +205,10 @@ def main() -> int:
                 print(refresh.stderr, file=sys.stderr, end="")
         else:
             check = command([deny, "--format", "json", "--locked", "check"])
-            results.append(("cargo-deny", deny_result(check)))
-            if check.returncode:
-                print(check.stdout, file=sys.stdout, end="")
-                print(check.stderr, file=sys.stderr, end="")
+            result = deny_result(check)
+            results.append(("cargo-deny", result))
+            print(check.stdout, file=sys.stdout, end="")
+            print(check.stderr, file=sys.stderr, end="")
 
     return finish()
 

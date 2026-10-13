@@ -52,6 +52,11 @@ MALFORMED = (
     '{"type":"summary","fields":{"bans":{"errors":true,"warnings":0,"notes":0,"helps":0}}}',
     '{"type":"summary","fields":{"bans":{"errors":-1,"warnings":0,"notes":0,"helps":0}}}',
     '{"type":"summary","fields":{"bans":{"errors":4294967296,"warnings":0,"notes":0,"helps":0}}}',
+    '{"type":"summary","fields":{"bans":{"errors":0.0,"warnings":0,"notes":0,"helps":0}}}',
+    '{"type":"summary","fields":{"bans":{"errors":0,"errors":1,"warnings":0,"notes":0,"helps":0}}}',
+    '{"type":"summary","fields":{"bans":{"errors":1,"errors":0,"warnings":0,"notes":0,"helps":0}}}',
+    '{"type":"summary","fields":{"bans":{"errors":0,"warnings":0,"notes":0,"helps":NaN}}}',
+    '{"type":"summary","fields":{"bans":{"errors":0,"warnings":0,"notes":0,"helps":0,"extra":0}}}',
 )
 
 MOCK_SCANNER = r'''#!/usr/bin/env python3
@@ -69,6 +74,7 @@ if arguments == ["--version"]:
     print("wrong version" if os.environ.get("MOCK_VERSION") == name else expected)
 elif name == "cargo-audit":
     mode = os.environ.get("MOCK_AUDIT", "clean")
+    sys.stderr.write(os.environ.get("MOCK_AUDIT_STDERR", ""))
     if mode == "unavailable":
         print("advisory network unavailable", file=sys.stderr)
         sys.exit(1)
@@ -101,6 +107,10 @@ elif arguments == ["--format", "json", "--locked", "check"]:
     if mode == "index-failure":
         print(json.dumps({"type": "diagnostic", "fields": {"severity": "error", "code": "index-failure", "message": "registry unavailable"}}))
         sys.exit(1)
+    print(json.dumps({"type": "summary", "fields": {
+        check: {"errors": 0, "warnings": 0, "notes": 0, "helps": 0}
+        for check in ("advisories", "bans", "licenses", "sources")
+    }}))
 else:
     raise SystemExit("unexpected scanner command")
 '''
@@ -110,8 +120,8 @@ class DenyResultTests(unittest.TestCase):
     def result(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> str:
         return AUDIT.deny_result(subprocess.CompletedProcess([], returncode, stdout, stderr))
 
-    def test_supported_records_and_empty_output_are_clean(self) -> None:
-        records = [LOGGER, SUMMARY, {"type": "summary", "fields": {}}]
+    def test_supported_records_with_complete_summary_are_clean(self) -> None:
+        records = [LOGGER]
         records.append({"type": "diagnostic", "fields": {
             **NONERROR["fields"], "code": "license-not-encountered", "graphs": [],
             "labels": [{"message": "label", "span": "MIT", "line": 1, "column": 1}],
@@ -121,11 +131,70 @@ class DenyResultTests(unittest.TestCase):
                        for severity in ("warning", "note", "help"))
         records.extend({"type": "log", "fields": {**LOGGER["fields"], "level": level}}
                        for level in ("WARN", "INFO", "DEBUG", "TRACE"))
-        for output in ("", "\n \t\n", *(json.dumps(record) for record in records),
+        for output in (*(json.dumps(record) for record in records),
                        "\n".join(json.dumps(record) for record in records)):
             for stream in ("stdout", "stderr"):
                 with self.subTest(output=output, stream=stream):
-                    self.assertEqual(self.result(**{stream: output}), "clean")
+                    self.assertEqual(self.result(**{stream: output + "\n" + json.dumps(SUMMARY)}), "clean")
+
+    def test_missing_and_partial_completion_are_failures(self) -> None:
+        partial = [{"type": "summary", "fields": {}}]
+        partial.extend({"type": "summary", "fields": {
+            key: value for key, value in SUMMARY["fields"].items() if key != missing
+        }} for missing in SUMMARY["fields"])
+        for output in ("", "\n \t\n", json.dumps(LOGGER), json.dumps(NONERROR),
+                       *(json.dumps(item) for item in partial)):
+            for stream in ("stdout", "stderr"):
+                with self.subTest(output=output, stream=stream):
+                    result = self.result(**{stream: output})
+                    self.assertIn("output-validation failure", result)
+                    self.assertIn("completion summary", result)
+
+    def test_duplicate_and_conflicting_summaries_are_ambiguous(self) -> None:
+        conflict = {"type": "summary", "fields": {
+            **SUMMARY["fields"], "advisories": {"errors": 1, "warnings": 0, "notes": 0, "helps": 0},
+        }}
+        for second in (SUMMARY, conflict):
+            for stdout, stderr in (
+                (json.dumps(SUMMARY) + "\n" + json.dumps(second), ""),
+                ("", json.dumps(SUMMARY) + "\n" + json.dumps(second)),
+                (json.dumps(SUMMARY), json.dumps(second)),
+            ):
+                with self.subTest(second=second, stdout=stdout):
+                    self.assertIn("ambiguous", self.result(stdout, stderr))
+
+    def test_completion_need_not_be_last_across_captured_streams(self) -> None:
+        summary = json.dumps(SUMMARY)
+        for stdout, stderr in ((summary + "\n" + json.dumps(LOGGER), json.dumps(NONERROR)),
+                               (json.dumps(NONERROR), summary + "\n" + json.dumps(LOGGER))):
+            self.assertEqual(self.result(stdout, stderr), "clean")
+
+    def test_index_failures_are_fatal_independently_of_severity(self) -> None:
+        for code in ("index-failure", "index-cache-load-failure",
+                     "a:index-failure", "a:index-cache-load-failure"):
+            for severity in ("warning", "error", "note", "help", "bug"):
+                diagnostic = json.dumps({"type": "diagnostic", "fields": {
+                    "severity": severity, "message": "registry unavailable", "code": code,
+                }})
+                for returncode in (0, 1):
+                    for stream in ("stdout", "stderr"):
+                        with self.subTest(code=code, severity=severity, returncode=returncode, stream=stream):
+                            self.assertIn("cargo-deny index errors", self.result(
+                                returncode=returncode, **{stream: diagnostic + "\n" + json.dumps(SUMMARY)}
+                            ))
+
+    def test_missing_and_invalid_counters_in_each_check_are_failures(self) -> None:
+        for check in SUMMARY["fields"]:
+            for counter in ("errors", "warnings", "notes", "helps"):
+                for value in (None, True, -1, 0.0, 4294967296):
+                    item = json.loads(json.dumps(SUMMARY))
+                    if value is None:
+                        del item["fields"][check][counter]
+                    else:
+                        item["fields"][check][counter] = value
+                    for stream in ("stdout", "stderr"):
+                        with self.subTest(check=check, counter=counter, value=value, stream=stream):
+                            self.assertIn("malformed cargo-deny output", self.result(**{stream: json.dumps(item)}))
 
     def test_invalid_records_are_failures_in_either_stream_and_mixtures(self) -> None:
         valid = json.dumps(LOGGER) + "\n" + json.dumps(NONERROR)
@@ -174,6 +243,36 @@ class DenyResultTests(unittest.TestCase):
                     self.assertNotIn("policy violations", result)
 
 
+class AuditResultTests(unittest.TestCase):
+    def result(self, stderr: str = "", count: int = 0, returncode: int = 0) -> str:
+        report = {"vulnerabilities": {"count": count, "found": bool(count), "list": [{}] * count}, "warnings": {}}
+        return AUDIT.audit_result(subprocess.CompletedProcess([], returncode, json.dumps(report), stderr))
+
+    def test_pinned_index_error_prefixes_reject_clean_reports(self) -> None:
+        # cargo-audit 0.22.2 auditor.rs status_warn!/status_err! producers.
+        for message in (
+            "warning: couldn't update crates.io index: registry unavailable",
+            "warning: couldn't open crates.io index: cache unavailable",
+            "error: couldn't check if the package is yanked: not found: No such crate in crates.io index: slab",
+        ):
+            for returncode in (0, 1):
+                with self.subTest(message=message, returncode=returncode):
+                    self.assertIn("cargo-audit registry-index errors", self.result(message, returncode=returncode))
+
+    def test_benign_progress_and_unrelated_diagnostics_remain_clean(self) -> None:
+        for message in ("", "    Fetching advisory database\n      Loaded advisories\n",
+                        "note: an error label is ordinary progress\n",
+                        "warning: a lock is busy, waiting for it to become available\n",
+                        "example: error: couldn't check if the package is yanked: quoted text\n"):
+            with self.subTest(message=message):
+                self.assertEqual(self.result(message), "clean")
+
+    def test_findings_and_index_failure_are_both_retained(self) -> None:
+        result = self.result("warning: couldn't open crates.io index: unavailable", count=1)
+        self.assertIn("findings (1 vulnerabilities", result)
+        self.assertIn("registry-index data unavailable", result)
+
+
 class ScheduledRustAuditTests(unittest.TestCase):
     def run_fixture(self, **modes: str) -> tuple[subprocess.CompletedProcess[str], str, list[dict]]:
         with tempfile.TemporaryDirectory(prefix="darkrenamer-scheduled-audit-test-") as directory:
@@ -206,6 +305,7 @@ class ScheduledRustAuditTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
+            self.assertEqual(list(root.glob("darkrenamer-rust-audit-*")), [])
             return result, summary.read_text(encoding="utf-8"), [
                 json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()
             ]
@@ -282,13 +382,50 @@ class ScheduledRustAuditTests(unittest.TestCase):
                         self.assertNotIn("Result: clean", summary)
                         self.assertNotIn(output, summary)
 
-    def test_supported_deny_output_reports_clean(self) -> None:
-        for output in ("", "\n \t\n", json.dumps(LOGGER), json.dumps(NONERROR), json.dumps(SUMMARY)):
-            with self.subTest(output=output):
-                result, summary, _ = self.run_fixture(MOCK_DENY_STDOUT=output, MOCK_DENY_STDERR=output)
+    def test_supported_complete_deny_output_reports_clean_and_retains_warnings(self) -> None:
+        for stream in ("STDOUT", "STDERR"):
+            output = json.dumps(LOGGER) + "\n" + json.dumps(NONERROR) + "\n" + json.dumps(SUMMARY)
+            with self.subTest(stream=stream):
+                result, summary, _ = self.run_fixture(**{"MOCK_DENY_" + stream: output})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("cargo-deny: clean", summary)
                 self.assertIn("Result: clean", summary)
+                self.assertIn("ordinary diagnostic", result.stdout + result.stderr)
+                self.assertNotIn("ordinary diagnostic", summary)
+
+    def test_exit_zero_deny_data_and_completion_failures_retain_diagnostics(self) -> None:
+        cases = ["", " \n\t", json.dumps(LOGGER), json.dumps(NONERROR),
+                 json.dumps({"type": "summary", "fields": {}}),
+                 json.dumps(SUMMARY) + "\n" + json.dumps(SUMMARY)]
+        cases.extend(json.dumps({"type": "summary", "fields": {
+            key: value for key, value in SUMMARY["fields"].items() if key != missing
+        }}) for missing in SUMMARY["fields"])
+        for code in ("index-failure", "a:index-cache-load-failure"):
+            for severity in ("warning", "error"):
+                cases.append(json.dumps({"type": "diagnostic", "fields": {
+                    "severity": severity, "code": code, "message": "registry unavailable",
+                }}) + "\n" + json.dumps(SUMMARY))
+        for output in cases:
+            for stream in ("STDOUT", "STDERR"):
+                with self.subTest(output=output, stream=stream):
+                    result, summary, _ = self.run_fixture(**{"MOCK_DENY_" + stream: output})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Result: failed or incomplete", summary)
+                    self.assertNotIn("Result: clean", summary)
+                    self.assertNotIn("registry unavailable", summary)
+                    self.assertIn(output, result.stdout + result.stderr)
+
+    def test_exit_zero_audit_index_failures_retain_diagnostics(self) -> None:
+        for message in ("warning: couldn't update crates.io index: registry unavailable\n",
+                        "warning: couldn't open crates.io index: cache unavailable\n",
+                        "error: couldn't check if the package is yanked: registry unavailable\n"):
+            with self.subTest(message=message):
+                result, summary, _ = self.run_fixture(MOCK_AUDIT_STDERR=message)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cargo-audit registry-index errors", summary)
+                self.assertIn("Result: failed or incomplete", summary)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn(message.strip(), summary)
 
     def test_nonzero_well_formed_deny_output_remains_failure(self) -> None:
         result, summary, _ = self.run_fixture(MOCK_DENY_STDERR=json.dumps(LOGGER), MOCK_DENY_EXIT="1")
