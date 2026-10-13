@@ -68,6 +68,14 @@ scheduled job caches pinned scanner binaries only; each run refreshes advisory
 data and checks the selected `Cargo.lock` and dependency policy anew. A failed
 refresh or scan is a failed check, not a clean result.
 
+The scheduled/manual adapter also rejects registry-index failures reported at
+exit zero, including cargo-deny's warning-level index diagnostics and the pinned
+cargo-audit registry-error messages outside its JSON report. A clean full
+cargo-deny check requires exactly one complete four-check summary with valid
+counters; empty, partial, duplicate, or malformed output is incomplete. Ordinary
+permitted policy warnings remain nonfatal. Classified failures retain scanner
+diagnostics in the job log without copying raw output into the Markdown summary.
+
 ### Why both Rust dependency scanners remain
 
 The investigation in [issue #94](https://github.com/PiesP/DarkReNamer/issues/94)
