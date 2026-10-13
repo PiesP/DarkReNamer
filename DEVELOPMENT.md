@@ -4,6 +4,48 @@ DarkReNamer pins its Rust toolchain in `rust-toolchain.toml`. Run commands from
 the repository root and use the committed lockfile. The project supports three
 different validation environments; none substitutes for the others.
 
+## Production Rust and Win32 code
+
+These are authoring defaults; the [safety model](SAFETY.md),
+[preview resource boundary](SAFETY.md#preview-resource-boundary), and
+[native boundary policy](SAFETY.md#unsafe-boundary-policy) are mandatory contracts.
+
+- Use the pinned rustfmt and existing editor settings. Keep explicit grouped
+  imports with matching visibility and `cfg`, and import only the test owner's
+  dependencies. Preserve public compatibility paths and target reachability.
+  Avoid production glob imports, arbitrary file/function-size quotas, and
+  aesthetic field reordering, especially where destruction order matters.
+- Prefer concrete types, clear units, early rejection, and explicit state
+  transitions. Use enums/newtypes when they prevent a real mistake; do not wrap
+  every boolean/integer or build a trait/factory layer for each helper. Borrow
+  for synchronous inspection and transfer ownership for longer-lived work;
+  retain justified snapshots, `Arc`, and resource-specific guards.
+- Reuse immutable metadata rather than repeatedly collecting and sorting it,
+  as the command catalog's derived rail view does. Use small local arrays for
+  structural bounds, as the prompt's three fixed and three optional sections
+  do. Preserve checked arithmetic, aggregate budgets, fallible preparation,
+  and atomic commit. New queues/caches must bound queued, in-flight, and
+  undrained completed work, with explicit saturation, invalidation,
+  cancellation, and retirement. Terminal results are not replaceable progress.
+- Retain precise `SAFETY` reasoning, API-specific return/error handling,
+  callback ABI, thread/apartment affinity, ownership, and reentrancy contracts.
+  Preserve prepare/release/native-call/reacquire/revalidate where applicable;
+  do not replace every synchronous message or merge distinct destructors into
+  a universal handle wrapper.
+- Keep exact UTF-16 operational values separate from lossy display text,
+  typed mutation certainty and explicit journal durability, and proposal
+  editing separate from filesystem mutation. Extend the existing command
+  catalog and preserve focus, accessibility, and Forced Colors behavior.
+  Distinguish DIP layout from physical-pixel painting; keep blocking I/O and
+  unbounded work out of UI handlers.
+- Retain existing lint and release-profile policy. Do not enable all Clippy
+  `pedantic`/`restriction` lints, nightly formatting options, or another style
+  checker. Complete the [maintenance gates](#routine-maintenance-workflow) and
+  applicable [native validation](#native-tests-in-a-local-hyper-v-vm).
+  Binary-size claims require comparable builds; memory/speed claims require
+  comparable [performance samples](#fixed-performance-sample). Reviewed
+  allocation removal alone does not establish an application-level speedup.
+
 ## Native Windows development
 
 Install Git, PowerShell 7.4 or newer, and rustup. Opening this repository causes

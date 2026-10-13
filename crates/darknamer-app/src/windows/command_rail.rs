@@ -210,11 +210,7 @@ pub(super) struct CommandRail {
 impl CommandRail {
     pub(super) fn create(parent: HWND, spec: &'static CommandRailSpec) -> io::Result<Self> {
         let commands = spec.ordered_command_specs();
-        let group_count = usize::from(!commands.is_empty())
-            + commands
-                .windows(2)
-                .filter(|pair| pair[0].rail.map(|p| p.group) != pair[1].rail.map(|p| p.group))
-                .count();
+        let group_count = spec.group_count();
         let tooltip = create_tooltip(parent)?;
         let mut rail = Self {
             parent,
@@ -227,7 +223,7 @@ impl CommandRail {
             tooltip_texts: Vec::with_capacity(commands.len()),
         };
 
-        if let Err(error) = rail.populate(&commands, group_count) {
+        if let Err(error) = rail.populate(commands, group_count) {
             rail.destroy_partial();
             return Err(error);
         }
