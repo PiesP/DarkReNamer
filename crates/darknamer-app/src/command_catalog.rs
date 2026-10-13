@@ -17,7 +17,7 @@ impl CommandRailSpec {
     /// Returns the total number of visible commands in this rail.
     #[must_use]
     pub fn command_count(self) -> usize {
-        self.unordered_command_specs().count()
+        self.ordered_command_specs().len()
     }
 
     /// Iterates over visible command identifiers in display order.
@@ -27,37 +27,23 @@ impl CommandRailSpec {
 
     /// Iterates over the catalog entries visible on this rail.
     pub fn command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
-        self.ordered_command_specs().into_iter()
+        self.ordered_command_specs().iter().copied()
     }
 
-    fn unordered_command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
-        COMMAND_UI_SPECS
-            .iter()
-            .chain(core::iter::once(&DELETE_SELECTED_UI_SPEC))
-            .filter(move |spec| {
-                spec.rail
-                    .is_some_and(|placement| placement.side == self.side)
-            })
-    }
-
-    pub(super) fn ordered_command_specs(self) -> Vec<&'static CommandUiSpec> {
-        let mut specs = self.unordered_command_specs().collect::<Vec<_>>();
-        specs.sort_by_key(|spec| {
-            spec.rail.map_or((u8::MAX, u8::MAX), |placement| {
-                (placement.group, placement.order)
-            })
-        });
-        specs
+    pub(super) fn ordered_command_specs(self) -> &'static [&'static CommandUiSpec] {
+        match self.side {
+            RailSide::Left => &ORDERED_RAIL_SPECS[..RAIL_COMMAND_COUNTS[0]],
+            RailSide::Right => &ORDERED_RAIL_SPECS[RAIL_COMMAND_COUNTS[0]..],
+        }
     }
 
     pub(super) fn group_count(self) -> usize {
-        let mut groups = [false; 256];
-        for spec in self.unordered_command_specs() {
-            if let Some(placement) = spec.rail {
-                groups[usize::from(placement.group)] = true;
-            }
-        }
-        groups.into_iter().filter(|present| *present).count()
+        let specs = self.ordered_command_specs();
+        usize::from(!specs.is_empty())
+            + specs
+                .windows(2)
+                .filter(|pair| pair[0].rail.map(|p| p.group) != pair[1].rail.map(|p| p.group))
+                .count()
     }
 }
 
@@ -728,6 +714,79 @@ pub const DELETE_SELECTED_UI_SPEC: CommandUiSpec = command_ui_spec!(
     Model,
     AllRows
 );
+
+const fn rail_command_counts() -> [usize; 2] {
+    let mut counts = [0; 2];
+    let mut index = 0;
+    while index <= COMMAND_UI_SPECS.len() {
+        let spec = if index < COMMAND_UI_SPECS.len() {
+            &COMMAND_UI_SPECS[index]
+        } else {
+            &DELETE_SELECTED_UI_SPEC
+        };
+        if let Some(placement) = spec.rail {
+            let side = match placement.side {
+                RailSide::Left => 0,
+                RailSide::Right => 1,
+            };
+            counts[side] += 1;
+        }
+        index += 1;
+    }
+    counts
+}
+
+const RAIL_COMMAND_COUNTS: [usize; 2] = rail_command_counts();
+const RAIL_COMMAND_COUNT: usize = RAIL_COMMAND_COUNTS[0] + RAIL_COMMAND_COUNTS[1];
+
+const fn rail_order_key(spec: &CommandUiSpec) -> u32 {
+    match spec.rail {
+        Some(placement) => {
+            let side = match placement.side {
+                RailSide::Left => 0,
+                RailSide::Right => 1,
+            };
+            (side << 16) | ((placement.group as u32) << 8) | placement.order as u32
+        }
+        None => u32::MAX,
+    }
+}
+
+const fn ordered_rail_specs() -> [&'static CommandUiSpec; RAIL_COMMAND_COUNT] {
+    let mut specs = [&DELETE_SELECTED_UI_SPEC; RAIL_COMMAND_COUNT];
+    let mut catalog_index = 0;
+    let mut active_count = 0;
+    while catalog_index <= COMMAND_UI_SPECS.len() {
+        let spec = if catalog_index < COMMAND_UI_SPECS.len() {
+            &COMMAND_UI_SPECS[catalog_index]
+        } else {
+            &DELETE_SELECTED_UI_SPEC
+        };
+        if spec.rail.is_some() {
+            specs[active_count] = spec;
+            active_count += 1;
+        }
+        catalog_index += 1;
+    }
+    // Compile-time stable insertion sort: equal keys retain catalog enumeration
+    // order, including Delete Selected's position after the ID-indexed catalog.
+    let mut index = 1;
+    while index < specs.len() {
+        let spec = specs[index];
+        let mut position = index;
+        while position > 0 && rail_order_key(specs[position - 1]) > rail_order_key(spec) {
+            specs[position] = specs[position - 1];
+            position -= 1;
+        }
+        specs[position] = spec;
+        index += 1;
+    }
+    specs
+}
+
+// Only visible references are retained; no runtime collection or sorting, and
+// no duplicate command metadata. ID lookup keeps the original catalog order.
+static ORDERED_RAIL_SPECS: [&CommandUiSpec; RAIL_COMMAND_COUNT] = ordered_rail_specs();
 
 /// Legacy shell accelerators whose commands are outside APPLY..LAST_COMMAND.
 pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 0] = [];

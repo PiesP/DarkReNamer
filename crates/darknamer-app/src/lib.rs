@@ -1537,6 +1537,124 @@ mod tests {
     }
 
     #[test]
+    fn command_rail_catalog_views_preserve_display_order_and_metadata() {
+        let left = [
+            (APPLY, "변경\n적용", 0, 0),
+            (REPLACE, "찾아\n바꾸기", 1, 0),
+            (PREFIX, "앞에\n붙이기", 1, 1),
+            (SUFFIX, "뒤에\n붙이기", 1, 2),
+            (CLEAR_NAME, "이름 본체\n지우기", 2, 0),
+            (DELETE_POSITION, "범위\n지우기", 2, 1),
+            (DELETE_DELIMITED, "사이\n지우기", 2, 2),
+            (KEEP_DIGITS, "숫자만\n남기기", 3, 0),
+            (PAD_DIGITS, "자릿수\n맞추기", 3, 1),
+            (SEQUENCE, "일련번호\n붙이기", 3, 2),
+        ];
+        let right = [
+            (RESET, "제안명\n초기화", 0, 0),
+            (MANUAL_CHANGE, "직접\n바꾸기", 1, 0),
+            (DELETE_SELECTED_COMMAND, "선택\n제거", 1, 1),
+            (SORT, "목록\n정렬", 1, 2),
+            (EXT_DELETE, "확장자\n지우기", 2, 0),
+            (EXT_ADD, "확장자\n추가", 2, 1),
+            (EXT_REPLACE, "확장자\n변경", 2, 2),
+            (PARENT_PREFIX, "폴더명\n앞에", 3, 0),
+            (PARENT_SUFFIX, "폴더명\n뒤에", 3, 1),
+        ];
+        for (rail, expected) in [(LEFT_RAIL, left.as_slice()), (RIGHT_RAIL, right.as_slice())] {
+            assert_eq!(rail.command_count(), expected.len());
+            assert_eq!(rail.group_count(), 4);
+            assert_eq!(
+                rail.commands().collect::<Vec<_>>(),
+                expected.iter().map(|entry| entry.0).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                rail_tool_specs(rail).collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&(id, label, _, _)| ToolSpec { id, label })
+                    .collect::<Vec<_>>()
+            );
+            for (spec, &(id, _, group, order)) in rail.command_specs().zip(expected) {
+                assert_eq!(command_ui_spec(id), Some(spec));
+                assert_eq!(
+                    spec.rail,
+                    Some(RailPlacement {
+                        side: rail.side,
+                        group,
+                        order
+                    })
+                );
+                assert_eq!(spec.legacy_shortcut, legacy_command_shortcut(id));
+            }
+        }
+        assert_eq!(
+            LEFT_RAIL.command_count() + RIGHT_RAIL.command_count(),
+            COMMAND_UI_SPECS
+                .iter()
+                .chain(core::iter::once(&DELETE_SELECTED_UI_SPEC))
+                .filter(|spec| spec.rail.is_some())
+                .count()
+        );
+    }
+
+    #[test]
+    fn command_rail_layout_preserves_both_rails_at_each_density() -> Result<(), LayoutError> {
+        let left = [
+            APPLY,
+            REPLACE,
+            PREFIX,
+            SUFFIX,
+            CLEAR_NAME,
+            DELETE_POSITION,
+            DELETE_DELIMITED,
+            KEEP_DIGITS,
+            PAD_DIGITS,
+            SEQUENCE,
+        ];
+        let right = [
+            RESET,
+            MANUAL_CHANGE,
+            DELETE_SELECTED_COMMAND,
+            SORT,
+            EXT_DELETE,
+            EXT_ADD,
+            EXT_REPLACE,
+            PARENT_PREFIX,
+            PARENT_SUFFIX,
+        ];
+        for (density, ys) in [
+            (
+                RailDensity::Comfortable,
+                [0, 40, 72, 104, 144, 176, 208, 248, 280, 312],
+            ),
+            (
+                RailDensity::Compact,
+                [0, 32, 60, 88, 120, 148, 176, 208, 236, 264],
+            ),
+        ] {
+            let metrics = density.metrics(96);
+            for (rail, ids) in [(LEFT_RAIL, left.as_slice()), (RIGHT_RAIL, right.as_slice())] {
+                let placements = calculate_command_rail_layout(&rail, 348, metrics)?;
+                assert_eq!(
+                    placements,
+                    ids.iter()
+                        .zip(ys)
+                        .map(|(&command, y)| CommandPlacement {
+                            command,
+                            x: 0,
+                            y,
+                            width: 52,
+                            height: metrics.button_height,
+                        })
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn focus_cycles_major_regions_and_skips_unavailable_rails() {
         let mut focus = FocusState::default();
         let left = [false, true, false];
