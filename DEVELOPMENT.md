@@ -68,6 +68,66 @@ scheduled job caches pinned scanner binaries only; each run refreshes advisory
 data and checks the selected `Cargo.lock` and dependency policy anew. A failed
 refresh or scan is a failed check, not a clean result.
 
+### Why both Rust dependency scanners remain
+
+The investigation in [issue #94](https://github.com/PiesP/DarkReNamer/issues/94)
+retains both scanners. The pins in CI, the scheduled audit, and the verified
+release-tool manifest define the supported versions. At the investigation
+baseline, cargo-audit 0.22.2 inspected the entire lockfile, while cargo-deny
+0.20.2 inspected the selected dependency graph. A clean product scan does not
+establish equivalence between those scopes.
+
+Real scanner controls used isolated metadata-only workspaces, a Git-backed
+synthetic advisory database, and an affected/unaffected version pair. No
+dependency code was executed and the product lockfile was unchanged. The
+measured reference behavior was:
+
+| Control | `cargo-audit audit --deny warnings` | Existing cargo-deny policy |
+| --- | --- | --- |
+| Clean / unaffected version | Exit 0 | Exit 0 |
+| Direct, transitive, build, dev, and optional dependency vulnerability | Exit 1 | Exit 1 with the configured all-features graph |
+| macOS-only dependency vulnerability | Exit 1 | Exit 0 with the configured Windows/Linux targets |
+| Direct / transitive unmaintained advisory | Exit 1 | Exit 1 |
+| Direct / transitive unsound advisory | Exit 1 / 1 | Exit 1 / 0 with the default workspace-only scope |
+| Direct / transitive notice advisory | Exit 0 with a structured warning | Exit 1; the scheduled audit adapter also rejects audit's nonempty warning report |
+| Yanked `slab` 0.4.10, with available registry data | Exit 1 | Exit 0 with a `yanked` warning |
+| License, dependency-ban, and source violations | Outside audit's policy | Nonzero; existing non-advisory warnings remain warnings |
+| Missing advisory data / failed advisory fetch | Nonzero | Nonzero |
+
+Detector controls used `--no-fetch --no-yanked` for audit and `--offline` for
+deny, pointing both tools at the same controlled database. Yank controls
+enabled registry checking separately. The direct vulnerability fixture used
+`itoa = "=1.0.18"`, a synthetic advisory patched at `>= 1.0.19`, and a passing
+control patched at `>= 1.0.18`; the target fixture placed the same dependency
+under `cfg(target_os = "macos")`. These advisories describe test inputs, not
+vulnerabilities in itoa.
+
+Removing the target filter catches the macOS control, and explicit unsound/yank
+settings could close those individual gaps. They do not provide a whole-lockfile
+scanner: in a separate disconnected-entry control, audit rejected the advisory
+in the retained registry entry; ordinary deny pruned that entry during Cargo
+metadata resolution and exited 0. `--locked` rejected the stale lockfile as an
+operational failure instead of scanning it. Changing all license/ban/source
+graph selection or promoting every warning to an error would also alter
+unrelated policy. Recreating lockfile auditing in a custom adapter would add
+maintenance beyond the proposed tool-count reduction.
+
+Unavailable offline registry data is an additional limitation, not a passing
+yank check: audit printed an index error but exited 0, and deny emitted an
+`index-failure` warning and exited 0. The investigation does not claim that
+either raw CLI guarantees complete offline intelligence. Retain fresh online
+checks and report unavailable data separately. Existing entrypoint regressions
+cover wrong/missing tool versions, malformed reports, findings, and nonzero
+tool/data failures; neither interrupted execution nor missing required results
+is consolidation evidence.
+
+Revisit consolidation when a supported cargo-deny interface can inspect the
+complete, unpruned lockfile independently of the policy graph. At that time,
+repeat the installed-tool controls, preserve precise advisory severities and
+registry-failure reporting, and verify CI, scheduled/manual, and release callers
+together. Until then, keep both tools, their immutable installation checks,
+fresh-data execution, and the scheduled adapter's two-result completion rule.
+
 ## Tooling tests
 
 `scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
