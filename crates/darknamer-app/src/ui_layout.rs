@@ -1177,24 +1177,25 @@ pub(crate) fn calculate_prompt_layout(
         .max(measured.label_height.max(0));
     let desired_button_height = line_height.saturating_add(scale_dip(14, dpi));
     let desired_separator_height = scale_dip(2, dpi).max(1);
-    let section_count = 3_usize
-        .saturating_add(usize::from(fields.value_one))
-        .saturating_add(usize::from(fields.value_two))
-        .saturating_add(usize::from(fields.choice));
+    let sections = [
+        Some(desired_title_height),
+        fields.value_one.then_some(desired_field_height),
+        fields.value_two.then_some(desired_field_height),
+        fields.choice.then_some(desired_field_height),
+        Some(desired_separator_height),
+        Some(desired_button_height),
+    ];
+    // The same six-slot array defines capacity and enumeration, so every active
+    // section fits. Only the compacted active range participates in geometry.
+    let section_count = sections.iter().flatten().count();
+    let mut desired_heights = sections.map(|_| 0);
+    for (index, height) in sections.into_iter().flatten().enumerate() {
+        desired_heights[index] = height;
+    }
+    let mut heights = desired_heights;
+    let desired_heights = &desired_heights[..section_count];
+    let heights = &mut heights[..section_count];
     let gap_count = section_count.saturating_sub(1);
-    let mut desired_heights = Vec::with_capacity(section_count);
-    desired_heights.push(desired_title_height);
-    if fields.value_one {
-        desired_heights.push(desired_field_height);
-    }
-    if fields.value_two {
-        desired_heights.push(desired_field_height);
-    }
-    if fields.choice {
-        desired_heights.push(desired_field_height);
-    }
-    desired_heights.push(desired_separator_height);
-    desired_heights.push(desired_button_height);
     let desired_sections_height = desired_heights
         .iter()
         .fold(0_i32, |total, height| total.saturating_add(*height));
@@ -1220,7 +1221,7 @@ pub(crate) fn calculate_prompt_layout(
     };
     let available_for_sections = available_after_padding
         .saturating_sub(vertical_gap.saturating_mul(i32::try_from(gap_count).unwrap_or(i32::MAX)));
-    let heights = fit_prompt_section_heights(&desired_heights, available_for_sections);
+    fit_prompt_section_heights(desired_heights, available_for_sections, heights);
     let mut height_index = 0_usize;
     let mut next_height = || {
         let height = heights.get(height_index).copied().unwrap_or_default();
@@ -1317,17 +1318,18 @@ pub(crate) fn calculate_prompt_layout(
 }
 
 #[cfg(any(windows, test))]
-fn fit_prompt_section_heights(desired: &[i32], available: i32) -> Vec<i32> {
+fn fit_prompt_section_heights(desired: &[i32], available: i32, heights: &mut [i32]) {
     let available = available.max(0);
     let desired_total = desired
         .iter()
         .fold(0_i32, |total, height| total.saturating_add(*height));
     if desired_total <= available {
-        return desired.to_vec();
+        heights.copy_from_slice(desired);
+        return;
     }
-    let mut heights = vec![0; desired.len()];
+    heights.fill(0);
     let mut remaining = available;
-    for height in &mut heights {
+    for height in heights.iter_mut() {
         if remaining == 0 {
             break;
         }
@@ -1350,7 +1352,6 @@ fn fit_prompt_section_heights(desired: &[i32], available: i32) -> Vec<i32> {
             break;
         }
     }
-    heights
 }
 
 pub(super) fn required_command_rail_height(

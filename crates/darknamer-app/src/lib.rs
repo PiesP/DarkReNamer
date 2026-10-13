@@ -4774,6 +4774,278 @@ mod tests {
     }
 
     #[test]
+    fn prompt_layout_preserves_all_field_combinations_and_height_remainders() {
+        let measured = PromptFontMetrics {
+            title_width: 120,
+            title_height: 18,
+            label_width: 44,
+            label_height: 18,
+            line_height: 18,
+        };
+        let rect = |x, y, width, height| LayoutRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // Independent baseline coordinates: fields are value one, value two,
+        // then choice. At 84 pixels, uneven spare pixels go to earlier sections.
+        let cases = [
+            (
+                0,
+                92,
+                [None, None, None],
+                18,
+                [None, None, None],
+                38,
+                (48, 24),
+            ),
+            (
+                1,
+                126,
+                [Some(38), None, None],
+                12,
+                [Some((32, 11)), None, None],
+                51,
+                (61, 11),
+            ),
+            (
+                2,
+                126,
+                [None, Some(38), None],
+                12,
+                [None, Some((32, 11)), None],
+                51,
+                (61, 11),
+            ),
+            (
+                3,
+                160,
+                [Some(38), Some(72), None],
+                7,
+                [Some((27, 7)), Some((42, 6)), None],
+                56,
+                (66, 6),
+            ),
+            (
+                4,
+                126,
+                [None, None, Some(38)],
+                12,
+                [None, None, Some((32, 11))],
+                51,
+                (61, 11),
+            ),
+            (
+                5,
+                160,
+                [Some(38), None, Some(72)],
+                7,
+                [Some((27, 7)), None, Some((42, 6))],
+                56,
+                (66, 6),
+            ),
+            (
+                6,
+                160,
+                [None, Some(38), Some(72)],
+                7,
+                [None, Some((27, 7)), Some((42, 6))],
+                56,
+                (66, 6),
+            ),
+            (
+                7,
+                194,
+                [Some(38), Some(72), Some(106)],
+                4,
+                [Some((24, 4)), Some((36, 4)), Some((48, 3))],
+                59,
+                (69, 3),
+            ),
+        ];
+        for (mask, client_height, field_ys, title_height, small_fields, separator_y, button) in
+            cases
+        {
+            let fields = PromptFields {
+                value_one: mask & 1 != 0,
+                value_two: mask & 2 != 0,
+                choice: mask & 4 != 0,
+            };
+            let expected = PromptLayout {
+                client: rect(0, 0, 380, client_height),
+                title: rect(12, 12, 356, 18),
+                edit_one: field_ys[0].map(|y| rect(90, y, 278, 26)),
+                label_one: field_ys[0].map(|y| rect(12, y, 70, 26)),
+                edit_two: field_ys[1].map(|y| rect(90, y, 278, 26)),
+                label_two: field_ys[1].map(|y| rect(12, y, 70, 26)),
+                choice: field_ys[2].map(|y| rect(12, y, 185, 26)),
+                separator: rect(0, client_height - 54, 380, 2),
+                ok: rect(210, client_height - 44, 75, 32),
+                cancel: rect(293, client_height - 44, 75, 32),
+            };
+            assert_eq!(
+                calculate_prompt_layout(96, measured, fields, rect(0, 0, 1920, 1080)),
+                expected
+            );
+            assert_eq!(
+                calculate_prompt_layout(96, measured, fields, expected.client),
+                expected
+            );
+            let small_expected = PromptLayout {
+                client: rect(0, 0, 380, 84),
+                title: rect(12, 12, 356, title_height),
+                edit_one: small_fields[0].map(|(y, h)| rect(90, y, 278, h)),
+                label_one: small_fields[0].map(|(y, h)| rect(12, y, 70, h)),
+                edit_two: small_fields[1].map(|(y, h)| rect(90, y, 278, h)),
+                label_two: small_fields[1].map(|(y, h)| rect(12, y, 70, h)),
+                choice: small_fields[2].map(|(y, h)| rect(12, y, 185, h)),
+                separator: rect(0, separator_y, 380, 2),
+                ok: rect(210, button.0, 75, button.1),
+                cancel: rect(293, button.0, 75, button.1),
+            };
+            assert_eq!(
+                calculate_prompt_layout(96, measured, fields, small_expected.client),
+                small_expected
+            );
+            let tiny_expected = PromptLayout {
+                client: rect(0, 0, 1, 1),
+                title: rect(0, 0, 1, 1),
+                edit_one: field_ys[0].map(|_| rect(1, 1, 0, 0)),
+                label_one: field_ys[0].map(|_| rect(0, 1, 1, 0)),
+                edit_two: field_ys[1].map(|_| rect(1, 1, 0, 0)),
+                label_two: field_ys[1].map(|_| rect(0, 1, 1, 0)),
+                choice: field_ys[2].map(|_| rect(0, 1, 1, 0)),
+                separator: rect(0, 1, 1, 0),
+                ok: rect(1, 1, 0, 0),
+                cancel: rect(1, 1, 0, 0),
+            };
+            for maximum in [rect(0, 0, 1, 1), rect(0, 0, 0, 0), rect(0, 0, -100, -100)] {
+                assert_eq!(
+                    calculate_prompt_layout(96, measured, fields, maximum),
+                    tiny_expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_layout_preserves_font_dpi_rounding_and_saturation() {
+        let measured = PromptFontMetrics {
+            title_width: 520,
+            title_height: 54,
+            label_width: 96,
+            label_height: 30,
+            line_height: 30,
+        };
+        let fields = PromptFields {
+            value_one: true,
+            value_two: true,
+            choice: true,
+        };
+        let rect = |x, y, width, height| LayoutRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        for (dpi, maximum, expected) in [
+            (
+                120,
+                rect(0, 0, 1920, 1080),
+                PromptLayout {
+                    client: rect(0, 0, 550, 305),
+                    title: rect(15, 15, 520, 54),
+                    edit_one: Some(rect(131, 79, 404, 40)),
+                    label_one: Some(rect(15, 79, 106, 40)),
+                    edit_two: Some(rect(131, 129, 404, 40)),
+                    label_two: Some(rect(15, 129, 106, 40)),
+                    choice: Some(rect(15, 179, 231, 40)),
+                    separator: rect(0, 229, 550, 3),
+                    ok: rect(337, 242, 94, 48),
+                    cancel: rect(441, 242, 94, 48),
+                },
+            ),
+            (
+                144,
+                rect(0, 0, 1920, 1080),
+                PromptLayout {
+                    client: rect(0, 0, 570, 330),
+                    title: rect(18, 18, 534, 54),
+                    edit_one: Some(rect(138, 84, 414, 42)),
+                    label_one: Some(rect(18, 84, 108, 42)),
+                    edit_two: Some(rect(138, 138, 414, 42)),
+                    label_two: Some(rect(18, 138, 108, 42)),
+                    choice: Some(rect(18, 192, 278, 42)),
+                    separator: rect(0, 246, 570, 3),
+                    ok: rect(314, 261, 113, 51),
+                    cancel: rect(439, 261, 113, 51),
+                },
+            ),
+            (
+                192,
+                rect(0, 0, 360, 260),
+                PromptLayout {
+                    client: rect(0, 0, 360, 260),
+                    title: rect(24, 24, 312, 26),
+                    edit_one: Some(rect(138, 66, 198, 26)),
+                    label_one: Some(rect(24, 66, 98, 26)),
+                    edit_two: Some(rect(138, 108, 198, 26)),
+                    label_two: Some(rect(24, 108, 98, 26)),
+                    choice: Some(rect(24, 150, 312, 25)),
+                    separator: rect(0, 191, 360, 4),
+                    ok: rect(24, 211, 148, 25),
+                    cancel: rect(188, 211, 148, 25),
+                },
+            ),
+        ] {
+            assert_eq!(
+                calculate_prompt_layout(dpi, measured, fields, maximum),
+                expected
+            );
+        }
+        let negative = PromptFontMetrics {
+            title_width: -1,
+            title_height: -1,
+            label_width: -1,
+            label_height: -1,
+            line_height: -1,
+        };
+        let clamped = calculate_prompt_layout(
+            96,
+            negative,
+            PromptFields::default(),
+            rect(0, 0, 1920, 1080),
+        );
+        assert_eq!(clamped.client, rect(0, 0, 380, 88));
+        assert_eq!(clamped.title, rect(12, 12, 356, 16));
+        assert_eq!(clamped.separator, rect(0, 36, 380, 2));
+        assert_eq!(clamped.ok, rect(210, 46, 75, 30));
+        let saturated = PromptFontMetrics {
+            title_width: i32::MAX,
+            title_height: i32::MAX,
+            label_width: i32::MAX,
+            label_height: i32::MAX,
+            line_height: i32::MAX,
+        };
+        assert_eq!(
+            calculate_prompt_layout(u32::MAX, saturated, fields, rect(0, 0, 380, 84)),
+            PromptLayout {
+                client: rect(0, 0, 380, 84),
+                title: rect(189, 39, 2, 1),
+                edit_one: Some(rect(190, 40, 1, 1)),
+                label_one: Some(rect(189, 40, 1, 1)),
+                edit_two: Some(rect(190, 41, 1, 1)),
+                label_two: Some(rect(189, 41, 1, 1)),
+                choice: Some(rect(189, 42, 2, 1)),
+                separator: rect(0, 43, 380, 1),
+                ok: rect(189, 44, 1, 1),
+                cancel: rect(190, 44, 1, 1),
+            }
+        );
+    }
+
+    #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
