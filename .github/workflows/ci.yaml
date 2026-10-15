@@ -17,20 +17,73 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  classify:
+    name: Classify documentation changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Checkout source and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Classify with protected policy
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          docs_only=false
+          base=''
+          if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
+            if git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master; then
+              base="$(git rev-parse --verify 'refs/remotes/origin/master^{commit}')"
+            fi
+          elif [[ "$EVENT_NAME" == push ]]; then
+            base="$EVENT_BEFORE"
+          fi
+          head="$(git rev-parse HEAD)"
+          if [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" == "$EVENT_SHA" ]] &&
+             git merge-base --is-ancestor "$base" "$head"; then
+            policy="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-policy.XXXXXXXX.py")"
+            decision="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-decision.XXXXXXXX")"
+            trap 'rm -f "$policy" "$decision"' EXIT
+            if git show "$base:scripts/classify-ci-docs.py" > "$policy"; then
+              if python3 -I "$policy" "$base" "$head" > "$decision" &&
+                 cmp -s "$decision" <(printf true); then
+                docs_only=true
+              fi
+            fi
+          fi
+          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
+
   quality:
     name: pr-gate/quality
+    needs: [classify]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout source
+        id: checkout
+        if: ${{ !cancelled() }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         run: rustup toolchain install
 
       - name: Enforce the Rust-only source tree
+        id: inventory
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           forbidden_sources="$(git ls-files '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp' '*.rc' '*.dsp' '*.dsw' '*.aps' '*.ncb' '*.opt' '*.plg' '*.clw')"
@@ -51,29 +104,45 @@ jobs:
           fi
 
       - name: Test tooling
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Ubuntu
 
       - name: Check formatting and lints
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      - name: Rust and tooling verification not required for this change
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}
+        run: echo 'Rust and tooling verification not required for this documentation change.'
+
   unit:
     name: pr-gate/unit
+    needs: [classify]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout source
+        id: checkout
+        if: ${{ !cancelled() }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         run: rustup toolchain install
 
       - name: Run workspace tests
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         run: cargo test --workspace --all-targets --all-features --locked
+
+      - name: Workspace tests not required for this change
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}
+        run: echo 'Workspace tests not required for this documentation change.'
 
   security:
     name: pr-gate/security
@@ -127,23 +196,30 @@ jobs:
 
   windows:
     name: pr-gate/windows
+    needs: [classify]
+    if: ${{ !cancelled() }}
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - name: Checkout source
+        id: checkout
+        if: ${{ !cancelled() }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Test tooling
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Windows
 
       - name: Install pinned Rust toolchain
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: rustup toolchain install
 
       - name: Validate Windows tests and lints
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: |
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -153,6 +229,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The Windows test gate failed.' }
 
       - name: Test optimized workspace artifacts
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: |
           $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
@@ -160,7 +237,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The optimized Windows test gate failed.' }
 
       - name: Build the compatibility executable
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: |
           cargo build --release --locked --package darknamer-app --bin DarkReNamer
           if ($LASTEXITCODE -ne 0) { throw 'The Windows release build failed.' }
+
+      - name: Windows verification not required for this change
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}
+        shell: pwsh
+        run: Write-Host 'Windows verification not required for this documentation change.'

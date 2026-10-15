@@ -73,6 +73,35 @@ fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(
 }
 
 #[test]
+fn ci_document_routing_preserves_required_gates_and_fails_closed() -> Result<(), String> {
+    workflow_policy::validate_ci_docs_routing()?;
+    let original = include_str!("../../../.github/workflows/ci.yaml");
+    for changed in [
+        original.replace("if: ${{ !cancelled() }}", "if: ${{ success() }}"),
+        original.replace("needs: [classify]", "needs: []"),
+        original.replace(
+            "(needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true')",
+            "needs.classify.outputs.docs_only != 'true'",
+        ),
+        original.replace(
+            "      - name: Enforce the Rust-only source tree\n        id: inventory\n        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}",
+            "      - name: Enforce the Rust-only source tree\n        id: inventory\n        if: false",
+        ),
+        original.replace(
+            "\"$SECURITY_TOOLS_ROOT/bin/cargo-audit\" audit --deny warnings",
+            "echo skipped-advisory-check",
+        ),
+    ] {
+        assert!(
+            workflow_policy::validate_ci_docs_routing_source(&changed).is_err()
+                || workflow_policy::validate_ci_security_tools_cache_source(&changed).is_err(),
+            "unsafe CI routing or security mutation was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn release_workflows_promote_the_immutable_candidate_without_rebuilding() -> Result<(), String> {
     workflow_policy::validate_release_handoff_policy()
 }

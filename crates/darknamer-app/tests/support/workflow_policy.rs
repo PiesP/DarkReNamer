@@ -54,6 +54,7 @@ struct Concurrency {
 
 #[derive(Deserialize)]
 struct Job {
+    name: Option<String>,
     #[serde(rename = "if")]
     condition: Option<String>,
     #[serde(rename = "runs-on")]
@@ -76,6 +77,7 @@ struct Environment {
 
 #[derive(Deserialize)]
 struct Step {
+    name: Option<String>,
     id: Option<String>,
     #[serde(rename = "if")]
     condition: Option<Scalar>,
@@ -207,6 +209,237 @@ fn steps_are_mandatory(path: &str, job: &Job) -> Result<(), String> {
         }),
         format!("{path} policy steps must execute and propagate failures"),
     )
+}
+
+fn named_step<'a>(path: &str, job: &'a Job, name: &str) -> Result<&'a Step, String> {
+    let matches = job
+        .steps
+        .iter()
+        .filter(|step| step.name.as_deref() == Some(name))
+        .collect::<Vec<_>>();
+    require(
+        matches.len() == 1,
+        format!("{path} must have exactly one {name} step"),
+    )?;
+    Ok(matches[0])
+}
+
+fn step_condition(path: &str, step: &Step, expected: Option<&str>) -> Result<(), String> {
+    require(
+        step.condition.as_ref().map(Scalar::text).as_deref() == expected
+            && step.continue_on_error.is_none(),
+        format!(
+            "{path} {} must keep its condition and propagate failures",
+            step.name.as_deref().unwrap_or("unnamed step")
+        ),
+    )
+}
+
+pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String> {
+    const PATH: &str = ".github/workflows/ci.yaml";
+    const FULL: &str = "${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}";
+    const FULL_AFTER_INVENTORY: &str = "${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}";
+    const DOCS: &str = "${{ !cancelled() && steps.checkout.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}";
+    const DOCS_AFTER_INVENTORY: &str = "${{ !cancelled() && steps.inventory.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}";
+    let workflow = parse(PATH, source)?;
+    require(
+        workflow
+            .triggers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == ["merge_group", "pull_request", "push", "workflow_dispatch"],
+        format!("{PATH} must retain push, PR, merge queue, and manual triggers"),
+    )?;
+    permissions(PATH, &workflow.permissions, &[("contents", "read")])?;
+    require(
+        workflow
+            .concurrency
+            .as_ref()
+            .is_some_and(|concurrency| concurrency.cancel_in_progress)
+            && workflow.jobs.keys().map(String::as_str).collect::<Vec<_>>()
+                == ["classify", "quality", "security", "unit", "windows"],
+        format!("{PATH} must retain concurrency and exactly four required gates"),
+    )?;
+    let classifier = workflow.jobs.get("classify").ok_or("missing classifier")?;
+    require(
+        classifier.runs_on == "ubuntu-24.04"
+            && classifier.needs.is_empty()
+            && classifier.condition.is_none()
+            && classifier.outputs.get("docs_only").map(String::as_str)
+                == Some("${{ steps.classify.outputs.docs_only }}")
+            && classifier.steps.len() == 2,
+        format!("{PATH} classifier must run independently and emit one decision"),
+    )?;
+    action_policy(PATH, classifier, &["actions/checkout"])?;
+    checkout_is_read_only(PATH, classifier)?;
+    let classifier_checkout = named_step(PATH, classifier, "Checkout source and history")?;
+    require(
+        with_is(classifier_checkout, "fetch-depth", "0"),
+        format!("{PATH} classifier must fetch complete history"),
+    )?;
+    step_condition(PATH, classifier_checkout, None)?;
+    let classifier_script = named_step(PATH, classifier, "Classify with protected policy")?;
+    step_condition(PATH, classifier_script, None)?;
+    require(
+        classifier_script.id.as_deref() == Some("classify")
+            && classifier_script.run.as_deref().is_some_and(|run| {
+                [
+                    "git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master",
+                    "git merge-base --is-ancestor \"$base\" \"$head\"",
+                    "git show \"$base:scripts/classify-ci-docs.py\"",
+                    "python3 -I \"$policy\" \"$base\" \"$head\"",
+                    "cmp -s \"$decision\" <(printf true)",
+                    "printf 'docs_only=%s\\n' \"$docs_only\" >> \"$GITHUB_OUTPUT\"",
+                ]
+                .iter()
+                .all(|fragment| run.contains(fragment))
+                    && !run.contains("merge_group.base_sha")
+            }),
+        format!("{PATH} must classify complete trees with protected policy"),
+    )?;
+
+    let security = workflow
+        .jobs
+        .get("security")
+        .ok_or("missing security job")?;
+    require(
+        security.name.as_deref() == Some("pr-gate/security")
+            && security.needs.is_empty()
+            && security.condition.is_none(),
+        format!("{PATH} security must run independently"),
+    )?;
+
+    for (job_name, gate_name, step_names, docs_name, expected_count) in [
+        (
+            "quality",
+            "pr-gate/quality",
+            &[
+                "Install pinned Rust toolchain",
+                "Test tooling",
+                "Check formatting and lints",
+            ][..],
+            "Rust and tooling verification not required for this change",
+            6,
+        ),
+        (
+            "unit",
+            "pr-gate/unit",
+            &["Install pinned Rust toolchain", "Run workspace tests"][..],
+            "Workspace tests not required for this change",
+            4,
+        ),
+        (
+            "windows",
+            "pr-gate/windows",
+            &[
+                "Test tooling",
+                "Install pinned Rust toolchain",
+                "Validate Windows tests and lints",
+                "Test optimized workspace artifacts",
+                "Build the compatibility executable",
+            ][..],
+            "Windows verification not required for this change",
+            7,
+        ),
+    ] {
+        let job = workflow.jobs.get(job_name).ok_or("missing required gate")?;
+        require(
+            job.name.as_deref() == Some(gate_name)
+                && job.needs == ["classify"]
+                && job.condition.as_deref() == Some("${{ !cancelled() }}")
+                && job.steps.len() == expected_count,
+            format!("{PATH} {gate_name} must run after classification failure or success"),
+        )?;
+        action_policy(PATH, job, &["actions/checkout"])?;
+        checkout_is_read_only(PATH, job)?;
+        let checkout = named_step(PATH, job, "Checkout source")?;
+        require(
+            checkout.id.as_deref() == Some("checkout"),
+            format!("{PATH} {gate_name} checkout must expose its outcome"),
+        )?;
+        step_condition(PATH, checkout, Some("${{ !cancelled() }}"))?;
+        for name in step_names {
+            let condition = if job_name == "quality" && *name != "Install pinned Rust toolchain" {
+                FULL_AFTER_INVENTORY
+            } else {
+                FULL
+            };
+            step_condition(PATH, named_step(PATH, job, name)?, Some(condition))?;
+        }
+        let docs = named_step(PATH, job, docs_name)?;
+        step_condition(
+            PATH,
+            docs,
+            Some(if job_name == "quality" {
+                DOCS_AFTER_INVENTORY
+            } else {
+                DOCS
+            }),
+        )?;
+        require(
+            docs.run
+                .as_deref()
+                .is_some_and(|run| run.contains("not required for this documentation change")),
+            format!("{PATH} {gate_name} must explain its successful documentation no-op"),
+        )?;
+    }
+
+    let quality = workflow.jobs.get("quality").ok_or("missing quality job")?;
+    let inventory = named_step(PATH, quality, "Enforce the Rust-only source tree")?;
+    require(
+        inventory.id.as_deref() == Some("inventory"),
+        format!("{PATH} must expose the document inventory result"),
+    )?;
+    step_condition(
+        PATH,
+        inventory,
+        Some("${{ !cancelled() && steps.checkout.outcome == 'success' }}"),
+    )?;
+    require(
+        inventory.run.as_deref().is_some_and(|run| {
+            run.contains("git ls-files '*.md' '*.txt'")
+                && run.contains("config/tracked-documents.txt")
+                && run.contains("exit 1")
+        }),
+        format!("{PATH} must always enforce the document inventory"),
+    )?;
+    let unit = workflow.jobs.get("unit").ok_or("missing unit job")?;
+    let windows = workflow.jobs.get("windows").ok_or("missing Windows job")?;
+    script_contract(
+        PATH,
+        &script(quality),
+        &[
+            "./scripts/test-tooling.ps1 -Platform Ubuntu",
+            "cargo fmt --all -- --check",
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        ],
+        &[],
+    )?;
+    script_contract(
+        PATH,
+        &script(unit),
+        &["cargo test --workspace --all-targets --all-features --locked"],
+        &[],
+    )?;
+    script_contract(
+        PATH,
+        &script(windows),
+        &[
+            "./scripts/test-tooling.ps1 -Platform Windows",
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+            "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
+            "cargo test --workspace --all-targets --all-features --locked -- --nocapture",
+            "cargo test --release --workspace --all-targets --all-features --locked -- --nocapture",
+            "cargo build --release --locked --package darknamer-app --bin DarkReNamer",
+        ],
+        &[],
+    )?;
+    Ok(())
+}
+
+pub(super) fn validate_ci_docs_routing() -> Result<(), String> {
+    validate_ci_docs_routing_source(include_str!("../../../../.github/workflows/ci.yaml"))
 }
 
 fn is_hosted_windows_runner(label: &str) -> bool {
@@ -508,12 +741,16 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
 }
 
 pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
+    validate_ci_security_tools_cache_source(include_str!("../../../../.github/workflows/ci.yaml"))
+}
+
+pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<(), String> {
     const PATH: &str = ".github/workflows/ci.yaml";
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
     const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2";
 
-    let workflow = parse(PATH, include_str!("../../../../.github/workflows/ci.yaml"))?;
+    let workflow = parse(PATH, source)?;
     let security = workflow
         .jobs
         .get("security")
@@ -683,7 +920,7 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
                 .jobs
                 .get("windows")
                 .ok_or_else(|| format!("{path} must retain its Windows job"))?;
-            steps_are_mandatory(path, quality)?;
+            validate_ci_docs_routing_source(source)?;
             action_policy(path, quality, &["actions/checkout"])?;
             require(
                 quality.runs_on.starts_with("ubuntu-")
@@ -706,7 +943,9 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
             is_hosted_windows_runner(&job.runs_on),
             format!("{path} must retain its hosted Windows lane"),
         )?;
-        steps_are_mandatory(path, job)?;
+        if path.ends_with("release.yaml") {
+            steps_are_mandatory(path, job)?;
+        }
         let allowed_actions = if path.ends_with("release.yaml") {
             &["actions/checkout", "actions/upload-artifact"][..]
         } else {
