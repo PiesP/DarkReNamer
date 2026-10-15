@@ -251,10 +251,11 @@ language. Ten PowerShell module files contain embedded C# (`Add-Type`):
 and `ui-native.ps1`. This is a file count, not a count of C# blocks.
 The C# is a separate CLR/native-interop requirement, not PowerShell syntax or
 generated JavaScript. Product Rust and workflow configuration are outside these
-script-language counts. The source-metadata and release-file extractions each
-add one PowerShell helper and one registered PowerShell test, bringing the
-PowerShell count to 80. Python, Bash and embedded-C# file counts remain
-unchanged. The release-file extraction removes its inline producer.
+script-language counts. At issue #57 closeout, the source-metadata and
+release-file extractions each added one PowerShell helper and registered test.
+The release-file extraction removed its inline producer. The later
+release-profile experiment retirement is recorded in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#retired-release-profile-comparisons).
 
 The table names public command families and their effects; the complete test
 selection, platforms, scope and deadlines stay in
@@ -275,8 +276,7 @@ second command or asset registry.
 | `run-scheduled-rust-audit.py` / Python | Python on scheduled/manual security runner; checked-out lockfile, pinned scanners, fresh advisory data | Runs scanner subprocesses and writes a bounded summary; `scheduled-rust-audit` tests and `security.yaml` own its policy. |
 | `run-windows-vm-tests.ps1`, `windows-vm-guest.ps1`, `windows-vm-acceptance.ps1`, `windows-vm-recovery-acceptance.ps1` / PowerShell modules | PowerShell 7.4+; verified checkout or bundle role closure, host transport or guest session | Launch/control bounded native, UI and recovery work, transfer private evidence, and clean owned resources; registered VM/observer tests cover contracts. Windows runtime acceptance still requires the prepared VM. |
 | `run-vm-automated-hosted.ps1` / PowerShell | Hosted Windows validation runner, authenticated candidate metadata and trusted source | Acquires/verifies handoff, invokes campaign and records gate outputs; `run-vm-automated-hosted` tests and `vm-acceptance.yaml` own this path. |
-| `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `get-git-blob-sha256.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release/profile workflows cover their callers. Candidate validation does not promote a release. |
-| `resolve-source-matrix-metadata.ps1` / PowerShell | PowerShell 7.4+ in the three manual size/profile matrix jobs; selected profile, checked-out Git source, pinned rustc and runner environment | Validates source SHA/epoch/rustc, rejects existing run/attempt output roots, creates the two roots and appends five `GITHUB_ENV` values; registered `resolve-source-matrix-metadata` and workflow syntax tests exercise the actual CLI. No guest or VM operation. |
+| `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `get-git-blob-sha256.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release workflows cover their callers. Candidate validation does not promote a release. |
 | `write-release-files.ps1` / PowerShell | PowerShell 7.4+ in the release candidate checkout; prepared handoff directory, source SHA, run ID/attempt, temporary root | Measures the prepared PE/PDB/archive, writes metrics, handoff and sorted checksums, and removes its temporary measurement; the release workflow validates the result before attestation. The registered release test covers actual CLI output and failure cleanup. |
 | `get-release-product-notes.ps1` / PowerShell | PowerShell 7.4+; selected source and optional release tag | Reads the non-empty exact-version prepared section in `DISTRIBUTION.md`; candidate preparation checks it and promotion includes it alongside generated channel, provenance and support disclosures. |
 | `capture-local-visual-gallery.sh` → `diagnostics/capture-local-visual-gallery.sh` / Bash | Opt-in Linux/WSL diagnostic from repository root; Wine/Xvfb, cross-build tools, FFmpeg, jq, GNU tools, optional empty absolute output directory | Builds a Windows test executable, captures BMP/PNG and SHA256 manifest, and cleans temporary Wine state. `visual-gallery-diagnostics` tests its wrapper with inert tools; output is diagnostic only. |
@@ -286,7 +286,6 @@ blocks have these owners and review triggers:
 
 | Inline owner | Why it remains inline; extraction trigger |
 | --- | --- |
-| `binary-size-matrix.yaml`, `profile-benchmark-matrix.yaml`, `profile-planning-matrix.yaml` | Each builds and measures its own experiment profile and emits experiment-specific results. Extract a producer when a second caller needs the same metric contract or the block acquires independently testable parsing or validation. |
 | `benchmark-planning.yaml` | Expands that workflow's benchmark parameters and invokes its Cargo loop. Extract if another benchmark stage shares the same input/result contract. |
 | `ci.yaml`, `security.yaml` | Route repository test jobs and scheduled audit outcomes from workflow events; the audit parser lives in `run-scheduled-rust-audit.py`. Extract repeated portable parsing, while keeping job permissions, triggers and failure reporting in the workflows. |
 | `release.yaml`, `vm-acceptance.yaml`, `promote-release.yaml` | Select trusted source and candidate identities, install pinned tools, attest or publish under workflow authority. The candidate workflow retains its build and information-only summary after the release-file producer extraction. Extract only a cohesive unprivileged calculation with its own fixture contract; keep provenance, secrets, API publication and promotion decisions here. |
@@ -1244,10 +1243,14 @@ GUI/Wine tooling tests use the explicit diagnostic scope described in
 reproduce them from the linked pre-retirement revision. Keep the Wine gallery as
 a diagnostic fallback only when the prepared VM cannot perform the required check.
 
-The planning benchmark and binary/profile matrix workflows are manually dispatched
-experiments. Use the representative planning measurement when investigating the
-current settings, and run optimization matrices only when reconsidering those
-choices. Their results do not replace source-bound Windows or release validation.
+The manually dispatched `benchmark-planning.yaml` is an optional directional
+measurement for a concrete planning investigation. Historical release-profile
+comparison workflows and their reproduction entrypoints are recorded in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#retired-release-profile-comparisons).
+Reconsider the selected release profile when a new toolchain, workload, or size
+constraint creates a concrete decision; reproduce the comparison from that
+history before restoring automation. Directional measurements do not replace
+source-bound Windows or release validation.
 
 ## Dependency policy
 
