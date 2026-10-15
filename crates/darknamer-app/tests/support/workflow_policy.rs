@@ -1231,80 +1231,19 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
         )?;
     }
 
-    for experiment in [
-        Experiment {
-            path: planning_path,
-            source: planning_source,
-            job: "benchmark",
-            retains_artifact: false,
-            required: &[
-                "DARKRENAMER_BENCH_ROOT_PRIVATE = '1'",
-                "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'",
-                "DARKRENAMER_BENCH_MEDIA = 'virtual'",
-                "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
-            ],
-            forbidden: &[],
-        },
-        Experiment {
-            path: ".github/workflows/binary-size-matrix.yaml",
-            source: include_str!("../../../../.github/workflows/binary-size-matrix.yaml"),
-            job: "measure",
-            retains_artifact: true,
-            required: &[
-                "id = 'app-3-core-3'",
-                "id = 'app-s-core-3'",
-                "id = 'app-s-core-s'",
-                "id = 'app-2-core-3'",
-                "binary-size-matrix.json",
-            ],
-            forbidden: &["cargo test"],
-        },
-        Experiment {
-            path: ".github/workflows/profile-benchmark-matrix.yaml",
-            source: include_str!("../../../../.github/workflows/profile-benchmark-matrix.yaml"),
-            job: "benchmark",
-            retains_artifact: true,
-            required: &[
-                "id = 'app-3-core-3'",
-                "id = 'app-s-core-3'",
-                "id = 'app-s-core-s'",
-                "id = 'app-2-core-3'",
-                "filesystem_mutation'] -cne 'none'",
-                "scope'] -cne 'cpu-micro-workloads'",
-                "recorded_iterations = 5",
-                "workload_count = 10000",
-                "selection_evidence = $false",
-                "profile-benchmark-matrix.json",
-            ],
-            forbidden: &["WindowsRenameBackend", "FileJournal"],
-        },
-        Experiment {
-            path: ".github/workflows/profile-planning-matrix.yaml",
-            source: include_str!("../../../../.github/workflows/profile-planning-matrix.yaml"),
-            job: "benchmark",
-            retains_artifact: true,
-            required: &[
-                "id = 'app-3-core-3'",
-                "id = 'app-s-core-3'",
-                "$topologies = @('same-parent', 'unique-parent', 'deep-parent')",
-                "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'",
-                "DARKRENAMER_BENCH_MEDIA = 'virtual'",
-                "DARKRENAMER_BENCH_VARIANT = 'baseline'",
-                "DARKRENAMER_BENCH_COUNT = '10000'",
-                "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
-                "execution_performed = $false",
-                "physical_storage_or_desktop_acceptance = $false",
-                "selection_evidence = $false",
-                "filesystem_mutation = 'owned-temporary-fixtures-only'",
-                "recorded_iterations = 5",
-                "profile-planning-matrix.json",
-            ],
-            forbidden: &["id = 'app-s-core-s'", "id = 'app-2-core-3'"],
-        },
-    ] {
-        validate_experiment(&experiment)?;
-    }
-    Ok(())
+    validate_experiment(&Experiment {
+        path: planning_path,
+        source: planning_source,
+        job: "benchmark",
+        retains_artifact: false,
+        required: &[
+            "DARKRENAMER_BENCH_ROOT_PRIVATE = '1'",
+            "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'",
+            "DARKRENAMER_BENCH_MEDIA = 'virtual'",
+            "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
+        ],
+        forbidden: &[],
+    })
 }
 
 #[test]

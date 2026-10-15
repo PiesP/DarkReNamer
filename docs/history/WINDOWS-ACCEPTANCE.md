@@ -11,6 +11,35 @@ in this history upgrades an old failure, `not-run`, or `review_required` result,
 and the existence of these procedures does not show that any acceptance run
 was completed.
 
+## Retired release-profile comparisons
+
+The release-profile size, CPU micro-workload, and hosted planning comparisons
+were manual experiments for choosing the application's release settings. The
+selected settings in `Cargo.toml` use size optimization for the app and level 3
+for the core, as committed in
+[`db45463fb01e56f84b5a17c5b90bfee70f3f918f`](https://github.com/PiesP/DarkReNamer/commit/db45463fb01e56f84b5a17c5b90bfee70f3f918f).
+No current release workflow calls the three comparison workflows. Their last
+available Actions runs are from 2026-09-01: [binary size](https://github.com/PiesP/DarkReNamer/actions/runs/33532232816),
+[CPU micro-workloads](https://github.com/PiesP/DarkReNamer/actions/runs/33532232768),
+and [hosted planning](https://github.com/PiesP/DarkReNamer/actions/runs/33534448904).
+Those runs report success, but their artifact listings are empty; no numerical
+comparison or full Windows acceptance result is asserted here.
+
+To reproduce a comparison for a new release-profile decision, inspect the exact
+pre-retirement source at
+[`83a3bd73a07ee642073bc46b8a9481e81b8c891e`](https://github.com/PiesP/DarkReNamer/tree/83a3bd73a07ee642073bc46b8a9481e81b8c891e):
+`.github/workflows/binary-size-matrix.yaml`,
+`.github/workflows/profile-benchmark-matrix.yaml`, or
+`.github/workflows/profile-planning-matrix.yaml`. That revision also contains
+their `scripts/resolve-source-matrix-metadata.ps1` and
+`scripts/get-git-blob-sha256.ps1` helpers, the
+`crates/darknamer-app/tests/profile_benchmarks.rs` CPU harness, and dedicated
+tooling tests. Use the selected workflow's `workflow_dispatch` inputs and steps
+on a supported Windows runner with a pinned source and toolchain; record fresh
+measurements and source identity before making a new decision. The current
+`benchmark-planning.yaml` remains available for a separate, directional
+planning investigation.
+
 ## Historical evidence boundary
 
 Formal desktop acceptance was recorded in an external, path-free JSON artifact

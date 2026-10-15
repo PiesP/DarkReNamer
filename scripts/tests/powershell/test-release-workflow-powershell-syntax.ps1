@@ -709,9 +709,6 @@ $repositoryRoot = (Resolve-Path (Join-Path $toolingScriptsRoot '..')).Path
 $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/ci.yaml'
     Join-Path $repositoryRoot '.github/workflows/benchmark-planning.yaml'
-    Join-Path $repositoryRoot '.github/workflows/binary-size-matrix.yaml'
-    Join-Path $repositoryRoot '.github/workflows/profile-benchmark-matrix.yaml'
-    Join-Path $repositoryRoot '.github/workflows/profile-planning-matrix.yaml'
     Join-Path $repositoryRoot '.github/workflows/release.yaml'
     Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
     Join-Path $repositoryRoot '.github/workflows/vm-acceptance.yaml'
@@ -730,18 +727,12 @@ if ($blockCount -le 0) {
 
 $ciPath = Join-Path $repositoryRoot '.github/workflows/ci.yaml'
 $planningPath = Join-Path $repositoryRoot '.github/workflows/benchmark-planning.yaml'
-$binarySizePath = Join-Path $repositoryRoot '.github/workflows/binary-size-matrix.yaml'
-$profileBenchmarkPath = Join-Path $repositoryRoot '.github/workflows/profile-benchmark-matrix.yaml'
-$profilePlanningPath = Join-Path $repositoryRoot '.github/workflows/profile-planning-matrix.yaml'
 $candidatePath = Join-Path $repositoryRoot '.github/workflows/release.yaml'
 $promotionPath = Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
 $validationPath = Join-Path $repositoryRoot '.github/workflows/vm-acceptance.yaml'
 
 $ciCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$ciPath])
 $planningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$planningPath])
-$binarySizeCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$binarySizePath])
-$profileBenchmarkCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$profileBenchmarkPath])
-$profilePlanningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$profilePlanningPath])
 $candidateSigningLine = @(Get-Content -LiteralPath $candidatePath | Select-String -Pattern '^  attest:$')
 if ($candidateSigningLine.Count -ne 1) { throw 'Candidate must have one separate attestation job.' }
 $candidateBuildBlocks = @($workflowBlocks[$candidatePath] | Where-Object { $_.line -lt $candidateSigningLine[0].LineNumber })
@@ -857,46 +848,6 @@ $null = Assert-OneCommand `
     -AfterDelimiter @('--ignored', '--exact', '--nocapture', '--test-threads=1') `
     -RequireDelimiter `
     -Message 'Planning benchmark must run the exact ignored backend benchmark with visible output.'
-$null = Assert-OneCommand `
-    -Commands $binarySizeCommands `
-    -Name 'cargo' `
-    -Subcommand 'build' `
-    -BeforeDelimiter @('build', '--release', '--locked', '--package', 'darknamer-app', '--bin', 'DarkReNamer') `
-    -RequiredOptions @{ '--config' = '$configPath' } `
-    -Message 'Binary-size workflow must build the selected release executable.'
-$null = Assert-OneCommand `
-    -Commands $profileBenchmarkCommands `
-    -Name 'cargo' `
-    -Subcommand 'test' `
-    -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', '--no-run') `
-    -RequiredOptions @{ '--config' = '$configPath' } `
-    -Message 'Profile benchmark must compile its selected harness without running it through Cargo.'
-$null = Assert-OneCommand `
-    -Commands $profileBenchmarkCommands `
-    -Name 'cargo' `
-    -Subcommand 'test' `
-    -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', 'benchmark_release_profile') `
-    -AfterDelimiter @('--ignored', '--exact', '--nocapture', '--test-threads=1') `
-    -RequiredOptions @{ '--config' = '$state.config_path' } `
-    -RequireDelimiter `
-    -Message 'Profile benchmark must execute the measured release profile with visible output.'
-$null = Assert-OneCommand `
-    -Commands $profilePlanningCommands `
-    -Name 'cargo' `
-    -Subcommand 'test' `
-    -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'rename_windows_backend', '--no-run') `
-    -RequiredOptions @{ '--config' = '$configPath' } `
-    -Message 'Profile planning workflow must compile its selected harness before direct execution.'
-$null = Assert-OneCommand `
-    -Commands $profilePlanningCommands `
-    -Name 'cargo' `
-    -Subcommand 'test' `
-    -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'rename_windows_backend', 'benchmark_durable_production_path') `
-    -AfterDelimiter @('--ignored', '--exact', '--nocapture', '--test-threads=1') `
-    -RequiredOptions @{ '--config' = '$state.config_path' } `
-    -RequireDelimiter `
-    -Message 'Profile planning workflow must execute the exact ignored benchmark with visible output.'
-
 $candidateMaster = Assert-OneCommand `
     -Commands $candidateCommands `
     -Name 'git' `
@@ -1470,121 +1421,6 @@ Assert-Assignment `
     -Right '$env:GITHUB_SHA' `
     -Message 'Planning benchmark must bind metrics to the selected workflow source SHA.'
 
-$matrixPolicies = @(
-    [pscustomobject]@{
-        Path = $binarySizePath
-        Matrix = 'BinarySize'
-        Commands = $binarySizeCommands
-        Fields = [ordered]@{
-            measurement_kind = "'release-profile-size-matrix'"
-            source_sha = '$env:SOURCE_SHA'
-            source_date_epoch = '[long] $env:SOURCE_DATE_EPOCH'
-            cargo_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml'
-            cargo_lock_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock'
-            rust_toolchain_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml'
-        }
-        BlobPaths = @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')
-        ConfigFields = [ordered]@{
-            cargo_config_sha256 = '$configHash'
-        }
-    }
-    [pscustomobject]@{
-        Path = $profileBenchmarkPath
-        Matrix = 'ProfileBenchmark'
-        Commands = $profileBenchmarkCommands
-        Fields = [ordered]@{
-            measurement_kind = "'release-profile-cpu-micro-workloads'"
-            scope = "'directional-only'"
-            selection_evidence = '$false'
-            source_sha = '$env:SOURCE_SHA'
-            source_date_epoch = '[long] $env:SOURCE_DATE_EPOCH'
-            cargo_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml'
-            cargo_lock_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock'
-            rust_toolchain_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml'
-            harness_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path crates/darknamer-app/tests/profile_benchmarks.rs'
-        }
-        BlobPaths = @(
-            'Cargo.toml'
-            'Cargo.lock'
-            'rust-toolchain.toml'
-            'crates/darknamer-app/tests/profile_benchmarks.rs'
-        )
-        ConfigFields = [ordered]@{
-            cargo_config_sha256 = '$variantState[$variant.id].config_hash'
-        }
-    }
-    [pscustomobject]@{
-        Path = $profilePlanningPath
-        Matrix = 'ProfilePlanning'
-        Commands = $profilePlanningCommands
-        Fields = [ordered]@{
-            measurement_kind = "'release-profile-windows-planning'"
-            evidence_class = "'directional-hosted'"
-            selection_evidence = '$false'
-            execution_performed = '$false'
-            physical_storage_or_desktop_acceptance = '$false'
-            source_sha = '$env:SOURCE_SHA'
-            source_date_epoch = '[long] $env:SOURCE_DATE_EPOCH'
-            instrumentation_revision = "'parent-validation-v1'"
-            cargo_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml'
-            cargo_lock_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock'
-            rust_toolchain_toml_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml'
-            harness_sha256 = './scripts/get-git-blob-sha256.ps1 -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path crates/darknamer-app/tests/rename_windows_backend.rs'
-        }
-        BlobPaths = @(
-            'Cargo.toml'
-            'Cargo.lock'
-            'rust-toolchain.toml'
-            'crates/darknamer-app/tests/rename_windows_backend.rs'
-        )
-        ConfigFields = [ordered]@{
-            cargo_config_sha256 = '$variantState[$variant.id].config_hash'
-        }
-    }
-)
-
-foreach ($policy in $matrixPolicies) {
-    $blocks = $workflowBlocks[$policy.Path]
-    $null = Assert-OneCommand `
-        -Commands $policy.Commands `
-        -Name './scripts/resolve-source-matrix-metadata.ps1' `
-        -BeforeDelimiter @('-Matrix', $policy.Matrix) `
-        -Message "$($policy.Path) must resolve source and output metadata through its matrix helper."
-    Assert-HashtableContract `
-        -Blocks $blocks `
-        -Required $policy.Fields `
-        -Message "$($policy.Path) must retain its source-bound matrix provenance."
-    Assert-HashtableContract `
-        -Blocks $blocks `
-        -Required $policy.ConfigFields `
-        -Message "$($policy.Path) must bind each variant's generated Cargo configuration."
-    foreach ($blobPath in $policy.BlobPaths) {
-        $null = Assert-OneCommand `
-            -Commands $policy.Commands `
-            -Name './scripts/get-git-blob-sha256.ps1' `
-            -BeforeDelimiter @('-SourceRoot', '$PWD', '-Revision', '$env:SOURCE_SHA', '-Path', $blobPath) `
-            -Message "$($policy.Path) must bind the Git blob for $blobPath."
-    }
-}
-
-$null = Assert-OneCommand `
-    -Commands $binarySizeCommands `
-    -Name './scripts/measure-windows-binary.ps1' `
-    -BeforeDelimiter @('-ExecutablePath', '$executablePath', '-PdbPath', '$pdbPath', '-DebugSymbolsZipPath', '$symbolsPath', '-OutputPath', '$measurementPath') `
-    -Message 'Binary-size workflow must use the verified binary measurement script.'
-Assert-BinaryGuard `
-    -Blocks $workflowBlocks[$profileBenchmarkPath] `
-    -Left "`$fields['instrumentation_revision']" `
-    -Operator ([Management.Automation.Language.TokenKind]::Cne) `
-    -Right "'profile-workloads-v1'" `
-    -Message 'Profile benchmark must reject a mismatched instrumentation revision.'
-Assert-BinaryGuard `
-    -Blocks $workflowBlocks[$profilePlanningPath] `
-    -Left "`$fields['instrumentation_revision']" `
-    -Operator ([Management.Automation.Language.TokenKind]::Cne) `
-    -Right "'parent-validation-v1'" `
-    -Message 'Profile planning must reject a mismatched instrumentation revision.'
-
 $cargoAssignment = Assert-SingleAssignment `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$cargo' `
@@ -1794,8 +1630,8 @@ Assert-Fails -Action {
 } -ExpectedFragment 'Found 0'
 
 $configFixture = @(New-FixtureBlocks -Script @'
-cargo --config $unmeasuredPath test --release --locked --package darknamer-app --test profile_benchmarks --no-run
-cargo --config $configPath test --config $unmeasuredPath --release --locked --package darknamer-app --test profile_benchmarks --no-run
+cargo --config $unmeasuredPath test --release --locked --package darknamer-app --test rename_windows_backend --no-run
+cargo --config $configPath test --config $unmeasuredPath --release --locked --package darknamer-app --test rename_windows_backend --no-run
 '@)
 $configCommands = @(Get-ExecutableCommands -Blocks $configFixture)
 Assert-Fails -Action {
@@ -1803,7 +1639,7 @@ Assert-Fails -Action {
         -Commands $configCommands `
         -Name 'cargo' `
         -Subcommand 'test' `
-        -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', '--no-run') `
+        -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'rename_windows_backend', '--no-run') `
         -RequiredOptions @{ '--config' = '$configPath' } `
         -Message 'config fixture'
 } -ExpectedFragment 'Found 0'
