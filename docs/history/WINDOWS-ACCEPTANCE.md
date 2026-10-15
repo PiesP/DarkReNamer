@@ -1,8 +1,8 @@
 # Historical Windows acceptance
 
-This document preserves the legacy manual desktop, physical-media, and
-observer procedures that predate the current release gate. It is historical
-reference, not a second release contract.
+This document preserves retired release comparisons, legacy manual desktop,
+physical-media and observer procedures, and completed source-specific GUI
+investigations. It is historical reference, not a second release contract.
 
 The active contract is
 [VM-Automated release validation](../../SAFETY.md#vm-automated-release-validation).
@@ -255,3 +255,84 @@ geometry, color diversity, and whether custom colors were active. Wine cannot
 provide the audited journal handles used by the main application, and its theme
 APIs may fall back to system rendering. The result does not establish Windows
 version, DPI, Forced Colors, main-workbench, or accessibility acceptance.
+
+## Historical focused GUI observations
+
+These source-specific diagnostics are separate from the active
+[fixed performance sample](../../DEVELOPMENT.md#fixed-performance-sample)
+and [icon settlement diagnostic](../../DEVELOPMENT.md#icon-settlement-diagnostic).
+Their original source, executable and tooling pins must be checked before any
+reproduction. They do not establish release acceptance or causal speed claims.
+The commands below came from the
+[immutable pre-move development guide](https://github.com/PiesP/DarkReNamer/blob/0c26bc69856a8c8d6a06ab1698c25f972bfb2998/DEVELOPMENT.md#L1109).
+
+### Focused first-10k-clear observation
+
+Use `focused-10k-clear` only for a separately authorized, single observation of
+the first clear after the ordinary 10,000-row full preview/reset. It retains
+the original source-built product EXE and original bundle manifest unchanged,
+while separately binding the corrected tooling to the current clean checkout.
+Pin both origins before VM contact:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic focused-10k-clear \
+  --preserved-product-bundle-root /absolute/private/original-product-bundle \
+  --expected-original-bundle-sha256 23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e \
+  --expected-product-source-sha 8248c73859e3a3ff0e524fd9448acfe965fa3f68 \
+  --expected-tooling-source-sha <current-clean-tooling-source-sha> \
+  --expected-prepared-application-sha256 06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-focused-clear-attempt
+```
+
+The distinct `focused-10k-clear-v1-1366x768-96-text100` run repeats the original
+30-second idle, 100/1,000/10,000 ordinary rows, four 2,250-row additions,
+single-row preview/reset, and five-row full preview/reset. It records the bound
+product PID and HWND, pre-clear rows, native command result and last-error class,
+post-clear rows, sampler coverage, exact normal exit, and the existing strict
+V1 guest cleanup. It stops after the first successful clear and does not run
+long-path, extension, or cycle phases. The 5-second native command timeout,
+600-second observer limit, one-PNG/32 MiB collection cap, and original fixture
+and disk/journal checks still apply. Failed attempts retain their original raw
+failure and partial observations; later cleanup cannot convert them to success.
+This receipt is an observation, not a full performance comparison or release
+acceptance. The original failed performance receipt stays failed, and the
+focused result cannot supply normal A/B/B/A medians.
+
+### Pre-worker icon settlement baseline
+
+For the pre-worker synchronous source, use the same `icon-settlement`
+diagnostic, V2 owned-resource profile, prepared-bundle pin, display, and two
+fresh fixture phases, but select its separate baseline endpoint explicitly:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic icon-settlement \
+  --icon-endpoint-method synchronous-row-count-upper-bound-v1 \
+  --baseline-product-source-sha b152761010b16ef74e2a3765241a253778b88e0b \
+  --expected-run-source-sha <frozen-tooling-only-commit-sha> \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/native-baseline-bundle \
+  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-icon-baseline-attempt
+```
+
+The baseline has run ID
+`icon-settlement-sync-upper-bound-v1-1366x768-96-text100` and a distinct raw
+scope. Its `synchronous_lookup_completion_upper_bound_ms` equals the existing
+Open-to-UIA-row-count `data_ready_ms`. The pre-worker source finishes synchronous
+Shell icon lookup before adding each row, so RowCount is a source-derived upper
+bound for lookup completion. It does not observe actual icon visibility,
+workers, queues, or joins and emits no status snapshots or fabricated zero
+counters. The shared plan's 100-ms status poll applies only to the async method.
+The baseline method is never inferred when the async status query is
+missing. The command requires the original product reference and the exact
+clean tooling-only run SHA; the prepared EXE hash and source are pinned before
+VM execution. A separate source audit must establish that the tooling-only
+checkout's product Rust, Cargo and toolchain blobs match the original product
+reference; the manifest's asserted reference does not perform that audit.
+Compare the baseline upper bound and candidate observed endpoint descriptively,
+recording their different methods and any censored attempts. These samples do
+not establish a causal or statistical speed claim.
