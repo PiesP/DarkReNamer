@@ -11,6 +11,12 @@ in this history upgrades an old failure, `not-run`, or `review_required` result,
 and the existence of these procedures does not show that any acceptance run
 was completed.
 
+CI for a reviewed documentation-only change may report `pr-gate/windows` as
+successful after an explicit "not required for this change" step. See
+[Documentation-only CI routing](../../DEVELOPMENT.md#documentation-only-ci-routing)
+for the current policy. Such a result supplies no new Windows test, executable,
+or VM acceptance evidence for this history.
+
 ## Retired release-profile comparisons
 
 The release-profile size, CPU micro-workload, and hosted planning comparisons
