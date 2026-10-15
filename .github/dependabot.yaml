@@ -1,9 +1,13 @@
 version: 2
 updates:
+  # Review routine versions weekly; handle relevant advisories and confirmed
+  # compiler/dependency blockers promptly through normal review and validation,
+  # retaining the existing policy for approved dependency-age exceptions.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
       time: "09:00"
       timezone: "Asia/Tokyo"
     cooldown:
@@ -22,7 +26,8 @@ updates:
   - package-ecosystem: "rust-toolchain"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
       time: "09:00"
       timezone: "Asia/Tokyo"
     cooldown:
@@ -36,7 +41,8 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
       time: "09:00"
       timezone: "Asia/Tokyo"
     cooldown:
