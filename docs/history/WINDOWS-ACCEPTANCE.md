@@ -277,7 +277,7 @@ Pin both origins before VM contact:
 ```bash
 python3 -I scripts/run-gui-regression.py \
   --diagnostic focused-10k-clear \
-  --preserved-product-bundle-root /tmp/issue32-bootstrap-baseline-prepared-8248c73 \
+  --preserved-product-bundle-root /absolute/private/original-product-bundle \
   --expected-original-bundle-sha256 23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e \
   --expected-product-source-sha 8248c73859e3a3ff0e524fd9448acfe965fa3f68 \
   --expected-tooling-source-sha <current-clean-tooling-source-sha> \
