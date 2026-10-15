@@ -110,6 +110,37 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
    create a release requirement. Preserve failures and inspect their evidence
    before a corrective change justifies another workload.
 
+### Documentation-only CI routing
+
+CI may use a shorter path only when every change from the protected `master`
+commit to the checked-out PR or merge-queue tree is a modification of an
+existing ordinary file in this reviewed list: `README.ko.md`, `README.ja.md`,
+`docs/USER-GUIDE.md`, `docs/USER-GUIDE.ko.md`, or
+`docs/history/WINDOWS-ACCEPTANCE.md`. These files are linked from other
+documents and checked by the tracked-document inventory. VM evidence tooling
+also hashes tracked blobs for source binding; no current build, runtime, or
+release tool consumes their content as an input. Reassess their consumers before
+expanding the list or adding such a reader. `README.md`, `DEVELOPMENT.md`,
+`DISTRIBUTION.md`, safety and security policy, the document inventory, and
+uncertain documents stay on the full path.
+
+The classifier executes the policy from the protected base. It compares the
+complete trees, including all commits in a PR or merge group; a push compares
+its prior protected commit with the checked-out commit. Additions, deletions,
+renames, mode/type changes, missing history or policy, malformed results, and
+manual runs select the full path. The implementation PR itself takes that full
+path because its workflow and classifier change.
+
+On the documentation path, `pr-gate/quality` still checks the Rust-only source
+and tracked-document inventory. `pr-gate/security` still validates its pinned
+tools and checks fresh advisories and dependency policy. `pr-gate/unit` and
+`pr-gate/windows` report successful steps that state the omitted tests are not
+required for this change; quality also states why Rust, Clippy, and tooling
+were omitted. A green no-op is not evidence that those tests ran. If
+classification fails, all three dependent gates run their original full
+commands. A canceled workflow is not a completed validation result. The
+separate scheduled security workflow is unaffected.
+
 The Rust dependency-audit job in `.github/workflows/security.yaml` runs on its
 weekly schedule and by manual dispatch, including when source is unchanged.
 CI retains the pull-request, push, and merge-group dependency gate. The
