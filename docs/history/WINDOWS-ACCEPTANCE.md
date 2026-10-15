@@ -31,7 +31,8 @@ pre-retirement source at
 `.github/workflows/binary-size-matrix.yaml`,
 `.github/workflows/profile-benchmark-matrix.yaml`, or
 `.github/workflows/profile-planning-matrix.yaml`. That revision also contains
-their `scripts/resolve-source-matrix-metadata.ps1` helper, the
+their `scripts/resolve-source-matrix-metadata.ps1` and
+`scripts/get-git-blob-sha256.ps1` helpers, the
 `crates/darknamer-app/tests/profile_benchmarks.rs` CPU harness, and dedicated
 tooling tests. Use the selected workflow's `workflow_dispatch` inputs and steps
 on a supported Windows runner with a pinned source and toolchain; record fresh
