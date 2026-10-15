@@ -4,6 +4,13 @@ DarkReNamer pins its Rust toolchain in `rust-toolchain.toml`. Run commands from
 the repository root and use the committed lockfile. The project supports three
 different validation environments; none substitutes for the others.
 
+Start with the [Windows gate](#native-windows-development) or
+[Linux/WSL gate](#portable-checks-on-linux-or-wsl), then use
+[focused tooling selections](#tooling-tests) during edits. The
+[routine workflow](#routine-maintenance-workflow) distinguishes required gates
+from optional diagnostics. [VM procedures](#native-tests-in-a-local-hyper-v-vm)
+and [release tooling](#release-tooling) cover their separate handoffs.
+
 ## Production Rust and Win32 code
 
 These are authoring defaults; the [safety model](SAFETY.md),
@@ -120,56 +127,17 @@ diagnostics in the job log without copying raw output into the Markdown summary.
 
 ### Why both Rust dependency scanners remain
 
-The investigation in [issue #94](https://github.com/PiesP/DarkReNamer/issues/94)
-retains both scanners. The pins in CI, the scheduled audit, and the verified
-release-tool manifest define the supported versions. At the investigation
-baseline, cargo-audit 0.22.2 inspected the entire lockfile, while cargo-deny
-0.20.2 inspected the selected dependency graph. A clean product scan does not
-establish equivalence between those scopes.
-
-Real scanner controls used isolated metadata-only workspaces, a Git-backed
-synthetic advisory database, and an affected/unaffected version pair. No
-dependency code was executed and the product lockfile was unchanged. The
-measured reference behavior was:
-
-| Control | `cargo-audit audit --deny warnings` | Existing cargo-deny policy |
-| --- | --- | --- |
-| Clean / unaffected version | Exit 0 | Exit 0 |
-| Direct, transitive, build, dev, and optional dependency vulnerability | Exit 1 | Exit 1 with the configured all-features graph |
-| macOS-only dependency vulnerability | Exit 1 | Exit 0 with the configured Windows/Linux targets |
-| Direct / transitive unmaintained advisory | Exit 1 | Exit 1 |
-| Direct / transitive unsound advisory | Exit 1 / 1 | Exit 1 / 0 with the default workspace-only scope |
-| Direct / transitive notice advisory | Exit 0 with a structured warning | Exit 1; the scheduled audit adapter also rejects audit's nonempty warning report |
-| Yanked `slab` 0.4.10, with available registry data | Exit 1 | Exit 0 with a `yanked` warning |
-| License, dependency-ban, and source violations | Outside audit's policy | Nonzero; existing non-advisory warnings remain warnings |
-| Missing advisory data / failed advisory fetch | Nonzero | Nonzero |
-
-Detector controls used `--no-fetch --no-yanked` for audit and `--offline` for
-deny, pointing both tools at the same controlled database. Yank controls
-enabled registry checking separately. The direct vulnerability fixture used
-`itoa = "=1.0.18"`, a synthetic advisory patched at `>= 1.0.19`, and a passing
-control patched at `>= 1.0.18`; the target fixture placed the same dependency
-under `cfg(target_os = "macos")`. These advisories describe test inputs, not
-vulnerabilities in itoa.
-
-Removing the target filter catches the macOS control, and explicit unsound/yank
-settings could close those individual gaps. They do not provide a whole-lockfile
-scanner: in a separate disconnected-entry control, audit rejected the advisory
-in the retained registry entry; ordinary deny pruned that entry during Cargo
-metadata resolution and exited 0. `--locked` rejected the stale lockfile as an
-operational failure instead of scanning it. Changing all license/ban/source
-graph selection or promoting every warning to an error would also alter
-unrelated policy. Recreating lockfile auditing in a custom adapter would add
-maintenance beyond the proposed tool-count reduction.
-
-Unavailable offline registry data is an additional limitation, not a passing
-yank check: audit printed an index error but exited 0, and deny emitted an
-`index-failure` warning and exited 0. The investigation does not claim that
-either raw CLI guarantees complete offline intelligence. Retain fresh online
-checks and report unavailable data separately. Existing entrypoint regressions
-cover wrong/missing tool versions, malformed reports, findings, and nonzero
-tool/data failures; neither interrupted execution nor missing required results
-is consolidation evidence.
+The [completed #94 scanner investigation](https://github.com/PiesP/DarkReNamer/issues/94#issuecomment-6140820886)
+retains both cargo-audit and cargo-deny. Its complete controls and failure
+receipts remain in that closeout and in the
+[immutable investigation-era source](https://github.com/PiesP/DarkReNamer/blob/599947b878da65ae0a750e8582e6f96f107ff195/DEVELOPMENT.md#L71).
+The pins in CI, the scheduled audit, and the verified release-tool manifest
+define the supported versions. Audit inspected the complete, unpruned lockfile;
+deny inspected a selected dependency graph. Their target, advisory, and yank
+results therefore differ. A clean product scan does not prove equivalent scope.
+Keep the scheduled adapter's fresh-data and registry-failure checks above:
+offline registry-index failures can exit zero in either raw CLI, so unavailable
+data must not become a clean result.
 
 Revisit consolidation when a supported cargo-deny interface can inspect the
 complete, unpruned lockfile independently of the policy graph. At that time,
@@ -236,25 +204,15 @@ The retired standalone acceptance tools and their schema are available only at
 the immutable revision linked in
 [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md).
 
-## Tooling command ownership (issue #57, base `b691535b78c350d6fcbdb0afa73489e87c63bc23`)
+## Tooling command ownership
 
 Python owns portable planning, parsing and verification; PowerShell owns host,
 guest, Hyper-V, UI Automation and Windows release integration. These are owners,
-not interchangeable runtimes. At the issue base, the tracked `scripts/` tree contained
-67 Python, 76 PowerShell (`.ps1`/`.psm1`) and two Bash files, including tests and
-fixtures. The nine workflow YAML files also contain handwritten Bash/default
-shell and PowerShell steps; moving those lines into YAML does not remove their
-language. Ten PowerShell module files contain embedded C# (`Add-Type`):
-`controller-entry.psm1`, `guest-native.ps1`, `guest-process.ps1`,
-`guest-runtime.ps1`, `recovery-journal.ps1`, `recovery-native.ps1`,
-`recovery-scenarios.ps1`, `runtimebroker-observer.ps1`, `ui-application.ps1`
-and `ui-native.ps1`. This is a file count, not a count of C# blocks.
-The C# is a separate CLR/native-interop requirement, not PowerShell syntax or
-generated JavaScript. Product Rust and workflow configuration are outside these
-script-language counts. At issue #57 closeout, the source-metadata and
-release-file extractions each added one PowerShell helper and registered test.
-The release-file extraction removed its inline producer. The later
-release-profile experiment retirement is recorded in
+not interchangeable runtimes. Embedded C# remains a CLR/native-interop
+exception. The completed file counts, language inventory and extraction
+decisions belong to [issue #57](https://github.com/PiesP/DarkReNamer/issues/57)
+and its [immutable implementation-era source](https://github.com/PiesP/DarkReNamer/blob/086d1044d07b2ec5a42b21b5bb4ddc435265d55e/DEVELOPMENT.md#L120).
+The release-profile experiment retirement is recorded in
 [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#retired-release-profile-comparisons).
 
 The table names public command families and their effects; the complete test
@@ -308,25 +266,16 @@ transfers frozen verified records to the guest. Preserve these paths together
 when changing a wrapper, role or bundle; run both bootstrap tests and the
 checkout/bundle negative fixtures before any Windows campaign.
 
-The three large review candidates have different ownership. `controller-entry.psm1`
-is the sole exported `Invoke-DrWindowsVmController` implementation, called by
-`run-windows-vm-tests.ps1`; it composes verified contracts, transport, poll and
-rescue definitions while owning session/task state, output inventories and
-failure cleanup. Observer, VM and owned-root tests also inspect it directly.
-Extraction of independently changing inventory/cleanup policy is plausible,
-but requires a new bundle role/pin plus focused failure-order and Windows
-cleanup evidence; size alone does not justify a move. `evidence/gui.py` is the
-`evidence-gui` role behind `validate-gui-regression-evidence.py`; GUI evidence
-tests call its validators. It combines bounded file/JSON loading, source and
-transport checks, and distinct text, appearance, performance and icon verdicts.
-Scenario-specific verdicts are possible later extraction seams, while common
-format decoding already lives in `formats`/`evidence` modules; preserve the
-independent verifier and its cumulative bounds. `ui-context-scenarios.ps1` is
-the verified UI observer role called by `ui-regression.ps1`; it owns context,
-standard, appearance, performance and icon scenario definitions and capture
-steps. Its scenario families are plausible seams only when a behavior change
-needs independent maintenance and Windows UI evidence; do not split the shared
-session/capture state into forwarding files.
+The completed review in [issue #57](https://github.com/PiesP/DarkReNamer/issues/57)
+retained `controller-entry.psm1`, `evidence/gui.py`, and
+`ui-context-scenarios.ps1` as cohesive units. Their responsibility and caller
+analysis is preserved in the
+[immutable review text](https://github.com/PiesP/DarkReNamer/blob/086d1044d07b2ec5a42b21b5bb4ddc435265d55e/DEVELOPMENT.md#L192).
+Revisit a split only when inventory/cleanup policy, a verdict family, or a UI
+scenario needs independent maintenance. Preserve controller failure order,
+independent GUI evidence verification, and shared observer session/capture
+state. Update the authenticated role closure and run focused fixtures plus any
+affected Windows cleanup or UI evidence.
 
 The Bash gallery remains an explicit exception. Its public wrapper is called
 from the historical Windows acceptance documentation, its implementation runs a
@@ -348,16 +297,6 @@ neither is a separate portable planner or serializer. Keep those ABI and cleanup
 operations together. Its PowerShell Windows-root checks enforce the guest's
 native filesystem contract; forwarding them to Python would add a guest runtime
 without removing that contract.
-
-The three large candidates are retained as cohesive units for this change.
-Controller inventory/cleanup is coupled to its remote session and error order;
-GUI verdict families share bounded decoding/source checks while remaining
-independent from their producers; UI scenarios share one observer session and
-capture state. Existing `formats` and `vm.connection` modules already own shared
-portable decoding and connection mechanics. Revisit a split when a specific
-scenario or cleanup policy needs independent maintenance, then update the
-authenticated role closure and run its focused fixtures plus any affected
-Windows cleanup/UI evidence.
 
 ## Authenticated tooling modules
 
@@ -1108,37 +1047,12 @@ or physical-media acceptance.
 
 ### Focused first-10k-clear diagnostic
 
-Use `focused-10k-clear` only for a separately authorized, single observation of
-the first clear after the ordinary 10,000-row full preview/reset. It retains
-the original source-built product EXE and original bundle manifest unchanged,
-while separately binding the corrected tooling to the current clean checkout.
-Pin both origins before VM contact:
-
-```bash
-python3 -I scripts/run-gui-regression.py \
-  --diagnostic focused-10k-clear \
-  --preserved-product-bundle-root /tmp/issue32-bootstrap-baseline-prepared-8248c73 \
-  --expected-original-bundle-sha256 23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e \
-  --expected-product-source-sha 8248c73859e3a3ff0e524fd9448acfe965fa3f68 \
-  --expected-tooling-source-sha <current-clean-tooling-source-sha> \
-  --expected-prepared-application-sha256 06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f \
-  --connection-profile /absolute/private/connection-profile.json \
-  --output-root /absolute/private/new-focused-clear-attempt
-```
-
-The distinct `focused-10k-clear-v1-1366x768-96-text100` run repeats the original
-30-second idle, 100/1,000/10,000 ordinary rows, four 2,250-row additions,
-single-row preview/reset, and five-row full preview/reset. It records the bound
-product PID and HWND, pre-clear rows, native command result and last-error class,
-post-clear rows, sampler coverage, exact normal exit, and the existing strict
-V1 guest cleanup. It stops after the first successful clear and does not run
-long-path, extension, or cycle phases. The 5-second native command timeout,
-600-second observer limit, one-PNG/32 MiB collection cap, and original fixture
-and disk/journal checks still apply. Failed attempts retain their original raw
-failure and partial observations; later cleanup cannot convert them to success.
-This receipt is an observation, not a full performance comparison or release
-acceptance. The original failed performance receipt stays failed, and the
-focused result cannot supply normal A/B/B/A medians.
+The first-clear replay for the original issue #32 bundle is a source-bound,
+single-observation diagnostic. Its frozen bundle pins, command and receipt limits
+are in [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
+A new investigation needs its own authorization and clean source/tooling bindings;
+failed or partial attempts remain failed. This observation cannot replace the
+fixed performance sample or a release verdict.
 
 ### Icon settlement diagnostic
 
@@ -1178,40 +1092,15 @@ fast close may retire the HWND before an external joined-state sample; such a
 receipt labels worker join as a source-contract inference. Controlled native
 close tests provide the separate direct join proof.
 
-For the pre-worker synchronous source, use the same `icon-settlement`
-diagnostic, V2 owned-resource profile, prepared-bundle pin, display, and two
-fresh fixture phases, but select its separate baseline endpoint explicitly:
-
-```bash
-python3 -I scripts/run-gui-regression.py \
-  --diagnostic icon-settlement \
-  --icon-endpoint-method synchronous-row-count-upper-bound-v1 \
-  --baseline-product-source-sha b152761010b16ef74e2a3765241a253778b88e0b \
-  --expected-run-source-sha <frozen-tooling-only-commit-sha> \
-  --acceptance-profile-id vm-automated-v2-owned-resources \
-  --prepared-bundle-root /absolute/private/native-baseline-bundle \
-  --expected-prepared-application-sha256 <frozen-baseline-application-sha256> \
-  --connection-profile /absolute/private/connection-profile.json \
-  --output-root /absolute/private/new-icon-baseline-attempt
-```
-
-The baseline has run ID
-`icon-settlement-sync-upper-bound-v1-1366x768-96-text100` and a distinct raw
-scope. Its `synchronous_lookup_completion_upper_bound_ms` equals the existing
-Open-to-UIA-row-count `data_ready_ms`. The pre-worker source finishes synchronous
-Shell icon lookup before adding each row, so RowCount is a source-derived upper
-bound for lookup completion. It does not observe actual icon visibility,
-workers, queues, or joins and emits no status snapshots or fabricated zero
-counters. The shared plan's 100-ms status poll applies only to the async method.
-The baseline method is never inferred when the async status query is
-missing. The command requires the original product reference and the exact
-clean tooling-only run SHA; the prepared EXE hash and source are pinned before
-VM execution. A separate source audit must establish that the tooling-only
-checkout's product Rust, Cargo and toolchain blobs match the original product
-reference; the manifest's asserted reference does not perform that audit.
-Compare the baseline upper bound and candidate observed endpoint descriptively,
-recording their different methods and any censored attempts. These samples do
-not establish a causal or statistical speed claim.
+The pre-worker synchronous baseline uses a separate row-count upper-bound
+method. Its frozen source/bundle invocation and distinct evidence limits are in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#pre-worker-icon-settlement-baseline).
+Row count bounds synchronous lookup completion; it does not observe actual icon
+visibility, workers, queues or joins. Compare it with the candidate's observed
+async endpoint only descriptively, recording both methods and censored attempts.
+A new comparison must bind both source and prepared EXE before VM execution and
+audit product Rust, Cargo and toolchain blob identity in any tooling-only
+checkout; a manifest assertion alone does not prove it.
 
 Keep both endpoint methods separate from the unchanged A/B/B/A
 `performance-sample-v2` runs; the async settlement wait changes later workload and cache
