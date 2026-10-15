@@ -35,9 +35,9 @@ def workflow_run_block(step_name: str) -> str:
     return "\n".join(line[10:] for line in match.group("body").splitlines()) + "\n"
 
 
-def git(root: Path, *args: str) -> str:
+def git(root: Path, *args: str, env: dict[str, str]) -> str:
     return subprocess.check_output(
-        ("git", *args), cwd=root, stderr=subprocess.DEVNULL, text=True
+        ("git", *args), cwd=root, env=env, stderr=subprocess.DEVNULL, text=True
     ).strip()
 
 
@@ -70,11 +70,22 @@ class GitHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="darkrenamer-ci-docs-")
         self.addCleanup(self.temporary.cleanup)
+        hooks = Path(self.temporary.name) / "hooks"
+        hooks.mkdir()
+        templates = Path(self.temporary.name) / "templates"
+        templates.mkdir()
+        self.git_env = {key: value for key, value in os.environ.items()
+                        if not key.startswith("GIT_CONFIG_") and key not in
+                        ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+        self.git_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                            GIT_TEMPLATE_DIR=str(templates), GIT_CONFIG_COUNT="1",
+                            GIT_CONFIG_KEY_0="core.hooksPath",
+                            GIT_CONFIG_VALUE_0=str(hooks))
         self.root = Path(self.temporary.name) / "checkout"
         self.root.mkdir()
-        git(self.root, "init", "-b", "master")
-        git(self.root, "config", "user.email", "fixture@example.invalid")
-        git(self.root, "config", "user.name", "CI fixture")
+        self.git("init", "-b", "master")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "user.name", "CI fixture")
         (self.root / "scripts").mkdir()
         (self.root / "docs").mkdir()
         (self.root / "scripts" / CLASSIFIER.name).write_bytes(CLASSIFIER.read_bytes())
@@ -83,14 +94,41 @@ class GitHistoryTests(unittest.TestCase):
         self.base = self.commit()
         self.origin = Path(self.temporary.name) / "origin.git"
         subprocess.run(("git", "init", "--bare", str(self.origin)), check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        git(self.root, "remote", "add", "origin", str(self.origin))
-        git(self.root, "push", "origin", "master")
+                       env=self.git_env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        self.git("remote", "add", "origin", str(self.origin))
+        self.git("push", "origin", "master")
+
+    def git(self, *args: str) -> str:
+        return git(self.root, *args, env=self.git_env)
+
+    def reset_to_base(self) -> None:
+        self.git("reset", "--hard", self.base)
+        self.git("clean", "-fd")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def raw_diff(self, head: str) -> bytes:
+        return subprocess.check_output(
+            ("git", "diff", "--raw", "-z", "--no-renames", "--abbrev=40",
+             self.base, head, "--"), cwd=self.root, env=self.git_env,
+        )
+
+    def assert_rejected_ordinary_path(self, path: str) -> None:
+        self.reset_to_base()
+        if not (self.root / path).exists():
+            self.base = self.edit(path, "initial\n")
+            self.git("push", "origin", "master")
+        head = self.edit(path, "changed\n")
+        expected = (rb":100644 100644 [0-9a-f]{40} [0-9a-f]{40} M\0"
+                    + re.escape(path.encode("utf-8")) + rb"\0")
+        self.assertIsNotNone(re.fullmatch(expected, self.raw_diff(head)))
+        self.assertEqual(self.decide("pull_request", head), "docs_only=false")
 
     def commit(self) -> str:
-        git(self.root, "add", "-A")
-        git(self.root, "commit", "-m", "fixture")
-        return git(self.root, "rev-parse", "HEAD")
+        self.git("add", "-A")
+        self.git("commit", "-m", "fixture")
+        return self.git("rev-parse", "HEAD")
 
     def edit(self, path: str, content: str) -> str:
         target = self.root / path
@@ -101,7 +139,7 @@ class GitHistoryTests(unittest.TestCase):
     def decide(self, event: str, head: str, before: str = "") -> str:
         output = Path(self.temporary.name) / "output"
         output.write_text("")
-        env = dict(os.environ, EVENT_NAME=event, EVENT_SHA=head,
+        env = dict(self.git_env, EVENT_NAME=event, EVENT_SHA=head,
                    EVENT_BEFORE=before, RUNNER_TEMP=self.temporary.name,
                    GITHUB_OUTPUT=str(output))
         subprocess.run(("bash", "-e"), input=workflow_run_block("Classify with protected policy"),
@@ -109,42 +147,71 @@ class GitHistoryTests(unittest.TestCase):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return output.read_text().strip()
 
-    def test_allowed_document_and_mixed_multicommit(self) -> None:
+    def test_allowed_document_multicommit_and_trusted_merge_group(self) -> None:
         head = self.edit("docs/USER-GUIDE.md", "first\n")
         self.assertEqual(self.decide("pull_request", head), "docs_only=true")
         self.assertEqual(self.decide("push", head, self.base), "docs_only=true")
         head = self.edit("docs/USER-GUIDE.md", "second\n")
         self.assertEqual(self.decide("merge_group", head), "docs_only=true")
+
+    def test_intentional_mixed_multicommit(self) -> None:
+        self.edit("docs/USER-GUIDE.md", "allowed first commit\n")
+        head = self.edit("README.md", "disallowed second commit\n")
+        self.assertEqual(self.decide("pull_request", head), "docs_only=false")
+        self.assertEqual(self.decide("merge_group", head), "docs_only=false")
+
+    def test_disallowed_paths_select_full_independently(self) -> None:
         for path in ("README.md", "DEVELOPMENT.md", "DISTRIBUTION.md",
                      ".github/workflows/ci.yaml", "src/main.rs", "docs/unknown.md"):
             with self.subTest(path=path):
-                head = self.edit(path, "changed\n")
-                self.assertEqual(self.decide("pull_request", head), "docs_only=false")
+                self.assert_rejected_ordinary_path(path)
 
-    def test_tree_operations_and_unusual_paths_select_full(self) -> None:
+    def test_deletion_selects_full(self) -> None:
         path = self.root / "docs" / "USER-GUIDE.md"
         path.unlink()
         self.assertEqual(self.decide("pull_request", self.commit()), "docs_only=false")
-        for name in ("README.ko.md", "docs/space name.md", "docs/new\nline.md",
-                     "docs/名前.md", "-flag.md"):
-            head = self.edit(name, "new\n")
-            self.assertEqual(self.decide("pull_request", head), "docs_only=false")
 
-    def test_mode_rename_symlink_and_gitlink_select_full(self) -> None:
+    def test_allowlisted_additions_select_full_independently(self) -> None:
+        for path in ("docs/USER-GUIDE.ko.md", "README.ko.md"):
+            with self.subTest(path=path):
+                self.reset_to_base()
+                head = self.edit(path, "new\n")
+                expected = (rb":000000 100644 0{40} [0-9a-f]{40} A\0"
+                            + re.escape(path.encode("utf-8")) + rb"\0")
+                self.assertIsNotNone(re.fullmatch(expected, self.raw_diff(head)))
+                self.assertEqual(self.decide("pull_request", head), "docs_only=false")
+
+    def test_unusual_paths_select_full_independently(self) -> None:
+        for name in ("docs/space name.md", "docs/new\nline.md",
+                     "docs/名前.md", "-flag.md"):
+            with self.subTest(path=name):
+                self.assert_rejected_ordinary_path(name)
+
+    def test_executable_mode_selects_full(self) -> None:
         path = self.root / "docs" / "USER-GUIDE.md"
         path.chmod(0o755)
         self.assertEqual(self.decide("pull_request", self.commit()), "docs_only=false")
-        git(self.root, "mv", "docs/USER-GUIDE.md", "docs/USER-GUIDE.ko.md")
+
+    def test_allowlisted_rename_selects_full(self) -> None:
+        self.git("mv", "docs/USER-GUIDE.md", "docs/USER-GUIDE.ko.md")
         self.assertEqual(self.decide("pull_request", self.commit()), "docs_only=false")
-        path = self.root / "README.md"
+
+    def test_allowlisted_symlink_selects_full(self) -> None:
+        path = self.root / "docs" / "USER-GUIDE.md"
         path.unlink()
-        path.symlink_to("docs/USER-GUIDE.ko.md")
-        self.assertEqual(self.decide("pull_request", self.commit()), "docs_only=false")
-        git(self.root, "update-index", "--add", "--cacheinfo", "160000", self.base,
-            "external-module")
-        git(self.root, "commit", "-m", "fixture gitlink")
+        path.symlink_to("../README.md")
+        head = self.commit()
+        raw = self.raw_diff(head)
+        self.assertRegex(raw, rb"^:100644 120000 [0-9a-f]{40} [0-9a-f]{40} T\0docs/USER-GUIDE\.md\0$")
+        self.assertEqual(self.decide("pull_request", head), "docs_only=false")
+
+    def test_allowlisted_gitlink_selects_full(self) -> None:
+        (self.root / "docs" / "USER-GUIDE.md").unlink()
+        self.git("update-index", "--add", "--cacheinfo", "160000", self.base,
+                 "docs/USER-GUIDE.md")
+        self.git("commit", "-m", "fixture gitlink")
         self.assertEqual(
-            self.decide("pull_request", git(self.root, "rev-parse", "HEAD")),
+            self.decide("pull_request", self.git("rev-parse", "HEAD")),
             "docs_only=false",
         )
 
@@ -159,18 +226,18 @@ class GitHistoryTests(unittest.TestCase):
         self.assertEqual(self.decide("unexpected", head), "docs_only=false")
         self.assertEqual(self.decide("push", head, "0" * 40), "docs_only=false")
         self.assertEqual(self.decide("pull_request", self.base), "docs_only=false")
-        git(self.root, "checkout", "--orphan", "unrelated")
+        self.git("checkout", "--orphan", "unrelated")
         (self.root / "docs" / "USER-GUIDE.md").write_text("orphan\n")
         orphan = self.commit()
         self.assertEqual(self.decide("merge_group", orphan), "docs_only=false")
 
     def test_missing_trusted_helper_selects_full(self) -> None:
-        git(self.root, "checkout", "--orphan", "pre-rollout")
-        git(self.root, "rm", "-rf", ".")
+        self.git("checkout", "--orphan", "pre-rollout")
+        self.git("rm", "-rf", ".")
         (self.root / "docs").mkdir(exist_ok=True)
         (self.root / "docs" / "USER-GUIDE.md").write_text("before\n")
         prior = self.commit()
-        git(self.root, "checkout", "-b", "trial")
+        self.git("checkout", "-b", "trial")
         head = self.edit("docs/USER-GUIDE.md", "after\n")
         self.assertEqual(self.decide("push", head, prior), "docs_only=false")
 
@@ -180,7 +247,7 @@ class GitHistoryTests(unittest.TestCase):
                        "raise RuntimeError('failed')\n"):
             with self.subTest(source=source):
                 base = self.edit("scripts/classify-ci-docs.py", source)
-                git(self.root, "push", "origin", "master")
+                self.git("push", "origin", "master")
                 head = self.edit("docs/USER-GUIDE.md", f"head {base}\n")
                 self.assertEqual(self.decide("pull_request", head), "docs_only=false")
 
@@ -191,7 +258,8 @@ class GitHistoryTests(unittest.TestCase):
         (self.root / "config" / "tracked-documents.txt").write_text("README.md\n")
         result = subprocess.run(
             ("bash", "-e"), input=workflow_run_block("Enforce the Rust-only source tree"),
-            text=True, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=self.root, env=self.git_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("Tracked documentation differs", result.stderr)
