@@ -745,8 +745,10 @@ def managed_desktop(args, evidence_root=None):
             raise RuntimeError('Desktop helper did not confirm session cleanup.')
 
 
-def run_controller(root, args, defaults=None, pwsh=None):
-    output = root if args.task_kind == 'core' else root / 'observer-output'
+def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
+                           suite_timeout=CONTROLLER_SUITE_TIMEOUT_SECONDS,
+                           stdout=None, stderr=None):
+    """Run one exact controller through managed closure and failure preservation."""
     receipt_path = output / 'owned-cleanup-strict-failure-preservation.json'
     command = None
     process = None
@@ -768,9 +770,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
 
     try:
         with managed_desktop(args, root) as desktop:
-            command = controller_invocation(root, args, defaults, pwsh,
-                                            desktop['expectedGuestSid'] if desktop else None)
-            cwd = root if args.ssh_host else Path('/mnt/c')
+            command = command_for_desktop(desktop)
             environment = (host_tools.child_environment() if args.ssh_host
                            else os.environ.copy())
             environment.pop('DR_VM_OWNED_CLEANUP_HANDSHAKE', None)
@@ -781,13 +781,9 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     'sid': desktop['expectedGuestSid'],
                 }
                 environment['DR_VM_OWNED_CLEANUP_HANDSHAKE'] = json.dumps(handshake, separators=(',', ':'))
-            process = subprocess.Popen(command, cwd=cwd, text=True, env=environment)
-            # The controller's default whole-suite budget is 2400 seconds; the
-            # allowance covers natural OS-process exit and evidence collection.
-            suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
-                                    getattr(args, 'focused_icon_tests', False) or
-                                    getattr(args, 'focused_refresh_tests', False))
-                             else CONTROLLER_SUITE_TIMEOUT_SECONDS)
+            streams = {key: value for key, value in (('stdout', stdout), ('stderr', stderr))
+                       if value is not None}
+            process = subprocess.Popen(command, cwd=cwd, text=True, env=environment, **streams)
             deadline = (time.monotonic() + suite_timeout +
                         CONTROLLER_CLEANUP_ALLOWANCE_SECONDS)
             while process.poll() is None:
@@ -851,16 +847,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
             os.link(temporary, signal_path)
             temporary.unlink()
         code = reap(300)
-        if code:
-            raise subprocess.CalledProcessError(code, command)
-        if (desktop and args.task_kind == 'core' and
-                not getattr(args, 'profile_refresh_stages', False) and
-                not getattr(args, 'focused_icon_tests', False) and
-                not getattr(args, 'focused_refresh_tests', False)):
-            result = read_json_strict(
-                root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
-            if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
-                raise ValueError('Production window DPI differs from the requested RDP scale.')
+        return subprocess.CompletedProcess(command, code), desktop
     except BaseException:
         if process is not None and process.poll() is None:
             try:
@@ -868,6 +855,30 @@ def run_controller(root, args, defaults=None, pwsh=None):
             except Exception:
                 pass
         raise
+
+
+def run_controller(root, args, defaults=None, pwsh=None):
+    output = root if args.task_kind == 'core' else root / 'observer-output'
+    suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
+                            getattr(args, 'focused_icon_tests', False) or
+                            getattr(args, 'focused_refresh_tests', False))
+                     else CONTROLLER_SUITE_TIMEOUT_SECONDS)
+    completed, desktop = run_managed_controller(
+        root, args,
+        lambda lease: controller_invocation(
+            root, args, defaults, pwsh, lease['expectedGuestSid'] if lease else None),
+        output=output, cwd=root if args.ssh_host else Path('/mnt/c'),
+        suite_timeout=suite_timeout,
+    )
+    if completed.returncode:
+        raise subprocess.CalledProcessError(completed.returncode, completed.args)
+    if (desktop and args.task_kind == 'core' and
+            not getattr(args, 'profile_refresh_stages', False) and
+            not getattr(args, 'focused_icon_tests', False) and
+            not getattr(args, 'focused_refresh_tests', False)):
+        result = read_json_strict(root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
+        if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
+            raise ValueError('Production window DPI differs from the requested RDP scale.')
 
 
 def test_artifacts(messages):

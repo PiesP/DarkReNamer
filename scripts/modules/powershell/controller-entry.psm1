@@ -6834,7 +6834,11 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $ownedHandshake = $null
             try {
                 $binding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE | ConvertFrom-Json -ErrorAction Stop
-                $pendingLease = Get-Content -LiteralPath (Join-Path $BundleRoot 'desktop-lease.json') `
+                $pendingLeasePath = Join-Path $BundleRoot 'desktop-lease.json'
+                if ($transportOutputRoot -cne $BundleRoot) {
+                    $pendingLeasePath = Join-Path (Split-Path -Parent $transportOutputRoot) 'desktop-lease.json'
+                }
+                $pendingLease = Get-Content -LiteralPath $pendingLeasePath `
                     -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($binding.nonce -cmatch '^[0-9a-f]{32}$' -and
                     $binding.lease_id -cmatch '^[0-9a-f]{32}$' -and

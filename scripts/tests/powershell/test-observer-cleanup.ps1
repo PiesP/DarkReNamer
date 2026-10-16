@@ -1402,6 +1402,83 @@ try {
         }
     }
 
+    # Recovery and GUI own separate module roles with the same local function name.
+    # Exercise the GUI definition through its maintained module source.
+    & {
+    $uiSource = Join-Path $PSScriptRoot '../../modules/powershell/ui-application.ps1'
+    $uiTokens = $null; $uiErrors = $null
+    $uiAst = [Management.Automation.Language.Parser]::ParseFile($uiSource, [ref]$uiTokens, [ref]$uiErrors)
+    $uiDefinition = @($uiAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Stop-AndDisposeAcceptanceOwnedProcess'
+    }, $true))
+    if ($uiErrors.Count -or $uiDefinition.Count -ne 1) {
+        throw 'GUI Job cleanup production function is not unique.'
+    }
+    . ([scriptblock]::Create($uiDefinition[0].Extent.Text))
+
+    # The GUI observer's failure cleanup must use the native, exact-primary Job
+    # termination receipt. Generic Job termination cannot prove the PID or exit code.
+    foreach ($mode in @('verified', 'unverified')) {
+        $process = [pscustomobject]@{ Id = 4242; HasExited = $false; disposed = 0; job = $null }
+        $process | Add-Member ScriptMethod Refresh {}
+        $process | Add-Member ScriptMethod WaitForExit {
+            param($milliseconds)
+            if ($this.job.stopped) { $this.HasExited = $true }
+            return $this.HasExited
+        }
+        $process | Add-Member ScriptMethod Dispose { $this.disposed++ }
+        $owner = [pscustomobject]@{ mode = $mode; stopped = $false; verified_calls = 0; generic_calls = 0 }
+        $owner | Add-Member ScriptProperty ActiveProcessCount { if ($this.stopped) { 0 } else { 1 } }
+        $owner | Add-Member ScriptMethod TerminateVerifiedSingleProcess {
+            param($expectedProcessId)
+            $this.verified_calls++
+            if ($expectedProcessId -ne 4242) { throw 'Wrong retained primary PID.' }
+            if ($this.mode -ceq 'unverified') { throw 'Exact Job membership unavailable.' }
+            $this.stopped = $true
+            [pscustomobject]@{ ProcessId = 4242; ActiveProcesses = 1; TotalProcesses = 1; ExitCode = 5678 }
+        }
+        $owner | Add-Member ScriptMethod Terminate { param($exitCode) $this.generic_calls++; $this.stopped = $true }
+        $owner | Add-Member ScriptMethod WaitForEmpty { param($milliseconds) return $this.stopped }
+        $owner | Add-Member ScriptMethod CloseJob { return $true }
+        $owner | Add-Member ScriptMethod WaitForCapture { param($milliseconds) }
+        $process.job = $owner
+        $state = [pscustomobject]@{
+            process = $process; owner = $owner; process_start_time_utc_ticks = '123456789'
+            job_closed = $false; job_empty = $false; job_capture_complete = $false
+            job_cleanup_error = $null; job_had_survivors = $false
+            job_forced_termination = $false; job_active_processes_at_primary_exit = $null
+            job_active_processes_at_close = $null; job_active_processes_at_stop = $null
+            job_active_process_ids_at_stop = @(); job_total_processes_at_stop = $null
+            job_primary_process_active_at_stop = $null; job_termination_exit_code = $null
+            job_cleanup_recorded = $false; job_cleanup_record = $null
+        }
+        if ($mode -ceq 'verified') {
+            Stop-AndDisposeAcceptanceOwnedProcess -Owned $state
+            $receipt = $state.job_cleanup_record
+            if ($receipt.status -cne 'clean' -or -not $receipt.forced_termination -or
+                $receipt.active_processes_at_stop -ne 1 -or
+                @($receipt.active_process_ids_at_stop).Count -ne 1 -or
+                $receipt.active_process_ids_at_stop[0] -ne 4242 -or
+                $receipt.total_processes_at_stop -ne 1 -or
+                $receipt.primary_process_active_at_stop -ne $true -or
+                $receipt.termination_exit_code -ne 5678 -or
+                $owner.verified_calls -ne 1 -or $owner.generic_calls -ne 0) {
+                throw 'GUI failure cleanup lost the exact native Job termination receipt.'
+            }
+        }
+        else {
+            Assert-Fails { Stop-AndDisposeAcceptanceOwnedProcess -Owned $state } 'did not close cleanly'
+            if ($owner.verified_calls -ne 1 -or $state.job_cleanup_record.status -cne 'failed' -or
+                $state.job_cleanup_record.error -notlike '*Exact Job membership unavailable*' -or
+                $null -ne $state.job_cleanup_record.termination_exit_code) {
+                throw 'Unverified native termination was incorrectly accepted or fabricated.'
+            }
+        }
+        if ($process.disposed -ne 1) { throw 'GUI failure cleanup did not dispose its primary process.' }
+    }
+    }
+
     $initial = foreach ($index in 1..3) {
         [pscustomobject]@{
             name = if ($index -eq 3) { 'sentinel.bin' } else { "$index.txt" }

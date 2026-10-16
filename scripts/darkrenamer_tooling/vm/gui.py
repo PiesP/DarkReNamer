@@ -1043,6 +1043,8 @@ def runtime_args(profile: dict, run: dict):
         desktop_scale=run["dpi"] * 100 // 96,
         desktop_width=run["width"],
         desktop_height=run["height"],
+        acceptance_profile_id=run.get("acceptance_profile_id", V1_PROFILE_ID),
+        acceptance_profile_sha256=run.get("acceptance_profile_sha256"),
     )
 
 
@@ -1289,22 +1291,22 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
     desktop_restored = False
     controller_exit = None
     controller_logs_bounded = True
+    summary_errors = []
     controller_stdout = run_root / "controller.stdout.txt"
     controller_stderr = run_root / "controller.stderr.txt"
     try:
         with controller_stdout.open("x", encoding="utf-8") as stdout, \
                 controller_stderr.open("x", encoding="utf-8") as stderr:
-            with native_runner.managed_desktop(runtime_args(profile, run)) as lease:
-                completed = subprocess.run(
-                    controller_command(repo, bundle, run_root, run, profile, lease),
-                    cwd=repo,
-                    env=host_tools.child_environment(),
-                    text=True,
-                    stdout=stdout,
-                    stderr=stderr,
-                    check=False,
-                )
-                controller_exit = completed.returncode
+            suite_timeout = (1200 if run["mode"] in {
+                "appearance-pair", ICON_SETTLEMENT_MODE, "performance-sample", FOCUSED_CLEAR_MODE,
+            } else launcher.CONTROLLER_SUITE_TIMEOUT_SECONDS)
+            completed, _lease = native_runner.run_managed_controller(
+                run_root, runtime_args(profile, run),
+                lambda lease: controller_command(repo, bundle, run_root, run, profile, lease),
+                output=output, cwd=repo, suite_timeout=suite_timeout,
+                stdout=stdout, stderr=stderr,
+            )
+            controller_exit = completed.returncode
         desktop_restored = True
         if controller_exit == 0 and run["mode"] in {"standard", "text-scale"}:
             write_text_raster_metrics(run_root)
@@ -1314,10 +1316,17 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
                 controller_logs_bounded = controller_logs_bounded and path.stat().st_size <= 128 * 1024 * 1024
                 os.replace(path, output / path.name)
         input_sha256 = digest(run_root / "input-manifest.json")
-        observer_result_path = output / "acceptance-result.json"
-        observer = read_json(observer_result_path) if observer_result_path.is_file() else {}
-        observation_path = output / "acceptance-observations.json"
-        observations = read_json(observation_path) if observation_path.is_file() else {}
+        def summary_document(name):
+            path = output / name
+            try:
+                return read_json(path)
+            except (OSError, ValueError) as error:
+                summary_errors.append({"file": name, "error_type": type(error).__name__})
+                return {}
+
+        observer = summary_document("acceptance-result.json")
+        observations = summary_document("acceptance-observations.json")
+        transport = summary_document("transport.json")
         environment = observations.get("environment", {}) if isinstance(observations.get("environment"), dict) else {}
         text = observer.get("text_scale", {}) if isinstance(observer.get("text_scale"), dict) else {}
         text_scale_restored = (
@@ -1331,19 +1340,23 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
             "input_manifest_sha256": input_sha256,
             "fixture": observer.get("guest_cleanup") is True,
             "process": observer.get("process_cleanup", observer.get("guest_cleanup")) is True,
-            "guest": (output / "transport.json").is_file()
-            and read_json(output / "transport.json").get("guest_cleanup") is True,
+            "guest": transport.get("guest_cleanup") is True,
             "desktop_restore": desktop_restored,
             "text_scale_restore": text_scale_restored,
             "controller_exit_code": controller_exit,
         }
-        cleanup["status"] = "passed" if all(
+        cleanup["status"] = "passed" if not summary_errors and all(
             cleanup[name] is True
             for name in ("fixture", "process", "guest", "desktop_restore", "text_scale_restore")
         ) else "failed"
         write_json(output / "cleanup.json", cleanup, exclusive=True)
+        if summary_errors:
+            write_json(output / "cleanup-errors.json", {
+                "schema_version": 1, "run_id": run["run_id"], "errors": summary_errors,
+            }, exclusive=True)
     require(controller_exit == 0, "GUI regression transport failed; preserve and inspect the run output.")
     require(controller_logs_bounded, "GUI regression controller stream exceeds the raw size bound.")
+    require(not summary_errors, "GUI regression cleanup summary is incomplete; preserve the raw output.")
     finalize_run(run_root)
 
 

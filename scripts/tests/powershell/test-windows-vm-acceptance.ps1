@@ -481,6 +481,46 @@ try {
     if ($controllerParseErrors.Count -ne 0) {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
     }
+    # Exercise the controller's actual pending-lease admission block with the
+    # GUI output layout, whose mutable lease is outside immutable inputs.
+    & {
+        $admission = @($controllerAst.FindAll({ param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+                $node.Body.Statements.Count -gt 0 -and
+                $node.Body.Statements[0].Extent.Text.StartsWith('$binding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE')
+        }, $true))
+        if ($admission.Count -ne 1) { throw 'Managed cleanup lease admission is ambiguous.' }
+        $admit = [scriptblock]::Create($admission[0].Extent.Text)
+        $savedHandshake = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE
+        try {
+            foreach ($case in @('core', 'gui', 'wrong-sid', 'wrong-lease', 'already-closed')) {
+                $root = Join-Path $temporaryRoot ('pending-lease-' + $case)
+                [void](New-Item -ItemType Directory -Path $root)
+                $BundleRoot = if ($case -ceq 'core') { $root } else { Join-Path $root 'inputs' }
+                $transportOutputRoot = if ($case -ceq 'core') { $root } else { Join-Path $root 'output' }
+                if ($case -cne 'core') {
+                    [void](New-Item -ItemType Directory -Path $BundleRoot, $transportOutputRoot)
+                }
+                $ExpectedDesktopSid = 'S-1-5-21-1-2-3-1001'
+                $env:DR_VM_OWNED_CLEANUP_HANDSHAKE = @{
+                    nonce = 'b' * 32; lease_id = 'a' * 32
+                    sid = if ($case -ceq 'wrong-sid') { 'S-1-5-21-1-2-3-1002' } else { $ExpectedDesktopSid }
+                } | ConvertTo-Json -Compress
+                Write-Utf8Json -Path (Join-Path $root 'desktop-lease.json') -Value @{
+                    lease_id = if ($case -ceq 'wrong-lease') { 'c' * 32 } else { 'a' * 32 }
+                    mode = 'managed-rdp'; start_status = 'ready'
+                    stop_status = if ($case -ceq 'already-closed') { 'stopped' } else { 'failed' }
+                }
+                $ownedHandshake = $null
+                . $admit
+                $expected = $case -cin @('core', 'gui')
+                if (($null -ne $ownedHandshake) -ne $expected) {
+                    throw "Pending managed lease admission mismatch for $case."
+                }
+            }
+        }
+        finally { $env:DR_VM_OWNED_CLEANUP_HANDSHAKE = $savedHandshake }
+    }
     $runnerParseErrors = $null
     $runnerParseTokens = $null
     $runnerAst = [Management.Automation.Language.Parser]::ParseInput(
