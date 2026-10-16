@@ -94,7 +94,7 @@ REQUIRED_GATE_IDS = frozenset({
 # explicit and closed; an unknown profile must never fall back to either one.
 PROFILE_DEFINITIONS = {
     "vm-automated-v1-win11-ntfs": (1, "config/vm-automated-v1.json"),
-    "vm-automated-v2-owned-resources": (2, "config/vm-automated-v2.json"),
+    "vm-automated-v2-owned-resources": (3, "config/vm-automated-v2.json"),
 }
 
 

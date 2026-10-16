@@ -849,24 +849,52 @@ failure stays explicit and cannot justify allowing an additional process.
 
 ### Owned-resources v2 runner environment
 
-The v2 profile has schema `darkrenamer-vm-automated-profile-v2`, ID
-`vm-automated-v2-owned-resources` and revision 2. Its canonical statement uses
-`darkrenamer-vm-automated-statement-v2` and keeps the exact profile ID, revision
-and SHA-256 source blob binding. V1 keeps its v1 schema and strict predicate.
-Neither a v1 failed record nor its separately verified cleanup proof can be
-promoted into v2 acceptance. The 30 first-attempt slots, 22 product targets,
-five gates, candidate bytes, source binding and authenticated hosted attestation
-are unchanged.
+The owned-resources profile keeps ID `vm-automated-v2-owned-resources` but its
+current source blob is revision 3, schema `darkrenamer-vm-automated-profile-v3`,
+with revision-3 raw process and cleanup records. The canonical statement uses
+`darkrenamer-vm-automated-statement-v3` and binds the exact profile ID, revision,
+and SHA-256 source blob. Historical revision-2 receipts retain their original
+meaning and can be selected only by their exact archived profile SHA in the
+read-only low-level cleanup verifier; they cannot satisfy a current campaign or
+publication. V1 keeps its v1 schema and strict predicate. Neither a v1 failed
+record nor its separately verified cleanup proof can be promoted into current
+acceptance. The 30 first-attempt slots, 22 product targets, five gates,
+candidate bytes, source binding and authenticated hosted attestation are unchanged.
 
 V2 retains complete raw OS process and task observations. A new, surviving, or
 multiple ambient OS processes do not by themselves fail the v2 environment
 predicate when owned lifetimes, jobs, roots and protected resources are fully
 accounted for and essential input, focus and settings remain intact. This is
 not a claim that a process is harmless because of its name, signature, parent
-or absence from an owned Job. Directly launched helpers and protected-resource
-connections must be accounted for; uncertain ownership, missing lifetimes or
+or absence from an owned Job. Directly launched helpers and observable protected
+roots/files must be accounted for; uncertain ownership, missing lifetimes or
 incomplete inventories fail closed. Unexpected scheduled-task creation,
 deletion or definition changes still fail.
+
+Revision 3 permits exactly one pre-name authenticated AntiMalware-Light Defender
+session-helper lifetime when CIM withholds both executable path and command line.
+The controller binds the trusted desktop first, holds native child and WinDefend
+parent lifetime handles and read-only, share-all relative no-reparse image-path
+handles before choosing a run UUID or creating roots. It checks native PID,
+creation time, owner SID, session, PPL, current-path Microsoft signatures,
+service origin, and each held path node's file ID, owner, and complete DACL.
+The only untrusted ACE allowed on that chain is the exact built-in Users allow
+mask `0x116` with container-inherit flag `0x2` on `C:\ProgramData` itself. It
+does not grant `DELETE`, `DELETE_CHILD`, `WRITE_DAC`, or `WRITE_OWNER`; the
+pre-existing nonempty Microsoft child cannot be replaced through that parent
+grant. Any additional effective untrusted write ACE, including one on a lower
+node, fails. Relative no-reparse opens and fresh path identity checks are
+required so that the exception cannot be applied to a substituted descendant.
+Every accepted inventory reopens the canonical path relative to the trusted
+drive root and compares the full held chain; new opaque lifetimes, altered path
+or descriptor, missing handle closure, or incomplete phase checks refuse cleanup.
+The verifier independently parses retained binary security descriptors and
+binds the raw proof to the indexed bundle, source, profile and VM. Ordinary
+processes still require their full CIM execution fields. The exception proves
+direct nonownership of that pre-existing protected OS lifetime by the later
+medium, non-breakaway candidate. Its CIM command line remains **unknown**; the
+current-path signature does not attest loaded image bytes, and transient CLI,
+IPC or broker-mediated connections are not completely observed.
 
 Owned process or Job survivors, unresolved owned tasks/files/roots, failed
 journal or product checks, input/focus interference, setting restoration

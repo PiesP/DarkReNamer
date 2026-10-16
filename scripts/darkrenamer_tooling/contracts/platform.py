@@ -665,6 +665,7 @@ def verify_environment(value: object, target: dict, *, candidate_pid: int, sessi
 
 V1_PROFILE_ID = "vm-automated-v1-win11-ntfs"
 V2_PROFILE_ID = "vm-automated-v2-owned-resources"
+HISTORICAL_V2_PROFILE_SHA256 = "10b034dd27a1a950be280d848e7f985d6820295e0970c6fafd6f49a50985efc7"
 
 
 def _v2_process_rows(value: object, sid: str, session: int, label: str) -> dict[str, dict]:
@@ -692,6 +693,288 @@ def _v2_process_rows(value: object, sid: str, session: int, label: str) -> dict[
         rows[row["identity"]] = row
         pids.add(pid)
     return rows
+
+
+def _v3_process_rows(value: object, sid: str, session: int, label: str,
+                     anchor: dict) -> dict[str, dict]:
+    require(type(value) is list and len(value) <= 20_000,
+            f"{label} process inventory is unavailable or oversized.")
+    rows: dict[str, dict] = {}
+    pids: set[int] = set()
+    common = {"kind", "identity", "pid", "session_id", "creation_time_utc",
+              "executable_path", "command_line", "parent_pid", "owner_sid"}
+    protected_count = 0
+    for raw in value:
+        kind = raw.get("kind") if type(raw) is dict else None
+        fields = common | ({"native_image_path", "protection_level"}
+                           if kind == "protected_pre_name" else set())
+        row = require_exact_keys(raw, fields, f"{label} process")
+        pid = require_int(row["pid"], 1, 0xFFFFFFFF, f"{label} PID")
+        require(type(row["creation_time_utc"]) is str and
+                _WINDOWS_UTC_TIMESTAMP.fullmatch(row["creation_time_utc"]) is not None and
+                row["identity"] == f"{pid}|{row['creation_time_utc']}" and
+                row["owner_sid"] == sid and type(row["session_id"]) is int and
+                row["session_id"] == session and
+                type(row["parent_pid"]) is int and 0 <= row["parent_pid"] <= 0xFFFFFFFF and
+                row["identity"] not in rows and pid not in pids,
+                f"{label} process lifetime or owner is unknown.")
+        if kind == "full":
+            require(type(row["executable_path"]) is str and
+                    re.match(r"^[A-Za-z]:\\", row["executable_path"]) is not None and
+                    len(row["executable_path"]) <= 32_767 and
+                    type(row["command_line"]) is str and
+                    0 < len(row["command_line"]) <= 4096,
+                    f"{label} ordinary process execution scope is unknown.")
+        elif kind == "protected_pre_name":
+            protected_count += 1
+            proof = anchor["proof"]
+            require(anchor["anchor_present"] is True and type(proof) is dict and
+                    row["executable_path"] is None and row["command_line"] is None and
+                    row["identity"] == proof["identity"] and
+                    row["parent_pid"] == proof["parent_pid"] and
+                    row["native_image_path"] == proof["child_native_identity"]["image_path"] and
+                    row["protection_level"] == 3,
+                    f"{label} contains a new or altered opaque process.")
+        else:
+            raise EvidenceError(f"{label} process kind is unsupported.")
+        rows[row["identity"]] = row
+        pids.add(pid)
+    require(protected_count == (1 if anchor["anchor_present"] else 0),
+            f"{label} omitted or multiplied the held protected lifetime.")
+    return rows
+
+
+def _v3_descriptor(value: object) -> tuple[str, list[dict]]:
+    require(type(value) is str and 28 <= len(value) <= 87_384,
+            "Protected OS binary descriptor is unavailable or oversized.")
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise EvidenceError("Protected OS binary descriptor is not canonical base64.") from error
+    require(20 <= len(data) <= 65_536 and base64.b64encode(data).decode("ascii") == value and
+            data[0] == 1 and data[1] == 0,
+            "Protected OS binary descriptor header is invalid.")
+
+    def word(offset: int) -> int:
+        require(0 <= offset <= len(data) - 2, "Protected OS descriptor word is truncated.")
+        return int.from_bytes(data[offset:offset + 2], "little")
+
+    def dword(offset: int) -> int:
+        require(0 <= offset <= len(data) - 4, "Protected OS descriptor dword is truncated.")
+        return int.from_bytes(data[offset:offset + 4], "little")
+
+    def sid(offset: int, limit: int) -> tuple[str, int]:
+        require(offset >= 20 and offset + 8 <= limit and data[offset] == 1 and
+                data[offset + 1] <= 15, "Protected OS descriptor SID is invalid.")
+        size = 8 + 4 * data[offset + 1]
+        require(offset + size <= limit, "Protected OS descriptor SID is truncated.")
+        authority = int.from_bytes(data[offset + 2:offset + 8], "big")
+        subs = [int.from_bytes(data[start:start + 4], "little")
+                for start in range(offset + 8, offset + size, 4)]
+        return "S-1-" + str(authority) + "".join("-" + str(part) for part in subs), size
+
+    flags = word(2)
+    owner_offset, dacl_offset = dword(4), dword(16)
+    require(flags & 0x8000 and flags & 0x0004 and owner_offset and dacl_offset and
+            dacl_offset + 8 <= len(data),
+            "Protected OS descriptor lacks a self-relative owner or DACL.")
+    owner, _ = sid(owner_offset, len(data))
+    acl_revision = data[dacl_offset]
+    acl_size = word(dacl_offset + 2)
+    ace_count = word(dacl_offset + 4)
+    require(acl_revision in (2, 4) and data[dacl_offset + 1] == 0 and
+            8 <= acl_size <= 65_536 - dacl_offset and
+            1 <= ace_count <= 64,
+            "Protected OS DACL header is invalid.")
+    end = dacl_offset + acl_size
+    cursor = dacl_offset + 8
+    aces = []
+    for _ in range(ace_count):
+        require(cursor + 8 <= end, "Protected OS ACE is truncated.")
+        ace_type, ace_flags = data[cursor], data[cursor + 1]
+        ace_size = word(cursor + 2)
+        require(ace_type in (0, 1) and ace_size >= 16 and
+                ace_size % 4 == 0 and cursor + ace_size <= end,
+                "Protected OS ACE form is unsupported.")
+        ace_sid, sid_size = sid(cursor + 8, cursor + ace_size)
+        require(8 + sid_size == ace_size, "Protected OS ACE has opaque trailing data.")
+        aces.append({"type": ace_type, "flags": ace_flags,
+                     "mask": dword(cursor + 4), "sid": ace_sid})
+        cursor += ace_size
+    require(cursor == end, "Protected OS DACL has trailing bytes.")
+    return owner, aces
+
+
+def _v3_protected_ancestry(value: object, image: str, leaf: str) -> list[dict]:
+    require(type(image) is str and re.fullmatch(
+        rf"[A-Za-z]:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\"
+        rf"4\.18\.[0-9]{{5}}\.[0-9]+-[0-9]+\\{re.escape(leaf)}", image,
+        flags=re.IGNORECASE) is not None,
+        "Protected OS image is outside its canonical platform directory.")
+    drive, *parts = image.split("\\")
+    expected = [drive + "\\"]
+    for part in parts:
+        expected.append(expected[-1].rstrip("\\") + "\\" + part)
+    require(type(value) is list and len(value) == len(expected) == 7,
+            "Protected OS ancestry depth is unknown.")
+    trusted = {"S-1-5-18", "S-1-5-32-544",
+               "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
+    for index, raw in enumerate(value):
+        row = require_exact_keys(raw, {"path", "is_directory", "file_id", "owner_sid",
+                                       "security_descriptor_base64", "aces"},
+                                 "Protected OS ancestry node")
+        binary_owner, binary_aces = _v3_descriptor(row["security_descriptor_base64"])
+        require(type(row["path"]) is str and row["path"].casefold() == expected[index].casefold() and
+                row["is_directory"] is (index < 6) and
+                type(row["file_id"]) is str and re.fullmatch(r"[0-9a-f]{48}", row["file_id"]) and
+                row["owner_sid"] in trusted and row["owner_sid"] == binary_owner and
+                type(row["aces"]) is list and row["aces"] == binary_aces and
+                1 <= len(row["aces"]) <= 64,
+                "Protected OS held node identity or descriptor is unknown.")
+        for raw_ace in row["aces"]:
+            ace = require_exact_keys(raw_ace, {"type", "flags", "mask", "sid"},
+                                     "Protected OS ACE")
+            require(type(ace["type"]) is int and ace["type"] in (0, 1) and
+                    type(ace["flags"]) is int and 0 <= ace["flags"] <= 255 and
+                    type(ace["mask"]) is int and 0 <= ace["mask"] <= 0xFFFFFFFF and
+                    type(ace["sid"]) is str and re.fullmatch(r"S-1-(?:[0-9]+-)*[0-9]+", ace["sid"]),
+                    "Protected OS ACE is unsupported.")
+            risk = 0x500D0156 & (~4 if index == 0 else 0xFFFFFFFF)
+            common_program_data = (index == 1 and ace == {
+                "type": 0, "flags": 2, "mask": 278, "sid": "S-1-5-32-545"})
+            require(not (ace["type"] == 0 and not (ace["flags"] & 8) and
+                         ace["sid"] not in trusted and ace["mask"] & risk and
+                         not common_program_data),
+                    "Protected OS ancestry grants untrusted effective write access.")
+    return value
+
+
+def _v3_anchor(value: object, *, name: str, sid: str, session: int,
+               profile_sha256: str, closed: bool) -> dict:
+    anchor = require_exact_keys(value, {
+        "schema_version", "run_name", "vm_id", "source_sha", "bundle_sha256",
+        "profile_sha256", "anchor_nonce", "pre_name_utc", "pre_name_snapshot",
+        "anchor_present", "all_handles_closed", "errors", "proof",
+    }, "Protected pre-name anchor")
+    require(anchor["schema_version"] == 3 and anchor["run_name"] == name and
+            type(anchor["vm_id"]) is str and re.fullmatch(
+                r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", anchor["vm_id"]) and
+            type(anchor["source_sha"]) is str and re.fullmatch(r"[0-9a-f]{40}", anchor["source_sha"]) and
+            type(anchor["bundle_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", anchor["bundle_sha256"]) and
+            anchor["profile_sha256"] == profile_sha256 and
+            type(anchor["anchor_nonce"]) is str and re.fullmatch(r"[0-9a-f]{32}", anchor["anchor_nonce"]) and
+            type(anchor["pre_name_utc"]) is str and
+            _WINDOWS_UTC_TIMESTAMP.fullmatch(anchor["pre_name_utc"]) is not None and
+            type(anchor["anchor_present"]) is bool and
+            anchor["all_handles_closed"] is closed and anchor["errors"] == [],
+            "Protected pre-name source, VM, profile, or closure binding is incomplete.")
+    if anchor["anchor_present"]:
+        proof = require_exact_keys(anchor["proof"], {
+            "schema_version", "identity", "pid", "creation_time_utc",
+            "parent_creation_time_utc", "parent_pid",
+            "runner_sid", "runner_session_id", "profile_sha256", "source_sha",
+            "bundle_sha256", "vm_id", "pre_name_utc", "anchor_nonce",
+            "cim_executable_path", "cim_command_line", "child_native_identity",
+            "parent_native_identity", "provenance", "run_name", "run_name_created_utc",
+            "handle_closed", "parent_handle_closed", "child_path_closed",
+            "parent_path_closed", "accepted_snapshot_count",
+        }, "Protected process proof")
+        require(proof["schema_version"] == 1 and proof["run_name"] == name and
+                proof["runner_sid"] == sid and proof["runner_session_id"] == session and
+                all(proof[field] == anchor[field] for field in (
+                    "profile_sha256", "source_sha", "bundle_sha256", "vm_id",
+                    "pre_name_utc", "anchor_nonce")) and
+                proof["cim_executable_path"] is None and proof["cim_command_line"] is None and
+                type(proof["run_name_created_utc"]) is str and
+                _WINDOWS_UTC_TIMESTAMP.fullmatch(proof["run_name_created_utc"]) is not None and
+                proof["run_name_created_utc"] >= anchor["pre_name_utc"] and
+                all(proof[key] is closed for key in (
+                    "handle_closed", "parent_handle_closed", "child_path_closed",
+                    "parent_path_closed")) and
+                type(proof["accepted_snapshot_count"]) is int and
+                proof["accepted_snapshot_count"] >= 1,
+                "Protected process proof lost its pre-name or closure identity.")
+        child = require_exact_keys(proof["child_native_identity"], {
+            "pid", "creation_filetime_100ns", "owner_sid", "session_id", "image_path",
+            "open_error", "pid_error", "times_error", "image_error", "token_error",
+            "token_sid_error", "token_session_error",
+        }, "Protected child native identity")
+        parent = require_exact_keys(proof["parent_native_identity"], set(child),
+                                    "Protected parent native identity")
+        require(proof["pid"] == child["pid"] and proof["parent_pid"] == parent["pid"] and
+                proof["identity"] == f"{proof['pid']}|{proof['creation_time_utc']}" and
+                type(proof["creation_time_utc"]) is str and
+                _WINDOWS_UTC_TIMESTAMP.fullmatch(proof["creation_time_utc"]) is not None and
+                child["owner_sid"] == sid and child["session_id"] == session and
+                parent["owner_sid"] == "S-1-5-18" and parent["session_id"] == 0 and
+                all(native[key] == 0 for native in (child, parent) for key in (
+                    "open_error", "pid_error", "times_error", "image_error", "token_error",
+                    "token_sid_error", "token_session_error")) and
+                all(type(native["creation_filetime_100ns"]) is str and
+                    re.fullmatch(r"[1-9][0-9]{0,19}", native["creation_filetime_100ns"])
+                    for native in (child, parent)) and
+                int(parent["creation_filetime_100ns"]) < int(child["creation_filetime_100ns"]),
+                "Protected process native parent or child lifetime is incomplete.")
+        for label, cim_time, native in (
+                ("child", proof["creation_time_utc"], child),
+                ("parent", proof["parent_creation_time_utc"], parent)):
+            require(type(cim_time) is str and
+                    _WINDOWS_UTC_TIMESTAMP.fullmatch(cim_time) is not None and
+                    cim_time.endswith("0Z"),
+                    f"Protected process {label} CIM creation time is invalid.")
+            try:
+                created = datetime.strptime(cim_time[:-2], "%Y-%m-%dT%H:%M:%S.%f")
+            except ValueError as error:
+                raise EvidenceError(f"Protected process {label} CIM creation time is invalid.") from error
+            delta = created - datetime(1601, 1, 1)
+            cim_filetime = ((delta.days * 86_400 + delta.seconds) * 10_000_000
+                            + delta.microseconds * 10)
+            require(0 <= int(native["creation_filetime_100ns"]) - cim_filetime <= 9,
+                    f"Protected process {label} native creation differs from its CIM lifetime.")
+        provenance = require_exact_keys(proof["provenance"], {
+            "child_ancestry", "parent_ancestry", "child_signature", "parent_signature",
+            "service", "protection_level", "parent_protection_level",
+        }, "Protected OS provenance")
+        _v3_protected_ancestry(provenance["child_ancestry"], child["image_path"],
+                               "DefenderSessionHelper.exe")
+        _v3_protected_ancestry(provenance["parent_ancestry"], parent["image_path"], "MsMpEng.exe")
+        require(provenance["child_ancestry"][:6] == provenance["parent_ancestry"][:6] and
+                provenance["protection_level"] == provenance["parent_protection_level"] == 3,
+                "Protected OS child and parent ancestry or PPL differ.")
+        for key in ("child_signature", "parent_signature"):
+            signature = require_exact_keys(provenance[key],
+                                           {"status", "signer_subject", "signer_thumbprint"},
+                                           "Protected OS signature")
+            require(signature["status"] == "Valid" and
+                    type(signature["signer_subject"]) is str and re.search(
+                        r"(^|,)\s*(CN|O)=Microsoft( Corporation| Windows)?(,|$)",
+                        signature["signer_subject"]) and
+                    type(signature["signer_thumbprint"]) is str and
+                    re.fullmatch(r"[0-9A-F]{40}", signature["signer_thumbprint"]),
+                    "Protected OS current-path signature is unavailable.")
+        service = require_exact_keys(provenance["service"],
+                                     {"name", "state", "start_name", "process_id", "path_name"},
+                                     "Protected service")
+        try:
+            service_argv = _windows_task_argv(service["path_name"])
+        except (TypeError, ValueError) as error:
+            raise EvidenceError("Protected OS service action is not parseable.") from error
+        require(service["name"] == "WinDefend" and service["state"] == "Running" and
+                service["start_name"] == "LocalSystem" and
+                service["process_id"] == parent["pid"] and
+                type(service["path_name"]) is str and
+                1 <= len(service_argv) <= 8 and service_argv[0].casefold() ==
+                parent["image_path"].casefold(),
+                "Protected OS parent is not the bound WinDefend service.")
+    else:
+        require(anchor["proof"] is None, "Absent protected anchor carries a process proof.")
+    pre_name = require_exact_keys(anchor["pre_name_snapshot"], {"complete", "processes", "attempts"},
+                                  "Pre-name process inventory")
+    require(pre_name["complete"] is True and type(pre_name["attempts"]) is int and
+            1 <= pre_name["attempts"] <= 3,
+            "Pre-name process inventory is incomplete.")
+    _v3_process_rows(pre_name["processes"], sid, session, "Pre-name", anchor)
+    return anchor
 
 
 def _v2_matches_owned_lifetime(row: dict, starts: dict[int, list[int]]) -> bool:
@@ -748,23 +1031,28 @@ def _v2_closed_helper(value: object, label: str) -> tuple[int, int]:
 
 
 def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
-                               deleted: bool = True) -> dict:
+                               deleted: bool = True, schema: int = 2) -> dict:
     from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 
+    require(schema in (2, 3), "Unknown owned-resource inventory schema.")
     require(type(profile_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", profile_sha256) is not None and
-            type(host["schema_version"]) is int and host["schema_version"] == 2 and
+            type(host["schema_version"]) is int and host["schema_version"] == schema and
             host["profile_id"] == V2_PROFILE_ID and
             host["profile_sha256"] == profile_sha256,
             "V2 cleanup is not bound to the selected profile bytes.")
-    evidence = require_exact_keys(host["owned_resource_evidence"], {
+    evidence_fields = {
         "schema_version", "run_name", "runner_sid", "runner_session_id", "root_records",
         "baseline_processes", "baseline_tasks", "process_snapshots", "task_snapshots",
         "declared_processes", "process_job_cleanup", "preflight_child", "engine_child",
         "task_execution", "rescue_attempts", "rescue_executions",
         "observed_roots_before", "observed_roots_after",
-    }, "V2 owned-resource evidence")
+    }
+    if schema == 3:
+        evidence_fields |= {"pre_name_snapshot", "protected_anchor_initial", "protected_anchor"}
+    evidence = require_exact_keys(host["owned_resource_evidence"], evidence_fields,
+                                  "V2 owned-resource evidence")
     name, sid = evidence["run_name"], evidence["runner_sid"]
-    require(type(evidence["schema_version"]) is int and evidence["schema_version"] == 2 and
+    require(type(evidence["schema_version"]) is int and evidence["schema_version"] == schema and
             type(name) is str and
             re.fullmatch(r"DarkReNamerTests-[0-9a-f]{32}", name) is not None and
             type(sid) is str and _WINDOWS_RUNNER_SID.fullmatch(sid) is not None,
@@ -803,10 +1091,39 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         require(observed_after == {"guest_present": True, "trusted_present": True},
                 "V2 failed run cannot be finalized with changed root presence.")
 
-    baseline = _v2_process_rows(evidence["baseline_processes"], sid, session, "V2 baseline")
+    if schema == 3:
+        initial = _v3_anchor(evidence["protected_anchor_initial"], name=name, sid=sid,
+                             session=session, profile_sha256=profile_sha256, closed=False)
+        anchor = _v3_anchor(evidence["protected_anchor"], name=name, sid=sid,
+                            session=session, profile_sha256=profile_sha256, closed=deleted)
+        require(initial["pre_name_snapshot"] == evidence["pre_name_snapshot"] ==
+                anchor["pre_name_snapshot"] and
+                all(initial[key] == anchor[key] for key in (
+                    "run_name", "vm_id", "source_sha", "bundle_sha256", "profile_sha256",
+                    "anchor_nonce", "pre_name_utc", "anchor_present")),
+                "V2 pre-name anchor changed its source or inventory.")
+        if initial["anchor_present"]:
+            for key in initial["proof"]:
+                if key in {"handle_closed", "parent_handle_closed", "child_path_closed",
+                           "parent_path_closed", "accepted_snapshot_count"}:
+                    continue
+                require(initial["proof"][key] == anchor["proof"][key],
+                        "V2 held pre-name proof changed after disclosure.")
+        parse_processes = lambda value, label: _v3_process_rows(value, sid, session, label, anchor)
+    else:
+        parse_processes = lambda value, label: _v2_process_rows(value, sid, session, label)
+    baseline = parse_processes(evidence["baseline_processes"], "V2 baseline")
     tasks = _v2_task_rows(evidence["baseline_tasks"], "V2 baseline")
     process_snapshots = require_exact_keys(evidence["process_snapshots"],
         {"before", "after_intervention", "after_delete"}, "V2 process snapshots")
+    if schema == 3 and initial["anchor_present"]:
+        require(initial["proof"]["accepted_snapshot_count"] >= 1 and
+                anchor["proof"]["accepted_snapshot_count"] >=
+                2 + sum(process_snapshots[phase] is not None for phase in
+                        ("before", "after_intervention", "after_delete")) and
+                anchor["proof"]["accepted_snapshot_count"] >=
+                initial["proof"]["accepted_snapshot_count"] + 1,
+                "V2 held protected lifetime was not rechecked for each inventory phase.")
     task_snapshots = require_exact_keys(evidence["task_snapshots"],
         {"before", "after_intervention", "after_delete"}, "V2 task snapshots")
     all_rows = list(baseline.values())
@@ -825,7 +1142,7 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         snapshot = require_exact_keys(process_snapshots[phase], {"complete", "processes"},
                                       f"V2 {phase} processes")
         require(snapshot["complete"] is True, f"V2 {phase} process enumeration is incomplete.")
-        current = _v2_process_rows(snapshot["processes"], sid, session, f"V2 {phase}")
+        current = parse_processes(snapshot["processes"], f"V2 {phase}")
         all_rows.extend(current.values())
         observed_delta = {key: row for key, row in current.items() if key not in baseline}
         require(type(host[process_key]) is list and
@@ -973,11 +1290,13 @@ def _verify_v2_owned_resources(host: dict, *, profile_sha256: str,
         owned_starts.setdefault(pid, []).append(start)
     receipt = require_exact_keys(host["runner_process_natural_exit"],
                                  {"schema_version", "status"}, "V2 ambient-process policy")
-    require(type(receipt["schema_version"]) is int and receipt["schema_version"] == 2 and
+    require(type(receipt["schema_version"]) is int and receipt["schema_version"] == schema and
             receipt["status"] == "v2-owned-resources",
             "V2 cleanup reused a strict-v1 ambient process receipt.")
     for row in all_rows:
-        scope = (row["executable_path"] + " " + row["command_line"]).casefold()
+        scope = ((row["native_image_path"] if schema == 3 and
+                  row["kind"] == "protected_pre_name" else
+                  row["executable_path"] + " " + row["command_line"])).casefold()
         require(not _v2_matches_owned_lifetime(row, owned_starts) and
                 name.casefold() not in scope and not any(path in scope for path in paths),
                 "V2 process is owned or has an unresolved protected execution scope.")
@@ -1050,8 +1369,29 @@ def verify_controller_owned_cleanup(transport: object, *, profile_id: str = V1_P
     require(type(host["runner_process_natural_exit"]) is dict,
             "Controller environment classification evidence is unavailable.")
     if profile_id == V2_PROFILE_ID:
-        _verify_v2_owned_resources(host, profile_sha256=profile_sha256)
+        schema = 2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3
+        _verify_v2_owned_resources(host, profile_sha256=profile_sha256, schema=schema)
     return host
+
+
+def verify_current_protected_anchor_binding(transport: object, *, source_sha: str,
+                                            bundle_sha256: str) -> None:
+    """Bind a revision-3 cleanup claim to independently indexed run bytes."""
+    require(type(transport) is dict and type(transport.get("raw_cleanup")) is dict and
+            type(source_sha) is str and re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None and
+            type(bundle_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", bundle_sha256) is not None,
+            "Protected anchor has no authenticated source or bundle input.")
+    raw = transport["raw_cleanup"]
+    evidence = raw.get("owned_resource_evidence")
+    require(type(evidence) is dict and raw.get("schema_version") == 3 and
+            evidence.get("schema_version") == 3,
+            "Current protected anchor requires the revision-3 inventory.")
+    for anchor in (evidence.get("protected_anchor_initial"),
+                   evidence.get("protected_anchor")):
+        require(type(anchor) is dict and anchor.get("source_sha") == source_sha and
+                anchor.get("bundle_sha256") == bundle_sha256 and
+                anchor.get("vm_id") == transport.get("vm_id"),
+                "Protected anchor differs from authenticated source, bundle, or VM.")
 
 
 def verify_controller_cleanup(transport: object, *, profile_id: str = V1_PROFILE_ID,

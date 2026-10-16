@@ -1,7 +1,7 @@
 {
-  "schema": "darkrenamer-vm-automated-profile-v2",
+  "schema": "darkrenamer-vm-automated-profile-v3",
   "profile_id": "vm-automated-v2-owned-resources",
-  "revision": 2,
+  "revision": 3,
   "environment": {
     "os_family": "Windows 11",
     "architecture": "x86_64",
@@ -440,6 +440,7 @@
     "vm-storage-performance"
   ],
   "outside_v2_claims": [
+    "protected-pre-name-process-command-line-and-transient-IPC-connections",
     "whole-session-os-process-stasis",
     "complete-causal-attribution-of-os-broker-start-and-exit",
     "global-detection-of-all-broker-escaped-processes",

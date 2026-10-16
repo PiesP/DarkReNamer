@@ -75,7 +75,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "3db81b989b10be70ccc7a9b9189a62799ecd7472c5661a9a1216427c1cb78bd4",
+      "sha256": "bda997ab328017053ff7518b2842c5d864ae24e896b1dbc28d75c0fd92a5a281",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "d84c84195dcbc6fee17db3d78043907f7f60aaeb198cb5c6d4ae9b471fb8cd97",
+      "sha256": "9de0e7d6b11ce1a7f932fcd910456b3c8489e98f0a11256fe429278bbf9a515a",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -219,7 +219,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "e75bc1ecb4c0e7b440b8116aeb8b474fc4d32a863dbbad7974333e0b5c91acf6",
+      "sha256": "88924aa30875cb08843a0f6fcdbd490a26507d71a79c9d33c84794740e2bd9f8",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -282,7 +282,7 @@
       "bundle": "tooling-contracts-platform.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.platform",
-      "sha256": "31025eb833c7542c530abf1df6b6a9d1317ecc6ecdfe3a2fc7978bfd212f51fa",
+      "sha256": "664c77cd78213bd8fd8b6c503bc71a1410b893d62c97ee72ba739654ac29df64",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -299,7 +299,7 @@
       "bundle": "tooling-contracts-owned-cleanup.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.owned_cleanup",
-      "sha256": "23d4e8da6d1c958664aa30028107b0a0c03deb6170174519dae9274646a2d952",
+      "sha256": "0eaebb8ac4e4e967354dd82cc797d0239ea63666ec6dc34a4fc9e628e440ee70",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -368,7 +368,7 @@
       "bundle": "tooling-evidence-archive.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.archive",
-      "sha256": "35ecef66728be85aa112bbb004972d840fba19013027cb12c1984d9426677011",
+      "sha256": "ae2d4b2f217e21749f60d07e538e378c14ba9a2c85ca0d495de893b231db8bef",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -436,7 +436,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "0c111a0d29be0b5186852f87aac29a1d8d3fd987377497e20d91ea871e510c80",
+      "sha256": "f6f7c027a00c7e055a37bd4099fa944079a6d0861b319db4382b633b20edf092",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -839,7 +839,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "c35df29d8180d2065f4881c043eb094e1a0664a0afb0428ea071b4483a80dbed",
+      "sha256": "98a048b4c019b20e9efb3f86b502374305d9bd9fd4fea685f9db40c71f45c65a",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

@@ -707,6 +707,17 @@ process crash, recovery export and Intent-only candidate discard share one
 execution group, then adds 10 independent core-UIA stability executions. The
 result is a predeclared 30-slot first-attempt plan.
 
+The owned-resources profile ID remains `vm-automated-v2-owned-resources`; its
+current source blob, statement, and raw cleanup inventory are revision 3. The
+controller captures a complete process inventory and any held protected OS
+lifetime before minting the run name. Its source, bundle, VM, profile, native
+lifetime, and held path proof stay bound through cleanup or the optional
+same-session strict-failure finalizer. An omitted or newly opaque process still
+blocks cleanup. The old revision-2 profile SHA selects only read-only historical
+cleanup verification; it cannot enter the current campaign. See
+[`SAFETY.md`](SAFETY.md#owned-resources-v2-runner-environment) for the exact
+exception and its observation limits.
+
 [`scripts/run-vm-automated-campaign.py`](scripts/run-vm-automated-campaign.py)
 uses the common [`scripts/test-windows-vm.py`](scripts/test-windows-vm.py) host
 controller for each VM cell. It requires a new absolute output directory outside
@@ -892,9 +903,9 @@ height 600–1080, and DPI 96, 120, 144, or 192. Each new attempt needs a new
 external output directory. The observer has a 600-second timeout and the
 collected output is capped at 120 MiB. The immutable run input records the
 existing `vm-automated-v1-win11-ntfs` cleanup profile by default. An explicit
-`--acceptance-profile-id vm-automated-v2-owned-resources` selects the existing
-V2 owned-resource cleanup contract for this diagnostic only. The launcher
-freezes the unchanged `config/vm-automated-v2.json` bytes and digest in each
+`--acceptance-profile-id vm-automated-v2-owned-resources` selects the current
+revision-3 owned-resource cleanup contract for this diagnostic only. The launcher
+freezes the selected `config/vm-automated-v2.json` bytes and digest in each
 input, binds the controller arguments to them, and independently verifies the
 complete V2 cleanup inventory and the observer Job and process lifetimes.
 For this diagnostic, use the selector with `--diagnostic appearance-pair`.

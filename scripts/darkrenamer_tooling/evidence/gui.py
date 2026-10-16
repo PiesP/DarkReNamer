@@ -15,7 +15,10 @@ import sys
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
-from darkrenamer_tooling.contracts.platform import V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup
+from darkrenamer_tooling.contracts.platform import (
+    V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
+    verify_current_protected_anchor_binding,
+)
 from darkrenamer_tooling.contracts.tooling import (
     RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
 )
@@ -528,8 +531,8 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                     manifest["acceptance_profile_sha256"] == profile_artifact["sha256"],
                     "Appearance V2 profile hash or artifact differs from its immutable manifest.")
             profile, _ = read_json(run_root, Path(profile_artifact["file"]), "appearance V2 profile")
-            require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v2" and
-                    profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 2),
+            require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
+                    profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 3),
                     "Appearance V2 profile definition is invalid.")
             if fixed_v2:
                 require(expected_profile_sha256 == profile_artifact["sha256"],
@@ -1169,12 +1172,21 @@ def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], n
     return value
 
 
+def validate_current_protected_transport(manifest: dict, transport: dict) -> None:
+    raw = transport.get("raw_cleanup") if isinstance(transport, dict) else None
+    if isinstance(raw, dict) and raw.get("schema_version") == 3:
+        verify_current_protected_anchor_binding(
+            transport, source_sha=manifest.get("tooling_source_sha", manifest["source_sha"]),
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
+
+
 def validate_pair_transport(run_root: Path, collection_files: dict[str, dict], normalized_exit: int,
                             manifest: dict, raw: dict) -> None:
     transport = validate_transport_exit(run_root, collection_files, normalized_exit)
     if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
         cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
                                             profile_sha256=manifest["acceptance_profile_sha256"])
+        validate_current_protected_transport(manifest, transport)
         owned = cleanup["owned_resource_evidence"]
         jobs = raw.get("process_job_cleanup")
         require(isinstance(jobs, list) and jobs and typed_equal(jobs, owned["process_job_cleanup"]) and
@@ -1216,6 +1228,7 @@ def validate_fixed_v2_transport(run_root: Path, collection_files: dict[str, dict
     transport = validate_transport_exit(run_root, collection_files, result["exit_code"])
     cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
                                         profile_sha256=manifest["acceptance_profile_sha256"])
+    validate_current_protected_transport(manifest, transport)
     owned = cleanup["owned_resource_evidence"]
     jobs = raw.get("process_job_cleanup")
     require(isinstance(jobs, list) and jobs and typed_equal(jobs, owned["process_job_cleanup"]) and
@@ -3776,6 +3789,7 @@ def validate_icon_owned_transport(transport: dict, manifest: dict, raw: dict,
                                   scenario: dict) -> None:
     cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
                                         profile_sha256=manifest["acceptance_profile_sha256"])
+    validate_current_protected_transport(manifest, transport)
     owned = cleanup["owned_resource_evidence"]
     jobs = raw.get("process_job_cleanup")
     require(isinstance(jobs, list) and len(jobs) == 1 and

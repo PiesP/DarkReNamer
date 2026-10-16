@@ -15,6 +15,7 @@ import uuid
 
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
+    verify_current_protected_anchor_binding,
 )
 from darkrenamer_tooling.contracts.tooling import stage_verified_tooling
 from darkrenamer_tooling.vm import host_tools
@@ -813,7 +814,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
             lease = read_json_strict(lease_path, maximum_bytes=64 * 1024)
             v2 = getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID
             if (type(preserved) is not dict or type(preserved.get('schema_version')) is not int or
-                    preserved['schema_version'] != (2 if v2 else 1) or
+                    preserved['schema_version'] != (3 if v2 else 1) or
                     (v2 and (preserved.get('profile_id') != V2_PROFILE_ID or
                              preserved.get('profile_sha256') != args.acceptance_profile_sha256 or
                              (original.get('raw_cleanup') or {}).get('profile_id') != V2_PROFILE_ID or
@@ -833,7 +834,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     lease.get('cleanup_observed') is not True):
                 raise ValueError('Frozen strict failure or desktop closure is incomplete.')
             signal = {
-                'schema_version': 2 if v2 else 1,
+                'schema_version': 3 if v2 else 1,
                 'nonce': preserved['nonce'],
                 'preservation_sha256': sha256(receipt_path),
                 'desktop_lease_sha256': sha256(lease_path),
@@ -1169,6 +1170,17 @@ def verify_transport_binding(transport, expected_transport_kind=None, expected_v
     return True
 
 
+def verify_current_anchor_from_bundle(root, manifest, transport):
+    """Join a current owned-resource claim to the actual staged bundle bytes."""
+    raw = transport.get('raw_cleanup') if isinstance(transport, dict) else None
+    if not isinstance(raw, dict) or raw.get('schema_version') != 3:
+        return
+    source = (manifest['harness']['source_sha'] if manifest['schema_version'] == 2
+              else manifest['source_sha'])
+    verify_current_protected_anchor_binding(
+        transport, source_sha=source, bundle_sha256=sha256(Path(root) / 'bundle.json'))
+
+
 def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None,
                   *, profile_id=V1_PROFILE_ID, profile_sha256=None):
     if type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in (1, 2):
@@ -1263,6 +1275,7 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     else:
         verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
                                   profile_sha256=profile_sha256)
+        verify_current_anchor_from_bundle(root, manifest, transport)
         if profile_id == V2_PROFILE_ID:
             _verify_v2_result_owned_binding(result, transport)
     if not candidate and total == 0:
@@ -1857,6 +1870,7 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
         raise ValueError('Refresh diagnostic transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
     _verify_v2_result_owned_binding(result, transport)
     verify_transport_binding(transport, transport_kind, expected_vm_id)
     return {'order': order, 'status': 'passed', 'test_binary_sha256': binary['sha256'],
@@ -1969,6 +1983,7 @@ def verify_focused_native_result(root, manifest, result, transport_kind,
         raise ValueError('Focused native transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
     _verify_v2_result_owned_binding(result, transport)
     verify_transport_binding(transport, transport_kind, expected_vm_id)
     return {'status': 'passed' if succeeded else 'failed', 'passed': passed_total,
@@ -2056,6 +2071,9 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
         raise ValueError('Observer transport result is incomplete or invalid.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
                               profile_sha256=profile_sha256)
+    if isinstance(transport.get('raw_cleanup'), dict) and transport['raw_cleanup'].get('schema_version') == 3:
+        manifest = read_json_strict(Path(root).parent / 'bundle.json')
+        verify_current_anchor_from_bundle(Path(root).parent, manifest, transport)
     if profile_id == V2_PROFILE_ID:
         _verify_v2_result_owned_binding(result, transport)
     if not is_supported_powershell_version(engine.get('version')):
@@ -2152,9 +2170,9 @@ def main(repo, argv=None, tooling=None):
         profile_path = repo / 'config' / 'vm-automated-v2.json'
         profile = read_json_strict(profile_path, maximum_bytes=1024 * 1024)
         if (not isinstance(profile, dict) or
-                profile.get('schema') != 'darkrenamer-vm-automated-profile-v2' or
+                profile.get('schema') != 'darkrenamer-vm-automated-profile-v3' or
                 profile.get('profile_id') != V2_PROFILE_ID or
-                type(profile.get('revision')) is not int or profile['revision'] != 2):
+                type(profile.get('revision')) is not int or profile['revision'] != 3):
             raise ValueError('V2 launcher profile definition is unavailable.')
         args.acceptance_profile_sha256 = sha256(profile_path)
     if args.prepare_only:

@@ -15,7 +15,7 @@ from pathlib import Path
 import stat
 import types
 
-TOOLING_MANIFEST_SHA256 = "c0b4dce83acd1bc73b0ac1c9682f26fd85d5ebe5238192f23435f0f29aac2d16"
+TOOLING_MANIFEST_SHA256 = "48025dcb44cfc28ac0fa42ebaa841c7fb047b4000d2b7c99053e6ec32b27da62"
 TOOLING_LOADER_SHA256 = "e1fa9acec8d287cb3a37379ec5a6176e900ec1f69ec65c354b11556b1aaba3e9"
 IMPLEMENTATION_ROLE = "evidence-gui"
 

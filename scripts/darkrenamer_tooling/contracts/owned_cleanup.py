@@ -10,8 +10,10 @@ import re
 import stat
 
 from darkrenamer_tooling.contracts.platform import (
-    V1_PROFILE_ID, V2_PROFILE_ID, _v2_matches_owned_lifetime, _v2_process_rows, _v2_task_rows,
-    _verify_v2_owned_resources, require_fixture_root,
+    V1_PROFILE_ID, V2_PROFILE_ID, HISTORICAL_V2_PROFILE_SHA256, _v2_matches_owned_lifetime,
+    _v2_process_rows, _v3_process_rows, _v3_anchor, _v2_task_rows,
+    _verify_v2_owned_resources, verify_current_protected_anchor_binding,
+    require_fixture_root,
 )
 from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys
@@ -92,7 +94,7 @@ def _reference(value: object, filename: str, data: bytes, label: str) -> None:
             f"{label} does not bind the preserved bytes.")
 
 
-def _snapshot(value: object, label: str, *, final: bool) -> dict:
+def _snapshot(value: object, label: str, *, final: bool, schema: int = 2) -> dict:
     fields = {"complete", "processes", "tasks", "owned_processes"}
     if final:
         fields.add("owned_tasks")
@@ -105,9 +107,11 @@ def _snapshot(value: object, label: str, *, final: bool) -> dict:
         known = set()
         require(len(row[key]) <= 20_000, f"{label} inventory exceeds its bound.")
         for item in row[key]:
+            process = key == "processes" and schema == 3
             require(type(item) is dict and type(item.get("identity")) is str and
-                    bool(item["identity"]) and type(item.get(binding)) is str and
-                    bool(item[binding]) and item["identity"] not in known,
+                    bool(item["identity"]) and
+                    (process or (type(item.get(binding)) is str and bool(item[binding]))) and
+                    item["identity"] not in known,
                     f"{label} has an unknown or duplicate {key} identity.")
             known.add(item["identity"])
             if binding == "definition_sha256":
@@ -125,7 +129,8 @@ def _subset(current: dict, frozen: dict, label: str) -> None:
 
 def _reject_owned_entries(snapshot: dict, roots: dict, run_name: str) -> None:
     prefixes = tuple(row["path"].rstrip("\\").casefold() + "\\" for row in roots.values())
-    require(not any(row["executable_path"].casefold().startswith(prefixes)
+    require(not any((row.get("native_image_path") if row.get("kind") == "protected_pre_name"
+                     else row["executable_path"]).casefold().startswith(prefixes)
                     for row in snapshot["processes"]) and
             not any(row["identity"].casefold() == ("\\" + run_name).casefold()
                     for row in snapshot["tasks"]),
@@ -344,7 +349,8 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
                     f"{kind} result does not bind the copied restoration document.")
 
 
-def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) -> dict:
+def _source_result(root: Path, original: dict, receipt: dict,
+                   listed: set[str]) -> tuple[dict, dict]:
     context = require_exact_keys(original.get("owned_cleanup_failure_context"), {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -394,11 +400,12 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
              if context["task_kind"] == "ui" else context["acceptance_mode"] is None),
             "Original acceptance mode is unavailable.")
     _restoration(root, result, context, listed)
-    return result
+    return result, bundle
 
 
 def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
-                            raw: dict, roots: dict, run_name: str) -> None:
+                            raw: dict, roots: dict, run_name: str, *, schema: int = 2,
+                            final_anchor: dict | None = None) -> None:
     evidence = raw["owned_resource_evidence"]
     sid, session = evidence["runner_sid"], evidence["runner_session_id"]
     baseline_tasks = _v2_task_rows(evidence["baseline_tasks"], "V2 baseline")
@@ -406,7 +413,10 @@ def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
     for label, snapshot in (("frozen", frozen), ("before", before), ("after", after)):
         require(_v2_task_rows(snapshot["tasks"], f"V2 finalizer {label}") == baseline_tasks,
                 f"V2 finalizer {label} task definition changed.")
-        rows = _v2_process_rows(snapshot["processes"], sid, session, f"V2 finalizer {label}")
+        rows = (_v3_process_rows(snapshot["processes"], sid, session,
+                                 f"V2 finalizer {label}", final_anchor)
+                if schema == 3 else
+                _v2_process_rows(snapshot["processes"], sid, session, f"V2 finalizer {label}"))
         for row in rows.values():
             prior = identities.get(row["pid"])
             require(prior is None or prior == row,
@@ -421,7 +431,9 @@ def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
         owned_starts.setdefault(lifetime["pid"], []).append(int(lifetime["start_time_utc_ticks"]))
     paths = tuple(row["path"].casefold() for row in roots.values())
     for row in identities.values():
-        scope = (row["executable_path"] + " " + row["command_line"]).casefold()
+        scope = ((row["native_image_path"] if schema == 3 and
+                  row["kind"] == "protected_pre_name" else
+                  row["executable_path"] + " " + row["command_line"])).casefold()
         require(not _v2_matches_owned_lifetime(row, owned_starts) and
                 run_name.casefold() not in scope and not any(path in scope for path in paths),
                 "V2 finalizer retained a protected process scope.")
@@ -442,6 +454,7 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     lease_bytes = _read_file(lease_path, 64 * 1024)
     original = _json(original_bytes, "Original transport")
     v2 = profile_id == V2_PROFILE_ID
+    schema = (2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3) if v2 else 1
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
@@ -452,13 +465,13 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         "schema_version", "kind", "run_name", "vm_id", "status", "pre", "post", "roots",
         "observed_roots_before", "observed_roots_after", "errors", "preservation_sha256",
         "desktop_lease_sha256", "original_transport_sha256", "nonce",
-    } | profile_fields, "Owned cleanup proof")
+    } | profile_fields | ({"protected_anchor"} if schema == 3 else set()), "Owned cleanup proof")
     signal = require_exact_keys(_json(signal_bytes, "Desktop closure signal"), {
         "schema_version", "nonce", "preservation_sha256", "desktop_lease_sha256",
     } | profile_fields, "Desktop closure signal")
     lease = _json(lease_bytes, "Desktop lease")
     require(all(type(document["schema_version"]) is int and
-                document["schema_version"] == (2 if v2 else 1)
+                document["schema_version"] == schema
                 for document in (receipt, proof, signal)) and
             receipt["kind"] == "owned_cleanup_strict_failure_preservation" and
             proof["kind"] == "owned_cleanup_after_strict_failure" and
@@ -494,7 +507,8 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
             type(original.get("raw_cleanup")) is dict, "Original strict failure is unavailable.")
     raw = original["raw_cleanup"]
     if v2:
-        _verify_v2_owned_resources(raw, profile_sha256=profile_sha256, deleted=False)
+        _verify_v2_owned_resources(raw, profile_sha256=profile_sha256,
+                                   deleted=False, schema=schema)
         require(raw.get("scheduled_task_present") is False and
                 raw.get("guest_root_present") is True and
                 raw.get("trusted_task_root_present") is True and
@@ -547,7 +561,13 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         total += row["bytes"]
     require(total <= 512 * 1024 * 1024 and "original-transport.json" in listed,
             "Preserved files exceed their bound or omit the original transport.")
-    result = _source_result(root, original, receipt, listed)
+    result, bundle = _source_result(root, original, receipt, listed)
+    if schema == 3:
+        source = (bundle["harness"]["source_sha"] if bundle["schema_version"] == 2
+                  else bundle["source_sha"])
+        verify_current_protected_anchor_binding(
+            original, source_sha=source,
+            bundle_sha256=original["owned_cleanup_failure_context"]["bundle"]["sha256"])
     if v2:
         require(result.get("process_job_cleanup") ==
                 raw["owned_resource_evidence"]["process_job_cleanup"] and
@@ -565,7 +585,7 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
                     document.get("observer_lifecycle") ==
                     rescue["task_execution"]["observer_lifecycle"],
                     "V2 rescue result is unbound to its exact task lifetime.")
-    frozen = _snapshot(receipt["failed_snapshot"], "Frozen failure", final=False)
+    frozen = _snapshot(receipt["failed_snapshot"], "Frozen failure", final=False, schema=schema)
     roots = _roots(receipt["root_records"], receipt["run_name"])
     require(proof["roots"] == roots, "Finalizer root records differ from creation.")
     observed = require_exact_keys(proof["observed_roots_before"], {"guest", "trusted"},
@@ -574,14 +594,36 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         require(type(observed[role]) is dict and observed[role] == {
             **roots[role], "ordinary_directory": True},
             f"{role} root was replaced, reparse, or changed its descriptor.")
-    before = _snapshot(proof["pre"], "Finalizer pre-inventory", final=True)
-    after = _snapshot(proof["post"], "Finalizer post-inventory", final=True)
+    before = _snapshot(proof["pre"], "Finalizer pre-inventory", final=True, schema=schema)
+    after = _snapshot(proof["post"], "Finalizer post-inventory", final=True, schema=schema)
     for inventory in (frozen, before, after):
         _reject_owned_entries(inventory, roots, receipt["run_name"])
     if v2:
         require(raw["owned_resource_evidence"]["root_records"] == roots,
                 "V2 root creation differs from the original raw evidence.")
-        _v2_finalizer_inventory(frozen, before, after, raw, roots, receipt["run_name"])
+        final_anchor = None
+        if schema == 3:
+            evidence = raw["owned_resource_evidence"]
+            final_anchor = _v3_anchor(proof["protected_anchor"],
+                                      name=receipt["run_name"], sid=evidence["runner_sid"],
+                                      session=evidence["runner_session_id"],
+                                      profile_sha256=profile_sha256, closed=True)
+            held_anchor = evidence["protected_anchor"]
+            require(all(final_anchor[key] == held_anchor[key] for key in (
+                "run_name", "vm_id", "source_sha", "bundle_sha256", "profile_sha256",
+                "anchor_nonce", "pre_name_utc", "pre_name_snapshot", "anchor_present")),
+                "Finalizer protected anchor differs from its original held context.")
+            if final_anchor["anchor_present"]:
+                require(all(final_anchor["proof"][key] == held_anchor["proof"][key]
+                            for key in held_anchor["proof"] if key not in (
+                                "handle_closed", "parent_handle_closed", "child_path_closed",
+                                "parent_path_closed", "accepted_snapshot_count")),
+                        "Finalizer protected lifetime changed after original preservation.")
+                require(final_anchor["proof"]["accepted_snapshot_count"] >=
+                        held_anchor["proof"]["accepted_snapshot_count"] + 2,
+                        "Finalizer did not recheck the held protected lifetime in both inventories.")
+        _v2_finalizer_inventory(frozen, before, after, raw, roots, receipt["run_name"],
+                                schema=schema, final_anchor=final_anchor)
     else:
         _subset(before, frozen, "Finalizer pre-inventory")
         _subset(after, frozen, "Finalizer post-inventory")

@@ -17,7 +17,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from controller_cleanup_fixture import clean_controller_cleanup, clean_controller_cleanup_v2
+from controller_cleanup_fixture import (
+    clean_controller_cleanup, clean_controller_cleanup_v2,
+    clean_controller_cleanup_v3,
+)
 from darkrenamer_tooling.evidence import gui as evidence
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
@@ -112,7 +115,9 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                 "start_observed": True, "exit_observed": True,
                 "exit_method": "normal-close", "exit_code": 0,
             }})
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, process_jobs=jobs, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         raw["process_lifecycles"] = lifecycles
         raw["process_job_cleanup"] = cleanup["owned_resource_evidence"]["process_job_cleanup"]
         raw["observer_lifecycle"] = cleanup["owned_resource_evidence"]["task_execution"]["observer_lifecycle"]
@@ -120,6 +125,7 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         transport_path = output / "transport.json"
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
+        transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
         write_json(transport_path, transport)
         self.fixture.refresh(run)
         return run, profile_hash
@@ -800,7 +806,9 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         second_job["pid"] = raw["assertions"]["scenario"]["default_columns"]["process_id"]
         second_job["process_start_time_utc_ticks"] = "134041000000000005"
         jobs.append(second_job)
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, process_jobs=jobs, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         owned = cleanup["owned_resource_evidence"]
         raw["process_job_cleanup"] = owned["process_job_cleanup"]
         raw["observer_lifecycle"] = owned["task_execution"]["observer_lifecycle"]
@@ -808,6 +816,7 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         transport_path = self.pair_run / "output" / "transport.json"
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
+        transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
         write_json(transport_path, transport)
         self.fixture.refresh(self.pair_run)
         return manifest, transport, raw
@@ -880,7 +889,7 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_input_manifest(self.pair_run, SOURCE)
         original_document = json.loads(original_profile)
-        for field, value in (("profile_id", "unexpected-v2"), ("revision", 3)):
+        for field, value in (("profile_id", "unexpected-v2"), ("revision", 2)):
             with self.subTest(profile_field=field):
                 changed = {**original_document, field: value}
                 changed_bytes = json_bytes(changed)
@@ -2080,12 +2089,16 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_input_manifest(run, SOURCE)
 
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         owned = cleanup["owned_resource_evidence"]
         raw = {"process_job_cleanup": owned["process_job_cleanup"],
                "observer_lifecycle": owned["task_execution"]["observer_lifecycle"]}
         scenario = self.scenario()
-        evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest, raw, scenario)
+        transport = {"raw_cleanup": cleanup,
+                     "vm_id": cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]}
+        evidence.validate_icon_owned_transport(transport, manifest, raw, scenario)
         for mutate in (
                 lambda r, s: s.__setitem__("process_start_utc_ticks", "134041000000000001"),
                 lambda r, s: r.__setitem__("process_job_cleanup", []),
@@ -2093,7 +2106,7 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
             copied_raw, copied_scenario = deepcopy(raw), deepcopy(scenario)
             mutate(copied_raw, copied_scenario)
             with self.assertRaises(evidence.EvidenceError):
-                evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest,
+                evidence.validate_icon_owned_transport(transport, manifest,
                                                        copied_raw, copied_scenario)
 
     def test_synchronous_baseline_manifest_requires_explicit_method_and_original_ref(self):

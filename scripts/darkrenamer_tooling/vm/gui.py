@@ -1461,10 +1461,10 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             profile_file = ordinary_file(Path(repo) / "config" / V2_PROFILE_FILE, 1024 * 1024,
                                          "V2 acceptance profile")
             profile_document = read_json(profile_file)
-            require(profile_document.get("schema") == "darkrenamer-vm-automated-profile-v2" and
+            require(profile_document.get("schema") == "darkrenamer-vm-automated-profile-v3" and
                     profile_document.get("profile_id") == V2_PROFILE_ID and
                     type(profile_document.get("revision")) is int and
-                    profile_document.get("revision") == 2,
+                    profile_document.get("revision") == 3,
                     "V2 acceptance profile definition is unavailable.")
             profile_digest = digest(profile_file)
         selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,

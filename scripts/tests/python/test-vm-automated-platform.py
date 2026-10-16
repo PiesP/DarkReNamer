@@ -10,11 +10,16 @@ import unittest
 
 from darkrenamer_tooling.contracts.platform import (
     _v2_task_action_matches, _windows_task_argv,
-    verify_cleanup, verify_controller_cleanup, verify_controller_owned_cleanup, verify_environment,
+    verify_cleanup, verify_controller_cleanup, verify_controller_owned_cleanup,
+    verify_current_protected_anchor_binding, verify_environment,
     verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
-from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
+from controller_cleanup_fixture import (
+    V2_PROFILE_SHA256, clean_controller_cleanup_v2,
+    clean_controller_cleanup_v3, clean_controller_cleanup_v3_protected,
+    _v3_descriptor,
+)
 
 class PlatformTests(unittest.TestCase):
     def setUp(self):
@@ -653,6 +658,99 @@ class PlatformTests(unittest.TestCase):
         events[1]["input_method"] = "uia"
         with self.assertRaises(EvidenceError):
             verify_keyboard_events(events, candidate_pid=1234, session_id=2, main_workbench_hwnd=12)
+
+
+class V3ProtectedResourceTests(unittest.TestCase):
+    def verify(self, cleanup):
+        return verify_controller_cleanup(
+            cleanup, profile_id="vm-automated-v2-owned-resources",
+            profile_sha256=cleanup["profile_sha256"])
+
+    def test_production_shaped_empty_and_held_protected_inventories(self):
+        for factory in (clean_controller_cleanup_v3,
+                        clean_controller_cleanup_v3_protected):
+            with self.subTest(factory=factory.__name__):
+                cleanup = factory()
+                self.verify(cleanup)
+                transport = {"vm_id": cleanup["owned_resource_evidence"][
+                    "protected_anchor"]["vm_id"], "raw_cleanup": cleanup}
+                verify_current_protected_anchor_binding(
+                    transport, source_sha="a" * 40, bundle_sha256="b" * 64)
+
+    def test_protected_lifetime_refuses_tampered_scope_or_provenance(self):
+        seed = clean_controller_cleanup_v3_protected()
+        for label, change in (
+            ("new opaque", lambda c: c["owned_resource_evidence"]["process_snapshots"][
+                "after_delete"]["processes"].append({**c["owned_resource_evidence"][
+                    "baseline_processes"][0], "pid": 4901,
+                    "identity": "4901|2026-09-30T01:02:03.0000000Z"})),
+            ("missing attempt", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["pre_name_snapshot"].pop("attempts")),
+            ("parent time", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"].update(
+                    parent_creation_time_utc="2026-09-29T01:02:04.0000000Z")),
+            ("snapshot count", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"].update(accepted_snapshot_count=2)),
+            ("unclosed", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"].update(parent_handle_closed=False)),
+            ("PPL", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"]["provenance"].update(protection_level=0)),
+            ("service", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"]["provenance"]["service"].update(
+                    name="OtherService")),
+            ("descriptor ACE", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"]["provenance"]["child_ancestry"][1][
+                    "aces"][1].update(mask=0x1F01FF)),
+            ("descriptor bytes", lambda c: c["owned_resource_evidence"][
+                "protected_anchor"]["proof"]["provenance"]["child_ancestry"][1].update(
+                    security_descriptor_base64="AA==")),
+        ):
+            changed = deepcopy(seed)
+            change(changed)
+            with self.subTest(label=label), self.assertRaises(EvidenceError):
+                self.verify(changed)
+
+    def test_current_binding_and_historical_schema_cannot_cross(self):
+        cleanup = clean_controller_cleanup_v3_protected()
+        transport = {"vm_id": cleanup["owned_resource_evidence"][
+            "protected_anchor"]["vm_id"], "raw_cleanup": cleanup}
+        for field, value in (("source_sha", "f" * 40),
+                             ("bundle_sha256", "f" * 64), ("vm_id", "0" * 36)):
+            changed = deepcopy(transport)
+            if field == "vm_id":
+                changed[field] = value
+                args = {"source_sha": "a" * 40, "bundle_sha256": "b" * 64}
+            else:
+                args = {"source_sha": "a" * 40, "bundle_sha256": "b" * 64}
+                args[field] = value
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_current_protected_anchor_binding(changed, **args)
+        historical = clean_controller_cleanup_v2()
+        self.verify(cleanup)
+        verify_controller_cleanup(historical, profile_id="vm-automated-v2-owned-resources",
+                                  profile_sha256=V2_PROFILE_SHA256)
+        with self.assertRaises(EvidenceError):
+            verify_controller_cleanup(historical, profile_id="vm-automated-v2-owned-resources",
+                                      profile_sha256=cleanup["profile_sha256"])
+        with self.assertRaises(EvidenceError):
+            verify_controller_cleanup(historical, profile_id="vm-automated-v2-owned-resources")
+        old_hash_new_schema = clean_controller_cleanup_v3(
+            profile_sha256=V2_PROFILE_SHA256)
+        with self.assertRaises(EvidenceError):
+            verify_controller_cleanup(old_hash_new_schema,
+                                      profile_id="vm-automated-v2-owned-resources",
+                                      profile_sha256=V2_PROFILE_SHA256)
+
+    def test_matching_binary_and_semantic_untrusted_acl_still_refuses(self):
+        cleanup = clean_controller_cleanup_v3_protected()
+        for anchor_name in ("protected_anchor_initial", "protected_anchor"):
+            node = cleanup["owned_resource_evidence"][anchor_name]["proof"][
+                "provenance"]["child_ancestry"][1]
+            node["aces"][1]["mask"] = 0x1F01FF
+            node["security_descriptor_base64"] = _v3_descriptor(
+                node["owner_sid"], node["aces"])
+        with self.assertRaisesRegex(EvidenceError, "untrusted effective write access"):
+            self.verify(cleanup)
 
 
 class V2OwnedResourceTests(unittest.TestCase):

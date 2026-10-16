@@ -13,7 +13,10 @@ from darkrenamer_tooling.contracts.owned_cleanup import (
     verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
-from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
+from controller_cleanup_fixture import (
+    V2_PROFILE_SHA256, clean_controller_cleanup_v2,
+    clean_controller_cleanup_v3_protected,
+)
 
 
 RUN = 'DarkReNamerTests-' + 'a' * 32
@@ -479,6 +482,103 @@ class V2OwnedCleanupTests(unittest.TestCase):
                 self.rebind_original()
                 with self.assertRaises(EvidenceError):
                     self.verify_v2()
+
+
+class V3OwnedCleanupTests(unittest.TestCase):
+    def setUp(self):
+        OwnedCleanupTests.setUp(self)
+        bundle_bytes = write(self.root / 'bundle.json',
+                             {'schema_version': 1, 'source_sha': '9' * 40})
+        bundle_ref = {'file': 'bundle.json', 'bytes': len(bundle_bytes),
+                      'sha256': digest(bundle_bytes)}
+        self.original['owned_cleanup_failure_context']['bundle'] = bundle_ref
+        self.receipt['files'][2] = bundle_ref
+        raw = clean_controller_cleanup_v3_protected(
+            profile_sha256='a' * 64, source_sha='9' * 40,
+            bundle_sha256=digest(bundle_bytes), vm_id=VM, run_name=RUN)
+        evidence = raw['owned_resource_evidence']
+        job = evidence['process_job_cleanup'][0]
+        result = process_result('9' * 40)
+        result['process_lifecycle'] = {
+            'pid': job['pid'],
+            'start_time_utc_ticks': job['process_start_time_utc_ticks']}
+        result['process_job_cleanup'] = deepcopy(evidence['process_job_cleanup'])
+        result['observer_lifecycle'] = deepcopy(evidence['task_execution']['observer_lifecycle'])
+        result_bytes = write(self.root / 'original-result.json', result)
+        result_ref = {'file': 'original-result.json', 'bytes': len(result_bytes),
+                      'sha256': digest(result_bytes)}
+        self.receipt['files'][1] = result_ref
+        self.original['owned_cleanup_failure_context']['source_result'] = result_ref
+        self.roots = deepcopy(evidence['root_records'])
+        self.frozen = {'complete': True,
+                       'processes': deepcopy(evidence['process_snapshots'][
+                           'after_intervention']['processes']),
+                       'tasks': [], 'owned_processes': []}
+        raw.update(guest_root_present=True, trusted_task_root_present=True,
+                   runner_process_inventory_complete=False,
+                   unexpected_runner_processes_after_delete=None,
+                   unexpected_runner_tasks_after_delete=None,
+                   resource_cleanup_errors=['Original root deletion was deferred.'])
+        evidence['process_snapshots']['after_delete'] = None
+        evidence['task_snapshots']['after_delete'] = None
+        evidence['observed_roots_before'] = None
+        evidence['observed_roots_after'] = {'guest_present': True, 'trusted_present': True}
+        held = evidence['protected_anchor']
+        held['all_handles_closed'] = False
+        held['proof'].update(handle_closed=False, parent_handle_closed=False,
+                             child_path_closed=False, parent_path_closed=False,
+                             accepted_snapshot_count=4)
+        self.original['raw_cleanup'] = raw
+        self.original['owned_cleanup_failure_context'].update(
+            failed_snapshot=self.frozen, root_records=self.roots)
+        self.receipt.update(schema_version=3, run_name=RUN,
+                            profile_id='vm-automated-v2-owned-resources',
+                            profile_sha256='a' * 64,
+                            failed_snapshot=self.frozen, root_records=self.roots)
+        self.signal.update(schema_version=3,
+                           profile_id='vm-automated-v2-owned-resources',
+                           profile_sha256='a' * 64)
+        inventory = {**deepcopy(self.frozen), 'owned_tasks': []}
+        final_anchor = deepcopy(held)
+        final_anchor['all_handles_closed'] = True
+        final_anchor['proof'].update(handle_closed=True, parent_handle_closed=True,
+                                      child_path_closed=True, parent_path_closed=True,
+                                      accepted_snapshot_count=6)
+        self.proof.update(schema_version=3, run_name=RUN,
+                          profile_id='vm-automated-v2-owned-resources',
+                          profile_sha256='a' * 64,
+                          pre=inventory, post=deepcopy(inventory), roots=self.roots,
+                          observed_roots_before={role: {**row, 'ordinary_directory': True}
+                                                 for role, row in self.roots.items()},
+                          protected_anchor=final_anchor)
+        self.rebind_original()
+
+    def rebind_original(self):
+        OwnedCleanupTests.rebind_original(self)
+
+    def verify_v3(self):
+        return verify_preserved_owned_cleanup(self.root,
+                                              profile_id='vm-automated-v2-owned-resources',
+                                              profile_sha256='a' * 64)
+
+    def test_held_pre_name_lifetime_closes_only_after_finalizer(self):
+        self.assertEqual(self.verify_v3()['owned_cleanup'], 'owned-clean')
+        self.assertEqual(self.verify_v3()['acceptance'], 'rejected')
+
+    def test_finalizer_rejects_lost_handle_or_phase_recheck(self):
+        seed = deepcopy(self.proof)
+        for mode in ('handle', 'count', 'source'):
+            self.proof = deepcopy(seed)
+            anchor = self.proof['protected_anchor']
+            if mode == 'handle':
+                anchor['proof']['child_path_closed'] = False
+            elif mode == 'count':
+                anchor['proof']['accepted_snapshot_count'] = 5
+            else:
+                anchor['source_sha'] = 'f' * 40
+            self.rebind_original()
+            with self.subTest(mode=mode), self.assertRaises(EvidenceError):
+                self.verify_v3()
 
 
 if __name__ == '__main__':
