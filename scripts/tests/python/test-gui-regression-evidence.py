@@ -2007,12 +2007,30 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
         repo = SCRIPT_ROOT.parent
         source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
                                              text=True).strip()
-        manifest = {"source_sha": source_sha,
-                    "product_inputs": producer.first_clear_product_inputs(repo, source_sha)}
-        evidence.verify_first_clear_product_inputs(repo, manifest)
-        manifest["product_inputs"]["entries_sha256"] = "0" * 64
-        with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+        historical_query = ["git", "ls-tree", "-rz", "--full-tree",
+                            evidence.FIRST_CLEAR_PRODUCT_REFERENCE_SHA]
+        current_tree = subprocess.check_output(
+            ["git", "ls-tree", "-rz", "--full-tree", source_sha], cwd=repo)
+        real_check_output = subprocess.check_output
+        def offline_tree(command, **kwargs):
+            return current_tree if command == historical_query else real_check_output(command, **kwargs)
+        with mock.patch.object(subprocess, "check_output", side_effect=offline_tree):
+            manifest = {"source_sha": source_sha,
+                        "product_inputs": producer.first_clear_product_inputs(repo, source_sha)}
             evidence.verify_first_clear_product_inputs(repo, manifest)
+            original_product_inputs = dict(manifest["product_inputs"])
+            manifest["product_inputs"]["entries_sha256"] = "0" * 64
+            with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+                evidence.verify_first_clear_product_inputs(repo, manifest)
+        manifest["product_inputs"] = original_product_inputs
+        altered_tree = current_tree.replace(b"100644 blob", b"100755 blob", 1)
+        self.assertNotEqual(altered_tree, current_tree)
+        with mock.patch.object(subprocess, "check_output",
+                               side_effect=lambda command, **kwargs:
+                               altered_tree if command == historical_query else
+                               real_check_output(command, **kwargs)):
+            with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+                evidence.verify_first_clear_product_inputs(repo, manifest)
 
     def make_failed_observation(self):
         run = self.focused_run

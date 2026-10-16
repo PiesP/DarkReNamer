@@ -1106,6 +1106,13 @@ immutable input records the V1 profile file hash and compares the complete
 non-tooling product/build Git inventory with
 `d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2`. The new executable hash is
 frozen separately; the historical executable is not reused.
+The diagnostic and its independent verifier read the historical Git tree, so
+the local checkout must contain that commit; a depth-one CI checkout cannot run
+the diagnostic. Check this without changing the checkout:
+
+```bash
+git cat-file -e d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2^{commit}
+```
 
 ```bash
 python3 -I scripts/run-gui-regression.py \
