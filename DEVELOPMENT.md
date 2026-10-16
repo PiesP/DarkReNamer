@@ -1087,6 +1087,51 @@ tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
 
+### Owned-resource fixed-performance sample
+
+The fixed sample uses strict V1 cleanup by default. To select the separately
+named revision-3 owned-resource contract, use a clean committed source and the
+exact application already exercised by its native runner:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic performance-sample \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --performance-column-order hidden-visible \
+  --prepared-bundle-root /absolute/private/verified-native-bundle \
+  --expected-prepared-application-sha256 <native-executed-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-owned-performance-attempt
+```
+
+This route uses `performance-sample-v2-owned-r3-1366x768-96-text100-` run
+IDs followed by `hidden-visible` or `visible-hidden`. It pins the reviewed
+revision-3 profile bytes; a different profile requires a reviewed contract.
+The fixed workload and timing scope above are unchanged. The explicit profile
+branch retains the 600-second observer and 1,200-second controller limits,
+5,000-ms command deadline, and one-PNG/32-MiB collection budget. No profile
+fallback or automatic retry occurs.
+
+The observer binds native PID and creation FILETIME through its original held
+process handle, then requires normal exit and one closed sole-primary Job.
+Actual pre-work and final text-scale snapshots must agree at effective 100%.
+A present registry value must be `DWord` 100; successfully observed absence is
+allowed only with an effective factor of 1.0. The sample does not change these
+settings to satisfy admission.
+
+The independent verifier retains complete process/task observations and ambient
+deltas and requires the revision-3 owned-resource proof plus the indexed
+managed-desktop start, stopped lease, and stop response. Failed preservation
+uses the [pre-delete restoration gate](SAFETY.md#owned-resource-fixed-performance-diagnostic);
+missing evidence leaves roots retained and the attempt incomplete. A successful
+observation with incomplete cleanup is not a passing sample.
+
+Report the selected contract and ambient delta ledger with the metrics. V2
+owned cleanup does not prove V1 whole-session process stasis or harmless ambient
+activity. Preserved V1 failures keep their original verdicts. Do not combine
+V1 and V2 runs into a common timing baseline or balanced-order median; compare
+products only under the same reviewed profile, workload, and desktop conditions.
+
 ### Focused first-10k-clear diagnostic
 
 The first-clear replay for the original issue #32 bundle is a source-bound,

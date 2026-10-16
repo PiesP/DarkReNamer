@@ -911,6 +911,33 @@ guarantee whole-session OS process stasis, complete causality of ambient OS
 activity, all broker-mediated escape paths or remote VM hardware attestation.
 The trusted VM producer and private raw-evidence boundary remain in force.
 
+### Owned-resource fixed-performance diagnostic
+
+The explicit `performance-sample-v2-owned-r3-` route applies the reviewed
+revision-3 owned-resource environment contract to the unchanged fixed sample.
+Legacy performance IDs and omitted-profile invocations retain strict V1;
+first-clear observations retain their frozen V1 selector. The new route binds
+one native product lifetime through its original held process handle to the
+observer, postlaunch target, sole-primary Job, executable, source and profile.
+Normal product exit and complete Job closure are required. All raw process and
+task rows remain evidence; the inherited V2 claim limits above still apply.
+
+Success requires actual 100% registry/UI text-scale proof before work and after
+owned runtime cleanup, plus indexed raw closure of the exact managed-desktop
+lease. A host cleanup boolean is insufficient. On preserved failure, the trusted
+controller validates the frozen input, result, observations, profile and root
+bindings and writes an exclusive `owned-performance-predelete.json` receipt
+before invoking the guest finalizer. The guest checks that binding before either
+owned-root deletion. Missing or inconsistent restoration evidence leaves both
+roots untouched. The independent Python verifier recomputes this frozen proof
+and separately checks the existing desktop signal, finalizer, post-inventories
+and root absence; its post-delete result cannot replace the pre-delete gate.
+
+These checks cannot convert a failed command into a passing sample or recreate
+historical closure. The [development command](DEVELOPMENT.md#owned-resource-fixed-performance-sample)
+describes the explicit route and reporting limits. It does not establish a
+whole-session V1 environment or permit comparison across different contracts.
+
 ### Common evidence and promotion bindings
 
 The independent verifier derives all 22 target verdicts from raw observations;
