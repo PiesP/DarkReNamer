@@ -66,7 +66,8 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 "schema_version": 1, "baseline": deepcopy(snapshot),
                 "final": deepcopy(snapshot), "snapshot_equal": True}}
         self.assertTrue(runner.first_clear_text_scale_restored(observations))
-        for mutation in ("missing", "final", "registry", "ui", "malformed"):
+        for mutation in ("missing", "final", "registry", "ui", "inconsistent-pair",
+                         "malformed-factor", "nonfinite-factor", "malformed"):
             changed = deepcopy(observations)
             if mutation == "missing":
                 changed.pop("text_scale_restoration")
@@ -76,6 +77,13 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 changed["text_scale_restoration"]["final"]["registry_value_kind"] = "QWord"
             elif mutation == "ui":
                 changed["text_scale_restoration"]["final"]["ui_settings_percent"] = 101
+            elif mutation == "inconsistent-pair":
+                for key in ("baseline", "final"):
+                    changed["text_scale_restoration"][key]["ui_settings_raw_factor"] = 1.5
+            elif mutation == "malformed-factor":
+                changed["text_scale_restoration"]["final"]["ui_settings_raw_factor"] = "1.0"
+            elif mutation == "nonfinite-factor":
+                changed["text_scale_restoration"]["final"]["ui_settings_raw_factor"] = float("nan")
             else:
                 changed["text_scale_restoration"]["final"]["registry_value"] = "100"
             with self.subTest(mutation=mutation):

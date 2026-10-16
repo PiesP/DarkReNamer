@@ -119,6 +119,7 @@ def first_clear_text_scale_restored(observations: object) -> bool:
     snapshots = (proof["baseline"], proof["final"])
     fields = {"registry_key_existed", "registry_value_existed", "registry_value_kind",
               "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}
+    # Python round and the collector's Math.Round both use ties to even.
     for snapshot in snapshots:
         if not isinstance(snapshot, dict) or set(snapshot) != fields or \
                 type(snapshot["registry_key_existed"]) is not bool or \
@@ -127,8 +128,9 @@ def first_clear_text_scale_restored(observations: object) -> bool:
                 type(snapshot["ui_settings_percent"]) is not int or \
                 snapshot["ui_settings_percent"] != 100 or \
                 type(snapshot["ui_settings_raw_factor"]) not in (int, float) or \
+                not 1.0 <= snapshot["ui_settings_raw_factor"] <= 2.25 or \
                 not math.isfinite(snapshot["ui_settings_raw_factor"]) or \
-                not 1.0 <= snapshot["ui_settings_raw_factor"] <= 2.25:
+                round(snapshot["ui_settings_raw_factor"] * 100) != snapshot["ui_settings_percent"]:
             return False
         if snapshot["registry_value_existed"]:
             if not isinstance(snapshot["registry_value_kind"], str) or \

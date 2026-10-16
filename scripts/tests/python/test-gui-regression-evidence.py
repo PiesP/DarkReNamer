@@ -2221,7 +2221,8 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
         original = json.loads(observations_path.read_text())
         self.assertEqual(self.validate_first_clear(run, manifest)["status"], "failure-observed")
         for mutation in ("missing", "final-missing", "registry-kind", "registry-value",
-                         "ui-factor", "ui-percent", "claimed-unequal", "malformed"):
+                         "ui-factor", "ui-percent", "inconsistent-pair", "malformed-factor",
+                         "claimed-unequal", "malformed"):
             observations = deepcopy(original)
             proof = observations["text_scale_restoration"]
             if mutation == "missing":
@@ -2236,6 +2237,11 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
                 proof["final"]["ui_settings_raw_factor"] = 1.001
             elif mutation == "ui-percent":
                 proof["final"]["ui_settings_percent"] = 101
+            elif mutation == "inconsistent-pair":
+                for key in ("baseline", "final"):
+                    proof[key]["ui_settings_raw_factor"] = 1.5
+            elif mutation == "malformed-factor":
+                proof["final"]["ui_settings_raw_factor"] = "1.0"
             elif mutation == "claimed-unequal":
                 proof["snapshot_equal"] = False
             else:
