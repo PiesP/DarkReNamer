@@ -2293,11 +2293,47 @@ try {
     } 'binding mismatch'
     Initialize-AcceptanceNative
     if ($IsWindows) {
-    # Execute the producer's retained-handle branch on a real short-lived child.
-    $lifetimeChild = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-        -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 3' `
-        -WindowStyle Hidden -PassThru
+    # Hold a same-host child on stdin until the retained-handle producer probe finishes.
+    $lifetimeChildCommand = "[Console]::Out.WriteLine('owned-performance-ready'); " +
+        "[Console]::Out.Flush(); if ([Console]::ReadLine() -cne 'release') { exit 2 }; exit 0"
+    $lifetimeStart = [Diagnostics.ProcessStartInfo]::new()
+    $lifetimeStart.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $lifetimeStart.UseShellExecute = $false
+    $lifetimeStart.CreateNoWindow = $true
+    $lifetimeStart.RedirectStandardInput = $true
+    $lifetimeStart.RedirectStandardOutput = $true
+    $lifetimeStart.RedirectStandardError = $true
+    $lifetimeStart.ArgumentList.Add('-NoProfile')
+    $lifetimeStart.ArgumentList.Add('-NonInteractive')
+    $lifetimeStart.ArgumentList.Add('-EncodedCommand')
+    $lifetimeStart.ArgumentList.Add([Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($lifetimeChildCommand)))
+    $lifetimeChild = [Diagnostics.Process]::new()
+    $lifetimeChild.StartInfo = $lifetimeStart
+    $lifetimeStarted = $false
+    $lifetimeError = $null
+    function Get-OwnedPerformanceChildState {
+        param([Diagnostics.Process]$Child,[bool]$Started,$ErrorTask)
+        if (-not $Started) { return 'start=pending' }
+        $exited = $Child.HasExited
+        $exitCode = if ($exited) { [string]$Child.ExitCode } else { 'pending' }
+        $errorText = if ($null -ne $ErrorTask -and $ErrorTask.IsCompletedSuccessfully) {
+            [string]$ErrorTask.Result
+        } else { '<pending>' }
+        if ($errorText.Length -gt 2000) { $errorText = $errorText.Substring(0,2000) }
+        return "pid=$($Child.Id); hasExited=$exited; exitCode=$exitCode; stderr=$errorText"
+    }
     try {
+        $lifetimeStarted = $lifetimeChild.Start()
+        if (-not $lifetimeStarted) { throw 'Owned performance lifetime child did not start.' }
+        $lifetimeError = $lifetimeChild.StandardError.ReadToEndAsync()
+        $readyLine = $lifetimeChild.StandardOutput.ReadLineAsync()
+        if (-not $readyLine.Wait(15000)) {
+            throw "Owned performance lifetime child readiness timed out: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        if ($readyLine.GetAwaiter().GetResult() -cne 'owned-performance-ready') {
+            throw "Owned performance lifetime child gave no readiness marker: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
         $lifetimeApplication = [pscustomobject]@{
             process=$lifetimeChild
             owned=[ordered]@{process_start_time_utc_ticks=[long]$lifetimeChild.StartTime.ToUniversalTime().Ticks}
@@ -2313,8 +2349,13 @@ try {
             $lifetimeApplication.process_lifecycle.creation_filetime -ne $creationFileTime) {
             throw 'Owned performance producer did not retain the child process identity.'
         }
-        if (-not $lifetimeChild.WaitForExit(15000) -or $lifetimeChild.ExitCode -ne 0) {
-            throw 'Owned performance lifetime child did not exit normally.'
+        $lifetimeChild.StandardInput.WriteLine('release')
+        $lifetimeChild.StandardInput.Close()
+        if (-not $lifetimeChild.WaitForExit(15000)) {
+            throw "Owned performance lifetime child exit timed out after release: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        if ($lifetimeChild.ExitCode -ne 0) {
+            throw "Owned performance lifetime child exited abnormally: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
         }
         $terminalLifetime=[DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
             [IntPtr]$lifetimeChild.Handle,[uint32]$lifetimeChild.Id,$creationFileTime,$true)
@@ -2324,7 +2365,10 @@ try {
         }
     }
     finally {
-        if (-not $lifetimeChild.HasExited) { $lifetimeChild.Kill(); $lifetimeChild.WaitForExit(5000) }
+        if ($lifetimeStarted -and -not $lifetimeChild.HasExited) {
+            $lifetimeChild.Kill()
+            [void]$lifetimeChild.WaitForExit(5000)
+        }
         $lifetimeChild.Dispose()
     }
     }
