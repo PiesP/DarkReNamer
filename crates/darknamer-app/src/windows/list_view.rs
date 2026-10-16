@@ -5368,7 +5368,7 @@ mod native_tests {
 
     #[test]
     fn full_refresh_native_zero_row_bulk_clear() -> Result<(), Box<dyn std::error::Error>> {
-        isolated_native_refresh_case("zero_row_bulk_clear", run_native_zero_row_bulk_clear)
+        isolated_native_refresh_case("native_zero_row_bulk_clear", run_native_zero_row_bulk_clear)
     }
 
     #[test]
