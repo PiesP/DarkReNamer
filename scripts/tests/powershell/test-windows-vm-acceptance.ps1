@@ -3742,9 +3742,12 @@ foreach ($call in $applicationStartCalls) {
                     is_administrator = $true; vm_id = $null } }
             2 { return [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1001'; session_id = 7 } }
             3 {
-                $name = [string]$ArgumentList[0]
+                if ($null -ne $ArgumentList[0]) {
+                    throw 'A v2 run name was disclosed before the protected-process anchor.'
+                }
+                $name = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
                 $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
-                return [pscustomobject]@{ guest_root = Join-Path $base $name;
+                return [pscustomobject]@{ run_name = $name; guest_root = Join-Path $base $name;
                     trusted_task_root = Join-Path $base ($name + '-trusted') }
             }
             4 { return [pscustomobject]@{ manifest_sha256 = 'a' * 64; records = @() } }

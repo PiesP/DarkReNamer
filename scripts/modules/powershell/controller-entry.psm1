@@ -1267,7 +1267,9 @@ $credential = $null
 $session = $null
 $guestRoot = $null
 $trustedTaskRoot = $null
-$taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+$taskName = if ($ownedV2) { $null } else {
+    'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+}
 $runnerTaskBaseline = @()
 $runnerProcessBaseline = @()
 $spotlightPreflight = $null
@@ -1586,10 +1588,13 @@ public static class VmDesktopState {
             -RunId $RuntimeBrokerDiagnosticRunId -RunnerSid $desktop.sid -VmId $ExpectedGuestVmId
         Write-DrDiagnosticPhase -Phase 'desktop-session-bound' -Details @{ session_id=[int]$desktop.session_id; runner_sid=[string]$desktop.sid }
     }
-    $workspaceRoots = Invoke-Command -Session $session -ArgumentList $taskName,$desktop.sid -ScriptBlock {
-        param($name,$runnerSid)
-        if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
-            $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$') {
+    $workspaceRoots = Invoke-Command -Session $session `
+        -ArgumentList $taskName,$desktop.sid,$desktop.session_id,$ownedV2 -ScriptBlock {
+        param($name,$runnerSid,$runnerSession,$useV2)
+        if (($useV2 -and $null -ne $name) -or
+            (-not $useV2 -and $name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$') -or
+            $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$' -or
+            $runnerSession -le 0) {
             throw 'The VM workspace identity is invalid.'
         }
         if (-not ('DarkReNamerVmOwnedRootGuard' -as [type])) {
@@ -2046,15 +2051,6 @@ public static class DarkReNamerVmControllerWorkspace {
         }
         else {
             [void][System.IO.FileSystemAclExtensions]::CreateDirectory($baseSecurity, $base)
-        }
-        $path = Join-Path $base $name
-        if (Test-Path -LiteralPath $path) {
-            throw 'The unique VM workspace path already exists.'
-        }
-        $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
-        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
-        $global:DrVmOwnedRootRecords = @{
-            guest = Get-DrVmOwnedRootRecord -Path $path
         }
         function global:Get-DrVmTrustedPowerShellPath {
             $programFiles = [Environment]::GetFolderPath(
@@ -3994,9 +3990,34 @@ public static class DrVmCommandLineNative {
             }
         }
 
+        if ($useV2) {
+            # No run-specific name or root exists during this complete inventory.
+            $preName = Get-DrVmRunnerProcesses -UserSid $runnerSid `
+                -SessionId $runnerSession -IncludeExecutionScope
+            if ($null -eq $preName -or -not $preName.complete) {
+                throw 'The pre-name VM runner process inventory was incomplete.'
+            }
+            $name = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+        }
+        $path = Join-Path $base $name
+        if (Test-Path -LiteralPath $path) {
+            throw 'The unique VM workspace path already exists.'
+        }
+        $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
+        $global:DrVmOwnedRootRecords = @{
+            guest = Get-DrVmOwnedRootRecord -Path $path
+        }
         [pscustomobject]@{
+            run_name = $name
             guest_root = $path
             trusted_task_root = Join-Path $base ($name + '-trusted')
+        }
+    }
+    if ($ownedV2) {
+        $taskName = [string]$workspaceRoots.run_name
+        if ($taskName -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$') {
+            throw 'The guest-created VM run name is invalid.'
         }
     }
     $guestRoot = [string]$workspaceRoots.guest_root
@@ -5188,10 +5209,12 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     try {
         if ($session) {
             try {
-                Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
-                    param($name)
-                    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-                    if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+                if ($taskName -cmatch '^DarkReNamerTests-[0-9a-f]{32}$') {
+                    Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
+                        param($name)
+                        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+                        if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+                    }
                 }
                 if ($runtimeBrokerEnabled -and -not $RuntimeBrokerPreparationOnly -and $trustedTaskRoot) {
                     try {
