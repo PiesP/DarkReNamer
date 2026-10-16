@@ -728,6 +728,7 @@ try {
             $runtimeCleanup=$false;$runtimeCleaned=$false
             $rawRegressionJournalAfter=$null;$rawRegressionJournalObserved=$false;$rawRegressionRuntimeRootAfter=$null
             $RegressionMode='standard';$textOriginal=$null;$textChanged=$false;$cursor=$null
+            $ownedPerformanceRun=$false;$ownedPerformanceTextBaseline=$null
             if ($Mode -ceq 'rescue' -and [string]::IsNullOrEmpty($InitialFailure)) {$result.status='passed'}
             . $finalizers[$Mode]
             $published=[IO.File]::ReadAllText($resultPath)|ConvertFrom-Json
