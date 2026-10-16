@@ -2339,6 +2339,31 @@ class VmRunnerTests(unittest.TestCase):
             observed.append(document['lease_id'])
         self.assertEqual(len(set(observed)), 2)
 
+    def test_owned_desktop_preserves_raw_stop_and_requires_exact_closed_lease(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        lease = self.desktop_lease()
+        lease['processId'] = 1234
+        response = {'status': 'stopped', 'lifecycleStatus': 'closed',
+                    'leaseId': lease['leaseId'], 'processId': lease['processId']}
+        for index, stop in enumerate((response, {**response, 'leaseId': 'f' * 32})):
+            evidence = self.root / ('owned-lease-' + str(index))
+            evidence.mkdir()
+            start_raw, stop_raw = json.dumps(lease), json.dumps(stop)
+            with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+                 mock.patch.object(vm, 'windows_host_command',
+                                   side_effect=[start_raw, stop_raw]):
+                if index:
+                    with self.assertRaisesRegex(RuntimeError, 'cleanup'):
+                        with vm.managed_desktop(args, evidence, capture_closure=True):
+                            pass
+                else:
+                    with vm.managed_desktop(args, evidence, capture_closure=True):
+                        pass
+            self.assertEqual((evidence / 'desktop-start-response.json').read_text(), start_raw)
+            self.assertEqual((evidence / 'desktop-stop-response.json').read_text(), stop_raw)
+            document = json.loads((evidence / 'desktop-lease.json').read_text())
+            self.assertIs(document['cleanup_observed'], index == 0)
+
     def test_owned_cleanup_signal_follows_managed_desktop_closure(self):
         args = vm.parse_arguments([
             '--ssh-host', 'vm', '--acceptance-profile-id', vm.V1_PROFILE_ID

@@ -231,6 +231,42 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.performance_run("unknown")
 
+    def test_owned_performance_uses_separate_ids_exact_profile_and_deadlines(self):
+        profile = (Path(__file__).parents[3] / 'config' / runner.V2_PROFILE_FILE).read_bytes()
+        self.assertEqual(hashlib.sha256(profile).hexdigest(),
+                         runner.OWNED_PERFORMANCE_PROFILE_SHA256)
+        (self.root / 'config').mkdir()
+        (self.root / 'config' / runner.V2_PROFILE_FILE).write_bytes(profile)
+        for order in runner.PERFORMANCE_ORDERS:
+            run = runner.performance_run(order, owned=True)
+            run_root = self.root / order
+            (run_root / 'inputs').mkdir(parents=True)
+            (run_root / 'inputs' / runner.V2_PROFILE_FILE).write_bytes(profile)
+            inputs = {'bundle_manifest': {}, 'artifacts': {}, 'source_sha': 'a' * 40,
+                      'source_tree': 'b' * 40,
+                      'acceptance_profile': {'file': f'inputs/{runner.V2_PROFILE_FILE}',
+                                             'bytes': len(profile),
+                                             'sha256': runner.OWNED_PERFORMANCE_PROFILE_SHA256}}
+            with mock.patch.object(runner, 'run_input_artifacts', return_value=({}, inputs)):
+                manifest = runner.input_manifest(self.root, self.root / 'bundle', run_root,
+                                                 run, 'c' * 64, {}, {})
+            self.assertEqual(manifest['command'][-2:],
+                             ['--acceptance-profile-id', runner.V2_PROFILE_ID])
+            self.assertEqual(manifest['request']['performance_plan']['long_path_order'], order)
+            self.write_json(run_root / 'input-manifest.json', manifest)
+            with mock.patch.object(runner.host_tools, 'require_pwsh74',
+                                   return_value='/usr/bin/pwsh'):
+                command = runner.controller_command(self.root, self.root / 'bundle',
+                    run_root, run, {'ssh_host': 'fixture-vm', 'expected_vm_id': 'fixture-id'},
+                    {'expectedGuestSid': 'S-1-5-21-1-2-3-4'})
+            self.assertEqual(command[command.index('-TestTimeoutSeconds') + 1], '600')
+            self.assertEqual(command[command.index('-SuiteTimeoutSeconds') + 1], '1200')
+            self.assertEqual(command[command.index('-AcceptanceProfileSha256') + 1],
+                             runner.OWNED_PERFORMANCE_PROFILE_SHA256)
+            self.assertEqual(command[command.index('-AcceptanceProfileId') + 1],
+                             runner.V2_PROFILE_ID)
+            self.assertNotEqual(run['run_id'], runner.performance_run(order)['run_id'])
+
     def test_prepared_performance_manifest_records_copied_exe_and_bundle_hashes(self):
         pin = "a" * 64
         inputs = {"bundle_manifest": {"sha256": "b" * 64},

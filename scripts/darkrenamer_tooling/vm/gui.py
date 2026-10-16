@@ -21,6 +21,8 @@ from darkrenamer_tooling.formats.png import PngPolicy, decode_png_bytes
 from darkrenamer_tooling.contracts.tooling import (
     RECORD_NAME, stage_verified_tooling, staged_tooling_files, trusted_tooling_inventory,
 )
+from darkrenamer_tooling.contracts.owned_cleanup import verify_owned_performance_text_scale
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 SAFE_LEAF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
@@ -73,6 +75,8 @@ RUNS = (
 V2_RUNS = tuple({**run, "run_id": f"{run['run_id']}-owned-v2"} for run in RUNS)
 APPEARANCE_PAIR_ID = "appearance-pair-light-dark-light"
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+OWNED_PERFORMANCE_RUN_ID = "performance-sample-v2-owned-r3-1366x768-96-text100"
+OWNED_PERFORMANCE_PROFILE_SHA256 = "11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f"
 FOCUSED_CLEAR_MODE = "focused-10k-clear"
 FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
 FOCUSED_PRESERVED_LANE = "focused-preserved-source-built-product-v1"
@@ -165,12 +169,15 @@ PERFORMANCE_PLAN = {
 }
 
 
-def performance_run(order: str = "hidden-visible") -> dict:
+def performance_run(order: str = "hidden-visible", *, owned: bool = False) -> dict:
     if order not in PERFORMANCE_ORDERS:
         raise ValueError("Unsupported performance long-path order.")
-    return {"run_id": f"{PERFORMANCE_RUN_ID}-{order}", "mode": "performance-sample",
+    return {"run_id": f"{OWNED_PERFORMANCE_RUN_ID if owned else PERFORMANCE_RUN_ID}-{order}",
+            "mode": "performance-sample",
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
-            "text_scale_percent": 100, "long_path_order": order}
+            "text_scale_percent": 100, "long_path_order": order,
+            **({"acceptance_profile_id": V2_PROFILE_ID,
+                "acceptance_profile_sha256": OWNED_PERFORMANCE_PROFILE_SHA256} if owned else {})}
 
 
 def focused_clear_run() -> dict:
@@ -1176,7 +1183,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
     if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
-        if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
+        if run["mode"] in {"appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
             command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
         command += ["-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
         if run["mode"] == FIRST_CLEAR_MODE:
@@ -1194,7 +1201,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                     manifest.get("acceptance_profile_sha256") == run["acceptance_profile_sha256"] == digest(staged) and
                     manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
                     "V2 controller profile differs from its immutable staged manifest.")
-            if run["mode"] in {"full-context", "standard", "text-scale", "tooltip"}:
+            if run["mode"] in {"full-context", "standard", "text-scale", "tooltip", "performance-sample"}:
                 source_profile = ordinary_file(repo / "config" / V2_PROFILE_FILE, 1024 * 1024,
                                                "Source V2 profile")
                 require(digest(source_profile) == run["acceptance_profile_sha256"],
@@ -1235,7 +1242,9 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
         require(total_bytes <= 120 * 1024 * 1024 and
                 sum(row["relative_path"].endswith(".png") for row in files) == expected_pngs,
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
-    if run_id in {performance_run(order)["run_id"] for order in PERFORMANCE_ORDERS} | {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
+    if run_id in {performance_run(order, owned=owned)["run_id"]
+                  for order in PERFORMANCE_ORDERS for owned in (False, True)} | \
+            {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
         png_count = sum(row["relative_path"].endswith(".png") for row in files)
         require(total_bytes <= 32 * 1024 * 1024 and
                 (png_count <= 1 if run_id == FIRST_CLEAR_RUN_ID else png_count == 1),
@@ -1439,13 +1448,21 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
                 "appearance-pair", ICON_SETTLEMENT_MODE, "performance-sample", FOCUSED_CLEAR_MODE,
                 FIRST_CLEAR_MODE,
             } else launcher.CONTROLLER_SUITE_TIMEOUT_SECONDS)
+            owned_performance = (run["mode"] == "performance-sample" and
+                                 run.get("acceptance_profile_id") == V2_PROFILE_ID)
+            managed_options = {"capture_desktop_closure": True} if owned_performance else {}
             completed, _lease = native_runner.run_managed_controller(
                 run_root, runtime_args(profile, run),
                 lambda lease: controller_command(repo, bundle, run_root, run, profile, lease),
                 output=output, cwd=repo, suite_timeout=suite_timeout,
-                stdout=stdout, stderr=stderr,
+                stdout=stdout, stderr=stderr, **managed_options,
             )
             controller_exit = completed.returncode
+            if owned_performance:
+                for leaf in ("desktop-lease.json", "desktop-start-response.json",
+                             "desktop-stop-response.json"):
+                    source = ordinary_file(run_root / leaf, 64 * 1024, leaf)
+                    shutil.copyfile(source, output / leaf)
         desktop_restored = True
         if controller_exit == 0 and run["mode"] in {"standard", "text-scale"}:
             write_text_raster_metrics(run_root)
@@ -1470,6 +1487,12 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
         text = observer.get("text_scale", {}) if isinstance(observer.get("text_scale"), dict) else {}
         if run["mode"] == FIRST_CLEAR_MODE:
             text_scale_restored = first_clear_text_scale_restored(observations)
+        elif run["mode"] == "performance-sample" and run.get("acceptance_profile_id") == V2_PROFILE_ID:
+            try:
+                verify_owned_performance_text_scale(observations)
+                text_scale_restored = True
+            except (EvidenceError, KeyError, TypeError):
+                text_scale_restored = False
         elif run["text_scale_percent"] == 100:
             text_scale_restored = environment.get("text_scale_factor_percent") == 100
         else:
@@ -1538,6 +1561,8 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
         command += ["--run", run["run_id"]]
     if diagnostic in {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
         command += ["--diagnostic", diagnostic]
+        if diagnostic == "performance-sample" and runs[0].get("acceptance_profile_id") == V2_PROFILE_ID:
+            command += ["--acceptance-profile-id", V2_PROFILE_ID]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
     else:
@@ -1577,12 +1602,15 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Desktop selection requires a diagnostic.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
-    require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE},
+    require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE},
             "Acceptance profile selection requires fixed GUI, appearance-pair or icon-settlement.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
             "Icon settlement requires explicit V2 owned-resource profile selection.")
     require(args.diagnostic != FIRST_CLEAR_MODE or args.acceptance_profile_id == V1_PROFILE_ID,
             "First-clear observation requires explicit strict V1 profile selection.")
+    require(args.diagnostic != "performance-sample" or
+            args.acceptance_profile_id in {None, V2_PROFILE_ID},
+            "Performance sample V1 is selected by omitting the profile option.")
     require(args.icon_endpoint_method is None or args.diagnostic == ICON_SETTLEMENT_MODE,
             "Icon endpoint selection requires the icon-settlement diagnostic.")
     baseline = args.icon_endpoint_method == ICON_BASELINE_METHOD
@@ -1619,7 +1647,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
-    selected_runs = ((performance_run(args.performance_column_order or "hidden-visible"),) if args.diagnostic == "performance-sample" else
+    selected_runs = ((performance_run(args.performance_column_order or "hidden-visible",
+                                     owned=args.acceptance_profile_id == V2_PROFILE_ID),)
+                     if args.diagnostic == "performance-sample" else
                      (focused_clear_run(),) if args.diagnostic == FOCUSED_CLEAR_MODE else
                      (first_clear_run(),) if args.diagnostic == FIRST_CLEAR_MODE else
                      (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
@@ -1629,7 +1659,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                      if args.diagnostic == "appearance-pair" else
                      V2_RUNS if args.acceptance_profile_id == V2_PROFILE_ID else RUNS)
     if (args.diagnostic is None and args.acceptance_profile_id == V2_PROFILE_ID or
-            args.diagnostic in {"appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}):
+            args.diagnostic in {"appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}):
         selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
         profile_digest = None
         if selected_profile == V2_PROFILE_ID:
@@ -1642,6 +1672,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                     profile_document.get("revision") == 3,
                     "V2 acceptance profile definition is unavailable.")
             profile_digest = digest(profile_file)
+            if args.diagnostic == "performance-sample":
+                require(profile_digest == OWNED_PERFORMANCE_PROFILE_SHA256,
+                        "Owned performance requires its reviewed revision-3 profile bytes.")
         selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
                                **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
                               for run in selected_runs)

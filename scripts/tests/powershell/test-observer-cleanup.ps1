@@ -18,6 +18,49 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# The new performance cleanup path requires the same observed 100% text-scale
+# state in both snapshots before it can authorize either root deletion.
+& {
+    $source = Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $definition = @($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Assert-DrControllerOwnedPerformanceTextScale'
+    },$true))
+    if ($errors.Count -or $definition.Count -ne 1) { throw 'Owned restoration gate is missing.' }
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    $snapshot = [pscustomobject]@{
+        registry_key_existed=$true; registry_value_existed=$true
+        registry_value_kind='DWord'; registry_value=[long]100
+        ui_settings_raw_factor=[double]1.0; ui_settings_percent=100
+    }
+    $proof = [pscustomobject]@{text_scale_restoration=[pscustomobject]@{
+        schema_version=1; baseline=$snapshot; final=$snapshot.PSObject.Copy(); snapshot_equal=$true}}
+    Assert-DrControllerOwnedPerformanceTextScale -Observations $proof
+    foreach ($field in @('registry_value','registry_value_kind','ui_settings_raw_factor',
+            'ui_settings_percent','registry_value_existed')) {
+        $bad = $snapshot.PSObject.Copy()
+        switch ($field) {
+            'registry_value' { $bad.$field = [long]150 }
+            'registry_value_kind' { $bad.$field = 'String' }
+            'ui_settings_raw_factor' { $bad.$field = [double]1.5 }
+            'ui_settings_percent' { $bad.$field = 150 }
+            'registry_value_existed' { $bad.$field = $false }
+        }
+        $proof.text_scale_restoration.final = $bad
+        Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+            'Owned performance'
+    }
+    $proof.text_scale_restoration.final = $null
+    Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+        'Owned performance'
+    $proof.text_scale_restoration.final = $snapshot.PSObject.Copy()
+    $proof.text_scale_restoration.snapshot_equal = $false
+    Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+        'missing or incomplete'
+}
+
 # Reject case variants at real public boundaries before source or VM acquisition.
 foreach ($entry in @(
     @{file='run-windows-vm-tests.ps1';args=@{BundleRoot='unused';SshHost='fixture'}},

@@ -173,6 +173,26 @@ public static class DarkReNamerVmAcceptanceNative {
         return checked((long)(((ulong)creation.High << 32) | creation.Low));
     }
 
+    public static long[] ReadPerformanceLifetime(IntPtr process, uint expectedPid,
+        long expectedCreationFileTime, bool terminal) {
+        if (process == IntPtr.Zero || GetProcessId(process) != expectedPid)
+            throw new InvalidOperationException("Performance retained process handle or PID differs.");
+        uint state = WaitForSingleObject(process, 0);
+        if (state != (terminal ? 0u : 0x102u))
+            throw new InvalidOperationException("Performance retained process liveness differs.");
+        NativeFileTime creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Performance retained process time is unavailable.");
+        long start = checked((long)(((ulong)creation.High << 32) | creation.Low));
+        long end = checked((long)(((ulong)exit.High << 32) | exit.Low));
+        if (start <= 0 || (expectedCreationFileTime != 0 && start != expectedCreationFileTime) ||
+            (terminal && end <= start))
+            throw new InvalidOperationException("Performance native process lifetime differs.");
+        if (WaitForSingleObject(process, 0) != state || GetProcessId(process) != expectedPid)
+            throw new InvalidOperationException("Performance process lifetime changed during capture.");
+        return new long[] { start, end };
+    }
+
     private static FirstClearIdentity ReadFirstClearIdentity(IntPtr process, uint expectedPid,
         IntPtr main, IntPtr list) {
         uint mainPid, listPid;

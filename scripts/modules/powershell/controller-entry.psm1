@@ -268,10 +268,191 @@ function Test-DrControllerV2OwnedProcessLifetime {
     return $false
 }
 
+function Assert-DrControllerOwnedPerformanceTextScale {
+    param([Parameter(Mandatory)] $Observations)
+    $proof = $Observations.text_scale_restoration
+    $expected = @('registry_key_existed','registry_value_existed','registry_value_kind',
+        'registry_value','ui_settings_raw_factor','ui_settings_percent')
+    if ($null -eq $proof) { throw 'Owned performance restoration proof is missing or incomplete.' }
+    if ($null -eq $proof.baseline -or $null -eq $proof.final) {
+        throw 'Owned performance restoration proof is missing or incomplete.'
+    }
+    if (($proof.schema_version -isnot [long] -and
+        $proof.schema_version -isnot [int]) -or $proof.schema_version -ne 1 -or
+        $proof.snapshot_equal -isnot [bool] -or -not $proof.snapshot_equal) {
+        throw 'Owned performance restoration proof is missing or incomplete.'
+    }
+    foreach ($row in @($proof.baseline,$proof.final)) {
+        if ($null -eq $row -or
+            @(Compare-Object -CaseSensitive $expected @($row.PSObject.Properties.Name)).Count -ne 0 -or
+            $row.registry_key_existed -isnot [bool] -or
+            $row.registry_value_existed -isnot [bool] -or
+            ($row.registry_value_existed -and (-not $row.registry_key_existed -or
+                $row.registry_value_kind -cne 'DWord' -or
+                $row.registry_value -isnot [long] -and $row.registry_value -isnot [int] -or
+                $row.registry_value -ne 100)) -or
+            (-not $row.registry_value_existed -and
+                ($null -ne $row.registry_value_kind -or $null -ne $row.registry_value)) -or
+            $row.ui_settings_raw_factor -isnot [double] -or
+            [double]::IsNaN($row.ui_settings_raw_factor) -or
+            [double]::IsInfinity($row.ui_settings_raw_factor) -or
+            [Math]::Abs($row.ui_settings_raw_factor - 1.0) -ge 0.000001 -or
+            $row.ui_settings_percent -isnot [long] -and $row.ui_settings_percent -isnot [int] -or
+            $row.ui_settings_percent -ne 100 -or
+            [Math]::Round($row.ui_settings_raw_factor * 100.0) -ne $row.ui_settings_percent) {
+            throw 'Owned performance registry or UISettings observation is not coherent 100 percent.'
+        }
+    }
+    $a,$b = $proof.baseline,$proof.final
+    if ($a.registry_key_existed -ne $b.registry_key_existed -or
+        $a.registry_value_existed -ne $b.registry_value_existed -or
+        $a.registry_value_kind -cne $b.registry_value_kind -or
+        $a.registry_value -ne $b.registry_value -or
+        $a.ui_settings_percent -ne $b.ui_settings_percent -or
+        [Math]::Abs($a.ui_settings_raw_factor - $b.ui_settings_raw_factor) -ge 0.000001) {
+        throw 'Owned performance text scale changed between frozen snapshots.'
+    }
+}
+
+function New-DrControllerOwnedPerformancePredelete {
+    param([Parameter(Mandatory)][string] $OutputRoot,
+          [Parameter(Mandatory)][string] $PreservationPath,
+          [Parameter(Mandatory)][string] $TransportPath,
+          [Parameter(Mandatory)][string] $SignalPath,
+          [Parameter(Mandatory)][string] $LeasePath,
+          [Parameter(Mandatory)][string] $RunName,
+          [Parameter(Mandatory)][string] $VmId,
+          [Parameter(Mandatory)][string] $Nonce,
+          [Parameter(Mandatory)][string] $LeaseId,
+          [Parameter(Mandatory)][string] $SourceSha,
+          [Parameter(Mandatory)][string] $BundleSha256,
+          [Parameter(Mandatory)][string] $ProfileSha256)
+    $preservation = Get-Content -LiteralPath $PreservationPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $original = Get-Content -LiteralPath $TransportPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $signal = Get-Content -LiteralPath $SignalPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $lease = Get-Content -LiteralPath $LeasePath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($preservation.schema_version -ne 3 -or
+        $preservation.kind -cne 'owned_cleanup_strict_failure_preservation' -or
+        $preservation.run_name -cne $RunName -or $preservation.vm_id -cne $VmId -or
+        $preservation.nonce -cne $Nonce -or $preservation.desktop_lease_id -cne $LeaseId -or
+        $preservation.profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $preservation.profile_sha256 -cne $ProfileSha256 -or
+        $original.status -cne 'failed' -or $original.task_kind -cne 'ui' -or
+        $original.owned_cleanup_failure_context.acceptance_mode -cne 'performance-sample' -or
+        $original.owned_cleanup_failure_context.source_sha -cne $SourceSha -or
+        $original.owned_cleanup_failure_context.bundle.sha256 -cne $BundleSha256 -or
+        $original.owned_cleanup_failure_context.root_records.guest.file_id -cne
+            $preservation.root_records.guest.file_id -or
+        $original.owned_cleanup_failure_context.root_records.trusted.file_id -cne
+            $preservation.root_records.trusted.file_id -or
+        $original.owned_cleanup_failure_context.output_preservation_verified -isnot [bool] -or
+        -not $original.owned_cleanup_failure_context.output_preservation_verified -or
+        $signal.nonce -cne $Nonce -or
+        $signal.preservation_sha256 -cne
+            (Get-FileHash -LiteralPath $PreservationPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $lease.lease_id -cne $LeaseId -or $lease.stop_status -cne 'stopped' -or
+        $lease.cleanup_observed -isnot [bool] -or -not $lease.cleanup_observed) {
+        throw 'Owned performance frozen failure or desktop binding differs.'
+    }
+    $indexed = @{}
+    foreach ($row in @($preservation.files)) {
+        if ($row.file -isnot [string] -or $indexed.ContainsKey($row.file) -or
+            $row.file -cmatch '[\\/]' -or $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
+            $row.bytes -lt 0 -or $row.bytes -gt 128MB) {
+            throw 'Owned performance preserved file index is unsafe.'
+        }
+        $path = Join-Path $OutputRoot $row.file
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Length -ne $row.bytes -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.sha256) {
+            throw 'Owned performance preserved bytes changed before deletion.'
+        }
+        $indexed[$row.file] = $row
+    }
+    foreach ($required in @('original-transport.json','acceptance-result.json',
+        'acceptance-observations.json','owned-performance-input-manifest.json',
+        'owned-performance-profile.json','bundle.json')) {
+        if (-not $indexed.ContainsKey($required)) {
+            throw 'Owned performance frozen source or observation is absent.'
+        }
+    }
+    if ($preservation.original_transport.sha256 -cne $indexed['original-transport.json'].sha256 -or
+        $original.owned_cleanup_failure_context.source_result.sha256 -cne
+            $indexed['acceptance-result.json'].sha256 -or
+        $original.owned_cleanup_failure_context.bundle.sha256 -cne $indexed['bundle.json'].sha256) {
+        throw 'Owned performance source, transport, or bundle reference differs.'
+    }
+    $result = Get-Content -LiteralPath (Join-Path $OutputRoot 'acceptance-result.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $observations = Get-Content -LiteralPath (Join-Path $OutputRoot 'acceptance-observations.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $input = Get-Content -LiteralPath (Join-Path $OutputRoot 'owned-performance-input-manifest.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $profile = Get-Content -LiteralPath (Join-Path $OutputRoot 'owned-performance-profile.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $runId = [string]$input.run_id
+    if ($runId -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$') {
+        throw 'Owned performance frozen run ID differs.'
+    }
+    $columnOrder = $Matches[1]
+    if (
+        $input.source_sha -cne $SourceSha -or $input.bundle_manifest.sha256 -cne $BundleSha256 -or
+        $input.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $input.acceptance_profile_sha256 -cne $ProfileSha256 -or
+        $input.acceptance_profile.sha256 -cne $ProfileSha256 -or
+        $input.request.mode -cne 'performance-sample' -or
+        $input.request.performance_plan.long_path_order -cne $columnOrder -or
+        $profile.schema -cne 'darkrenamer-vm-automated-profile-v3' -or
+        $profile.profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $profile.revision -ne 3 -or
+        $indexed['owned-performance-profile.json'].sha256 -cne $ProfileSha256 -or
+        $result.source_sha -cne $SourceSha -or $result.application.sha256 -cne
+            $input.artifacts.application.sha256 -or
+        $result.observations.sha256 -cne $indexed['acceptance-observations.json'].sha256 -or
+        $observations.run_id -cne $runId -or
+        ($result.acceptance_observations | ConvertTo-Json -Depth 24 -Compress) -cne
+            ($observations | ConvertTo-Json -Depth 24 -Compress)) {
+        throw 'Owned performance frozen input, profile, result, or observations differ.'
+    }
+    Assert-DrControllerOwnedPerformanceTextScale -Observations $observations
+    $refs = [ordered]@{}
+    foreach ($key in @('original-transport.json','acceptance-result.json',
+        'acceptance-observations.json','owned-performance-input-manifest.json',
+        'owned-performance-profile.json','bundle.json')) { $refs[$key] = $indexed[$key] }
+    $refs['owned-cleanup-strict-failure-preservation.json'] = [ordered]@{
+        file='owned-cleanup-strict-failure-preservation.json';
+        bytes=(Get-Item -LiteralPath $PreservationPath).Length
+        sha256=(Get-FileHash -LiteralPath $PreservationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $refs['owned-cleanup-desktop-closed.json'] = [ordered]@{
+        file='owned-cleanup-desktop-closed.json'; bytes=(Get-Item -LiteralPath $SignalPath).Length
+        sha256=(Get-FileHash -LiteralPath $SignalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $refs['desktop-lease.json'] = [ordered]@{
+        file='desktop-lease.json'; bytes=(Get-Item -LiteralPath $LeasePath).Length
+        sha256=(Get-FileHash -LiteralPath $LeasePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    [ordered]@{
+        schema_version=1; kind='owned_performance_predelete_restoration'
+        run_name=$RunName; run_id=$runId; vm_id=$VmId; nonce=$Nonce
+        desktop_lease_id=$LeaseId; source_sha=$SourceSha; bundle_sha256=$BundleSha256
+        profile_id='vm-automated-v2-owned-resources'; profile_sha256=$ProfileSha256
+        roots=$preservation.root_records; files=$refs
+    }
+}
+
 function Invoke-DrControllerOwnedCleanupAfterFailure {
-    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256)
-    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
-        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256,$startMapDefinition,$lifetimeDefinition)
+    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,
+          $PredeleteJson,$PredeleteSha256,$ExpectedNonce,$ExpectedLeaseId,[bool]$RequireOwnedPerformance=$false)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,$PredeleteJson,$PredeleteSha256,$ExpectedNonce,$ExpectedLeaseId,$RequireOwnedPerformance,(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
+        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256,
+              $predeleteJson,$predeleteSha256,$expectedNonce,$expectedLeaseId,$requireOwnedPerformance,
+              $startMapDefinition,$lifetimeDefinition)
         Set-Item -Path Function:Get-DrControllerV2OwnedStartMap -Value ([scriptblock]::Create($startMapDefinition))
         Set-Item -Path Function:Test-DrControllerV2OwnedProcessLifetime -Value ([scriptblock]::Create($lifetimeDefinition))
         $v2 = $null -ne $v2Evidence
@@ -467,6 +648,59 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 }
             }
             $proof.observed_roots_before = $beforeRoots
+            if ($requireOwnedPerformance) {
+                if ($predeleteJson -isnot [string] -or $predeleteJson.Length -lt 1 -or
+                    $predeleteJson.Length -gt 65536 -or
+                    $predeleteSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                    throw 'Owned performance pre-delete restoration receipt is unavailable.'
+                }
+                $bytes = [Text.UTF8Encoding]::new($false,$true).GetBytes($predeleteJson)
+                $hash = -join ([Security.Cryptography.SHA256]::HashData($bytes) |
+                    ForEach-Object { $_.ToString('x2') })
+                $predelete = $predeleteJson | ConvertFrom-Json -ErrorAction Stop
+                if ($hash -cne $predeleteSha256 -or
+                    $predelete.schema_version -ne 1 -or
+                    $predelete.kind -cne 'owned_performance_predelete_restoration' -or
+                    $predelete.run_name -cne $name -or
+                    $predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -or
+                    $predelete.vm_id -cne $actualVmId -or
+                    $predelete.nonce -cne $expectedNonce -or
+                    $predelete.desktop_lease_id -cne $expectedLeaseId -or
+                    $predelete.profile_id -cne 'vm-automated-v2-owned-resources' -or
+                    $predelete.profile_sha256 -cne $profileSha256 -or
+                    $predelete.source_sha -cne $v2Evidence.protected_anchor.source_sha -or
+                    $predelete.bundle_sha256 -cne $v2Evidence.protected_anchor.bundle_sha256 -or
+                    $predelete.roots.guest.file_id -cne $roots.guest.file_id -or
+                    $predelete.roots.trusted.file_id -cne $roots.trusted.file_id -or
+                    $predelete.roots.guest.base_file_id -cne $roots.guest.base_file_id -or
+                    $predelete.roots.trusted.base_file_id -cne $roots.trusted.base_file_id -or
+                    $predelete.roots.guest.path -cne $roots.guest.path -or
+                    $predelete.roots.trusted.path -cne $roots.trusted.path) {
+                    throw 'Owned performance pre-delete receipt differs from the held deletion target.'
+                }
+                $required = @('original-transport.json','acceptance-result.json',
+                    'acceptance-observations.json','owned-performance-input-manifest.json',
+                    'owned-performance-profile.json','bundle.json',
+                    'owned-cleanup-strict-failure-preservation.json',
+                    'owned-cleanup-desktop-closed.json','desktop-lease.json')
+                if (@(Compare-Object -ReferenceObject $required `
+                    -DifferenceObject @($predelete.files.PSObject.Properties.Name) `
+                    -CaseSensitive).Count -ne 0) {
+                    throw 'Owned performance pre-delete receipt omits a frozen binding.'
+                }
+                foreach ($key in $required) {
+                    $row = $predelete.files.$key
+                    if ($row.file -cne $key -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                        $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
+                        $row.bytes -lt 1 -or $row.bytes -gt 8MB) {
+                        throw 'Owned performance pre-delete receipt has an invalid file reference.'
+                    }
+                }
+                $proof['predelete_sha256'] = $predeleteSha256
+            }
+            elseif ($null -ne $predeleteJson -or $null -ne $predeleteSha256) {
+                throw 'Pre-delete receipt was supplied to a different cleanup route.'
+            }
             $guestGuard.Delete()
             $trustedGuard.Delete()
         }
@@ -1254,6 +1488,13 @@ if ($focusedTests -and ($taskSelection.kind -cne 'core' -or
 if ($refreshProfile -or $FocusedRefreshTests) { $coreTestOutputAggregateMaximumBytes = 32MB }
 
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
+$ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
+    $AcceptanceMode -ceq 'performance-sample'
+if ($ownedPerformance -and ($TestTimeoutSeconds -ne 600 -or
+    $SuiteTimeoutSeconds -ne 1200 -or $AcceptanceProfileSha256 -cne
+        '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f')) {
+    throw 'Owned performance requires exact revision-3 profile and 600/1200 second bounds.'
+}
 $v2Engine = $null
 $engineChild = $null
 if ($ownedV2 -and -not $PSBoundParameters.ContainsKey('AcceptanceProfileSha256')) {
@@ -1312,6 +1553,16 @@ $transport = [ordered]@{
     host_platform = $hostPlatform
     status = 'starting'
     guest_cleanup = $false
+}
+if ($ownedPerformance) {
+    $desktopBinding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($desktopBinding.lease_id -cnotmatch '^[0-9a-f]{32}$' -or
+        $desktopBinding.nonce -cnotmatch '^[0-9a-f]{32}$' -or
+        $desktopBinding.sid -cne $ExpectedDesktopSid) {
+        throw 'Owned performance desktop lease binding is unavailable.'
+    }
+    $transport['desktop_lease_id'] = [string]$desktopBinding.lease_id
 }
 $credential = $null
 $session = $null
@@ -6933,6 +7184,18 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $originalTransportFrozen = $true
                 $transportItem = Get-Item -LiteralPath $transportPath -Force
                 $transportHash = (Get-FileHash -LiteralPath $transportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($ownedPerformance) {
+                    $frozenInputPath = Join-Path $transportOutputRoot 'owned-performance-input-manifest.json'
+                    $frozenProfilePath = Join-Path $transportOutputRoot 'owned-performance-profile.json'
+                    [IO.File]::Copy($AcceptanceManifest,$frozenInputPath,$false)
+                    [IO.File]::Copy((Join-Path $BundleRoot 'vm-automated-v2.json'),$frozenProfilePath,$false)
+                    if ((Get-FileHash -LiteralPath $frozenInputPath -Algorithm SHA256).Hash -ine
+                            (Get-FileHash -LiteralPath $AcceptanceManifest -Algorithm SHA256).Hash -or
+                        (Get-FileHash -LiteralPath $frozenProfilePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                            $AcceptanceProfileSha256) {
+                        throw 'Owned performance frozen input or profile differs before preservation.'
+                    }
+                }
                 $nonce = [string]$ownedHandshake.nonce
                 $receipt = [ordered]@{
                     schema_version = if ($ownedV2) { 3 } else { 1 }
@@ -6998,12 +7261,42 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receiptHash) {
                         throw 'Frozen failure evidence or managed desktop closure differs from its receipt.'
                     }
+                    $predeleteJson = $null
+                    $predeleteHash = $null
+                    if ($ownedPerformance) {
+                        $predelete = New-DrControllerOwnedPerformancePredelete `
+                            -OutputRoot $transportOutputRoot -PreservationPath $receiptPath `
+                            -TransportPath $transportPath -SignalPath $signalPath -LeasePath $leasePath `
+                            -RunName $taskName -VmId $receipt.vm_id -Nonce $nonce `
+                            -LeaseId $ownedHandshake.lease_id `
+                            -SourceSha $transport.owned_cleanup_failure_context.source_sha `
+                            -BundleSha256 $transport.owned_cleanup_failure_context.bundle.sha256 `
+                            -ProfileSha256 $AcceptanceProfileSha256
+                        $predeletePath = Join-Path $transportOutputRoot 'owned-performance-predelete.json'
+                        Write-DrControllerExclusiveJson -Path $predeletePath -Value $predelete -MaximumBytes 64KB
+                        $predeleteJson = Get-Content -LiteralPath $predeletePath -Raw -ErrorAction Stop
+                        $predeleteHash = (Get-FileHash -LiteralPath $predeletePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                        foreach ($reference in $predelete.files.Values) {
+                            $sourcePath = if ($reference.file -ceq 'desktop-lease.json') {
+                                $leasePath
+                            } else { Join-Path $transportOutputRoot $reference.file }
+                            $item = Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+                            if ($item.Length -ne $reference.bytes -or
+                                (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                                    $reference.sha256) {
+                                throw 'Owned performance pre-delete bound bytes changed.'
+                            }
+                        }
+                    }
                     $proof = Invoke-DrControllerOwnedCleanupAfterFailure `
                         -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
                         -SessionId $desktop.session_id -ExpectedVmId $receipt.vm_id `
                         -Frozen $receipt.failed_snapshot -Roots $receipt.root_records `
                         -V2Evidence $(if ($ownedV2) { $transport.raw_cleanup.owned_resource_evidence } else { $null }) `
-                        -ProfileSha256 $(if ($ownedV2) { $AcceptanceProfileSha256 } else { $null })
+                        -ProfileSha256 $(if ($ownedV2) { $AcceptanceProfileSha256 } else { $null }) `
+                        -PredeleteJson $predeleteJson -PredeleteSha256 $predeleteHash `
+                        -ExpectedNonce $nonce -ExpectedLeaseId $ownedHandshake.lease_id `
+                        -RequireOwnedPerformance $ownedPerformance
                 }
                 catch {
                     $proof = [pscustomobject]@{
@@ -7024,6 +7317,9 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $proof | Add-Member -NotePropertyName original_transport_sha256 -NotePropertyValue $transportHash -Force
                 $proof | Add-Member -NotePropertyName desktop_lease_sha256 -NotePropertyValue $leaseHash -Force
                 $proof | Add-Member -NotePropertyName nonce -NotePropertyValue $nonce -Force
+                if ($ownedPerformance) {
+                    $proof | Add-Member -NotePropertyName predelete_sha256 -NotePropertyValue $predeleteHash -Force
+                }
                 $temporaryProof = $proofPath + '.tmp'
                 Write-DrControllerExclusiveJson -Path $temporaryProof -Value $proof -MaximumBytes 1MB
                 # PowerShell coerces $null to an empty string for this string overload.

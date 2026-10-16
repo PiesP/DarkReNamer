@@ -38,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
     throw 'Unsupported VM acceptance profile identity.'
 }
-$ToolingManifestSha256 = 'f9437b7bc3698597d6ba39483f86150cd29b009ba1210971584a4efd82f8416e'
+$ToolingManifestSha256 = '9e58725c82496601de591e1b4e7545d5b04d6cf20ec50199e1b8873cf46b2efa'
 $ToolingLoaderSha256 = '355bc675f7ea3dd1baa6532ca3ab0b3e6e6a969a319214c2f256d58206380e43'
 
 function Get-DrBootstrapSha256 {

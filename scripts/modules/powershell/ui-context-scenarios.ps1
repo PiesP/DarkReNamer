@@ -1619,11 +1619,15 @@ function Invoke-ObserverPerformanceSampleScenario {
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
         [switch] $StopAfterFirstClear,
         [switch] $ObserveFirstClear,
+        [switch] $OwnedPerformance,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
     if ($StopAfterFirstClear -and $ObserveFirstClear) { throw 'First-clear modes are mutually exclusive.' }
+    if ($OwnedPerformance -and ($StopAfterFirstClear -or $ObserveFirstClear)) {
+        throw 'Owned performance lifetime applies only to the complete fixed workload.'
+    }
     $scenarioClock = if ($ObserveFirstClear) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
     $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'performance-fixture'
     $shortFixture = Resolve-JobBoundShortPath -Path $fixture
@@ -1671,6 +1675,8 @@ function Invoke-ObserverPerformanceSampleScenario {
     $timings = [Collections.Generic.List[object]]::new()
     $clearRowCounts = [Collections.Generic.List[int]]::new()
     $commandSends = [Collections.Generic.List[object]]::new()
+    $nativeCreationFileTime = [long]0
+    $nativeLifetimeCheckpoints = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
@@ -1709,6 +1715,22 @@ function Invoke-ObserverPerformanceSampleScenario {
         $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'performance sample application' `
             -ProcessLifecycleObservations $ProcessLifecycleObservations
+        if ($OwnedPerformance) {
+            $handle = [IntPtr]$application.process.Handle
+            $pid = [uint32]$application.process.Id
+            $initial = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime($handle,$pid,0,$false)
+            $nativeCreationFileTime = [long]$initial[0]
+            $ticks = [long]$application.owned.process_start_time_utc_ticks
+            if ([decimal]$ticks -ne ([decimal]$nativeCreationFileTime + 504911232000000000)) {
+                throw 'Performance managed and native creation times differ.'
+            }
+            $application.process_lifecycle['creation_filetime'] = $nativeCreationFileTime
+            $nativeLifetimeCheckpoints.Add([ordered]@{ phase='pre-work'; creation_filetime=$nativeCreationFileTime })
+            $ObservationSink['native_process_lifetime'] = [ordered]@{
+                pid=[long]$pid; creation_filetime=$nativeCreationFileTime
+                checkpoints=$nativeLifetimeCheckpoints; terminal_exit_filetime=$null
+            }
+        }
         [void](Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main `
             -Process $application.process -ExpectedSession $SessionId)
         $environment = Get-ObserverEnvironmentMetadata -Application $application
@@ -1748,6 +1770,11 @@ function Invoke-ObserverPerformanceSampleScenario {
             throw 'Performance auxiliary columns were not hidden at clean start.'
         }
         $sampler = [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle)
+        if ($OwnedPerformance) {
+            $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
+            $nativeLifetimeCheckpoints.Add([ordered]@{ phase='idle'; creation_filetime=[long]$check[0] })
+        }
         Start-Sleep -Seconds 30
         [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
             -Window $application.main -Process $application.process -ExpectedSession $SessionId `
@@ -1772,6 +1799,11 @@ function Invoke-ObserverPerformanceSampleScenario {
             }
         }
         $sampler.SetPhase('ordinary-10000')
+        if ($OwnedPerformance) {
+            $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
+            $nativeLifetimeCheckpoints.Add([ordered]@{ phase='ordinary-10000'; creation_filetime=[long]$check[0] })
+        }
         $largeElapsed = [double]0
         $largeReadiness = [Collections.Generic.List[double]]::new()
         for ($chunk = 0; $chunk -lt 4; $chunk++) {
@@ -2029,6 +2061,11 @@ function Invoke-ObserverPerformanceSampleScenario {
         }
         }
         $sampler.SetPhase('post')
+        if ($OwnedPerformance) {
+            $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
+            $nativeLifetimeCheckpoints.Add([ordered]@{ phase='post'; creation_filetime=[long]$check[0] })
+        }
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
         $sampler = $null
@@ -2060,6 +2097,11 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['journal_residue_count'] = 0
         $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId `
             -WaitSeconds $WaitSeconds -CloseInput ordinary
+        if ($OwnedPerformance) {
+            $terminal = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$true)
+            $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
+        }
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
         $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
