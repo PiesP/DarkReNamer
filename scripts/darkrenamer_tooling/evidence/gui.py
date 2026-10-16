@@ -4108,12 +4108,20 @@ def validate_owned_performance_transport(run_root: Path, files: dict[str, dict],
             owned["task_execution"]["exit_code"] == 0,
             "Owned performance process declaration or observer task differs.")
     lease_id = validate_owned_performance_desktop(run_root, files, manifest, transport, owned)
+    ambient = {
+        phase: {"processes": cleanup[processes], "tasks": cleanup[tasks]}
+        for phase, processes, tasks in (
+            ("before", "unexpected_runner_processes", "unexpected_runner_tasks"),
+            ("after_intervention", "unexpected_runner_processes_after_intervention",
+             "unexpected_runner_tasks_after_intervention"),
+            ("after_delete", "unexpected_runner_processes_after_delete",
+             "unexpected_runner_tasks_after_delete"))
+    }
     return {"owned_cleanup": "owned-clean", "desktop_lease_id": lease_id,
             "ambient_delta_counts": {
-                phase: len(cleanup[field])
-                for phase, field in (("before", "unexpected_runner_processes"),
-                                     ("after_intervention", "unexpected_runner_processes_after_intervention"),
-                                     ("after_delete", "unexpected_runner_processes_after_delete"))}}
+                phase: {kind: len(rows) for kind, rows in ledger.items()}
+                for phase, ledger in ambient.items()},
+            "ambient_delta_ledger": ambient}
 
 
 def validate_performance_run(root: Path, run_id: str, source_sha: str, *,

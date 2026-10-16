@@ -82,6 +82,10 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
             broken['text_scale_restoration']['final'] = None
             with self.assertRaises(EvidenceError):
                 verify_owned_performance_text_scale(broken)
+            broken = deepcopy(proof)
+            broken['text_scale_restoration']['final']['ui_settings_raw_factor'] = 1
+            with self.assertRaises(EvidenceError):
+                verify_owned_performance_text_scale(broken)
 
     def test_predelete_receipt_recomputes_frozen_bytes_and_rejects_forgery(self):
         with tempfile.TemporaryDirectory() as temporary:

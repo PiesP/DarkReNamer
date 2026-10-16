@@ -314,7 +314,7 @@ def verify_owned_performance_text_scale(observations: object) -> dict:
         require(type(row["registry_key_existed"]) is bool and
                 type(row["registry_value_existed"]) is bool and
                 (not row["registry_value_existed"] or row["registry_key_existed"]) and
-                type(row["ui_settings_raw_factor"]) in (int, float) and
+                type(row["ui_settings_raw_factor"]) is float and
                 math.isfinite(row["ui_settings_raw_factor"]) and
                 abs(row["ui_settings_raw_factor"] - 1.0) < 0.000001 and
                 type(row["ui_settings_percent"]) is int and

@@ -579,6 +579,66 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 }
             }
         }
+        function Invoke-DrControllerBoundRootDelete {
+            param($GuestGuard,$TrustedGuard,[bool]$RequireOwnedPerformance,
+                  $PredeleteJson,$PredeleteSha256,$Name,$ActualVmId,$ExpectedNonce,
+                  $ExpectedLeaseId,$ProfileSha256,$V2Evidence,$Roots)
+            if ($requireOwnedPerformance) {
+                if ($predeleteJson -isnot [string] -or $predeleteJson.Length -lt 1 -or
+                    $predeleteJson.Length -gt 65536 -or
+                    $predeleteSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                    throw 'Owned performance pre-delete restoration receipt is unavailable.'
+                }
+                $bytes = [Text.UTF8Encoding]::new($false,$true).GetBytes($predeleteJson)
+                $hash = -join ([Security.Cryptography.SHA256]::HashData($bytes) |
+                    ForEach-Object { $_.ToString('x2') })
+                $predelete = $predeleteJson | ConvertFrom-Json -ErrorAction Stop
+                if ($hash -cne $predeleteSha256 -or
+                    $predelete.schema_version -ne 1 -or
+                    $predelete.kind -cne 'owned_performance_predelete_restoration' -or
+                    $predelete.run_name -cne $name -or
+                    $predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -or
+                    $predelete.vm_id -cne $actualVmId -or
+                    $predelete.nonce -cne $expectedNonce -or
+                    $predelete.desktop_lease_id -cne $expectedLeaseId -or
+                    $predelete.profile_id -cne 'vm-automated-v2-owned-resources' -or
+                    $predelete.profile_sha256 -cne $profileSha256 -or
+                    $predelete.source_sha -cne $v2Evidence.protected_anchor.source_sha -or
+                    $predelete.bundle_sha256 -cne $v2Evidence.protected_anchor.bundle_sha256 -or
+                    $predelete.roots.guest.file_id -cne $roots.guest.file_id -or
+                    $predelete.roots.trusted.file_id -cne $roots.trusted.file_id -or
+                    $predelete.roots.guest.base_file_id -cne $roots.guest.base_file_id -or
+                    $predelete.roots.trusted.base_file_id -cne $roots.trusted.base_file_id -or
+                    $predelete.roots.guest.path -cne $roots.guest.path -or
+                    $predelete.roots.trusted.path -cne $roots.trusted.path) {
+                    throw 'Owned performance pre-delete receipt differs from the held deletion target.'
+                }
+                $required = @('original-transport.json','acceptance-result.json',
+                    'acceptance-observations.json','owned-performance-input-manifest.json',
+                    'owned-performance-profile.json','bundle.json',
+                    'owned-cleanup-strict-failure-preservation.json',
+                    'owned-cleanup-desktop-closed.json','desktop-lease.json')
+                if (@(Compare-Object -ReferenceObject $required `
+                    -DifferenceObject @($predelete.files.PSObject.Properties.Name) `
+                    -CaseSensitive).Count -ne 0) {
+                    throw 'Owned performance pre-delete receipt omits a frozen binding.'
+                }
+                foreach ($key in $required) {
+                    $row = $predelete.files.$key
+                    if ($row.file -cne $key -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                        $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
+                        $row.bytes -lt 1 -or $row.bytes -gt 8MB) {
+                        throw 'Owned performance pre-delete receipt has an invalid file reference.'
+                    }
+                }
+            }
+            elseif ($null -ne $predeleteJson -or $null -ne $predeleteSha256) {
+                throw 'Pre-delete receipt was supplied to a different cleanup route.'
+            }
+            [void]$GuestGuard.Delete()
+            [void]$TrustedGuard.Delete()
+            if ($RequireOwnedPerformance) { return $PredeleteSha256 }
+        }
         try {
             if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
                 $sid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$' -or
@@ -648,61 +708,14 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 }
             }
             $proof.observed_roots_before = $beforeRoots
-            if ($requireOwnedPerformance) {
-                if ($predeleteJson -isnot [string] -or $predeleteJson.Length -lt 1 -or
-                    $predeleteJson.Length -gt 65536 -or
-                    $predeleteSha256 -cnotmatch '^[0-9a-f]{64}$') {
-                    throw 'Owned performance pre-delete restoration receipt is unavailable.'
-                }
-                $bytes = [Text.UTF8Encoding]::new($false,$true).GetBytes($predeleteJson)
-                $hash = -join ([Security.Cryptography.SHA256]::HashData($bytes) |
-                    ForEach-Object { $_.ToString('x2') })
-                $predelete = $predeleteJson | ConvertFrom-Json -ErrorAction Stop
-                if ($hash -cne $predeleteSha256 -or
-                    $predelete.schema_version -ne 1 -or
-                    $predelete.kind -cne 'owned_performance_predelete_restoration' -or
-                    $predelete.run_name -cne $name -or
-                    $predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -or
-                    $predelete.vm_id -cne $actualVmId -or
-                    $predelete.nonce -cne $expectedNonce -or
-                    $predelete.desktop_lease_id -cne $expectedLeaseId -or
-                    $predelete.profile_id -cne 'vm-automated-v2-owned-resources' -or
-                    $predelete.profile_sha256 -cne $profileSha256 -or
-                    $predelete.source_sha -cne $v2Evidence.protected_anchor.source_sha -or
-                    $predelete.bundle_sha256 -cne $v2Evidence.protected_anchor.bundle_sha256 -or
-                    $predelete.roots.guest.file_id -cne $roots.guest.file_id -or
-                    $predelete.roots.trusted.file_id -cne $roots.trusted.file_id -or
-                    $predelete.roots.guest.base_file_id -cne $roots.guest.base_file_id -or
-                    $predelete.roots.trusted.base_file_id -cne $roots.trusted.base_file_id -or
-                    $predelete.roots.guest.path -cne $roots.guest.path -or
-                    $predelete.roots.trusted.path -cne $roots.trusted.path) {
-                    throw 'Owned performance pre-delete receipt differs from the held deletion target.'
-                }
-                $required = @('original-transport.json','acceptance-result.json',
-                    'acceptance-observations.json','owned-performance-input-manifest.json',
-                    'owned-performance-profile.json','bundle.json',
-                    'owned-cleanup-strict-failure-preservation.json',
-                    'owned-cleanup-desktop-closed.json','desktop-lease.json')
-                if (@(Compare-Object -ReferenceObject $required `
-                    -DifferenceObject @($predelete.files.PSObject.Properties.Name) `
-                    -CaseSensitive).Count -ne 0) {
-                    throw 'Owned performance pre-delete receipt omits a frozen binding.'
-                }
-                foreach ($key in $required) {
-                    $row = $predelete.files.$key
-                    if ($row.file -cne $key -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                        $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
-                        $row.bytes -lt 1 -or $row.bytes -gt 8MB) {
-                        throw 'Owned performance pre-delete receipt has an invalid file reference.'
-                    }
-                }
-                $proof['predelete_sha256'] = $predeleteSha256
-            }
-            elseif ($null -ne $predeleteJson -or $null -ne $predeleteSha256) {
-                throw 'Pre-delete receipt was supplied to a different cleanup route.'
-            }
-            $guestGuard.Delete()
-            $trustedGuard.Delete()
+            $verifiedPredeleteHash = Invoke-DrControllerBoundRootDelete `
+                -GuestGuard $guestGuard -TrustedGuard $trustedGuard `
+                -RequireOwnedPerformance $requireOwnedPerformance `
+                -PredeleteJson $predeleteJson -PredeleteSha256 $predeleteSha256 `
+                -Name $name -ActualVmId $actualVmId -ExpectedNonce $expectedNonce `
+                -ExpectedLeaseId $expectedLeaseId -ProfileSha256 $profileSha256 `
+                -V2Evidence $v2Evidence -Roots $roots
+            if ($requireOwnedPerformance) { $proof['predelete_sha256'] = $verifiedPredeleteHash }
         }
         catch { $proof.errors = @($_.Exception.Message) }
         finally {

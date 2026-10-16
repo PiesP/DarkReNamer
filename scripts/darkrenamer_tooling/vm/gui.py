@@ -1603,7 +1603,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
     require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE},
-            "Acceptance profile selection requires fixed GUI, appearance-pair or icon-settlement.")
+            "Acceptance profile selection is unsupported for this diagnostic.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
             "Icon settlement requires explicit V2 owned-resource profile selection.")
     require(args.diagnostic != FIRST_CLEAR_MODE or args.acceptance_profile_id == V1_PROFILE_ID,

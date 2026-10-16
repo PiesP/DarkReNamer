@@ -1087,8 +1087,12 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 events = []
 
                 @contextmanager
-                def desktop(_args, evidence_root):
+                def desktop(_args, evidence_root, *, capture_closure=False):
                     self.assertEqual(evidence_root, run_root)
+                    self.assertEqual(capture_closure, v2)
+                    if capture_closure:
+                        self.write_json(run_root / 'desktop-start-response.json',
+                                        {'status': 'ready', 'leaseId': 'a' * 32})
                     events.append("start")
                     try:
                         yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
@@ -1098,6 +1102,10 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                             "stop_status": "failed" if variant == "stop-failed" else "stopped",
                             "cleanup_observed": variant != "stop-failed",
                         })
+                        if capture_closure:
+                            self.write_json(run_root / 'desktop-stop-response.json',
+                                {'status': 'stopped', 'lifecycleStatus': 'closed',
+                                 'leaseId': 'a' * 32})
                         events.append("closed")
                         if variant == "stop-failed":
                             raise RuntimeError("fixture desktop stop failed")

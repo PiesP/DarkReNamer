@@ -1610,6 +1610,28 @@ function Convert-ObserverPerformanceSampleRows {
     })
 }
 
+function Initialize-ObserverOwnedPerformanceLifetime {
+    param([Parameter(Mandatory)]$Application,
+          [Parameter(Mandatory)][Collections.IDictionary]$ObservationSink,
+          [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Checkpoints)
+    $handle = [IntPtr]$Application.process.Handle
+    $productPid = [uint32]$Application.process.Id
+    $initial = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+        $handle,$productPid,0,$false)
+    $nativeCreationFileTime = [long]$initial[0]
+    $ticks = [long]$Application.owned.process_start_time_utc_ticks
+    if ([decimal]$ticks -ne ([decimal]$nativeCreationFileTime + 504911232000000000)) {
+        throw 'Performance managed and native creation times differ.'
+    }
+    $Application.process_lifecycle['creation_filetime'] = $nativeCreationFileTime
+    $Checkpoints.Add([ordered]@{ phase='pre-work'; creation_filetime=$nativeCreationFileTime })
+    $ObservationSink['native_process_lifetime'] = [ordered]@{
+        pid=[long]$productPid; creation_filetime=$nativeCreationFileTime
+        checkpoints=$Checkpoints; terminal_exit_filetime=$null
+    }
+    return $nativeCreationFileTime
+}
+
 function Invoke-ObserverPerformanceSampleScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -1716,20 +1738,9 @@ function Invoke-ObserverPerformanceSampleScenario {
             -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'performance sample application' `
             -ProcessLifecycleObservations $ProcessLifecycleObservations
         if ($OwnedPerformance) {
-            $handle = [IntPtr]$application.process.Handle
-            $pid = [uint32]$application.process.Id
-            $initial = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime($handle,$pid,0,$false)
-            $nativeCreationFileTime = [long]$initial[0]
-            $ticks = [long]$application.owned.process_start_time_utc_ticks
-            if ([decimal]$ticks -ne ([decimal]$nativeCreationFileTime + 504911232000000000)) {
-                throw 'Performance managed and native creation times differ.'
-            }
-            $application.process_lifecycle['creation_filetime'] = $nativeCreationFileTime
-            $nativeLifetimeCheckpoints.Add([ordered]@{ phase='pre-work'; creation_filetime=$nativeCreationFileTime })
-            $ObservationSink['native_process_lifetime'] = [ordered]@{
-                pid=[long]$pid; creation_filetime=$nativeCreationFileTime
-                checkpoints=$nativeLifetimeCheckpoints; terminal_exit_filetime=$null
-            }
+            $nativeCreationFileTime = Initialize-ObserverOwnedPerformanceLifetime `
+                -Application $application -ObservationSink $ObservationSink `
+                -Checkpoints $nativeLifetimeCheckpoints
         }
         [void](Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main `
             -Process $application.process -ExpectedSession $SessionId)
