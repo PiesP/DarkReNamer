@@ -1,0 +1,547 @@
+[
+  {
+    "path": ".editorconfig",
+    "git_object": "82b704c461776fd80dfda7289f89143473c99f05",
+    "mode": "100644"
+  },
+  {
+    "path": ".gitattributes",
+    "git_object": "e1a7eb95813e873b6a5f13e8fc92c9ce1f51c227",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/dependabot.yaml",
+    "git_object": "de6ff321777e5cad8b9dbc02a63e8648004a556f",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/settings.yml",
+    "git_object": "749c674238928f8938ada644b083f907d34d586c",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/benchmark-planning.yaml",
+    "git_object": "62fc2bf1c722a2cef989aa4c22f7b1eaaa3bff57",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/ci.yaml",
+    "git_object": "c8320fdb9a76784300217c288ff8947c263bc47a",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/promote-release.yaml",
+    "git_object": "8234bd93affca3782093703c823be3b4a8ae75c7",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/release.yaml",
+    "git_object": "ac1007a84a23523fe3f591dcd4426bc8aaece2c3",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/security.yaml",
+    "git_object": "3e2f38d60d8cef58c93842ed1f102907356b100b",
+    "mode": "100644"
+  },
+  {
+    "path": ".github/workflows/vm-acceptance.yaml",
+    "git_object": "9cbed5b3b158438170441d202b3e767496f22e88",
+    "mode": "100644"
+  },
+  {
+    "path": ".gitignore",
+    "git_object": "752e19971c234fd092efe574ced914db2a62f1c8",
+    "mode": "100644"
+  },
+  {
+    "path": "Cargo.lock",
+    "git_object": "8841864e0a79fcd0a49389323c800574a054991a",
+    "mode": "100644"
+  },
+  {
+    "path": "Cargo.toml",
+    "git_object": "a2a1e5de5b235d5f24fc14c1d03fbab14c35e22d",
+    "mode": "100644"
+  },
+  {
+    "path": "DISTRIBUTION.md",
+    "git_object": "f34b2e9d7ad7312139125182c3109dd39dfd829a",
+    "mode": "100644"
+  },
+  {
+    "path": "LICENSE",
+    "git_object": "f74064b98077856e152faf0111b26e6fa3bfc6b6",
+    "mode": "100644"
+  },
+  {
+    "path": "LICENSES/DarkNamer-MIT.txt",
+    "git_object": "660535eefa845f82a2ae5d200f3ed5d4225f7f6e",
+    "mode": "100644"
+  },
+  {
+    "path": "README.ja.md",
+    "git_object": "f4b8622e9b9ff400cbf8fe7861963adf5c7e1cc5",
+    "mode": "100644"
+  },
+  {
+    "path": "README.ko.md",
+    "git_object": "3cb22690b740b20f77423158013930674361ce2e",
+    "mode": "100644"
+  },
+  {
+    "path": "README.md",
+    "git_object": "e7f4276f881520e9dd5af2e28057a34e9f6f2481",
+    "mode": "100644"
+  },
+  {
+    "path": "SAFETY.md",
+    "git_object": "1f35ac2de90f91e678b6eb6338d86e30f8bf2dc8",
+    "mode": "100644"
+  },
+  {
+    "path": "SECURITY.md",
+    "git_object": "5170659704be1a9f54d5c032d0fdf8545c8cadd6",
+    "mode": "100644"
+  },
+  {
+    "path": "THIRD_PARTY_NOTICES.md",
+    "git_object": "6804959603c3f6829ba89911cdbc9170bd778474",
+    "mode": "100644"
+  },
+  {
+    "path": "about.hbs",
+    "git_object": "0a5d2e0b6cc40b65c21e44b89c4b7031f3a35b68",
+    "mode": "100644"
+  },
+  {
+    "path": "about.toml",
+    "git_object": "a50c4716f650d9c26f82ba62b7e86c0a943277f6",
+    "mode": "100644"
+  },
+  {
+    "path": "config/release-tool-integrity.json",
+    "git_object": "7cfa81b65228f902b69a9ffb14bcbc2b1369a8f4",
+    "mode": "100644"
+  },
+  {
+    "path": "config/tracked-documents.txt",
+    "git_object": "ed23977803ee61d8e0077c64ccfaa9838e8b07d8",
+    "mode": "100644"
+  },
+  {
+    "path": "config/vm-automated-v1.json",
+    "git_object": "bfc1094cff0f36913c7176ffb4bfd97c7e79fce4",
+    "mode": "100644"
+  },
+  {
+    "path": "config/vm-automated-v2.json",
+    "git_object": "9fd4f74282aa17dab0add02a1ceb469c0b15897d",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/Cargo.toml",
+    "git_object": "17af0e700c00be2e189a66cc9fb7818da21d9d70",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/THIRD_PARTY_NOTICES.md",
+    "git_object": "42ca524d0aff821be90b2636263406fef4cda627",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/build.rs",
+    "git_object": "b80e888ff0afe14bad658b4bb9fed111acd11953",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/build_support/resource_script.rs",
+    "git_object": "93338078f41626aeefa2f23907e9ddc5eb031c6f",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/build_support/test_source_manifest.rs",
+    "git_object": "98f4fe1a7a92bf9535e9119a630ee1e6f2503f3b",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/resource_ids.rs",
+    "git_object": "f61002d6f4017834dfe08f170ff5e5d5847a5480",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/admission.rs",
+    "git_object": "eaf6cfb62d46be2cbcbafe1a55abe3d8c8ce66f8",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/appearance_model.rs",
+    "git_object": "fb92764cfb57dd64426483c97463b311c608adc8",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/apply_progress.rs",
+    "git_object": "4f1d8f2070a98593b184eca83ee8b04593d72c7d",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/command_catalog.rs",
+    "git_object": "9f139919d369a4650175a40cda9b2201e1b4ea5d",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/confirmation_display.rs",
+    "git_object": "37c5b9504443e75fdf831903f6aecedcec1f21af",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/focus_navigation.rs",
+    "git_object": "06ee34febe161ec2694fae9d3b831352f35fde43",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/icon_cache.rs",
+    "git_object": "9cab6b2e12c33aaf0754a139e1b89e9e72334617",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/icon_requests.rs",
+    "git_object": "97d4f984ab81b9bcec72171c35a520f9774cbdb5",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/lib.rs",
+    "git_object": "1e591322f6b9d0588236de0cddf372a05ba43a08",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/main.rs",
+    "git_object": "64e6963d0d1f18e124dd15bb6a5612ba1eacde17",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/preview.rs",
+    "git_object": "8503b6de58e283978f273ee587afb07c4e5a8d40",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/activation.rs",
+    "git_object": "d743a0acdfcdd9f00101b587ad67e3ab7f9eacef",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/executor.rs",
+    "git_object": "cf566f1daeba726659cefe6c2519ce37181550f6",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/failpoint.rs",
+    "git_object": "1d27f914f3710d59674915d3f6f9f317994f2fd0",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/file_journal.rs",
+    "git_object": "7f2696ba0670812a4fa4379fdb13d758452385a2",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/journal.rs",
+    "git_object": "13d1085cd1704c54aa849189a28f5cf305c73e6f",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/memory.rs",
+    "git_object": "952f3556bdf90dbe0a1f576215218dc130d62ade",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/mod.rs",
+    "git_object": "9a76750d05f3bd216246e3924c82cfd101d377b3",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/model.rs",
+    "git_object": "9e294b474d6d765fb53b2f217cb2d6aeb5aff17b",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/planner.rs",
+    "git_object": "9bfa85154b2e0a3b421e3efed2b5ac697bd05000",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/ports.rs",
+    "git_object": "c3f7740e2095a0e4b12a7200790887f9ffde3378",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/private_state.rs",
+    "git_object": "02de45808dbd25d384110c748da09802ecbfb142",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/recovery.rs",
+    "git_object": "6e978a54897662df95951f2521132d8ea811ec38",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/schedule.rs",
+    "git_object": "0daf0c3e57de4b36f8dda0474fb2fb4e64825afd",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/windows_backend.rs",
+    "git_object": "459c011a6557793c44074229e35723b6827e64dc",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/rename/windows_native.rs",
+    "git_object": "eb10a3f1045bb41d6f45153ddebfccebebb11dce",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/ui_layout.rs",
+    "git_object": "6f3763c9f6eb43feb51e6f34ec3a34a0516bf9ea",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/window_placement.rs",
+    "git_object": "450086eefbfb3124c481dbe0d01a4e279e3227e0",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows.rs",
+    "git_object": "15a6c440246f1e889e4cdd8456ed62b8250b43eb",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/appearance.rs",
+    "git_object": "596f753b85a4f476d436610eaa31a4745ad20e12",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/appearance_dialog.rs",
+    "git_object": "5b0554685e104b999d7147fc42941ea50367540a",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/application.rs",
+    "git_object": "ae2857a84335a046fad32091d13e2ae955c41d13",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/clipboard.rs",
+    "git_object": "971ebe28ac403d904a1463b0678c6c0a4234387c",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/command_dispatch.rs",
+    "git_object": "012f86314422676799d7647e3230398c67ece84c",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/command_rail.rs",
+    "git_object": "a1bf3e1c1e72e83fbfd2de42f375452b7b90ec2c",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/dialog.rs",
+    "git_object": "77cb260cb023559d53b5355e4938006df9c045b1",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/drag_drop.rs",
+    "git_object": "67dd35748e9458f312bc298a29d3b98e2e72e8e0",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/icon_worker.rs",
+    "git_object": "5fb4dd73c0385e54462c2709dede3454475e65bb",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/list_view.rs",
+    "git_object": "7eb52e3e96c7bedd6ba1a03fd7367f6552359ce7",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/menu.rs",
+    "git_object": "84acb516111ddf27fbc56f7e75a037538cc34083",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/popup_menu.rs",
+    "git_object": "5517ad57bdcfea143d1b3cf6edfd1c8aeea1d596",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/preference_lifecycle.rs",
+    "git_object": "aa09a7611cc2f97afe342c990adef59458b51d1c",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/preferences.rs",
+    "git_object": "c4bfe9bb202cfdb1d42a0ceae9065830f0b5e884",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/recovery_ui.rs",
+    "git_object": "8e2d7c41413f9698f28a7ef13ed6fe82f4fef64b",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/safe_runtime.rs",
+    "git_object": "837f585a798d36d3ded17b4958a1e250303355e0",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/text_io.rs",
+    "git_object": "73a9f7e8067beceb67c7ed20cde1a8137545feea",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/visual_capture.rs",
+    "git_object": "0136e03a40aeac62c07b189e9d07321ef0781c30",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/src/windows/worker.rs",
+    "git_object": "b38961dbb31b142fc03c700a3cc3a852d7865bdd",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/admission.rs",
+    "git_object": "e9c927fd3561a3f0d33592c1d8f35d54abbc1b08",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/icon_cache.rs",
+    "git_object": "9d8424146e5572fc027acd182f89859db21f738e",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/icon_requests.rs",
+    "git_object": "a2fcc89ba83accd83832725b1a96e49884368db5",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/journal_codec_corpus.rs",
+    "git_object": "ae46ee8d250364bc3094e72888f50eef522a092f",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_activation.rs",
+    "git_object": "56577d862df6aa70c0ff946d472c534a6035935a",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_executor.rs",
+    "git_object": "0d8fc70da74ad128dabfa232c639cd4ce9c10965",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_file_journal.rs",
+    "git_object": "4f4ec94df4102808ab5958eb7ad3b4174a7d1b2b",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_planner.rs",
+    "git_object": "cb4b7a95f88f0549f34de3f11cce1a4d6cf4f846",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_recovery.rs",
+    "git_object": "df427ffb199f74db895e2a19dedc427d108a4566",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/rename_windows_backend.rs",
+    "git_object": "185ba2333beaedee7e414572bffaab3c3d980acc",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/resource_script.rs",
+    "git_object": "9137c882d4bd96750924731c08a2cb0ebf7b8b7c",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/support/windows_capabilities.rs",
+    "git_object": "7c4a943cc6699986e3ef7ec28b79f0cb0a2226e8",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/support/workflow_policy.rs",
+    "git_object": "753b92ec1bbf59aea74a465fec89652691d53825",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/unsafe_policy.rs",
+    "git_object": "ada6340a5282f6893978b69a5e885e07a44d8501",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/vm_automated_journal_corpus.rs",
+    "git_object": "6992da91aa6289a02287221f3871d7a75e475f42",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-app/tests/windows_capability_policy.rs",
+    "git_object": "394024cd06df23e1424126acf3a250b4c5ce449a",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/Cargo.toml",
+    "git_object": "abea2e991ff1af9b3a0b854c0c10dc28a4bf7ba4",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/src/lib.rs",
+    "git_object": "2b93a51f7708a867ada807ada3f5ec39a057032b",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/src/windows_leaf_name.rs",
+    "git_object": "88cbb35eca4682209c27fb520ce5a7e529db0ded",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/tests/actual_size.rs",
+    "git_object": "43d9501e80b2d0f80c77057bb2e39d7d8abbb7fc",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/tests/compatibility_golden.rs",
+    "git_object": "2eb834ce198196a139d246ad4f90cfa5fa18ebaa",
+    "mode": "100644"
+  },
+  {
+    "path": "crates/darknamer-core/tests/windows_leaf_name.rs",
+    "git_object": "efdf8ed49c7eb057b2b6e1358e050537a314f887",
+    "mode": "100644"
+  },
+  {
+    "path": "deny.toml",
+    "git_object": "6ba6795c642abb6f7357228acedb04a5781a3264",
+    "mode": "100644"
+  },
+  {
+    "path": "docs/USER-GUIDE.ko.md",
+    "git_object": "ad4615956e8361da988a6da19953ad5636352983",
+    "mode": "100644"
+  },
+  {
+    "path": "docs/USER-GUIDE.md",
+    "git_object": "13bd426c3f00696901360d2169030aacc119a37c",
+    "mode": "100644"
+  },
+  {
+    "path": "docs/history/WINDOWS-ACCEPTANCE.md",
+    "git_object": "a7ed36cf74caf42342181b75b26c4434a8e9f0cb",
+    "mode": "100644"
+  },
+  {
+    "path": "rust-toolchain.toml",
+    "git_object": "bb1223bea7d9c0e9ede9dbd33245a9c24e7c7c89",
+    "mode": "100644"
+  }
+]

@@ -18,6 +18,7 @@ from darkrenamer_tooling.formats import png as codec
 from gui_regression_fixture import (
     Fixture as EvidenceFixture, SCRIPT as EVIDENCE_SCRIPT,
     SOURCE as EVIDENCE_SOURCE, TREE as EVIDENCE_TREE,
+    first_clear_product_tree,
 )
 
 
@@ -129,26 +130,30 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[3]
         source_sha = runner.subprocess.check_output(["git", "rev-parse", "HEAD"],
                                                      cwd=repo, text=True).strip()
-        # Hosted checkout is depth 1. Supply only the archived tree query from
-        # the checked-out tree; the fixed entry count/digest below still pin the
-        # exact historical product inputs, while exercising production parsing.
+        # Hosted checkout is depth 1. Both Git replies come from frozen d37
+        # product entries, independent of later legitimate product edits.
         historical_query = ["git", "ls-tree", "-rz", "--full-tree",
                             runner.FIRST_CLEAR_PRODUCT_REFERENCE_SHA]
-        current_tree = runner.subprocess.check_output(
-            ["git", "ls-tree", "-rz", "--full-tree", source_sha], cwd=repo)
+        current_query = ["git", "ls-tree", "-rz", "--full-tree", source_sha]
+        frozen_tree = first_clear_product_tree()
         real_check_output = runner.subprocess.check_output
         def offline_tree(command, **kwargs):
-            return current_tree if command == historical_query else real_check_output(command, **kwargs)
+            if command == historical_query or command == current_query:
+                return frozen_tree
+            return real_check_output(command, **kwargs)
         with mock.patch.object(runner.subprocess, "check_output", side_effect=offline_tree):
             product = runner.first_clear_product_inputs(repo, source_sha)
-        altered_tree = current_tree.replace(b"100644 blob", b"100755 blob", 1)
-        self.assertNotEqual(altered_tree, current_tree)
-        with mock.patch.object(runner.subprocess, "check_output",
-                               side_effect=lambda command, **kwargs:
-                               altered_tree if command == historical_query else
-                               real_check_output(command, **kwargs)):
-            with self.assertRaisesRegex(ValueError, "product/build inputs differ"):
-                runner.first_clear_product_inputs(repo, source_sha)
+        altered_tree = frozen_tree.replace(b"100644 blob", b"100755 blob", 1)
+        self.assertNotEqual(altered_tree, frozen_tree)
+        for changed_query in (current_query, historical_query):
+            with self.subTest(changed_query=changed_query[-1]), \
+                 mock.patch.object(runner.subprocess, "check_output",
+                                   side_effect=lambda command, **kwargs:
+                                   altered_tree if command == changed_query else
+                                   frozen_tree if command in (historical_query, current_query) else
+                                   real_check_output(command, **kwargs)):
+                with self.assertRaisesRegex(ValueError, "product/build inputs differ"):
+                    runner.first_clear_product_inputs(repo, source_sha)
         self.assertEqual(product["reference_source_sha"],
                          "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2")
         self.assertEqual(product["entries_count"], 109)

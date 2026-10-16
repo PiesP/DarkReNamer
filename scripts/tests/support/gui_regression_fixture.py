@@ -16,6 +16,16 @@ SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
 TREE = "b" * 40
 
+
+def first_clear_product_tree() -> bytes:
+    """Rebuild the frozen d37 product-only Git tree reply for shallow offline tests."""
+    fixture = SCRIPT_ROOT / "tests/fixtures/first-clear-product-inputs.json"
+    entries = json.loads(fixture.read_text(encoding="utf-8"))
+    return b"".join(
+        f'{row["mode"]} blob {row["git_object"]}\t{row["path"]}\0'.encode("utf-8")
+        for row in entries
+    )
+
 # Frozen producer sample values. Validation uses the independent evidence module.
 FIXTURE_MODE_SEMANTICS = {
     'full-context': frozenset({

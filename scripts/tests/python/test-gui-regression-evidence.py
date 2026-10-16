@@ -24,7 +24,7 @@ from controller_cleanup_fixture import (
 from darkrenamer_tooling.evidence import gui as evidence
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
-    physical_menu_apply_entry, scenario, Fixture,
+    physical_menu_apply_entry, scenario, Fixture, first_clear_product_tree,
 )
 
 
@@ -2009,11 +2009,12 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
                                              text=True).strip()
         historical_query = ["git", "ls-tree", "-rz", "--full-tree",
                             evidence.FIRST_CLEAR_PRODUCT_REFERENCE_SHA]
-        current_tree = subprocess.check_output(
-            ["git", "ls-tree", "-rz", "--full-tree", source_sha], cwd=repo)
+        current_query = ["git", "ls-tree", "-rz", "--full-tree", source_sha]
+        frozen_tree = first_clear_product_tree()
         real_check_output = subprocess.check_output
         def offline_tree(command, **kwargs):
-            return current_tree if command == historical_query else real_check_output(command, **kwargs)
+            return frozen_tree if command in (historical_query, current_query) else \
+                real_check_output(command, **kwargs)
         with mock.patch.object(subprocess, "check_output", side_effect=offline_tree):
             manifest = {"source_sha": source_sha,
                         "product_inputs": producer.first_clear_product_inputs(repo, source_sha)}
@@ -2023,14 +2024,17 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
             with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
                 evidence.verify_first_clear_product_inputs(repo, manifest)
         manifest["product_inputs"] = original_product_inputs
-        altered_tree = current_tree.replace(b"100644 blob", b"100755 blob", 1)
-        self.assertNotEqual(altered_tree, current_tree)
-        with mock.patch.object(subprocess, "check_output",
-                               side_effect=lambda command, **kwargs:
-                               altered_tree if command == historical_query else
-                               real_check_output(command, **kwargs)):
-            with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
-                evidence.verify_first_clear_product_inputs(repo, manifest)
+        altered_tree = frozen_tree.replace(b"100644 blob", b"100755 blob", 1)
+        self.assertNotEqual(altered_tree, frozen_tree)
+        for changed_query in (current_query, historical_query):
+            with self.subTest(changed_query=changed_query[-1]), \
+                 mock.patch.object(subprocess, "check_output",
+                                   side_effect=lambda command, **kwargs:
+                                   altered_tree if command == changed_query else
+                                   frozen_tree if command in (historical_query, current_query) else
+                                   real_check_output(command, **kwargs)):
+                with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+                    evidence.verify_first_clear_product_inputs(repo, manifest)
 
     def make_failed_observation(self):
         run = self.focused_run
