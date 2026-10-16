@@ -3708,6 +3708,243 @@ foreach ($call in $applicationStartCalls) {
     }
 }
 
+# Drive the whole production controller through an incomplete runner baseline.
+# The fixture replaces only external VM/transfer boundaries, and executes the
+# controller's real no-result cleanup body and transport finalization.
+& {
+    foreach ($definition in @($controllerAst.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst]
+            })) {
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $fixture = New-AcceptanceFixture -Name 'controller-incomplete-baseline'
+    $probe = [pscustomobject]@{ calls = 0; candidate_started = $false; cleanup_context = $null }
+    $priorProgramData = $env:ProgramData
+    $priorRootRecords = Get-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue
+    $env:ProgramData = Join-Path $script:temporaryRoot 'controller-baseline-programdata'
+    $global:DrVmOwnedRootRecords = [ordered]@{ guest = $null; trusted = $null }
+    function New-SshControllerSession { param($HostAlias) [pscustomobject]@{ fixture = $HostAlias } }
+    function New-ControllerToolingTransferStage {
+        param($VerifiedTooling)
+        [pscustomobject]@{ root = $fixture.bundle_root; manifest_sha256 = 'a' * 64; records = @() }
+    }
+    function Remove-ControllerToolingTransferStage { param($Transfer) $null }
+    function Close-DrControllerResources { param($Session,$Credential,$Mutex,$MutexHeld) @() }
+    function Copy-Item {
+        param($LiteralPath,$Destination,$ToSession)
+        if ($null -eq $ToSession) { throw 'The fixture may only intercept VM transfers.' }
+    }
+    function Invoke-Command {
+        param($Session,$ArgumentList,$ScriptBlock)
+        $probe.calls++
+        switch ($probe.calls) {
+            1 { return [pscustomobject]@{ platform = 'Win32NT'; powershell_version = '7.4.0';
+                    is_administrator = $true; vm_id = $null } }
+            2 { return [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1001'; session_id = 7 } }
+            3 {
+                $name = [string]$ArgumentList[0]
+                $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
+                return [pscustomobject]@{ guest_root = Join-Path $base $name;
+                    trusted_task_root = Join-Path $base ($name + '-trusted') }
+            }
+            4 { return [pscustomobject]@{ manifest_sha256 = 'a' * 64; records = @() } }
+            5 {
+                return (@{ schema_version = 2; registration = $null;
+                    child_lifecycle = @{ exited = $true; streams_complete = $true;
+                        exact_lifetime_absent = $true; process_job_closed = $true };
+                    engine = @{ version = '7.4.0' };
+                    engine_child = @{ exited = $true; streams_complete = $true;
+                        exact_lifetime_absent = $true; process_job_closed = $true } } |
+                    ConvertTo-Json -Depth 6 -Compress)
+            }
+            6 { return }
+            7 { return [pscustomobject]@{ complete = $false; processes = @() } }
+            8 { return }
+            9 {
+                $probe.cleanup_context = $ArgumentList[5]
+                return (& $ScriptBlock @ArgumentList)
+            }
+            default { $probe.candidate_started = $true; throw 'Candidate reached the fixture VM.' }
+        }
+    }
+    try {
+        Assert-Fails {
+            Invoke-DrWindowsVmController -BundleRoot $fixture.bundle_root -SshHost 'inert-fixture' `
+                -AcceptanceProfileId 'vm-automated-v2-owned-resources' `
+                -AcceptanceProfileSha256 ('a' * 64) -TaskKind core `
+                -EntryPointPath $controller -VerifiedTooling ([pscustomobject]@{})
+        } 'VM transport, acceptance, or cleanup failed'
+        $transport = Get-Content -LiteralPath (Join-Path $fixture.bundle_root 'transport.json') -Raw |
+            ConvertFrom-Json
+        $primary = Get-Content -LiteralPath (Join-Path $fixture.bundle_root 'transport-error.txt') -Raw
+        $retained = Get-Content -LiteralPath (Join-Path $fixture.bundle_root 'retained-guest-directory.txt') -Raw
+        if ($probe.calls -ne 9 -or $probe.candidate_started -or
+            $null -eq $probe.cleanup_context -or
+            $probe.cleanup_context.candidate_task_may_have_started -or
+            $null -ne $probe.cleanup_context.task_execution -or
+            @($probe.cleanup_context.process_job_cleanup).Count -ne 0 -or
+            $transport.status -cne 'failed' -or $transport.guest_cleanup -or
+            $transport.raw_cleanup.process_jobs_closed -or
+            $transport.raw_cleanup.resource_cleanup_errors[0] -cne
+                'V2 candidate was not scheduled; owned roots require independent closure evidence.' -or
+            $primary -notlike '*The VM runner process baseline was incomplete; refusing to start an untrackable candidate.*' -or
+            $primary -like '*process_job_cleanup*' -or
+            $retained -cnotmatch 'DarkReNamerTests-[0-9a-f]{32}$' -or
+            (Test-Path -LiteralPath (Join-Path $fixture.bundle_root 'original-transport.json'))) {
+            throw 'The complete controller hid the original baseline failure or falsely closed ownership.'
+        }
+    }
+    finally {
+        $env:ProgramData = $priorProgramData
+        if ($null -ne $priorRootRecords) { $global:DrVmOwnedRootRecords = $priorRootRecords.Value }
+        else { Remove-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue }
+    }
+}
+
+# Execute the production baseline guard and v2 cleanup-context statements under
+# StrictMode. A failed baseline has no candidate result; its helper evidence and
+# the original error must survive construction of the retained cleanup context.
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($controllerPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'The controller no-result regression source did not parse.' }
+    $controller = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-DrWindowsVmController'
+    }, $true)
+    $guard = @($controller.FindAll({ param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.Text.Contains('The VM runner process baseline was incomplete; refusing to start an untrackable candidate.')
+    }, $true))
+    $contextAssignment = @($controller.FindAll({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$cleanupTaskContext'
+    }, $true))
+    $v2Context = @($controller.FindAll({ param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.Text.Contains("-NotePropertyName process_job_cleanup") -and
+            $node.Extent.Text.Contains("-NotePropertyName declared_processes")
+    }, $true) | Sort-Object { $_.Extent.Text.Length } | Select-Object -First 1)
+    $copyBaseline = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Copy-DrControllerV2TaskBaseline'
+    }, $true))
+    $addIdentity = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Add-DrControllerLifecycleIdentity'
+    }, $true))
+    if ($guard.Count -ne 1 -or $contextAssignment.Count -ne 1 -or $v2Context.Count -ne 1) {
+        throw 'The production baseline or cleanup context is ambiguous.'
+    }
+    if ($copyBaseline.Count -ne 1 -or $addIdentity.Count -ne 1) {
+        throw 'The production cleanup-context helpers are ambiguous.'
+    }
+    . ([scriptblock]::Create($copyBaseline[0].Extent.Text))
+    . ([scriptblock]::Create($addIdentity[0].Extent.Text))
+    $baselineGuard = [scriptblock]::Create($guard[0].Extent.Text)
+    $makeContext = [scriptblock]::Create(
+        $contextAssignment[0].Extent.Text + "`n" + $v2Context[0].Extent.Text + "`n" + '$cleanupTaskContext'
+    )
+    $processSnapshot = [pscustomobject]@{ complete = $false; processes = @() }
+    $primary = $null
+    try { & $baselineGuard } catch { $primary = $_.Exception.Message }
+    if ($primary -cne 'The VM runner process baseline was incomplete; refusing to start an untrackable candidate.') {
+        throw 'The incomplete baseline did not preserve its primary refusal.'
+    }
+    $result = $null
+    $ownedV2 = $true
+    $runtimeBrokerEnabled = $false
+    $desktop = [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1001'; session_id = 7 }
+    $runnerTaskBaseline = @()
+    $runnerProcessBaseline = @()
+    $spotlightPreflight = $null
+    $preflightChild = [pscustomobject]@{
+        exited = $true; streams_complete = $true; exact_lifetime_absent = $true; process_job_closed = $true
+    }
+    $engineChild = [pscustomobject]@{
+        exited = $true; streams_complete = $true; exact_lifetime_absent = $true; process_job_closed = $true
+    }
+    $taskExecution = $null
+    $candidateTaskMayHaveStarted = $false
+    $script:DrVmV2RescueAttempts = 0
+    $script:DrVmV2RescueExecutions = [Collections.Generic.List[object]]::new()
+    $AcceptanceProfileSha256 = 'a' * 64
+    $recovery = $false
+    $declared = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $context = & $makeContext
+    if ($null -eq $context -or $null -ne $context.task_execution -or
+        $context.candidate_task_may_have_started -or
+        -not [object]::ReferenceEquals($context.preflight_child, $preflightChild) -or
+        -not [object]::ReferenceEquals($context.engine_child, $engineChild) -or
+        @($context.process_job_cleanup).Count -ne 0 -or
+        @($context.declared_processes).Count -ne 0 -or
+        $primary -cne 'The VM runner process baseline was incomplete; refusing to start an untrackable candidate.') {
+        throw 'No-result cleanup context lost its primary failure or helper ownership.'
+    }
+    $cleanupAssignment = @($controller.FindAll({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Extent.Text -match '^\$cleanupResult\s*=\s*Invoke-Command\b'
+    }, $true))
+    if ($cleanupAssignment.Count -ne 1) { throw 'The production cleanup invocation is ambiguous.' }
+    $remoteBody = $cleanupAssignment[0].Find({ param($node)
+        $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+    }, $true).ScriptBlock.GetScriptBlock()
+    $previousProgramData = $env:ProgramData
+    $previousRootRecords = Get-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue
+    $env:ProgramData = Join-Path $script:temporaryRoot 'no-result-programdata'
+    $global:DrVmOwnedRootRecords = [ordered]@{ guest = $null; trusted = $null }
+    try {
+        $runName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+        $root = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $runName
+        $trustedRoot = $root + '-trusted'
+        $observed = & $remoteBody $root $trustedRoot $runName $false $false $context `
+            'param()' 'param()' 'param()'
+        if ($observed.guest_cleanup -or $null -ne $observed.failed_snapshot -or
+            $observed.raw_cleanup.process_jobs_closed -or
+            @($observed.raw_cleanup.resource_cleanup_errors).Count -ne 1 -or
+            $observed.raw_cleanup.resource_cleanup_errors[0] -cne
+                'V2 candidate was not scheduled; owned roots require independent closure evidence.') {
+            throw 'The never-scheduled candidate was falsely finalized.'
+        }
+        foreach ($field in @('process_job_closed','exact_lifetime_absent')) {
+            $preflightChild.$field = $false
+            $context = & $makeContext
+            $observed = & $remoteBody $root $trustedRoot $runName $false $false $context `
+                'param()' 'param()' 'param()'
+            if ($observed.guest_cleanup -or
+                $observed.raw_cleanup.resource_cleanup_errors[0] -cne
+                    'V2 preflight helper lifetime or Job closure is unavailable.') {
+                throw 'Missing preflight helper ownership was hidden by the absent candidate.'
+            }
+            $preflightChild.$field = $true
+        }
+        $candidateTaskMayHaveStarted = $true
+        $result = [pscustomobject]@{ status = 'failed' }
+        $context = & $makeContext
+        if (-not $context.candidate_task_may_have_started -or
+            @($context.process_job_cleanup).Count -ne 0) {
+            throw 'Malformed started-candidate result became a closed Job ledger.'
+        }
+        $observed = & $remoteBody $root $trustedRoot $runName $false $false $context `
+            'param()' 'param()' 'param()'
+        if ($observed.guest_cleanup -or
+            $observed.raw_cleanup.resource_cleanup_errors[0] -cne
+                'V2 candidate may have started without a verified terminal task lifetime.') {
+            throw 'A started candidate without a result was falsely finalized.'
+        }
+    }
+    finally {
+        $env:ProgramData = $previousProgramData
+        if ($null -ne $previousRootRecords) {
+            $global:DrVmOwnedRootRecords = $previousRootRecords.Value
+        }
+        else {
+            Remove-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 & {
     $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
     $tokens = $null
