@@ -351,11 +351,15 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
 
 def _source_result(root: Path, original: dict, receipt: dict,
                    listed: set[str]) -> tuple[dict, dict]:
-    context = require_exact_keys(original.get("owned_cleanup_failure_context"), {
+    raw_context = original.get("owned_cleanup_failure_context")
+    bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
+                  raw_context.get("acceptance_mode") in
+                  ("appearance-pair", "performance-sample", "first-clear-observation"))
+    context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
         "output_preservation_verified", "task_kind",
-    }, "Original failure context")
+    } | ({"acceptance_text_scale_percent"} if bounded_ui else set()), "Original failure context")
     require(context["failed_snapshot"] == receipt["failed_snapshot"] and
             context["root_records"] == receipt["root_records"] and
             context["task_kind"] == original.get("task_kind") and
@@ -374,8 +378,14 @@ def _source_result(root: Path, original: dict, receipt: dict,
             "Copied source result is unavailable.")
     result_data = _read_file(root.joinpath(*result_name.split("/")), 8 * 1024 * 1024)
     _reference(source, result_name, result_data, "Original source result")
-    bundle_root = root if context["task_kind"] == "core" else root.parent
-    bundle_data = _read_file(bundle_root / "bundle.json", 4 * 1024 * 1024)
+    bundle_reference = require_exact_keys(context["bundle"], {"file", "bytes", "sha256"},
+                                          "Source bundle reference")
+    require(bundle_reference["file"] == "bundle.json", "Source bundle path differs.")
+    frozen_here = context["task_kind"] == "core" or "bundle.json" in listed
+    bundle_path = root / "bundle.json" if frozen_here else root.parent / "bundle.json"
+    require(frozen_here or not (root / "bundle.json").exists(),
+            "Unlisted output bundle conflicts with the historical parent layout.")
+    bundle_data = _read_file(bundle_path, 4 * 1024 * 1024)
     _reference(context["bundle"], "bundle.json", bundle_data, "Source bundle")
     result = _json(result_data, "Original source result")
     bundle = _json(bundle_data, "Source bundle")
@@ -396,7 +406,12 @@ def _source_result(root: Path, original: dict, receipt: dict,
                     "Copied recovery observer differs from the original context.")
     require(type(context["high_contrast_requested"]) is bool and
             (context["acceptance_mode"] in
-             ("current-dpi", "full-context", "standard", "text-scale", "tooltip")
+             ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
+             (context["acceptance_mode"] in
+              ("appearance-pair", "performance-sample", "first-clear-observation") and
+              type(context["acceptance_text_scale_percent"]) is int and
+              context["acceptance_text_scale_percent"] == 100 and
+              context["high_contrast_requested"] is False)
              if context["task_kind"] == "ui" else context["acceptance_mode"] is None),
             "Original acceptance mode is unavailable.")
     _restoration(root, result, context, listed)

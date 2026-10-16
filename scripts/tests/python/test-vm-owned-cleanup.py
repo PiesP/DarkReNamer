@@ -192,6 +192,69 @@ class OwnedCleanupTests(unittest.TestCase):
             'acceptance': 'rejected',
         })
 
+    def test_first_clear_failed_ui_can_preserve_owned_cleanup_without_acceptance(self):
+        source_sha = '9' * 40
+        observer_sha = '8' * 64
+        ui_root = self.root / 'ui'
+        ui_root.mkdir()
+        for path in tuple(self.root.iterdir()):
+            if path != ui_root and path.name != 'bundle.json':
+                path.rename(ui_root / path.name)
+        (ui_root / 'bundle.json').write_bytes((self.root / 'bundle.json').read_bytes())
+        (self.root / 'bundle.json').unlink()
+        self.root = ui_root
+        result_path = self.root / 'acceptance-result.json'
+        result = process_result(source_sha)
+        result.update(status='failed', failure_reason='gui_regression_observer_failed',
+                      acceptance_script_sha256=observer_sha)
+        result_bytes = write(result_path, result)
+        (self.root / 'original-result.json').unlink()
+        context = self.original['owned_cleanup_failure_context']
+        context.update(task_kind='ui', observer_sha256=observer_sha,
+                       acceptance_mode='first-clear-observation',
+                       acceptance_text_scale_percent=100)
+        context['source_result'] = {'file': result_path.name, 'bytes': len(result_bytes),
+                                    'sha256': digest(result_bytes)}
+        self.original['task_kind'] = 'ui'
+        self.original['observer_process'] = {'state': 'exited', 'exit_code': 1}
+        self.receipt['files'][1] = context['source_result']
+        self.rebind_original()
+        self.assertEqual(verify_preserved_owned_cleanup(self.root), {
+            'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
+            'acceptance': 'rejected',
+        })
+        for mode in ('performance-sample', 'appearance-pair'):
+            context['acceptance_mode'] = mode
+            if mode == 'appearance-pair':
+                context['acceptance_text_scale_percent'] = 100
+            self.rebind_original()
+            with self.subTest(mode=mode):
+                self.assertEqual(verify_preserved_owned_cleanup(self.root)['acceptance'], 'rejected')
+        context['acceptance_text_scale_percent'] = 150
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_text_scale_percent'] = 100
+        context['high_contrast_requested'] = True
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['high_contrast_requested'] = False
+        context.pop('acceptance_text_scale_percent')
+        context['acceptance_mode'] = 'unrelated-mode'
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_mode'] = 'first-clear-observation'
+        context['acceptance_text_scale_percent'] = 100
+        # Old native UI roots can use the parent bundle when the frozen output
+        # inventory never claimed a copied bundle at the output root.
+        (self.root.parent / 'bundle.json').write_bytes((self.root / 'bundle.json').read_bytes())
+        (self.root / 'bundle.json').unlink()
+        self.receipt['files'] = [row for row in self.receipt['files'] if row['file'] != 'bundle.json']
+        self.rebind_original()
+        self.assertEqual(verify_preserved_owned_cleanup(self.root)['owned_cleanup'], 'owned-clean')
+
     def test_rejects_raw_owned_entries_despite_empty_owned_labels(self):
         for kind in ('process', 'task'):
             with self.subTest(kind=kind):

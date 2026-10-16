@@ -1598,6 +1598,18 @@ function Invoke-ObserverBoundPerformanceCommand {
     }
 }
 
+function Convert-ObserverPerformanceSampleRows {
+    param([Parameter(Mandatory)][object[]] $Samples)
+    @($Samples | ForEach-Object {
+        [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
+            private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
+            threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
+            ui_response_ms=$_.UiResponseMs; probe_status=$_.ProbeStatus;
+            probe_error_code=$_.ProbeErrorCode;
+            resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
+    })
+}
+
 function Invoke-ObserverPerformanceSampleScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -1606,10 +1618,13 @@ function Invoke-ObserverPerformanceSampleScenario {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
         [switch] $StopAfterFirstClear,
+        [switch] $ObserveFirstClear,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
+    if ($StopAfterFirstClear -and $ObserveFirstClear) { throw 'First-clear modes are mutually exclusive.' }
+    $scenarioClock = if ($ObserveFirstClear) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
     $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'performance-fixture'
     $shortFixture = Resolve-JobBoundShortPath -Path $fixture
     $ordinary = New-PrivateDirectory -Parent $shortFixture -Leaf 'ordinary'
@@ -1658,7 +1673,15 @@ function Invoke-ObserverPerformanceSampleScenario {
     $commandSends = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
-    $ObservationSink['plan'] = if ($StopAfterFirstClear) {
+    $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
+        elseif ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
+    $ObservationSink['plan'] = if ($ObserveFirstClear) {
+        [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
+            sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
+            command_timeout_ms=5000; passive_poll_limit=50; passive_window_ms=10000;
+            passive_interval_ms=200; individual_query_timeout_ms=50;
+            stop_after_first_clear=$true; full_performance_sample=$false }
+    } elseif ($StopAfterFirstClear) {
         [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
             sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
             stop_after_first_clear=$true; full_performance_sample=$false }
@@ -1793,7 +1816,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$fullElapsedMs;
             command_elapsed_ms=$prefix.elapsed_ms; rows=10000;
             observed_rows=[int]$grid.pattern.Current.RowCount })
-        if ($StopAfterFirstClear) {
+        if ($StopAfterFirstClear -or $ObserveFirstClear) {
             $ObservationSink['first_clear'] = [ordered]@{
                 stage = 'before-send'; command_id = 32782
                 process_id = [int]$application.process.Id
@@ -1802,8 +1825,33 @@ function Invoke-ObserverPerformanceSampleScenario {
                 preview_reset = @($ObservationSink['full_preview_rows'] | ForEach-Object { $_.reset })
                 post_clear_rows = $null
             }
+            if ($ObserveFirstClear) {
+                $ObservationSink['first_clear']['schema_version'] = 1
+                $ObservationSink['first_clear']['polls'] = @()
+                $ObservationSink['first_clear']['poll_status'] = 'not-started'
+                $ObservationSink['first_clear']['poll_elapsed_ms'] = 0
+                $ObservationSink['first_clear']['native_identity'] = $null
+            }
             if ($ObservationSink['first_clear'].pre_clear_rows -ne 10000) {
                 throw 'Focused clear did not begin with 10000 rows.'
+            }
+        }
+        $firstClearIdentity = $null
+        if ($ObserveFirstClear) {
+            $firstClearIdentity = [DarkReNamerVmAcceptanceNative]::CaptureFirstClearIdentity(
+                [IntPtr]$application.process.Handle, [uint32]$application.process.Id,
+                [IntPtr]$application.main_handle, [IntPtr]$listHandle)
+            $ObservationSink['first_clear'].native_identity = [ordered]@{
+                process_id=[long]$firstClearIdentity.ProcessId
+                creation_filetime=[long]$firstClearIdentity.CreationFileTime
+                main_handle=[long]$firstClearIdentity.MainHandle
+                list_handle=[long]$firstClearIdentity.ListHandle
+                main_thread_id=[long]$firstClearIdentity.MainThreadId
+                list_thread_id=[long]$firstClearIdentity.ListThreadId
+                main_class=[string]$firstClearIdentity.MainClass
+                list_class=[string]$firstClearIdentity.ListClass
+                list_parent=[long]$firstClearIdentity.ListParent
+                list_control_id=[int]$firstClearIdentity.ListControlId
             }
         }
         try {
@@ -1811,19 +1859,79 @@ function Invoke-ObserverPerformanceSampleScenario {
                 -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
         }
         catch {
-            if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'send-failed' }
+            if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'send-failed' }
+            if ($ObserveFirstClear -and $commandSends.Count -gt 0 -and
+                $commandSends[$commandSends.Count - 1].command_id -eq 32782 -and
+                $commandSends[$commandSends.Count - 1].status -ceq 'timeout' -and
+                $commandSends[$commandSends.Count - 1].error_code -eq 1460) {
+                $originalFailure = $_
+                if ($null -ne $sampler) {
+                    try {
+                        $ObservationSink['partial_samples'] = @(
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
+                    }
+                    catch { $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name }
+                    finally { $sampler = $null }
+                }
+                $pollClock = $null
+                $polls = $null
+                try {
+                    $pollClock = [Diagnostics.Stopwatch]::StartNew()
+                    $polls = [Collections.Generic.List[object]]::new()
+                    $pollStatus = 'budget-exhausted'
+                    for ($pollIndex = 0; $pollIndex -lt 50; $pollIndex++) {
+                        $elapsed = [long]$pollClock.ElapsedMilliseconds
+                        $slotStart = $pollIndex * 200
+                        if ($elapsed -gt $slotStart + 199) { continue }
+                        if ($elapsed -lt $slotStart) {
+                            if ($slotStart + 100 -gt 10000 -or
+                                [long]$scenarioClock.ElapsedMilliseconds + ($slotStart - $elapsed) + 100 -gt 600000) { break }
+                            Start-Sleep -Milliseconds ($slotStart - $elapsed)
+                            $elapsed = [long]$pollClock.ElapsedMilliseconds
+                            if ($elapsed -gt $slotStart + 199) { continue }
+                        }
+                        if ($elapsed + 100 -gt 10000 -or
+                            [long]$scenarioClock.ElapsedMilliseconds + 100 -gt 600000) { break }
+                        $poll = [DarkReNamerVmAcceptanceNative]::PollFirstClear(
+                            [IntPtr]$application.process.Handle, $firstClearIdentity)
+                        $polls.Add([ordered]@{
+                            index=$pollIndex; elapsed_ms=[long]$pollClock.ElapsedMilliseconds
+                            status=[string]$poll.Status; creation_filetime=[long]$poll.CreationFileTime
+                            count_status=[string]$poll.CountStatus; count_error=[int]$poll.CountError
+                            count_elapsed_ms=[double]$poll.CountElapsedMs
+                            row_count=$poll.RowCount; response_status=[string]$poll.ResponseStatus
+                            response_error=[int]$poll.ResponseError
+                            response_elapsed_ms=[double]$poll.ResponseElapsedMs
+                        })
+                        if ($poll.Status -cne 'identity-bound') { $pollStatus = 'identity-unknown'; break }
+                        if ($pollIndex -eq 49) { $pollStatus = 'poll-limit'; break }
+                    }
+                    $ObservationSink['first_clear'].polls = @($polls.ToArray())
+                    $ObservationSink['first_clear'].poll_status = $pollStatus
+                    $ObservationSink['first_clear'].poll_elapsed_ms = [long]$pollClock.ElapsedMilliseconds
+                }
+                catch {
+                    if ($null -ne $polls) { $ObservationSink['first_clear'].polls = @($polls.ToArray()) }
+                    $ObservationSink['first_clear'].poll_status = 'observer-error'
+                    if ($null -ne $pollClock) {
+                        $ObservationSink['first_clear'].poll_elapsed_ms = [long]$pollClock.ElapsedMilliseconds
+                    }
+                    $ObservationSink['first_clear'].poll_error_type = $_.Exception.GetType().Name
+                }
+                throw $originalFailure
+            }
             throw
         }
-        if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'sent' }
+        if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'sent' }
         $clearedRows = [int]$grid.pattern.Current.RowCount
-        if ($StopAfterFirstClear) {
+        if ($StopAfterFirstClear -or $ObserveFirstClear) {
             $ObservationSink['first_clear'].post_clear_rows = $clearedRows
             $ObservationSink['first_clear'].stage = 'after-send'
         }
         if ($clearedRows -ne 0) { throw 'Performance list clear did not remove all rows.' }
-        if ($StopAfterFirstClear) { $ObservationSink['first_clear'].stage = 'verified-empty' }
+        if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'verified-empty' }
         $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
-        if (-not $StopAfterFirstClear) {
+        if (-not $StopAfterFirstClear -and -not $ObserveFirstClear) {
         $longModes = if ($LongPathOrder -eq 'visible-hidden') { @('long-visible','long-hidden') }
             else { @('long-hidden','long-visible') }
         $columnsVisible = $false
@@ -1924,16 +2032,9 @@ function Invoke-ObserverPerformanceSampleScenario {
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
         $sampler = $null
-        $ObservationSink['samples'] = @($samples | ForEach-Object {
-            [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
-                private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
-                threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
-                ui_response_ms=$_.UiResponseMs; probe_status=$_.ProbeStatus;
-                probe_error_code=$_.ProbeErrorCode;
-                resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
-        })
+        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples)
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
-            'single-row','full-preview') + $(if ($StopAfterFirstClear) { @() }
+            'single-row','full-preview') + $(if ($StopAfterFirstClear -or $ObserveFirstClear) { @() }
                 else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
         $ObservationSink['phase_summary'] = @(Get-ObserverPerformancePhaseSummary `
             -Samples $ObservationSink['samples'] -PhaseOrder $phaseOrder)
@@ -1961,20 +2062,15 @@ function Invoke-ObserverPerformanceSampleScenario {
             -WaitSeconds $WaitSeconds -CloseInput ordinary
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
-        $ObservationSink['mode'] = if ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
+        $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
+            elseif ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
         return $ObservationSink
     }
     finally {
         if ($null -ne $sampler) {
             try {
-                $ObservationSink['partial_samples'] = @($sampler.Stop() | ForEach-Object {
-                    [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
-                        private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
-                        threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
-                        ui_response_ms=$_.UiResponseMs; probe_status=$_.ProbeStatus;
-                        probe_error_code=$_.ProbeErrorCode;
-                        resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
-                })
+                $ObservationSink['partial_samples'] = @(
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
             }
             catch { $ObservationSink['partial_sampling_error'] = $_.Exception.Message }
         }

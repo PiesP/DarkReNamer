@@ -51,6 +51,18 @@ FOCUSED_CLEAR_PLAN = {
     "clear_command_id": 0x800E, "stop_after_first_clear": True,
     "full_performance_sample": False,
 }
+FIRST_CLEAR_MODE = "first-clear-observation"
+FIRST_CLEAR_RUN_ID = "first-clear-observation-v1-1366x768-96-text100"
+FIRST_CLEAR_PRODUCT_REFERENCE_SHA = "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2"
+FIRST_CLEAR_SCOPE = "first-clear-observation-v1"
+FIRST_CLEAR_PLAN = {
+    "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
+    "sample_interval_ms": 200, "maximum_seconds": 600,
+    "clear_command_id": 0x800E, "command_timeout_ms": 5000,
+    "passive_poll_limit": 50, "passive_window_ms": 10000,
+    "passive_interval_ms": 200, "individual_query_timeout_ms": 50,
+    "stop_after_first_clear": True, "full_performance_sample": False,
+}
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -414,12 +426,14 @@ def validate_request(value: object) -> dict:
         fields.add("performance_plan")
     if isinstance(value, dict) and value.get("mode") == FOCUSED_CLEAR_MODE:
         fields.add("focused_clear_plan")
+    if isinstance(value, dict) and value.get("mode") == FIRST_CLEAR_MODE:
+        fields.add("first_clear_observation_plan")
     if isinstance(value, dict) and value.get("mode") == ICON_SETTLEMENT_MODE:
         fields.update({"settlement_plan", "endpoint_method"})
         if value.get("endpoint_method") == ICON_BASELINE_METHOD:
             fields.add("baseline_product_source_sha")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE},
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
@@ -448,6 +462,11 @@ def validate_request(value: object) -> dict:
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
                 typed_equal(request["focused_clear_plan"], FOCUSED_CLEAR_PLAN),
                 "Focused clear request differs from its fixed plan.")
+    elif request["mode"] == FIRST_CLEAR_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                typed_equal(request["first_clear_observation_plan"], FIRST_CLEAR_PLAN),
+                "First-clear observation request differs from its fixed plan.")
     elif request["mode"] == ICON_SETTLEMENT_MODE:
         require(request["appearance"] == "light" and
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
@@ -493,13 +512,15 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         required.add("prepared_bundle")
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == FOCUSED_CLEAR_MODE:
         required.update({"tooling_source_sha", "tooling_source_tree"})
+    if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == FIRST_CLEAR_MODE:
+        required.add("product_inputs")
     fixed_v2 = isinstance(value, dict) and isinstance(value.get("request"), dict) and (
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
-            value["request"].get("mode") in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2):
+            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2):
         required.add("acceptance_profile_id")
-        if value.get("acceptance_profile_id") == V2_PROFILE_ID:
+        if value.get("acceptance_profile_id") == V2_PROFILE_ID or value["request"].get("mode") == FIRST_CLEAR_MODE:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
     manifest = exact_keys(value, required, "input manifest")
     require(int_equals(manifest["schema_version"], 1), "input manifest schema_version must be integer 1.")
@@ -522,10 +543,20 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE or fixed_v2 else {V1_PROFILE_ID, V2_PROFILE_ID}),
+                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE or fixed_v2 else
+                 {V1_PROFILE_ID} if request["mode"] == FIRST_CLEAR_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
+        if request["mode"] == FIRST_CLEAR_MODE:
+            profile_artifact = checked_artifact(run_root, manifest["acceptance_profile"], "V1 profile")
+            require(profile_artifact["file"] == "inputs/vm-automated-v1.json" and
+                    manifest["acceptance_profile_sha256"] == profile_artifact["sha256"],
+                    "First-clear strict V1 profile binding differs.")
+            profile, _ = read_json(run_root, Path(profile_artifact["file"]), "strict V1 profile")
+            require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v1" and
+                    profile.get("profile_id") == V1_PROFILE_ID and int_equals(profile.get("revision"), 1),
+                    "First-clear strict V1 profile definition differs.")
         if manifest["acceptance_profile_id"] == V2_PROFILE_ID:
             profile_artifact = checked_artifact(run_root, manifest["acceptance_profile"], "acceptance profile")
             require(profile_artifact["file"] == "inputs/vm-automated-v2.json" and
@@ -538,13 +569,21 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
             if fixed_v2:
                 require(expected_profile_sha256 == profile_artifact["sha256"],
                         "Fixed GUI V2 profile differs from the selected source blob.")
+    if request["mode"] == FIRST_CLEAR_MODE:
+        product = exact_keys(manifest["product_inputs"],
+                             {"reference_source_sha", "entries_sha256", "entries_count"},
+                             "first-clear product inputs")
+        require(product["reference_source_sha"] == FIRST_CLEAR_PRODUCT_REFERENCE_SHA and
+                type(product["entries_count"]) is int and product["entries_count"] > 0,
+                "First-clear product input reference differs.")
+        checked_digest(product["entries_sha256"], "first-clear product inputs")
     validate_host_platform(manifest["host_preflight"], "input manifest host_preflight")
     validate_guest_platform(manifest["guest_preflight"], "input manifest guest_preflight")
     command = manifest["command"]
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -685,6 +724,21 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--expected-tooling-source-sha", manifest["tooling_source_sha"],
                             "--expected-prepared-application-sha256", prepared["application_sha256"]],
                 "Focused clear manifest identity or command is invalid.")
+    if request["mode"] == FIRST_CLEAR_MODE:
+        prepared = exact_keys(manifest.get("prepared_bundle"),
+                              {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              "first-clear prepared bundle")
+        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                prepared["application_sha256"] == artifacts["application"]["sha256"] and
+                manifest["run_id"] == FIRST_CLEAR_RUN_ID and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", FIRST_CLEAR_MODE,
+                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--expected-prepared-application-sha256", prepared["application_sha256"],
+                            "--acceptance-profile-id", V1_PROFILE_ID],
+                "First-clear manifest identity or prepared executable differs.")
     if request["mode"] == ICON_SETTLEMENT_MODE:
         prepared = manifest.get("prepared_bundle")
         require(prepared is not None, "Icon settlement requires pinned prepared-bundle provenance.")
@@ -707,7 +761,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--acceptance-profile-id", V2_PROFILE_ID, *method_args],
                 "Icon settlement manifest identity or command is invalid.")
     else:
-        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE}:
+        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE}:
             require("prepared_bundle" not in manifest,
                     "Prepared bundle provenance is restricted to performance and focused clear runs.")
     if request["mode"] == "tooltip":
@@ -3467,6 +3521,347 @@ def verify_focused_harness_git(repo: Path, tooling_sha: str, artifacts: dict) ->
                 "Focused harness differs from the selected tooling Git blob: " + path)
 
 
+def verify_first_clear_product_inputs(repo: Path, manifest: dict) -> None:
+    def entries(source: str) -> list[dict]:
+        raw = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", source], cwd=repo)
+        result = []
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            identity, name = entry.split(b"\t", 1)
+            path = name.decode("utf-8")
+            if path.startswith("scripts/") or path in {
+                    "DEVELOPMENT.md", "config/tooling-bundle.json", "config/tooling-tests.json"}:
+                continue
+            mode, kind, oid = identity.decode("ascii").split(" ")
+            require(kind == "blob", "First-clear product inventory has a non-blob entry.")
+            result.append({"path": path, "git_object": oid, "mode": mode})
+        return result
+    original = entries(FIRST_CLEAR_PRODUCT_REFERENCE_SHA)
+    current = entries(manifest["source_sha"])
+    encoded = json.dumps(current, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    require(current == original and len(current) == 109 and
+            sha256_bytes(encoded) == "ddec9417f39e08db6ede551ce7cd63b79673a82e03be16e49b5061dac6ba5c78" and
+            manifest["product_inputs"] == {
+                "reference_source_sha": FIRST_CLEAR_PRODUCT_REFERENCE_SHA,
+                "entries_sha256": sha256_bytes(encoded), "entries_count": len(current)},
+            "First-clear product/build inputs differ from the observed d37 source.")
+
+
+def validate_first_clear_collection(run_root: Path, input_hash: str, failed: bool) -> dict[str, dict]:
+    collection, _ = read_json(run_root, Path("collection.json"), "first-clear collection")
+    collection = exact_keys(collection, {"schema_version", "run_id", "input_manifest_sha256", "files"},
+                            "first-clear collection")
+    require(int_equals(collection["schema_version"], 1) and
+            collection["run_id"] == FIRST_CLEAR_RUN_ID and
+            collection["input_manifest_sha256"] == input_hash,
+            "First-clear collection identity differs.")
+    rows = collection["files"]
+    require(isinstance(rows, list) and 1 <= len(rows) <= 256, "First-clear file inventory is invalid.")
+    files: dict[str, dict] = {}
+    total = 0
+    for index, row in enumerate(rows):
+        row = exact_keys(row, {"relative_path", "bytes", "sha256"}, f"first-clear file {index}")
+        relative = safe_relative(row["relative_path"], f"first-clear file {index}")
+        name = relative.as_posix()
+        require(name not in files and name != "run-result.json", "Duplicate first-clear collection entry.")
+        expected_size = checked_int(row["bytes"], 0, MAX_ARTIFACT_BYTES, name)
+        expected_hash = checked_digest(row["sha256"], name)
+        data = read_bytes(run_root / "output", relative, MAX_ARTIFACT_BYTES, name)
+        require(len(data) == expected_size and sha256_bytes(data) == expected_hash,
+                f"First-clear raw file differs from its collection: {name}")
+        files[name] = row
+        total += len(data)
+    require(total <= 32 * 1024 * 1024 and
+            sum(name.endswith(".png") for name in files) <= 1,
+            "First-clear diagnostic exceeds its 32 MiB/one-PNG cap.")
+    mandatory = {"acceptance-result.json", "acceptance-observations.json", "transport.json",
+                 "cleanup.json", "platform-preflight.json", "controller.stdout.txt", "controller.stderr.txt"}
+    require(mandatory <= set(files), "First-clear diagnostic is missing a required raw file.")
+    output = run_root / "output"
+    require(output.is_dir() and not output.is_symlink(), "First-clear output is unsafe.")
+    actual = set()
+    for path in output.rglob("*"):
+        relative = path.relative_to(output)
+        if path.is_dir() and not path.is_symlink():
+            continue
+        ordinary_path(output, relative, MAX_ARTIFACT_BYTES, "first-clear output entry")
+        actual.add(relative.as_posix())
+    require(actual == set(files) | (set() if failed else {"run-result.json"}),
+            "First-clear output differs from its complete file inventory.")
+    return files
+
+
+def validate_first_clear_run(root: Path, run_id: str, source_sha: str, repo: Path) -> dict:
+    require(run_id == FIRST_CLEAR_RUN_ID, "First-clear run identity differs.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "First-clear run directory is unsafe.")
+    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    require(manifest["request"]["mode"] == FIRST_CLEAR_MODE and
+            manifest["acceptance_profile_sha256"] == sha256_bytes(
+                (repo / "config" / "vm-automated-v1.json").read_bytes()),
+            "First-clear strict V1 source profile changed.")
+    verify_first_clear_product_inputs(repo, manifest)
+    input_hash = sha256_bytes(input_bytes)
+    failed = not (run_root / "output" / "run-result.json").exists()
+    files = validate_first_clear_collection(run_root, input_hash, failed)
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "first-clear observer")
+    observations, observations_bytes = read_json(run_root / "output", Path("acceptance-observations.json"),
+                                                  "first-clear observations")
+    transport, _ = read_json(run_root / "output", Path("transport.json"), "first-clear transport")
+    cleanup, _ = read_json(run_root / "output", Path("cleanup.json"), "first-clear cleanup")
+    preflight, _ = read_json(run_root / "output", Path("platform-preflight.json"),
+                             "first-clear platform preflight")
+    preflight = exact_keys(preflight, {"schema_version", "run_id", "input_manifest_sha256",
+        "phase", "source_sha", "application_sha256", "runner_sha256", "observer_sha256",
+        "guest_platform"}, "first-clear platform preflight")
+    artifacts = manifest["artifacts"]
+    require(int_equals(preflight["schema_version"], 1) and preflight["run_id"] == run_id and
+            preflight["input_manifest_sha256"] == input_hash and preflight["phase"] == "pre-launch" and
+            preflight["source_sha"] == source_sha and
+            preflight["application_sha256"] == artifacts["application"]["sha256"] and
+            preflight["runner_sha256"] == artifacts["runner"]["sha256"] and
+            preflight["observer_sha256"] == artifacts["observer"]["sha256"] and
+            validate_guest_platform(preflight["guest_platform"], "first-clear guest") ==
+            manifest["guest_preflight"],
+            "First-clear prelaunch source, inputs, or guest identity differs.")
+    require(isinstance(transport, dict) and transport.get("host_platform") == "Unix" and
+            transport.get("vm_identity_kind") == manifest["guest_preflight"]["vm_identity_kind"] and
+            transport.get("vm_identity_sha256") == manifest["guest_preflight"]["vm_identity_sha256"] and
+            isinstance(transport.get("vm_id"), str) and
+            re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                         transport["vm_id"]) is not None and
+            str(uuid.UUID(transport["vm_id"])) == transport["vm_id"] and
+            sha256_bytes(transport["vm_id"].encode("ascii")) == transport["vm_identity_sha256"] and
+            transport.get("status") == "collected",
+            "First-clear collected transport differs from authenticated preflight identity.")
+    require(files["acceptance-result.json"]["sha256"] == sha256_bytes(raw_bytes) and
+            files["acceptance-observations.json"]["sha256"] == sha256_bytes(observations_bytes) and
+            isinstance(raw, dict) and isinstance(observations, dict) and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observations_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "First-clear observer does not bind collected scenario bytes.")
+    scenario = observations.get("scenario")
+    require(isinstance(scenario, dict) and
+            raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            nested(raw, "assertions", "scope") == FIRST_CLEAR_SCOPE and
+            scenario.get("mode") == FIRST_CLEAR_MODE and
+            typed_equal(scenario.get("plan"), FIRST_CLEAR_PLAN) and
+            scenario.get("executable_sha256") == artifacts["application"]["sha256"],
+            "First-clear source, product, or distinct plan binding differs.")
+    environment = scenario.get("environment")
+    require(isinstance(environment, dict) and
+            nested(environment, "physical_screen", "width") == 1366 and
+            nested(environment, "physical_screen", "height") == 768 and
+            environment.get("hwnd_dpi") == 96 and
+            environment.get("text_scale_factor_percent") == 100 and
+            nested(environment, "main_window", "process_id") == scenario.get("process_id") and
+            nested(scenario, "startup", "empty_grid") is True and
+            nested(scenario, "startup", "main_hwnd_bound") is True and
+            nested(scenario, "startup", "import_command_enabled") is True,
+            "First-clear observed display, startup, or process binding differs.")
+    ordinary = scenario.get("ordinary_representatives")
+    preview = scenario.get("full_preview_rows")
+    require(ordinary == [{"index": index, "name": f"ordinary-{index:05d}.txt"}
+                         for index in (0, 4999, 9999)] and
+            preview == [{"index": index, "source": f"ordinary-{index:05d}.txt",
+                         "prefixed": f"sample-ordinary-{index:05d}.txt",
+                         "reset": f"ordinary-{index:05d}.txt"}
+                        for index in (0, 2499, 4999, 7499, 9999)],
+            "First-clear fixed ordinary fixture or preview/reset observations differ.")
+    timings = scenario.get("timings")
+    require(isinstance(timings, list) and len(timings) == 4 and
+            [row.get("id") for row in timings if isinstance(row, dict)] ==
+            ["ordinary-100", "ordinary-1000", "ordinary-10000", "full-preview"] and
+            [row.get("rows") for row in timings] == [100, 1000, 10000, 10000] and
+            [row.get("observed_rows") for row in timings] == [100, 1000, 10000, 10000] and
+            timings[2].get("batch_rows") == [2250, 2250, 2250, 2250] and
+            isinstance(timings[2].get("batch_command_ready_after_rows_ms"), list) and
+            len(timings[2]["batch_command_ready_after_rows_ms"]) == 4 and
+            all(type(row.get("elapsed_ms")) in (int, float) and
+                math.isfinite(row["elapsed_ms"]) and 0 < row["elapsed_ms"] < 600000
+                for row in timings),
+            "First-clear completed pre-command import/preview timing sequence differs.")
+    samples = scenario.get("partial_samples") if failed else scenario.get("samples")
+    prefix_phases = ["empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
+                     "single-row", "full-preview"]
+    phase_order = prefix_phases if failed else prefix_phases + ["post"]
+    require(isinstance(samples, list) and 6 <= len(samples) <= 3000 and
+            all(isinstance(row, dict) and row.get("phase") in phase_order and
+                type(row.get("elapsed_ms")) in (int, float) and
+                math.isfinite(row["elapsed_ms"]) and 0 <= row["elapsed_ms"] <= 600000
+                for row in samples) and
+            [phase for phase in prefix_phases if any(row["phase"] == phase for row in samples)] == prefix_phases and
+            [phase_order.index(row["phase"]) for row in samples] == sorted(
+                phase_order.index(row["phase"]) for row in samples) and
+            max(row["elapsed_ms"] for row in samples if row["phase"] == "empty-idle") -
+            min(row["elapsed_ms"] for row in samples if row["phase"] == "empty-idle") >= 29000,
+            "First-clear retained samples do not cover the fixed idle/import/preview prefix.")
+    screenshots = raw.get("screenshots")
+    require(isinstance(screenshots, list) and len(screenshots) == 1 and
+            screenshots[0].get("file") == "performance-empty.png" and
+            screenshots[0].get("sha256") == files.get("performance-empty.png", {}).get("sha256"),
+            "First-clear original empty-idle screenshot is unbound.")
+    first = scenario.get("first_clear")
+    sends = scenario.get("command_sends")
+    first_keys = {"schema_version", "stage", "command_id", "process_id", "main_handle",
+                  "pre_clear_rows", "preview_reset", "post_clear_rows", "native_identity",
+                  "polls", "poll_status", "poll_elapsed_ms"}
+    require(isinstance(first, dict) and set(first) == first_keys |
+            ({"poll_error_type"} if first.get("poll_status") == "observer-error" else set()) and
+            int_equals(first.get("schema_version"), 1) and
+            int_equals(first.get("command_id"), 32782) and
+            first.get("preview_reset") == [f"ordinary-{index:05d}.txt"
+                                           for index in (0, 2499, 4999, 7499, 9999)] and
+            int_equals(first.get("pre_clear_rows"), 10000) and
+            isinstance(sends, list) and len(sends) == 1 and
+            sends[0].get("command_id") == 32782 and
+            sends[0].get("scenario_phase") == "full-preview-clear",
+            "First-clear diagnostic must contain exactly one original clear command.")
+    identity = first.get("native_identity")
+    require(isinstance(identity, dict) and set(identity) == {
+                "process_id", "creation_filetime", "main_handle", "list_handle",
+                "main_thread_id", "list_thread_id", "main_class", "list_class",
+                "list_parent", "list_control_id"} and
+            all(type(identity[name]) is int and identity[name] > 0 for name in
+                ("process_id", "creation_filetime", "main_handle", "list_handle",
+                 "main_thread_id", "list_thread_id", "list_parent")) and
+            type(identity["list_control_id"]) is int and
+            identity["main_class"] == "DarkReNamerWindow" and
+            identity["list_class"] == "SysListView32" and
+            identity["list_parent"] == identity["main_handle"] and
+            identity["list_control_id"] == 1000 and
+            identity["process_id"] == scenario.get("process_id") == first.get("process_id") and
+            identity["main_handle"] == first.get("main_handle") ==
+            nested(environment, "main_window", "hwnd") and
+            identity["main_thread_id"] == identity["list_thread_id"] and
+            type(scenario.get("process_start_utc_ticks")) is int and
+            identity["creation_filetime"] + 504911232000000000 ==
+            scenario["process_start_utc_ticks"],
+            "First-clear native process or original HWND identity differs.")
+    lifecycles = raw.get("process_lifecycles")
+    jobs = raw.get("process_job_cleanup")
+    require(isinstance(lifecycles, list) and len(lifecycles) == 1 and
+            isinstance(jobs, list) and len(jobs) == 1 and
+            nested(lifecycles[0], "process_lifecycle", "pid") == identity["process_id"] and
+            nested(lifecycles[0], "process_lifecycle", "start_time_utc_ticks") ==
+            str(scenario["process_start_utc_ticks"]) and
+            nested(lifecycles[0], "process_lifecycle", "executable_sha256") ==
+            artifacts["application"]["sha256"] and
+            nested(lifecycles[0], "process_lifecycle", "start_observed") is True and
+            jobs[0].get("pid") == identity["process_id"] and
+            jobs[0].get("process_start_time_utc_ticks") ==
+            str(scenario["process_start_utc_ticks"]),
+            "First-clear native creation lifetime is not bound to the owned Job ledger.")
+    observer_process = transport.get("observer_process") if isinstance(transport, dict) else None
+    require(isinstance(observer_process, dict) and observer_process.get("state") == "exited" and
+            type(observer_process.get("exit_code")) is int and
+            isinstance(cleanup, dict) and cleanup.get("run_id") == run_id and
+            cleanup.get("input_manifest_sha256") == input_hash and
+            type(cleanup.get("controller_exit_code")) is int,
+            "First-clear actual process or cleanup receipt is absent.")
+    if failed:
+        require(raw.get("status") == "failed" and
+                raw.get("failure_reason") == "gui_regression_observer_failed" and
+                sends[0].get("status") == "timeout" and
+                int_equals(sends[0].get("error_code"), 1460) and
+                int_equals(sends[0].get("native_return"), 0) and
+                type(sends[0].get("elapsed_ms")) in (int, float) and
+                5000 <= sends[0]["elapsed_ms"] <= 10000 and
+                observer_process["exit_code"] != 0 and cleanup["controller_exit_code"] != 0,
+                "First-clear timeout must remain a real failed command and process exit.")
+        polls = first.get("polls")
+        require(isinstance(polls, list) and len(polls) <= 50 and
+                first.get("post_clear_rows") is None and first.get("stage") == "send-failed" and
+                first.get("poll_status") in {"budget-exhausted", "poll-limit", "identity-unknown", "observer-error"},
+                "First-clear timeout passive observation is incomplete or misclassified.")
+        prior_elapsed = -1
+        prior_index = -1
+        polls_fully_bound = True
+        for poll in polls:
+            require(isinstance(poll, dict) and set(poll) == {
+                        "index", "elapsed_ms", "status", "creation_filetime", "count_status",
+                        "count_error", "count_elapsed_ms", "row_count", "response_status",
+                        "response_error", "response_elapsed_ms"} and
+                    type(poll["index"]) is int and prior_index < poll["index"] < 50 and
+                    type(poll["elapsed_ms"]) is int and prior_elapsed <= poll["elapsed_ms"] <= 600000 and
+                    poll["status"] in {"identity-bound", "identity-drift", "identity-unavailable"} and
+                    poll["count_status"] in {"returned", "failed", "invalid-result", "not-run"} and
+                    poll["response_status"] in {"returned", "failed", "not-run"} and
+                    type(poll["count_error"]) is int and type(poll["response_error"]) is int and
+                    type(poll["count_elapsed_ms"]) in (int, float) and
+                    type(poll["response_elapsed_ms"]) in (int, float) and
+                    math.isfinite(poll["count_elapsed_ms"]) and
+                    math.isfinite(poll["response_elapsed_ms"]) and
+                    0 <= poll["count_elapsed_ms"] <= 600000 and
+                    0 <= poll["response_elapsed_ms"] <= 600000 and
+                    (poll["row_count"] is None or
+                     (poll["status"] == "identity-bound" and poll["count_status"] == "returned" and
+                      type(poll["row_count"]) is int and 0 <= poll["row_count"] <= 10000)) and
+                    (poll["status"] != "identity-bound" or
+                     poll["creation_filetime"] == identity["creation_filetime"]),
+                    "First-clear passive poll identity, count, or bounds differ.")
+            polls_fully_bound = polls_fully_bound and poll["status"] == "identity-bound"
+            prior_elapsed, prior_index = poll["elapsed_ms"], poll["index"]
+        require(type(first.get("poll_elapsed_ms")) is int and
+                0 <= first["poll_elapsed_ms"] <= 600000,
+                "First-clear monotonic poll budget is unavailable.")
+        closure = all(cleanup.get(key) is True for key in
+                      ("fixture", "process", "guest", "desktop_restore", "text_scale_restore"))
+        job = jobs[0]
+        job_closed = job.get("job_empty") is True and job.get("job_closed") is True and \
+            job.get("capture_complete") is True and job.get("status") == "clean" and \
+            int_equals(job.get("active_processes_at_close"), 0) and \
+            (job.get("forced_termination") is not True or
+             (type(job.get("primary_process_active_at_stop")) is bool and
+              type(job.get("termination_exit_code")) is int))
+        closure = closure and raw.get("process_cleanup") is True and job_closed and \
+            cleanup.get("status") == "passed" and transport.get("guest_cleanup") is True
+        if closure:
+            try:
+                verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V1_PROFILE_ID)
+            except EvidenceError:
+                closure = False
+        complete_window = len(polls) == 50 and prior_index == 49 and polls_fully_bound and \
+            first["poll_elapsed_ms"] <= 10000 and all(row["elapsed_ms"] <= 10000 for row in polls) and \
+            first["poll_status"] == "poll-limit"
+        return {"run_id": run_id, "status": "failure-observed" if closure and complete_window else "incomplete",
+                "timeout_observed": True,
+                "command_status": "timeout", "observer_exit_code": observer_process["exit_code"],
+                "controller_exit_code": cleanup["controller_exit_code"],
+                "resource_cleanup": "passed" if closure else "incomplete",
+                "passive_poll_count": len(polls), "passive_window_complete": complete_window,
+                "max_count_wall_ms": max((row["count_elapsed_ms"] for row in polls), default=None),
+                "max_response_wall_ms": max((row["response_elapsed_ms"] for row in polls), default=None),
+                "final_row_count": (polls[-1]["row_count"] if complete_window and
+                                    polls[-1]["count_status"] == "returned" else None),
+                "performance_acceptance": "not-run"}
+    require(raw.get("status") == "review_required" and
+            sends[0].get("status") == "success" and first.get("stage") == "verified-empty" and
+            first.get("polls") == [] and first.get("poll_status") == "not-started" and
+            int_equals(first.get("poll_elapsed_ms"), 0) and
+            int_equals(first.get("post_clear_rows"), 0) and observer_process["exit_code"] == 0 and
+            cleanup["controller_exit_code"] == 0 and cleanup.get("status") == "passed",
+            "Within-deadline first clear lacks a successful diagnostic result.")
+    validate_cleanup(run_root, input_hash)
+    validate_collection(run_root, input_hash)
+    validate_performance_lifecycle(lifecycles, scenario, artifacts["application"]["sha256"])
+    require(raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            jobs[0].get("job_empty") is True and jobs[0].get("job_closed") is True and
+            jobs[0].get("capture_complete") is True and jobs[0].get("status") == "clean" and
+            int_equals(jobs[0].get("active_processes_at_close"), 0) and
+            jobs[0].get("forced_termination") is False,
+            "Within-deadline first-clear Job did not close after normal process exit.")
+    verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V1_PROFILE_ID)
+    return {"run_id": run_id, "status": "observed-within-deadline",
+            "command_status": "success", "performance_acceptance": "not-run"}
+
+
 def validate_focused_clear_run(root: Path, run_id: str, source_sha: str,
                                tooling_repo: Path) -> dict:
     require(run_id == FOCUSED_CLEAR_RUN_ID, "Focused clear run id is invalid.")
@@ -3900,7 +4295,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -3935,6 +4330,17 @@ def main(repo: Path, argv=None) -> int:
                           "performance_batch": "not-run", "release_campaign": "not-run"},
                          ensure_ascii=False, indent=2))
         return 0
+    if args.diagnostic == FIRST_CLEAR_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                args.runs == [FIRST_CLEAR_RUN_ID],
+                "First-clear observation requires its single distinct diagnostic run.")
+        observed = validate_first_clear_run(root, args.runs[0], args.expected_source_sha, repo)
+        report = {"schema_version": 1, "diagnostic": FIRST_CLEAR_MODE,
+                  "status": observed["status"], "source_sha": args.expected_source_sha,
+                  "runs": [observed], "full_four_run_regression": "not-run",
+                  "performance_batch": "not-run", "release_campaign": "not-run"}
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if observed["status"] != "incomplete" else 1
     if args.diagnostic == ICON_SETTLEMENT_MODE:
         require(not args.require_complete_set and args.configuration_set is None and
                 len(args.runs) == 1 and args.runs[0] in

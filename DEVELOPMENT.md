@@ -1045,7 +1045,7 @@ Read and freeze `application.sha256` from its `bundle.json`, then pass
 `--prepared-bundle-root /absolute/private/native-bundle` and
 `--expected-prepared-application-sha256` with that digest to each performance
 invocation. Prepared reuse is restricted to declared performance, focused-clear,
-and icon-settlement diagnostics; the runner verifies
+first-clear-observation, and icon-settlement diagnostics; the runner verifies
 the clean source, executable, test binaries and trusted native tooling closure
 before contacting the VM. Each attempt retains its own authenticated inputs and
 prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
@@ -1095,6 +1095,43 @@ are in [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-f
 A new investigation needs its own authorization and clean source/tooling bindings;
 failed or partial attempts remain failed. This observation cannot replace the
 fixed performance sample or a release verdict.
+
+### First-clear failure observation
+
+The `first-clear-observation` mode is a separate, one-attempt diagnostic of the
+first 10,000-row clear on the current native-tested product. It requires a clean
+committed checkout, a newly prepared source-built native bundle, an explicit
+pin to that bundle's `application.sha256`, and the strict V1 profile. The
+immutable input records the V1 profile file hash and compares the complete
+non-tooling product/build Git inventory with
+`d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2`. The new executable hash is
+frozen separately; the historical executable is not reused.
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic first-clear-observation \
+  --acceptance-profile-id vm-automated-v1-win11-ntfs \
+  --prepared-bundle-root /absolute/private/new-native-bundle \
+  --expected-prepared-application-sha256 <new-bundle-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-first-clear-observation
+```
+
+The observer keeps the fixed 30-second idle and 100/1,000/10,000-row import and
+preview/reset prefix, then sends `WM_COMMAND 32782` once with the unchanged
+5,000-ms native timeout. If that send times out with error 1460, it retains the
+failed command and performs at most 50 passive slots over 10 monotonic seconds.
+Each slot checks the original held process creation FILETIME and main/ListView
+HWND identity before and after bounded, pointer-free count and responsiveness
+queries with 50-ms native request limits. Missed slots, identity loss, and
+actual wall-time overruns remain visible; neither a later zero row count nor a
+structurally complete observation changes the failed command. The observer,
+controller, and producer exits remain nonzero on timeout. The separate verifier
+may report `failure-observed` only when all 50 bound slots and strict cleanup
+are complete; otherwise it reports `incomplete`. Resource cleanup can pass
+independently of the failed command. The raw original receipt and any failed
+follow-up roots remain preserved. This mode never substitutes for the fixed
+performance sample, native/GUI acceptance, or release evidence.
 
 ### Icon settlement diagnostic
 

@@ -2001,6 +2001,228 @@ class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
                     self.validate()
 
 
+class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
+    def test_independent_current_product_inventory_rejects_claimed_hash_mutation(self):
+        from darkrenamer_tooling.vm import gui as producer
+        repo = SCRIPT_ROOT.parent
+        source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                             text=True).strip()
+        manifest = {"source_sha": source_sha,
+                    "product_inputs": producer.first_clear_product_inputs(repo, source_sha)}
+        evidence.verify_first_clear_product_inputs(repo, manifest)
+        manifest["product_inputs"]["entries_sha256"] = "0" * 64
+        with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+            evidence.verify_first_clear_product_inputs(repo, manifest)
+
+    def make_failed_observation(self):
+        run = self.focused_run
+        renamed = run.with_name(evidence.FIRST_CLEAR_RUN_ID)
+        run.rename(renamed)
+        output = renamed / "output"
+        (output / "run-result.json").unlink()
+        (output / "platform-postlaunch.json").unlink()
+        manifest_path = renamed / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["run_id"] = evidence.FIRST_CLEAR_RUN_ID
+        manifest["request"] = {"mode": evidence.FIRST_CLEAR_MODE, "appearance": "light",
+            "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100,
+            "first_clear_observation_plan": deepcopy(evidence.FIRST_CLEAR_PLAN)}
+        manifest["acceptance_profile_id"] = evidence.V1_PROFILE_ID
+        manifest["acceptance_profile_sha256"] = digest(
+            (SCRIPT_ROOT.parent / "config/vm-automated-v1.json").read_bytes())
+        vm_id = "18338a47-f647-45c4-98b8-6107331e2602"
+        manifest["guest_preflight"]["vm_identity_kind"] = "hyper-v-guest-parameters-virtual-machine-id-v1"
+        manifest["guest_preflight"]["vm_identity_sha256"] = digest(vm_id.encode("ascii"))
+        write_json(manifest_path, manifest)
+        preflight_path = output / "platform-preflight.json"
+        preflight = json.loads(preflight_path.read_text())
+        preflight.update(run_id=renamed.name,
+                         input_manifest_sha256=digest(manifest_path.read_bytes()),
+                         phase="pre-launch", source_sha=SOURCE,
+                         application_sha256=manifest["artifacts"]["application"]["sha256"],
+                         runner_sha256=manifest["artifacts"]["runner"]["sha256"],
+                         observer_sha256=manifest["artifacts"]["observer"]["sha256"],
+                         guest_platform=manifest["guest_preflight"])
+        write_json(preflight_path, preflight)
+        observations_path = output / "acceptance-observations.json"
+        observations = json.loads(observations_path.read_text())
+        scenario = observations["scenario"]
+        scenario["mode"] = evidence.FIRST_CLEAR_MODE
+        scenario["plan"] = deepcopy(evidence.FIRST_CLEAR_PLAN)
+        scenario["environment"]["physical_screen"] = {"left": 0, "top": 0,
+            "right": 1366, "bottom": 768, "width": 1366, "height": 768}
+        scenario["startup"] = {"empty_grid": True, "main_hwnd_bound": True,
+            "import_command_enabled": True}
+        scenario["ordinary_representatives"] = [
+            {"index": index, "name": f"ordinary-{index:05d}.txt"}
+            for index in (0, 4999, 9999)]
+        scenario["full_preview_rows"] = [
+            {"index": index, "source": f"ordinary-{index:05d}.txt",
+             "prefixed": f"sample-ordinary-{index:05d}.txt",
+             "reset": f"ordinary-{index:05d}.txt"}
+            for index in (0, 2499, 4999, 7499, 9999)]
+        scenario["partial_samples"] = [row for row in scenario.pop("samples")
+                                       if row["phase"] != "post"]
+        for field in ("phase_summary", "wakeups", "disk_unchanged",
+                      "journal_residue_count", "normal_exit_code"):
+            scenario.pop(field, None)
+        scenario["process_start_utc_ticks"] = 639277610271308143
+        scenario["first_clear"] = {"schema_version": 1, "stage": "send-failed",
+            "command_id": 32782, "process_id": 4242, "main_handle": 1001,
+            "pre_clear_rows": 10000, "post_clear_rows": None,
+            "preview_reset": [f"ordinary-{index:05d}.txt"
+                              for index in (0, 2499, 4999, 7499, 9999)],
+            "native_identity": {"process_id": 4242, "creation_filetime": 134366378271308143,
+                "main_handle": 1001, "list_handle": 1002, "main_thread_id": 20,
+                "list_thread_id": 20, "main_class": "DarkReNamerWindow", "list_class": "SysListView32",
+                "list_parent": 1001, "list_control_id": 1000},
+            "polls": [{"index": index, "elapsed_ms": index * 200 + 100, "status": "identity-bound",
+                "creation_filetime": 134366378271308143, "count_status": "failed",
+                "count_error": 1460, "count_elapsed_ms": 49.0,
+                "row_count": None, "response_status": "failed",
+                "response_error": 1460, "response_elapsed_ms": 49.0}
+                for index in range(50)], "poll_status": "poll-limit",
+            "poll_elapsed_ms": 9900}
+        scenario["command_sends"] = [{"command_id": 32782,
+            "scenario_phase": "full-preview-clear", "native_return": 0,
+            "message_result": None, "error_code": 1460, "elapsed_ms": 5006.0,
+            "status": "timeout"}]
+        write_json(observations_path, observations)
+        raw_path = output / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["source_sha"] = SOURCE
+        raw["status"] = "failed"
+        raw["failure_reason"] = "gui_regression_observer_failed"
+        raw["process_lifecycles"] = [{"process_lifecycle": {
+            "pid": 4242, "start_time_utc_ticks": "639277610271308143",
+            "executable_sha256": manifest["artifacts"]["application"]["sha256"],
+            "start_observed": True, "exit_observed": False}}]
+        raw["process_job_cleanup"] = [{"pid": 4242,
+            "process_start_time_utc_ticks": "639277610271308143",
+            "job_empty": True, "job_closed": True, "capture_complete": True,
+            "active_processes_at_close": 0, "forced_termination": True,
+            "primary_process_active_at_stop": True, "termination_exit_code": 1,
+            "status": "clean"}]
+        raw["assertions"] = {"scope": evidence.FIRST_CLEAR_SCOPE, "scenario": scenario}
+        raw["observations"] = {"file": "acceptance-observations.json",
+                               "sha256": digest(observations_path.read_bytes())}
+        raw["acceptance_observations"] = observations
+        write_json(raw_path, raw)
+        transport_path = output / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["observer_process"] = {"state": "exited", "exit_code": 1}
+        transport["guest_cleanup"] = True
+        transport["status"] = "collected"
+        transport["host_platform"] = "Unix"
+        transport["vm_id"] = vm_id
+        transport["vm_identity_kind"] = manifest["guest_preflight"]["vm_identity_kind"]
+        transport["vm_identity_sha256"] = manifest["guest_preflight"]["vm_identity_sha256"]
+        write_json(transport_path, transport)
+        cleanup_path = output / "cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup.update(run_id=renamed.name, input_manifest_sha256=digest(manifest_path.read_bytes()),
+                       controller_exit_code=1, status="passed", fixture=True, process=True,
+                       guest=True, desktop_restore=True, text_scale_restore=True)
+        write_json(cleanup_path, cleanup)
+        self.refresh_first_clear_collection(renamed)
+        return renamed, manifest
+
+    @staticmethod
+    def refresh_first_clear_collection(run):
+        output = run / "output"
+        rows = [{"relative_path": path.name, "bytes": path.stat().st_size,
+                 "sha256": digest(path.read_bytes())}
+                for path in sorted(output.iterdir()) if path.is_file()]
+        write_json(run / "collection.json", {"schema_version": 1, "run_id": run.name,
+            "input_manifest_sha256": digest((run / "input-manifest.json").read_bytes()),
+            "files": rows})
+
+    def validate_first_clear(self, run, manifest):
+        with mock.patch.object(evidence, "validate_input_manifest",
+                               return_value=(manifest, (run / "input-manifest.json").read_bytes())), \
+             mock.patch.object(evidence, "verify_first_clear_product_inputs"):
+            return evidence.validate_first_clear_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+
+    def test_failed_command_remains_failed_and_complete_cleanup_is_separate(self):
+        run, manifest = self.make_failed_observation()
+        result = self.validate_first_clear(run, manifest)
+        self.assertEqual(result["status"], "failure-observed")
+        self.assertEqual(result["command_status"], "timeout")
+        self.assertEqual(result["performance_acceptance"], "not-run")
+        self.assertIsNone(result["final_row_count"])
+        observation_path = run / "output/acceptance-observations.json"
+        raw_path = run / "output/acceptance-result.json"
+        original_observations = observation_path.read_bytes()
+        original_raw = raw_path.read_bytes()
+        observations = json.loads(original_observations)
+        observations["scenario"]["first_clear"]["polls"].pop()
+        observations["scenario"]["first_clear"]["poll_status"] = "budget-exhausted"
+        write_json(observation_path, observations)
+        raw = json.loads(original_raw)
+        raw["assertions"]["scenario"] = observations["scenario"]
+        raw["acceptance_observations"] = observations
+        raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+        write_json(raw_path, raw)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+        observation_path.write_bytes(original_observations)
+        raw_path.write_bytes(original_raw)
+        self.refresh_first_clear_collection(run)
+        observations = json.loads(original_observations)
+        observations["scenario"]["first_clear"]["poll_elapsed_ms"] = 10001
+        write_json(observation_path, observations)
+        raw = json.loads(original_raw)
+        raw["assertions"]["scenario"] = observations["scenario"]
+        raw["acceptance_observations"] = observations
+        raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+        write_json(raw_path, raw)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+        observation_path.write_bytes(original_observations)
+        raw_path.write_bytes(original_raw)
+        self.refresh_first_clear_collection(run)
+        cleanup = json.loads((run / "output/cleanup.json").read_text())
+        cleanup["guest"] = False
+        cleanup["status"] = "failed"
+        write_json(run / "output/cleanup.json", cleanup)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+
+    def test_extra_command_and_lifetime_or_hash_mutations_refuse(self):
+        run, manifest = self.make_failed_observation()
+        raw_path = run / "output/acceptance-result.json"
+        observation_path = run / "output/acceptance-observations.json"
+        for mutate in ("second-command", "window-lifetime", "poll-invalid",
+                       "reclassified-command", "raw-hash"):
+            original_raw = raw_path.read_bytes()
+            original_observations = observation_path.read_bytes()
+            raw = json.loads(original_raw)
+            observations = json.loads(original_observations)
+            if mutate == "second-command":
+                observations["scenario"]["command_sends"].append(
+                    deepcopy(observations["scenario"]["command_sends"][0]))
+            elif mutate == "window-lifetime":
+                observations["scenario"]["first_clear"]["polls"][0]["creation_filetime"] += 1
+            elif mutate == "poll-invalid":
+                observations["scenario"]["first_clear"]["poll_elapsed_ms"] = 600001
+            elif mutate == "reclassified-command":
+                observations["scenario"]["command_sends"][0]["status"] = "success"
+            else:
+                raw["source_sha"] = "f" * 40
+            write_json(observation_path, observations)
+            raw["assertions"]["scenario"] = observations["scenario"]
+            raw["acceptance_observations"] = observations
+            raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+            write_json(raw_path, raw)
+            self.refresh_first_clear_collection(run)
+            with self.subTest(mutate=mutate), self.assertRaises(evidence.EvidenceError):
+                self.validate_first_clear(run, manifest)
+            raw_path.write_bytes(original_raw)
+            observation_path.write_bytes(original_observations)
+            self.refresh_first_clear_collection(run)
+
+
 class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
     @staticmethod
     def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0,

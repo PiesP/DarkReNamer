@@ -179,6 +179,16 @@ function Get-DrControllerPreservedFiles {
     @($files.ToArray() | Sort-Object file)
 }
 
+function Test-DrControllerOwnedFailureModeSupported {
+    param([string] $TaskKind, [string] $AcceptanceMode,
+          [int] $TextScalePercent, [bool] $HighContrast)
+    if ($TaskKind -cne 'ui') { return $true }
+    if ($AcceptanceMode -cin @('current-dpi', 'full-context', 'standard', 'text-scale',
+            'tooltip')) { return $true }
+    $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
+        'first-clear-observation') -and $TextScalePercent -eq 100 -and -not $HighContrast
+}
+
 function Remove-DrControllerProofRemotingMetadata {
     param([Parameter(Mandatory)] $Proof)
     # These are transport annotations added by PowerShell remoting, not proof fields.
@@ -1154,7 +1164,7 @@ function Invoke-DrWindowsVmController {
     [string] $FocusedRefreshCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -6850,7 +6860,11 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $ownedHandshake = $binding
                 }
             } catch { }
-            if ((Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $cleanupResult) -and
+            $ownedUiModeSupported = Test-DrControllerOwnedFailureModeSupported `
+                -TaskKind $taskSelection.kind -AcceptanceMode $AcceptanceMode `
+                -TextScalePercent $AcceptanceTextScalePercent -HighContrast ([bool]$AcceptanceHighContrast)
+            if ($ownedUiModeSupported -and
+                (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $cleanupResult) -and
                 $transport.status -ceq 'collected' -and
                 $transport.guest_cleanup -eq $false -and
                 $processJobsClosed -and
@@ -6872,7 +6886,16 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     [IO.File]::Copy((Join-Path $BundleRoot 'result.json'),$sourceResultPath)
                 }
                 $sourceResultItem = Get-Item -LiteralPath $sourceResultPath -Force -ErrorAction Stop
-                $bundleItem = Get-Item -LiteralPath (Join-Path $BundleRoot 'bundle.json') -Force -ErrorAction Stop
+                $bundleSource = Join-Path $BundleRoot 'bundle.json'
+                $bundleCopy = Join-Path $transportOutputRoot 'bundle.json'
+                if ($transportOutputRoot -cne $BundleRoot) {
+                    [IO.File]::Copy($bundleSource, $bundleCopy, $false)
+                }
+                $bundleItem = Get-Item -LiteralPath $bundleCopy -Force -ErrorAction Stop
+                if ((Get-FileHash -LiteralPath $bundleSource -Algorithm SHA256).Hash -ine
+                    (Get-FileHash -LiteralPath $bundleCopy -Algorithm SHA256).Hash) {
+                    throw 'Frozen failure bundle copy differs from the staged source.'
+                }
                 $transport['owned_cleanup_failure_context'] = [ordered]@{
                     task_kind = [string]$taskSelection.kind
                     failed_snapshot = $cleanupResult.failed_snapshot
@@ -6892,6 +6915,12 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     acceptance_mode = if ($taskSelection.kind -ceq 'ui') { [string]$AcceptanceMode } else { $null }
                     high_contrast_requested = [bool]($taskSelection.kind -ceq 'ui' -and $AcceptanceHighContrast)
                     output_preservation_verified = [bool](-not $observerTask -or $outputPreservedForCleanup)
+                }
+                if ($taskSelection.kind -ceq 'ui' -and
+                    $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
+                        'first-clear-observation')) {
+                    $transport['owned_cleanup_failure_context']['acceptance_text_scale_percent'] =
+                        [int]$AcceptanceTextScalePercent
                 }
                 $transport.status = 'failed'
                 $transport['cleanup_error'] = 'Strict OS cleanup delta failed; original raw cleanup is retained.'

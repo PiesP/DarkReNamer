@@ -12,6 +12,40 @@ $ErrorActionPreference = 'Stop'
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
+$controllerAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'),
+    [ref]$null, [ref]$null)
+$modeGate = @($controllerAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Test-DrControllerOwnedFailureModeSupported'
+}, $true))
+if ($modeGate.Count -ne 1) { throw 'Production strict-failure mode gate is unavailable.' }
+. ([scriptblock]::Create($modeGate[0].Extent.Text))
+
+foreach ($mode in @('performance-sample', 'first-clear-observation')) {
+    if (-not (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode $mode `
+        -TextScalePercent 100 -HighContrast $false)) {
+        throw "Strict-failure UI mode $mode cannot reach its independent finalizer."
+    }
+}
+if (-not (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode appearance-pair `
+    -TextScalePercent 100 -HighContrast $false)) {
+    throw 'Approved appearance-pair settings cannot reach strict finalization.'
+}
+foreach ($case in @(
+    @{ mode='appearance-pair'; percent=150; contrast=$false },
+    @{ mode='appearance-pair'; percent=100; contrast=$true },
+    @{ mode='performance-sample'; percent=150; contrast=$false },
+    @{ mode='first-clear-observation'; percent=100; contrast=$true },
+    @{ mode='focused-10k-clear'; percent=100; contrast=$false },
+    @{ mode='icon-settlement'; percent=100; contrast=$false }
+)) {
+    if (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode $case.mode `
+        -TextScalePercent $case.percent -HighContrast $case.contrast) {
+        throw "Unsupported UI mode $($case.mode) could delete its failed roots."
+    }
+}
+
 function Invoke-TestAcceptance {
     [CmdletBinding()]
     param(
@@ -3152,6 +3186,35 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    $candidateFirstClearInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidateFirstClearInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'first-clear-observation-v1-1366x768-96-text100'
+    $candidateFirstClearInput | Add-Member -NotePropertyName acceptance_profile_id `
+        -NotePropertyValue 'vm-automated-v1-win11-ntfs'
+    $candidateFirstClearInput.request.mode = 'first-clear-observation'
+    $candidateFirstClearInput.request.text_scale_percent = [long]100
+    $candidateFirstClearInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidateFirstClearInput.request.desktop.width = [long]1366
+    $candidateFirstClearInput.request.desktop.height = [long]768
+    $candidateFirstClearInput.request | Add-Member -NotePropertyName first_clear_observation_plan -NotePropertyValue ([ordered]@{
+        ordinary_rows=@(100,1000,10000); idle_seconds=30; sample_interval_ms=200
+        maximum_seconds=600; clear_command_id=32782; command_timeout_ms=5000
+        passive_poll_limit=50; passive_window_ms=10000; passive_interval_ms=200
+        individual_query_timeout_ms=50; stop_after_first_clear=$true
+        full_performance_sample=$false
+    })
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFirstClearInput `
+        -Verified $candidateRegressionResolved -RegressionMode first-clear-observation `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidateFirstClearInput.request.first_clear_observation_plan.command_timeout_ms = 5001
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFirstClearInput `
+            -Verified $candidateRegressionResolved -RegressionMode first-clear-observation `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidateFirstClearInput.request.first_clear_observation_plan.command_timeout_ms = 5000
     $candidateFocusedInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     $candidateFocusedInput | Add-Member -NotePropertyName run_id `
         -NotePropertyValue 'focused-10k-clear-v1-1366x768-96-text100'

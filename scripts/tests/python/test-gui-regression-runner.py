@@ -56,6 +56,50 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_first_clear_uses_current_prepared_bundle_and_strict_staged_v1_profile(self):
+        repo = Path(__file__).resolve().parents[3]
+        source_sha = runner.subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                     cwd=repo, text=True).strip()
+        product = runner.first_clear_product_inputs(repo, source_sha)
+        self.assertEqual(product["reference_source_sha"],
+                         "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2")
+        self.assertEqual(product["entries_count"], 109)
+        self.assertEqual(product["entries_sha256"],
+                         "ddec9417f39e08db6ede551ce7cd63b79673a82e03be16e49b5061dac6ba5c78")
+        profile_source = repo / "config/vm-automated-v1.json"
+        profile_hash = runner.digest(profile_source)
+        application_hash = "a" * 64
+        run_root = self.root / runner.FIRST_CLEAR_RUN_ID
+        (run_root / "inputs").mkdir(parents=True)
+        (run_root / "inputs" / runner.V1_PROFILE_FILE).write_bytes(profile_source.read_bytes())
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": application_hash}},
+                  "source_sha": source_sha, "source_tree": "c" * 40,
+                  "v1_acceptance_profile": {"file": "inputs/vm-automated-v1.json",
+                                             "sha256": profile_hash,
+                                             "bytes": profile_source.stat().st_size}}
+        run = runner.first_clear_run()
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)), \
+             mock.patch.object(runner, "first_clear_product_inputs", return_value=product):
+            manifest = runner.input_manifest(repo, self.root / "bundle", run_root, run,
+                                             "d" * 64, {}, {},
+                                             prepared_application_sha256=application_hash)
+        self.write_json(run_root / "input-manifest.json", manifest)
+        self.assertEqual(manifest["request"]["first_clear_observation_plan"], runner.FIRST_CLEAR_PLAN)
+        self.assertEqual(manifest["acceptance_profile_sha256"], profile_hash)
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V1_PROFILE_ID])
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(repo, self.root / "bundle", run_root, run,
+                                                {"ssh_host": "prepared", "expected_vm_id": "0" * 36},
+                                                {"expectedGuestSid": "sid"})
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1], runner.V1_PROFILE_ID)
+        (run_root / "inputs" / runner.V1_PROFILE_FILE).write_bytes(b"changed")
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
+             self.assertRaisesRegex(ValueError, "strict V1 profile"):
+            runner.controller_command(repo, self.root / "bundle", run_root, run,
+                                      {"ssh_host": "prepared", "expected_vm_id": "0" * 36},
+                                      {"expectedGuestSid": "sid"})
+
     def test_performance_sample_is_one_opt_in_bounded_run(self):
         run = runner.performance_run()
         self.assertEqual(run["mode"], "performance-sample")
