@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 import zlib
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
@@ -55,6 +56,66 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path = self.root / name
         path.write_bytes(value)
         return path
+
+    def test_first_clear_cleanup_requires_real_before_and_after_text_scale(self):
+        snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                    "registry_value_kind": "DWord", "registry_value": 100,
+                    "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        observations = {"environment": None, "scenario": {"environment": {
+            "text_scale_factor_percent": 100}}, "text_scale_restoration": {
+                "schema_version": 1, "baseline": deepcopy(snapshot),
+                "final": deepcopy(snapshot), "snapshot_equal": True}}
+        self.assertTrue(runner.first_clear_text_scale_restored(observations))
+        for mutation in ("missing", "final", "registry", "ui", "malformed"):
+            changed = deepcopy(observations)
+            if mutation == "missing":
+                changed.pop("text_scale_restoration")
+            elif mutation == "final":
+                changed["text_scale_restoration"]["final"] = None
+            elif mutation == "registry":
+                changed["text_scale_restoration"]["final"]["registry_value_kind"] = "QWord"
+            elif mutation == "ui":
+                changed["text_scale_restoration"]["final"]["ui_settings_percent"] = 101
+            else:
+                changed["text_scale_restoration"]["final"]["registry_value"] = "100"
+            with self.subTest(mutation=mutation):
+                self.assertFalse(runner.first_clear_text_scale_restored(changed))
+
+    def test_failed_first_clear_cleanup_summary_uses_post_cleanup_proof(self):
+        snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                    "registry_value_kind": "DWord", "registry_value": 100,
+                    "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        for name, final, expected in (("restored", deepcopy(snapshot), True),
+                                      ("missing-final", None, False)):
+            with self.subTest(name=name):
+                run_root = self.root / name
+                run_root.mkdir()
+                self.write_json(run_root / "input-manifest.json", {"run_id": name})
+                proof = {"schema_version": 1, "baseline": deepcopy(snapshot),
+                         "final": final, "snapshot_equal": final is not None}
+
+                def controller(*_args, **kwargs):
+                    output = kwargs["output"]
+                    self.write_json(output / "acceptance-observations.json", {
+                        "environment": None,
+                        "scenario": {"environment": {"text_scale_factor_percent": 100}},
+                        "text_scale_restoration": proof})
+                    self.write_json(output / "acceptance-result.json", {
+                        "guest_cleanup": True, "process_cleanup": True})
+                    self.write_json(output / "transport.json", {"guest_cleanup": True})
+                    return SimpleNamespace(returncode=1), None
+
+                native = SimpleNamespace(run_managed_controller=controller)
+                with mock.patch.object(runner, "runtime_args", return_value=[]), \
+                     mock.patch.object(runner, "collection_document", return_value={}), \
+                     mock.patch.object(runner, "validate_failed_first_clear"):
+                    with self.assertRaisesRegex(ValueError, "transport failed"):
+                        runner.execute_run(self.root, self.root, run_root,
+                                           {"run_id": name, "mode": runner.FIRST_CLEAR_MODE,
+                                            "text_scale_percent": 100}, {}, native)
+                cleanup = json.loads((run_root / "output/cleanup.json").read_text())
+                self.assertEqual(cleanup["text_scale_restore"], expected)
+                self.assertEqual(cleanup["status"], "passed" if expected else "failed")
 
     def test_first_clear_uses_current_prepared_bundle_and_strict_staged_v1_profile(self):
         repo = Path(__file__).resolve().parents[3]

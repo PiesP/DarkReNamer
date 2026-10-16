@@ -55,6 +55,44 @@ FIRST_CLEAR_MODE = "first-clear-observation"
 FIRST_CLEAR_RUN_ID = "first-clear-observation-v1-1366x768-96-text100"
 FIRST_CLEAR_PRODUCT_REFERENCE_SHA = "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2"
 FIRST_CLEAR_SCOPE = "first-clear-observation-v1"
+
+
+def first_clear_text_scale_restored(observations: object) -> bool:
+    if not isinstance(observations, dict):
+        return False
+    proof = observations.get("text_scale_restoration")
+    if not isinstance(proof, dict) or set(proof) != {
+            "schema_version", "baseline", "final", "snapshot_equal"} or \
+            type(proof["schema_version"]) is not int or proof["schema_version"] != 1 or \
+            proof["snapshot_equal"] is not True:
+        return False
+    snapshots = (proof["baseline"], proof["final"])
+    fields = {"registry_key_existed", "registry_value_existed", "registry_value_kind",
+              "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or set(snapshot) != fields or \
+                type(snapshot["registry_key_existed"]) is not bool or \
+                type(snapshot["registry_value_existed"]) is not bool or \
+                (snapshot["registry_value_existed"] and not snapshot["registry_key_existed"]) or \
+                type(snapshot["ui_settings_percent"]) is not int or \
+                snapshot["ui_settings_percent"] != 100 or \
+                type(snapshot["ui_settings_raw_factor"]) not in (int, float) or \
+                not math.isfinite(snapshot["ui_settings_raw_factor"]) or \
+                not 1.0 <= snapshot["ui_settings_raw_factor"] <= 2.25:
+            return False
+        if snapshot["registry_value_existed"]:
+            if not isinstance(snapshot["registry_value_kind"], str) or \
+                    not 0 < len(snapshot["registry_value_kind"]) <= 40 or \
+                    type(snapshot["registry_value"]) is not int or \
+                    not -(2 ** 63) <= snapshot["registry_value"] < 2 ** 63:
+                return False
+        elif snapshot["registry_value_kind"] is not None or snapshot["registry_value"] is not None:
+            return False
+    baseline, final = snapshots
+    return all(baseline[field] == final[field] for field in fields if field != "ui_settings_raw_factor") and \
+        abs(baseline["ui_settings_raw_factor"] - final["ui_settings_raw_factor"]) < 0.000001
+
+
 FIRST_CLEAR_PLAN = {
     "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
     "sample_interval_ms": 200, "maximum_seconds": 600,
@@ -3811,7 +3849,7 @@ def validate_first_clear_run(root: Path, run_id: str, source_sha: str, repo: Pat
         require(type(first.get("poll_elapsed_ms")) is int and
                 0 <= first["poll_elapsed_ms"] <= 600000,
                 "First-clear monotonic poll budget is unavailable.")
-        closure = all(cleanup.get(key) is True for key in
+        closure = first_clear_text_scale_restored(observations) and all(cleanup.get(key) is True for key in
                       ("fixture", "process", "guest", "desktop_restore", "text_scale_restore"))
         job = jobs[0]
         job_closed = job.get("job_empty") is True and job.get("job_closed") is True and \
@@ -3846,7 +3884,8 @@ def validate_first_clear_run(root: Path, run_id: str, source_sha: str, repo: Pat
             first.get("polls") == [] and first.get("poll_status") == "not-started" and
             int_equals(first.get("poll_elapsed_ms"), 0) and
             int_equals(first.get("post_clear_rows"), 0) and observer_process["exit_code"] == 0 and
-            cleanup["controller_exit_code"] == 0 and cleanup.get("status") == "passed",
+            cleanup["controller_exit_code"] == 0 and cleanup.get("status") == "passed" and
+            first_clear_text_scale_restored(observations),
             "Within-deadline first clear lacks a successful diagnostic result.")
     validate_cleanup(run_root, input_hash)
     validate_collection(run_root, input_hash)

@@ -2065,6 +2065,13 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
         write_json(preflight_path, preflight)
         observations_path = output / "acceptance-observations.json"
         observations = json.loads(observations_path.read_text())
+        observations["environment"] = None
+        text_snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                         "registry_value_kind": "DWord", "registry_value": 100,
+                         "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        observations["text_scale_restoration"] = {
+            "schema_version": 1, "baseline": deepcopy(text_snapshot),
+            "final": deepcopy(text_snapshot), "snapshot_equal": True}
         scenario = observations["scenario"]
         scenario["mode"] = evidence.FIRST_CLEAR_MODE
         scenario["plan"] = deepcopy(evidence.FIRST_CLEAR_PLAN)
@@ -2206,6 +2213,41 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
         write_json(run / "output/cleanup.json", cleanup)
         self.refresh_first_clear_collection(run)
         self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+
+    def test_first_clear_text_scale_proof_is_required_and_recomputed(self):
+        run, manifest = self.make_failed_observation()
+        observations_path = run / "output/acceptance-observations.json"
+        raw_path = run / "output/acceptance-result.json"
+        original = json.loads(observations_path.read_text())
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "failure-observed")
+        for mutation in ("missing", "final-missing", "registry-kind", "registry-value",
+                         "ui-factor", "ui-percent", "claimed-unequal", "malformed"):
+            observations = deepcopy(original)
+            proof = observations["text_scale_restoration"]
+            if mutation == "missing":
+                observations.pop("text_scale_restoration")
+            elif mutation == "final-missing":
+                proof["final"] = None
+            elif mutation == "registry-kind":
+                proof["final"]["registry_value_kind"] = "QWord"
+            elif mutation == "registry-value":
+                proof["final"]["registry_value"] = 101
+            elif mutation == "ui-factor":
+                proof["final"]["ui_settings_raw_factor"] = 1.001
+            elif mutation == "ui-percent":
+                proof["final"]["ui_settings_percent"] = 101
+            elif mutation == "claimed-unequal":
+                proof["snapshot_equal"] = False
+            else:
+                proof["final"]["registry_value"] = "100"
+            write_json(observations_path, observations)
+            raw = json.loads(raw_path.read_text())
+            raw["acceptance_observations"] = observations
+            raw["observations"]["sha256"] = digest(observations_path.read_bytes())
+            write_json(raw_path, raw)
+            self.refresh_first_clear_collection(run)
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
 
     def test_extra_command_and_lifetime_or_hash_mutations_refuse(self):
         run, manifest = self.make_failed_observation()

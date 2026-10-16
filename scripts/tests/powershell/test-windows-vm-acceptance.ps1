@@ -28,6 +28,26 @@ foreach ($mode in @('performance-sample', 'first-clear-observation')) {
         throw "Strict-failure UI mode $mode cannot reach its independent finalizer."
     }
 }
+$firstClearScale = [pscustomobject]@{
+    KeyExists=$true; ValueExists=$true; ValueKind='DWord'; Value=[int64]100;
+    UiFactor=[double]1.0; UiPercent=100
+}
+$firstClearProof = New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $firstClearScale
+if (-not $firstClearProof.snapshot_equal -or
+    $firstClearProof.baseline.registry_value_kind -cne 'DWord' -or
+    $firstClearProof.final.ui_settings_percent -ne 100) {
+    throw 'First-clear text-scale restoration helper lost the baseline or final snapshot.'
+}
+if ((New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $null).snapshot_equal) {
+    throw 'First-clear text-scale restoration accepted a missing final read.'
+}
+$changedFirstClearScale = [pscustomobject]@{
+    KeyExists=$true; ValueExists=$true; ValueKind='QWord'; Value=[int64]100;
+    UiFactor=[double]1.0; UiPercent=100
+}
+if ((New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $changedFirstClearScale).snapshot_equal) {
+    throw 'First-clear text-scale restoration accepted a changed registry kind.'
+}
 if (-not (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode appearance-pair `
     -TextScalePercent 100 -HighContrast $false)) {
     throw 'Approved appearance-pair settings cannot reach strict finalization.'

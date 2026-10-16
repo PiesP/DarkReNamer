@@ -105,6 +105,44 @@ def first_clear_run() -> dict:
     return {"run_id": FIRST_CLEAR_RUN_ID, "mode": FIRST_CLEAR_MODE,
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
             "text_scale_percent": 100, "acceptance_profile_id": V1_PROFILE_ID}
+
+
+def first_clear_text_scale_restored(observations: object) -> bool:
+    if not isinstance(observations, dict):
+        return False
+    proof = observations.get("text_scale_restoration")
+    if not isinstance(proof, dict) or set(proof) != {
+            "schema_version", "baseline", "final", "snapshot_equal"} or \
+            type(proof["schema_version"]) is not int or proof["schema_version"] != 1 or \
+            proof["snapshot_equal"] is not True:
+        return False
+    snapshots = (proof["baseline"], proof["final"])
+    fields = {"registry_key_existed", "registry_value_existed", "registry_value_kind",
+              "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or set(snapshot) != fields or \
+                type(snapshot["registry_key_existed"]) is not bool or \
+                type(snapshot["registry_value_existed"]) is not bool or \
+                (snapshot["registry_value_existed"] and not snapshot["registry_key_existed"]) or \
+                type(snapshot["ui_settings_percent"]) is not int or \
+                snapshot["ui_settings_percent"] != 100 or \
+                type(snapshot["ui_settings_raw_factor"]) not in (int, float) or \
+                not math.isfinite(snapshot["ui_settings_raw_factor"]) or \
+                not 1.0 <= snapshot["ui_settings_raw_factor"] <= 2.25:
+            return False
+        if snapshot["registry_value_existed"]:
+            if not isinstance(snapshot["registry_value_kind"], str) or \
+                    not 0 < len(snapshot["registry_value_kind"]) <= 40 or \
+                    type(snapshot["registry_value"]) is not int or \
+                    not -(2 ** 63) <= snapshot["registry_value"] < 2 ** 63:
+                return False
+        elif snapshot["registry_value_kind"] is not None or snapshot["registry_value"] is not None:
+            return False
+    baseline, final = snapshots
+    return all(baseline[field] == final[field] for field in fields if field != "ui_settings_raw_factor") and \
+        abs(baseline["ui_settings_raw_factor"] - final["ui_settings_raw_factor"]) < 0.000001
+
+
 ICON_SETTLEMENT_MODE = "icon-settlement"
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -1428,11 +1466,12 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
         transport = summary_document("transport.json")
         environment = observations.get("environment", {}) if isinstance(observations.get("environment"), dict) else {}
         text = observer.get("text_scale", {}) if isinstance(observer.get("text_scale"), dict) else {}
-        text_scale_restored = (
-            environment.get("text_scale_factor_percent") == 100
-            if run["text_scale_percent"] == 100
-            else text.get("restoration") == "verified"
-        )
+        if run["mode"] == FIRST_CLEAR_MODE:
+            text_scale_restored = first_clear_text_scale_restored(observations)
+        elif run["text_scale_percent"] == 100:
+            text_scale_restored = environment.get("text_scale_factor_percent") == 100
+        else:
+            text_scale_restored = text.get("restoration") == "verified"
         cleanup = {
             "schema_version": 1,
             "run_id": run["run_id"],

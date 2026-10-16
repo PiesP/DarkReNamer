@@ -47,6 +47,17 @@ function Test-TextScaleSnapshotEqual {
         [Math]::Abs([double]$Expected.UiFactor - [double]$Actual.UiFactor) -lt 0.000001 -and
         $Expected.UiPercent -eq $Actual.UiPercent
 }
+function New-FirstClearTextScaleRestoration {
+    param([object] $Baseline, [object] $Final)
+    [ordered]@{
+        schema_version = 1
+        baseline = if ($null -ne $Baseline) { ConvertTo-TextScaleDocumentSnapshot $Baseline } else { $null }
+        final = if ($null -ne $Final) { ConvertTo-TextScaleDocumentSnapshot $Final } else { $null }
+        snapshot_equal = $null -ne $Baseline -and $null -ne $Final -and
+            $Baseline.UiPercent -eq 100 -and $Final.UiPercent -eq 100 -and
+            (Test-TextScaleSnapshotEqual -Expected $Baseline -Actual $Final)
+    }
+}
 function Wait-TextScaleSnapshot {
     param(
         [Parameter(Mandatory)][scriptblock] $Accept,
@@ -681,6 +692,7 @@ function Invoke-GuiRegressionAcceptance {
     $textOriginal = $null
     $textAcceptance = $null
     $textChanged = $false
+    $firstClearTextBaseline = $null
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     Initialize-TrustedResultWriter `
         -Root $resolved.root `
@@ -710,6 +722,11 @@ function Invoke-GuiRegressionAcceptance {
         Initialize-AcceptanceNative
         if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
             throw 'Windows refused Per-Monitor-V2 awareness.'
+        }
+        if ($RegressionMode -eq 'first-clear-observation') {
+            $firstClearTextBaseline = Get-TextScaleSnapshot
+            $observations['text_scale_restoration'] = New-FirstClearTextScaleRestoration `
+                -Baseline $firstClearTextBaseline -Final $null
         }
         if ($RegressionMode -eq 'text-scale' -or
             ($RegressionMode -eq 'appearance-pair' -and $TextScalePercent -eq 150)) {
@@ -1001,6 +1018,23 @@ function Invoke-GuiRegressionAcceptance {
             catch {
                 $result.status = 'failed'
                 $result.failure_reason = 'text_scale_restore_failed'
+            }
+        }
+        if ($RegressionMode -eq 'first-clear-observation') {
+            try {
+                $firstClearTextFinal = Get-TextScaleSnapshot
+                $observations['text_scale_restoration'] = New-FirstClearTextScaleRestoration `
+                    -Baseline $firstClearTextBaseline -Final $firstClearTextFinal
+                if (-not $observations.text_scale_restoration.snapshot_equal) {
+                    throw 'First-clear text scale differs from its baseline.'
+                }
+            }
+            catch {
+                $result.status = 'failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = 'text_scale_restore_failed'
+                }
+                $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
             }
         }
         try { Exit-TestExecutionState -Previous $executionState }

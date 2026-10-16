@@ -219,7 +219,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "277fa1c3d34200ca278bcc6fbc005339bcb054e9b23de3d8a68304a97cebd651",
+      "sha256": "d13cfd557827faf3795614d90c09b019587d55da6a641fab5546aa709ea07383",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -436,7 +436,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "dc1c9e9a9bb555f811167b73cce7ff18fcfdf211bf6540654875c308d29192d3",
+      "sha256": "ba30f01815c9401e674135249d7e4681a8bc8e393ebf00399016d78b67673c3f",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -644,7 +644,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "1b5094aa011c966b70f3b517d48350a651b5ce66da428e74b5c10b55d48ea6ba",
+      "sha256": "21e23a25b32aa77aaf3c9ff73279d962bcdcd5d6ac302cdb0f95914d44b0fe61",
       "dependencies": []
     },
     {
