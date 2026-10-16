@@ -398,10 +398,10 @@ class ArchiveIngressTests(unittest.TestCase):
 
 
 class CanonicalStatementTests(unittest.TestCase):
-    def test_v2_statement_requires_matching_profile_revision_and_schema(self) -> None:
+    def test_current_owned_statement_requires_matching_profile_revision_and_schema(self) -> None:
         statement = statement_fixture()
-        statement['schema'] = 'darkrenamer-vm-automated-statement-v2'
-        statement['profile'].update(id='vm-automated-v2-owned-resources', revision=2)
+        statement['schema'] = 'darkrenamer-vm-automated-statement-v3'
+        statement['profile'].update(id='vm-automated-v2-owned-resources', revision=3)
         encoded = evidence.serialize_canonical_statement(statement)
         self.assertEqual(evidence.parse_canonical_statement_bytes(encoded)['profile'], statement['profile'])
         for field, value in (('id', 'vm-automated-v1-win11-ntfs'),
@@ -491,14 +491,16 @@ class IndexedArchiveTests(unittest.TestCase):
             self.assertEqual(set(result.files), {*self.entries, "evidence-index.json"})
         self.assertFalse(path.exists())
 
-    def test_v2_index_preserves_its_distinct_schema(self) -> None:
+    def test_known_index_schemas_remain_distinct_and_unknown_fails(self) -> None:
         index = {'schema': 'darkrenamer-vm-automated-index-v2', 'files': {
             path: {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
             for path, data in self.entries.items()}}
-        self.write(index_bytes=json.dumps(index).encode())
-        with self.extract() as result:
-            self.assertEqual(result.index_schema, index['schema'])
-        index['schema'] = 'darkrenamer-vm-automated-index-v3'
+        for version in (2, 3):
+            index['schema'] = f'darkrenamer-vm-automated-index-v{version}'
+            self.write(index_bytes=json.dumps(index).encode())
+            with self.extract() as result:
+                self.assertEqual(result.index_schema, index['schema'])
+        index['schema'] = 'darkrenamer-vm-automated-index-v4'
         self.write(index_bytes=json.dumps(index).encode())
         with self.assertRaises(evidence.EvidenceError):
             with self.extract():

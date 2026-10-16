@@ -62,12 +62,14 @@ foreach ($entry in @(
         task_execution=@{observer_lifecycle=@{pid=3;start_time_utc_ticks=(& $at 2)}}
         rescue_executions=@(@{task_execution=@{observer_lifecycle=@{pid=777;start_time_utc_ticks=(& $at 10)}}})}
     $v2Evidence=$taskContext
-    $owned=[pscustomobject]@{pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
+    $owned=[pscustomobject]@{kind='full';pid=900;parent_pid=777;identity='900|start';owner_sid=$sid;session_id=2
         creation_time_utc=(& $iso 11)
-        executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding'}
-    $ambient=[pscustomobject]@{pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
+        executable_path='C:\Windows\helper.exe';command_line='C:\Windows\helper.exe -Embedding';
+        native_image_path=$null;protection_level=$null}
+    $ambient=[pscustomobject]@{kind='full';pid=901;parent_pid=0;identity='901|start';owner_sid=$sid;session_id=2
         creation_time_utc=(& $iso 5)
-        executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding'}
+        executable_path='C:\Windows\ambient.exe';command_line='C:\Windows\ambient.exe -Embedding';
+        native_image_path=$null;protection_level=$null}
     $found=@(Get-V2OwnedScopeProcesses @{processes=@($owned,$ambient)})
     if($found.Count -ne 1 -or $found[0].pid -ne 900){throw 'Rescue descendant escaped normal owned scope.'}
     Assert-V2Inventory @{tasks=@();processes=@($ambient)} @{processes=@()}

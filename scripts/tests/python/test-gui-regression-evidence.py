@@ -49,6 +49,24 @@ class SyntheticFixtureTestCase(unittest.TestCase):
 
 
 class GuiEvidenceTests(SyntheticFixtureTestCase):
+    @staticmethod
+    def bind_v2_fixture_vm(run: Path, manifest: dict, transport: dict) -> None:
+        """Make the synthetic preflight, postlaunch and transport one VM identity."""
+        vm_id = transport["vm_id"]
+        vm_hash = digest(vm_id.encode("ascii"))
+        manifest["guest_preflight"]["vm_identity_sha256"] = vm_hash
+        write_json(run / "input-manifest.json", manifest)
+        preflight_path = run / "output/platform-preflight.json"
+        preflight = json.loads(preflight_path.read_text())
+        preflight["guest_platform"]["vm_identity_sha256"] = vm_hash
+        write_json(preflight_path, preflight)
+        postlaunch_path = run / "output/platform-postlaunch.json"
+        postlaunch = json.loads(postlaunch_path.read_text())
+        postlaunch["vm_identity_sha256"] = vm_hash
+        write_json(postlaunch_path, postlaunch)
+        transport["vm_identity_kind"] = manifest["guest_preflight"]["vm_identity_kind"]
+        transport["vm_identity_sha256"] = vm_hash
+
     def test_fixture_semantics_do_not_follow_changed_verifier_expectations(self):
         baseline = json.loads((self.fixture.build("stable-standard", "standard") /
                                "output" / "run-result.json").read_text())
@@ -126,6 +144,7 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
         transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
+        self.bind_v2_fixture_vm(run, manifest, transport)
         write_json(transport_path, transport)
         self.fixture.refresh(run)
         return run, profile_hash
@@ -148,6 +167,24 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                                                             stdout=(SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes())), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(evidence.main(SCRIPT_ROOT.parent, argv), 0)
+
+    def test_current_v2_rejects_coherent_foreign_transport_vm(self):
+        run, profile_hash = self.fixed_v2_run("standard")
+        self.assertEqual(evidence.validate_run(self.root, run.name, SOURCE,
+                         expected_profile_sha256=profile_hash)["result"]["status"], "review_required")
+        transport_path = run / "output/transport.json"
+        transport = json.loads(transport_path.read_text())
+        foreign_id = "87654321-4321-4321-4321-cba987654321"
+        transport["vm_id"] = foreign_id
+        transport["vm_identity_sha256"] = digest(foreign_id.encode("ascii"))
+        owned = transport["raw_cleanup"]["owned_resource_evidence"]
+        owned["protected_anchor_initial"]["vm_id"] = foreign_id
+        owned["protected_anchor"]["vm_id"] = foreign_id
+        write_json(transport_path, transport)
+        self.fixture.refresh(run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "VM identity differs"):
+            evidence.validate_run(self.root, run.name, SOURCE,
+                                  expected_profile_sha256=profile_hash)
 
     def test_fixed_v2_selection_rejects_historical_single_v1_run(self):
         profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
@@ -817,6 +854,7 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
         transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
+        GuiEvidenceTests.bind_v2_fixture_vm(self.pair_run, manifest, transport)
         write_json(transport_path, transport)
         self.fixture.refresh(self.pair_run)
         return manifest, transport, raw
@@ -2098,6 +2136,7 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
         scenario = self.scenario()
         transport = {"raw_cleanup": cleanup,
                      "vm_id": cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]}
+        GuiEvidenceTests.bind_v2_fixture_vm(run, manifest, transport)
         evidence.validate_icon_owned_transport(transport, manifest, raw, scenario)
         for mutate in (
                 lambda r, s: s.__setitem__("process_start_utc_ticks", "134041000000000001"),

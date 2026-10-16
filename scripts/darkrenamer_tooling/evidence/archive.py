@@ -916,7 +916,8 @@ def open_indexed_evidence_archive(
                 index = require_exact_keys(parse_bounded_json_bytes(index_bytes),
                                            {"schema", "files"}, "Evidence index")
                 _require(index["schema"] in ("darkrenamer-vm-automated-index-v1",
-                                              "darkrenamer-vm-automated-index-v2"),
+                                              "darkrenamer-vm-automated-index-v2",
+                                              "darkrenamer-vm-automated-index-v3"),
                          "Unsupported evidence index schema.")
                 inventory = _coerce_inventory(index["files"], ArchiveLimits())
                 _require(index_name not in inventory and "campaign.json" in inventory,
@@ -958,7 +959,8 @@ def _validate_statement(statement: object) -> dict[str, object]:
         "targets", "required_gates", "ingress", "validation",
     }, "statement")
     _require(top["schema"] in ("darkrenamer-vm-automated-statement-v1",
-                               "darkrenamer-vm-automated-statement-v2"),
+                               "darkrenamer-vm-automated-statement-v2",
+                               "darkrenamer-vm-automated-statement-v3"),
              "statement.schema is unsupported.")
     _require(type(top["result"]) is str and top["result"] in {"passed", "failed"},
              "statement.result is invalid.")

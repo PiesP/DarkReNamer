@@ -173,7 +173,7 @@ class CliFixture:
                 "sha256": (hashlib.sha256(data).hexdigest() if data is not None else reference.sha256),
                 "size": len(data) if data is not None else reference.size,
             }
-        index = compact({"schema": f"darkrenamer-vm-automated-index-v{self.revision}", "files": pins})
+        index = compact({"schema": f"darkrenamer-vm-automated-index-v{self.profile['revision']}", "files": pins})
         with ZipFile(destination, "w", compression=ZIP_STORED, allowZip64=False) as archive:
             archive.writestr("evidence-index.json", index)
             for path in self.campaign.files:

@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import uuid
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
@@ -1175,6 +1176,18 @@ def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], n
 def validate_current_protected_transport(manifest: dict, transport: dict) -> None:
     raw = transport.get("raw_cleanup") if isinstance(transport, dict) else None
     if isinstance(raw, dict) and raw.get("schema_version") == 3:
+        guest = manifest["guest_preflight"]
+        vm_id = transport.get("vm_id")
+        try:
+            canonical_vm_id = str(uuid.UUID(vm_id)) if type(vm_id) is str else None
+        except ValueError:
+            canonical_vm_id = None
+        require(canonical_vm_id is not None and vm_id == canonical_vm_id and
+                canonical_vm_id != str(uuid.UUID(int=0)) and
+                transport.get("vm_identity_kind") == guest["vm_identity_kind"] and
+                transport.get("vm_identity_sha256") ==
+                    sha256_bytes(canonical_vm_id.encode("ascii")) == guest["vm_identity_sha256"],
+                "Protected transport VM identity differs from immutable guest preflight.")
         verify_current_protected_anchor_binding(
             transport, source_sha=manifest.get("tooling_source_sha", manifest["source_sha"]),
             bundle_sha256=manifest["bundle_manifest"]["sha256"])

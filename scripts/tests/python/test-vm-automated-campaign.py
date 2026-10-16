@@ -44,10 +44,10 @@ class CampaignTests(unittest.TestCase):
         self.plan = new_plan(self.profile, profile_sha256='d' * 64, candidate=self.candidate,
                              harness_sha='a' * 40, campaign_id='test-campaign',
                              created_at='2026-09-20T00:00:00Z')
-        self.assertEqual(self.plan['schema'], 'darkrenamer-vm-automated-plan-v2')
+        self.assertEqual(self.plan['schema'], 'darkrenamer-vm-automated-plan-v3')
         with self.assertRaises(EvidenceError):
             self.verify()
-        self.campaign['schema'] = 'darkrenamer-vm-automated-campaign-v2'
+        self.campaign['schema'] = 'darkrenamer-vm-automated-campaign-v3'
         self.assertEqual(len(self.verify()), 30)
         for field, value in (('profile_id', 'unknown'), ('revision', 1),
                              ('revision', True), ('schema', 'darkrenamer-vm-automated-profile-v1')):
@@ -59,9 +59,11 @@ class CampaignTests(unittest.TestCase):
 
     def test_v1_failed_attempt_cannot_be_relabelled_as_v2_success(self):
         self.profile = json.loads((REPOSITORY_ROOT / 'config/vm-automated-v2.json').read_text())
-        # Even a relabelled plan cannot replace a retained failed first attempt.
-        self.plan['schema'] = 'darkrenamer-vm-automated-plan-v2'
-        self.campaign['schema'] = 'darkrenamer-vm-automated-campaign-v2'
+        # Even a current-profile plan cannot replace a retained failed first attempt.
+        self.plan = new_plan(self.profile, profile_sha256='d' * 64, candidate=self.candidate,
+                             harness_sha='a' * 40, campaign_id='test-campaign',
+                             created_at='2026-09-20T00:00:00Z')
+        self.campaign['schema'] = 'darkrenamer-vm-automated-campaign-v3'
         self.campaign['attempts'][0]['exit_code'] = 1
         with self.assertRaises(EvidenceError):
             self.verify()

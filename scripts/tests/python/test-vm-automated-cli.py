@@ -56,13 +56,13 @@ class VmAutomatedCliTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return cli.main(REPOSITORY_ROOT)
 
-    def test_v2_archive_emits_selected_canonical_profile(self):
+    def test_current_owned_archive_emits_selected_canonical_profile(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = CliFixture(Path(directory), revision=2)
             statement = parse_canonical_statement_bytes(cli.validate(fixture.args()))
-            self.assertEqual(statement["schema"], "darkrenamer-vm-automated-statement-v2")
+            self.assertEqual(statement["schema"], "darkrenamer-vm-automated-statement-v3")
             self.assertEqual(statement["profile"], {
-                "id": fixture.profile["profile_id"], "revision": 2,
+                "id": fixture.profile["profile_id"], "revision": 3,
                 "sha256": hashlib.sha256(fixture.profile_bytes).hexdigest()})
             args = fixture.args()
             args.profile_id = "vm-automated-v1-win11-ntfs"
@@ -72,7 +72,7 @@ class VmAutomatedCliTests(unittest.TestCase):
             args = fixture.args()
             del args.profile_id
             statement = parse_canonical_statement_bytes(cli.validate(args))
-            self.assertEqual(statement['profile']['revision'], 2)
+            self.assertEqual(statement['profile']['revision'], 3)
 
     def test_omitted_profile_rejects_v1_archive_before_extraction(self):
         args = self.fixture.args()

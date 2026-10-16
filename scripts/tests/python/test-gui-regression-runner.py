@@ -285,9 +285,8 @@ class GuiRegressionRunnerTests(unittest.TestCase):
 
         config = self.root / "config"
         config.mkdir()
-        self.write_json(config / runner.V2_PROFILE_FILE, {
-            "schema": "darkrenamer-vm-automated-profile-v2",
-            "profile_id": runner.V2_PROFILE_ID, "revision": 2})
+        (config / runner.V2_PROFILE_FILE).write_bytes(
+            (Path(__file__).parents[3] / "config" / runner.V2_PROFILE_FILE).read_bytes())
         complete = base + ["--baseline-product-source-sha", runner.ICON_BASELINE_PRODUCT_SOURCE_SHA,
                            "--expected-run-source-sha", "c" * 40,
                            "--prepared-bundle-root", str(self.root / "prepared"),

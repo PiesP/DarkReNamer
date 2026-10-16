@@ -330,7 +330,7 @@
       "bundle": "tooling-contracts-authority.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.authority",
-      "sha256": "58b1a560105e6854771c06e4e70f95746eb4425aa885eb419b7c09b159f2a695",
+      "sha256": "4d65b0b7c01fbf2fbb1e71015c62cc2fd1148807e97136e02bcabd9f1f25c2ea",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -368,7 +368,7 @@
       "bundle": "tooling-evidence-archive.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.archive",
-      "sha256": "ae2d4b2f217e21749f60d07e538e378c14ba9a2c85ca0d495de893b231db8bef",
+      "sha256": "db360d001efd31894ff5dd5f34ce60e9655169d432f82cd1152f91867e70f84f",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -436,7 +436,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "f6f7c027a00c7e055a37bd4099fa944079a6d0861b319db4382b633b20edf092",
+      "sha256": "9fdb39929149742e88de2c6f7d147956202647eda4c0ad76e995e2aa0c3ddf9f",
       "dependencies": [
         "tooling-loader",
         "package-root",
