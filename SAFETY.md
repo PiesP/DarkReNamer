@@ -528,8 +528,13 @@ A synchronized full ListView refresh first checks the native row count against
 its retained rendered-row cache. It reserves missing cache capacity fallibly,
 then formats and owns one replacement row at a time. The model, issue-cache,
 icon-cache, and prior-row borrows end before each synchronous native message;
-the changed-column mask is copied before dispatch. Native row deletion and
-insertion remain individual operations. If native count, allocation, or any
+the changed-column mask is copied before dispatch. A synchronized refresh to
+zero rows uses checked `LVM_DELETEALLITEMS` with both scalar parameters zero,
+under the existing programmatic-update and redraw guards. The rendered cache
+is cleared only after native success. Existing callback lease and notification
+handling is unchanged; per-item delete notifications may still occur. Other
+trailing deletion and insertion remain individual operations. If native count,
+allocation, or any
 incremental write fails, preview synchronization is marked failed before a
 bounded full model snapshot is used for authoritative native rebuilding. A
 failed rebuild leaves Apply blocked and retains its prior cache for a later

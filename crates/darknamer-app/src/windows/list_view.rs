@@ -2057,6 +2057,24 @@ fn apply_incremental_rows(state: &mut AppState) -> bool {
             .rendered_vec_capacity_bytes_peak
             .max(capacity * size_of::<RenderedRow>());
     });
+    if new_len == 0 && old_len != 0 {
+        let deleted = {
+            #[cfg(test)]
+            let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Native);
+            // SAFETY: the live ListView receives the pointer-free bulk-delete
+            // message with both required parameters zero. The enclosing
+            // programmatic-update and redraw guards remain active.
+            unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) }
+        };
+        if deleted == 0 {
+            return false;
+        }
+        #[cfg(test)]
+        refresh_profile::record(|counters| counters.native_deletions += 1);
+        state.rendered_rows.clear();
+        state.rendered_rows.shrink_to_fit();
+        return true;
+    }
     for row in (new_len..old_len).rev() {
         let deleted = {
             #[cfg(test)]
@@ -5228,10 +5246,10 @@ mod native_tests {
                 compare_windows,
             )?;
             assert_normal_refresh(state, "regression-before-bulk-clear");
-            let removed = state.model.len();
+            assert!(state.model.len() > 1);
             assert!(state.model.clear());
             let cleared = assert_normal_refresh(state, "regression-cleared");
-            assert_eq!(cleared.native_deletions, removed);
+            assert_eq!(cleared.native_deletions, 1);
             assert_eq!(cleared.full_rebuilds, 0);
             state.model.append_batch_by(
                 refresh_fixture_rows(parent, "ordinary", 20, 4),
@@ -5307,6 +5325,50 @@ mod native_tests {
         })??;
         app.close()?;
         Ok(())
+    }
+
+    fn run_native_zero_row_bulk_clear() -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = RefreshTestOle::initialize()?;
+        let mut app = RefreshTestApp::new()?;
+        app.with_state(|state| -> Result<(), Box<dyn std::error::Error>> {
+            for count in [0, 1, 10_000] {
+                if count != 0 {
+                    state.model.append_batch_by(
+                        refresh_fixture_rows(r"C:\refresh-fixture\bulk", "ordinary", 0, count),
+                        compare_windows,
+                    )?;
+                    assert_normal_refresh(state, "bulk-before-clear");
+                    select_rows_with_focus(state.list_window, &[count - 1], Some(count - 1));
+                    assert_eq!(selected_indices(state.list_window), vec![count - 1]);
+                    assert_eq!(focused_index(state.list_window), Some(count - 1));
+                    assert!(state.model.clear());
+                }
+                let cleared = assert_normal_refresh(state, "bulk-after-clear");
+                assert_eq!(cleared.native_deletions, usize::from(count != 0));
+                assert_eq!(cleared.full_rebuilds, 0);
+                assert!(state.preview_synchronization.is_synchronized());
+                assert!(state.rendered_rows.is_empty());
+                assert_model_native_rows(state);
+                assert!(selected_indices(state.list_window).is_empty());
+                assert_eq!(focused_index(state.list_window), None);
+            }
+            state.model.append_batch_by(
+                refresh_fixture_rows(r"C:\refresh-fixture\bulk", "repopulated", 0, 2),
+                compare_windows,
+            )?;
+            assert_normal_refresh(state, "bulk-repopulated");
+            assert_model_native_rows(state);
+            assert!(selected_indices(state.list_window).is_empty());
+            assert_eq!(focused_index(state.list_window), None);
+            Ok(())
+        })??;
+        app.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_native_zero_row_bulk_clear() -> Result<(), Box<dyn std::error::Error>> {
+        isolated_native_refresh_case("zero_row_bulk_clear", run_native_zero_row_bulk_clear)
     }
 
     #[test]
