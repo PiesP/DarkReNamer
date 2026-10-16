@@ -435,6 +435,30 @@ class V2OwnedCleanupTests(unittest.TestCase):
         self.rebind_original()
         self.assertEqual(self.verify_v2()['owned_cleanup'], 'owned-clean')
 
+    def test_v2_no_candidate_result_cannot_be_promoted_by_a_cleanup_proof(self):
+        original_transport = (self.root / 'original-transport.json').read_bytes()
+        (self.root / 'original-result.json').unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.verify_v2()
+        self.assertEqual((self.root / 'original-transport.json').read_bytes(), original_transport)
+
+    def test_v2_missing_helper_or_candidate_lifetime_refuses_owned_clean(self):
+        original = deepcopy(self.original)
+        for missing in ('preflight-job', 'engine-job', 'preflight-lifetime',
+                        'engine-lifetime', 'candidate-task'):
+            with self.subTest(missing=missing):
+                self.original = deepcopy(original)
+                evidence = self.original['raw_cleanup']['owned_resource_evidence']
+                if missing == 'candidate-task':
+                    evidence['task_execution'] = None
+                else:
+                    helper = 'preflight_child' if missing.startswith('preflight') else 'engine_child'
+                    field = 'process_job_closed' if missing.endswith('job') else 'exact_lifetime_absent'
+                    evidence[helper][field] = False
+                self.rebind_original()
+                with self.assertRaises(EvidenceError):
+                    self.verify_v2()
+
     def test_v2_tampered_profile_task_or_process_scope_fails(self):
         original = deepcopy(self.original)
         proof = deepcopy(self.proof)

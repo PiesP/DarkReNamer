@@ -1273,6 +1273,7 @@ $runnerProcessBaseline = @()
 $spotlightPreflight = $null
 $preflightChild = $null
 $taskExecution = $null
+$candidateTaskMayHaveStarted = $false
 $script:DrVmV2RescueExecutions = [Collections.Generic.List[object]]::new()
 $script:DrVmV2RescueAttempts = 0
 $result = $null
@@ -4270,6 +4271,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             if ($candidateSeconds -lt $TestTimeoutSeconds) { throw 'Insufficient diagnostic time after candidate staging.' }
             $SuiteTimeoutSeconds = [Math]::Min($SuiteTimeoutSeconds, $candidateSeconds)
         }
+        # The remote call can register and start the task before returning a record.
+        $candidateTaskMayHaveStarted = $true
         $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256,$RuntimeBrokerDiagnosticRunId,$ownedV2,$v2Engine -ScriptBlock {
             param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash,$runtimeBrokerRunId,$v2,$preflightEngine)
             $observerPath = Join-Path $root 'windows-vm-acceptance.ps1'
@@ -4581,6 +4584,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             -LiteralPath (Join-Path $BundleRoot 'windows-vm-recovery-acceptance.ps1') `
             -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'windows-vm-recovery-acceptance.ps1') `
             -ToSession $session
+        $candidateTaskMayHaveStarted = $true
         $recoveryEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$RecoveryMode,$RecoveryFixtureCount,([bool]$RecoveryExport),([bool]$RecoveryIntentOnlyCandidateDiscard),$recoveryEvidenceRoot,$trustedBundleRecords,$recoveryRuntimeRoot,$ownedV2,$v2Engine -ScriptBlock {
             param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$fixtureCount,$recoveryExport,$intentOnlyCandidateDiscard,$evidenceRoot,$bundleRecords,$runtimeRoot,$v2,$preflightEngine)
             $observerPath = Join-Path $root 'windows-vm-recovery-acceptance.ps1'
@@ -4821,6 +4825,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
+    $candidateTaskMayHaveStarted = $true
     $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$FocusedIconTests),$FocusedIconCase,([bool]$FocusedRefreshTests),$FocusedRefreshCase -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$focusedIcon,$focusedIconCase,$focusedRefresh,$focusedRefreshCase)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
@@ -5251,11 +5256,19 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         $cleanupTaskContext | Add-Member -NotePropertyName profile_sha256 -NotePropertyValue $AcceptanceProfileSha256
                         $cleanupTaskContext | Add-Member -NotePropertyName baseline_processes -NotePropertyValue @($runnerProcessBaseline)
                         $cleanupTaskContext | Add-Member -NotePropertyName task_execution -NotePropertyValue $taskExecution
+                        $cleanupTaskContext | Add-Member -NotePropertyName candidate_task_may_have_started -NotePropertyValue $candidateTaskMayHaveStarted
                         $cleanupTaskContext | Add-Member -NotePropertyName preflight_child -NotePropertyValue $preflightChild
                         $cleanupTaskContext | Add-Member -NotePropertyName engine_child -NotePropertyValue $engineChild
                         $cleanupTaskContext | Add-Member -NotePropertyName rescue_attempts -NotePropertyValue $script:DrVmV2RescueAttempts
                         $cleanupTaskContext | Add-Member -NotePropertyName rescue_executions -NotePropertyValue @($script:DrVmV2RescueExecutions.ToArray())
-                        $cleanupTaskContext | Add-Member -NotePropertyName process_job_cleanup -NotePropertyValue @($result.process_job_cleanup)
+                        $jobCleanupProperty = if ($null -ne $result) {
+                            $result.PSObject.Properties['process_job_cleanup']
+                        } else { $null }
+                        # No result is not a clean or closed candidate Job. The
+                        # independent closure gate below remains false in this state.
+                        $cleanupTaskContext | Add-Member -NotePropertyName process_job_cleanup -NotePropertyValue @(
+                            if ($null -ne $jobCleanupProperty) { $jobCleanupProperty.Value }
+                        )
                         $cleanupTaskContext | Add-Member -NotePropertyName declared_processes -NotePropertyValue @(
                             $declared | Sort-Object | ForEach-Object {
                                 $parts = $_.Split('|')
@@ -5328,17 +5341,35 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 trusted = $global:DrVmOwnedRootRecords.trusted
                             }
                             $errors = [Collections.Generic.List[string]]::new()
+                            $ownedTask = @()
                             $ownedAfter = @()
                             $deleted = $false
+                            $helpersClosed = $true
+                            foreach ($child in @($taskContext.preflight_child,$taskContext.engine_child)) {
+                                if ($null -eq $child) { $helpersClosed = $false; break }
+                                foreach ($field in @('exited','streams_complete','exact_lifetime_absent','process_job_closed')) {
+                                    $property = $child.PSObject.Properties[$field]
+                                    if ($null -eq $property -or $property.Value -isnot [bool] -or
+                                        -not $property.Value) {
+                                        $helpersClosed = $false
+                                        break
+                                    }
+                                }
+                                if (-not $helpersClosed) { break }
+                            }
                             try {
+                                if (-not $helpersClosed) {
+                                    throw 'V2 preflight helper lifetime or Job closure is unavailable.'
+                                }
+                                if ($null -eq $taskContext.task_execution) {
+                                    if ($taskContext.candidate_task_may_have_started) {
+                                        throw 'V2 candidate may have started without a verified terminal task lifetime.'
+                                    }
+                                    throw 'V2 candidate was not scheduled; owned roots require independent closure evidence.'
+                                }
                                 if (-not $mayDelete -or -not $jobsClosed -or
-                                    $null -eq $taskContext.task_execution -or
                                     -not $taskContext.task_execution.terminal -or
                                     -not $taskContext.task_execution.observer_lifetime_absent -or
-                                    $null -eq $taskContext.preflight_child -or
-                                    -not $taskContext.preflight_child.process_job_closed -or
-                                    $null -eq $taskContext.engine_child -or
-                                    -not $taskContext.engine_child.process_job_closed -or
                                     $taskContext.rescue_attempts -ne @($taskContext.rescue_executions).Count -or
                                     $null -eq $rootRecords.guest -or $null -eq $rootRecords.trusted) {
                                     throw 'V2 declared task, helper, Job or root closure is unavailable.'
@@ -5509,10 +5540,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                     $null -ne $taskContext.task_execution -and
                                     $taskContext.task_execution.terminal -and
                                     $taskContext.task_execution.observer_lifetime_absent -and
-                                    $null -ne $taskContext.preflight_child -and
-                                    $taskContext.preflight_child.process_job_closed -and
-                                    $null -ne $taskContext.engine_child -and
-                                    $taskContext.engine_child.process_job_closed -and
+                                    $helpersClosed -and
                                     $ownedAfter.Count -eq 0 -and $ownedTask.Count -eq 0)
                                 failed_snapshot = if ($null -ne $intervention -and $null -ne $tasksIntervention) {
                                     [ordered]@{complete=[bool]$intervention.complete
