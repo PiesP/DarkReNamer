@@ -23,6 +23,9 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX48 = re.compile(r"[0-9a-f]{48}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 RUN = re.compile(r"DarkReNamerTests-[0-9a-f]{32}\Z")
+OWNED_PERFORMANCE_PROFILE_SHA256 = "11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f"
+OWNED_PERFORMANCE_RUN = re.compile(
+    r"performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)\Z")
 
 
 def require(condition: bool, message: str) -> None:
@@ -294,6 +297,117 @@ def _setting_snapshot(value: dict, kind: str) -> None:
             require(valid, "Text scale registry value kind or raw value is unknown.")
 
 
+def verify_owned_performance_text_scale(observations: object) -> dict:
+    """Verify actual coherent 100% registry/UISettings snapshots for the owned route."""
+    require(type(observations) is dict, "Owned performance observations are unavailable.")
+    proof = require_exact_keys(observations.get("text_scale_restoration"),
+                               {"schema_version", "baseline", "final", "snapshot_equal"},
+                               "Owned performance restoration")
+    require(type(proof["schema_version"]) is int and proof["schema_version"] == 1 and
+            proof["snapshot_equal"] is True,
+            "Owned performance restoration is not terminal and equal.")
+    fields = {"registry_key_existed", "registry_value_existed", "registry_value_kind",
+              "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}
+    normalized = []
+    for label in ("baseline", "final"):
+        row = require_exact_keys(proof[label], fields, f"Owned performance {label}")
+        require(type(row["registry_key_existed"]) is bool and
+                type(row["registry_value_existed"]) is bool and
+                (not row["registry_value_existed"] or row["registry_key_existed"]) and
+                type(row["ui_settings_raw_factor"]) is float and
+                math.isfinite(row["ui_settings_raw_factor"]) and
+                abs(row["ui_settings_raw_factor"] - 1.0) < 0.000001 and
+                type(row["ui_settings_percent"]) is int and
+                row["ui_settings_percent"] == round(row["ui_settings_raw_factor"] * 100) == 100,
+                f"Owned performance {label} effective text scale is incoherent.")
+        if row["registry_value_existed"]:
+            require(row["registry_value_kind"] == "DWord" and
+                    type(row["registry_value"]) is int and row["registry_value"] == 100,
+                    f"Owned performance {label} registry text scale is not DWord 100.")
+        else:
+            require(row["registry_value_kind"] is None and row["registry_value"] is None,
+                    f"Owned performance {label} registry absence was not observed.")
+        normalized.append(row)
+    before, after = normalized
+    require(all(before[key] == after[key] for key in fields - {"ui_settings_raw_factor"}) and
+            abs(before["ui_settings_raw_factor"] - after["ui_settings_raw_factor"]) < 0.000001,
+            "Owned performance text scale differs after the workload.")
+    return proof
+
+
+def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
+                                 proof: dict, indexed: dict[str, dict],
+                                 receipt_bytes: bytes, signal_bytes: bytes,
+                                 lease_bytes: bytes) -> None:
+    path = root / "owned-performance-predelete.json"
+    require(path.exists(), "Owned performance pre-delete receipt is missing.")
+    data = _read_file(path, 64 * 1024)
+    frozen = require_exact_keys(_json(data, "Owned performance pre-delete receipt"), {
+        "schema_version", "kind", "run_name", "run_id", "vm_id", "nonce",
+        "desktop_lease_id", "source_sha", "bundle_sha256", "profile_id",
+        "profile_sha256", "roots", "files",
+    }, "Owned performance pre-delete receipt")
+    context = original["owned_cleanup_failure_context"]
+    run_id = frozen["run_id"]
+    match = OWNED_PERFORMANCE_RUN.fullmatch(run_id) if type(run_id) is str else None
+    require(frozen["schema_version"] == 1 and
+            frozen["kind"] == "owned_performance_predelete_restoration" and match is not None and
+            frozen["run_name"] == receipt["run_name"] and
+            frozen["vm_id"] == receipt["vm_id"] and
+            frozen["nonce"] == receipt["nonce"] and
+            frozen["desktop_lease_id"] == receipt["desktop_lease_id"] and
+            frozen["source_sha"] == context["source_sha"] and
+            frozen["bundle_sha256"] == context["bundle"]["sha256"] and
+            frozen["profile_id"] == V2_PROFILE_ID and
+            frozen["profile_sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256 and
+            frozen["roots"] == receipt["root_records"] and
+            proof["predelete_sha256"] == _digest(data),
+            "Owned performance pre-delete identity or proof hash differs.")
+    required = ("original-transport.json", "acceptance-result.json",
+                "acceptance-observations.json", "owned-performance-input-manifest.json",
+                "owned-performance-profile.json", "bundle.json")
+    require(all(name in indexed for name in required),
+            "Owned performance frozen source files are missing.")
+    expected = {name: indexed[name] for name in required}
+    for name, blob in (("owned-cleanup-strict-failure-preservation.json", receipt_bytes),
+                       ("owned-cleanup-desktop-closed.json", signal_bytes),
+                       ("desktop-lease.json", lease_bytes)):
+        expected[name] = {"file": name, "bytes": len(blob), "sha256": _digest(blob)}
+    require(type(frozen["files"]) is dict and set(frozen["files"]) == set(expected) and
+            all(require_exact_keys(frozen["files"][name], {"file", "bytes", "sha256"}, name)
+                == row for name, row in expected.items()) and
+            context["source_result"] == expected["acceptance-result.json"] and
+            receipt["original_transport"] == expected["original-transport.json"],
+            "Owned performance pre-delete file bindings differ.")
+    def document(name: str) -> dict:
+        return _json(_read_file(root / name, 4 * 1024 * 1024), name)
+    manifest = document("owned-performance-input-manifest.json")
+    profile = document("owned-performance-profile.json")
+    result = document("acceptance-result.json")
+    observations = document("acceptance-observations.json")
+    require(expected["owned-performance-profile.json"]["sha256"] ==
+            OWNED_PERFORMANCE_PROFILE_SHA256 and
+            profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
+            profile.get("profile_id") == V2_PROFILE_ID and profile.get("revision") == 3 and
+            manifest.get("run_id") == observations.get("run_id") == run_id and
+            manifest.get("source_sha") == result.get("source_sha") == frozen["source_sha"] and
+            manifest.get("acceptance_profile_id") == V2_PROFILE_ID and
+            manifest.get("acceptance_profile_sha256") == OWNED_PERFORMANCE_PROFILE_SHA256 and
+            manifest.get("acceptance_profile", {}).get("sha256") ==
+                OWNED_PERFORMANCE_PROFILE_SHA256 and
+            manifest.get("bundle_manifest", {}).get("sha256") == frozen["bundle_sha256"] and
+            manifest.get("request", {}).get("mode") == "performance-sample" and
+            manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
+                match.group(1) and
+            result.get("application", {}).get("sha256") ==
+                manifest.get("artifacts", {}).get("application", {}).get("sha256") and
+            result.get("observations", {}).get("sha256") ==
+                expected["acceptance-observations.json"]["sha256"] and
+            result.get("acceptance_observations") == observations,
+            "Owned performance frozen input, profile, result, or observations differ.")
+    verify_owned_performance_text_scale(observations)
+
+
 def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> None:
     if context["task_kind"] != "ui":
         return
@@ -470,6 +584,7 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     original = _json(original_bytes, "Original transport")
     v2 = profile_id == V2_PROFILE_ID
     schema = (2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3) if v2 else 1
+    possible_owned_performance = v2 and profile_sha256 == OWNED_PERFORMANCE_PROFILE_SHA256
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
@@ -480,7 +595,10 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         "schema_version", "kind", "run_name", "vm_id", "status", "pre", "post", "roots",
         "observed_roots_before", "observed_roots_after", "errors", "preservation_sha256",
         "desktop_lease_sha256", "original_transport_sha256", "nonce",
-    } | profile_fields | ({"protected_anchor"} if schema == 3 else set()), "Owned cleanup proof")
+    } | profile_fields | ({"protected_anchor"} if schema == 3 else set()) |
+        ({"predelete_sha256"} if possible_owned_performance and
+         "predelete_sha256" in _json(proof_bytes, "Owned cleanup proof") else set()),
+        "Owned cleanup proof")
     signal = require_exact_keys(_json(signal_bytes, "Desktop closure signal"), {
         "schema_version", "nonce", "preservation_sha256", "desktop_lease_sha256",
     } | profile_fields, "Desktop closure signal")
@@ -577,6 +695,24 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     require(total <= 512 * 1024 * 1024 and "original-transport.json" in listed,
             "Preserved files exceed their bound or omit the original transport.")
     result, bundle = _source_result(root, original, receipt, listed)
+    if possible_owned_performance:
+        context = original["owned_cleanup_failure_context"]
+        embedded = result.get("acceptance_observations")
+        run_id = embedded.get("run_id") if type(embedded) is dict else None
+        candidate = (context["acceptance_mode"] == "performance-sample" or
+                     type(run_id) is str and
+                     run_id.startswith("performance-sample-v2-owned-r3-") or
+                     any(name.startswith("owned-performance-") for name in listed) or
+                     "predelete_sha256" in proof or
+                     (root / "owned-performance-predelete.json").exists())
+        if candidate:
+            require(context["acceptance_mode"] == "performance-sample" and
+                    type(run_id) is str and OWNED_PERFORMANCE_RUN.fullmatch(run_id) is not None and
+                    "predelete_sha256" in proof,
+                    "Owned performance route lacks its frozen restoration gate.")
+            _owned_performance_predelete(root, original, receipt, proof,
+                                         {row["file"]: row for row in files},
+                                         receipt_bytes, signal_bytes, lease_bytes)
     if schema == 3:
         source = (bundle["harness"]["source_sha"] if bundle["schema_version"] == 2
                   else bundle["source_sha"])

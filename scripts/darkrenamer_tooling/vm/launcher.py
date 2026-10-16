@@ -674,8 +674,19 @@ def write_desktop_lease_document(root, document):
     temporary.replace(path)
 
 
+def write_desktop_helper_response(root, leaf, raw):
+    path = Path(root) / leaf
+    encoded = raw.encode('utf-8')
+    if not (0 < len(encoded) <= 64 * 1024):
+        raise ValueError('Desktop helper response exceeds its evidence bound.')
+    with path.open('xb') as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 @contextmanager
-def managed_desktop(args, evidence_root=None):
+def managed_desktop(args, evidence_root=None, *, capture_closure=False):
     if args.desktop_mode == 'existing':
         yield None
         return
@@ -694,9 +705,10 @@ def managed_desktop(args, evidence_root=None):
     lease_document_path = None if evidence_root is None else Path(evidence_root) / 'desktop-lease.json'
     if lease_document_path is not None and lease_document_path.exists():
         raise ValueError('Managed desktop lease evidence path already exists.')
-    lease = json.loads(windows_host_command(
+    start_raw = windows_host_command(
         '& ' + helper + ' -Action Start' + selector + ' -ScalePercent '
-        + str(args.desktop_scale) + geometry))
+        + str(args.desktop_scale) + geometry)
+    lease = json.loads(start_raw)
     if (not isinstance(lease, dict) or lease.get('status') != 'ready' or
             not isinstance(lease.get('leasePath'), str) or
             not re.fullmatch(r'[A-Za-z]:\\[^\r\n]+', lease['leasePath']) or
@@ -716,6 +728,8 @@ def managed_desktop(args, evidence_root=None):
         'cleanup_observed': False,
     }
     try:
+        if capture_closure:
+            write_desktop_helper_response(evidence_root, 'desktop-start-response.json', start_raw)
         write_desktop_lease_document(evidence_root, lease_document)
         if (not isinstance(lease.get('expectedGuestSid'), str) or
                 not re.fullmatch(r'S-1-5-21-(?:\d+-){2}\d+-\d+', lease['expectedGuestSid']) or
@@ -731,13 +745,19 @@ def managed_desktop(args, evidence_root=None):
         yield lease
     finally:
         try:
-            stopped = json.loads(windows_host_command(
+            stop_raw = windows_host_command(
                 '& ' + helper + ' -Action Stop -LeasePath ' + psquote(lease['leasePath'])
-                + ' -LeaseId ' + psquote(lease['leaseId'])))
+                + ' -LeaseId ' + psquote(lease['leaseId']))
+            stopped = json.loads(stop_raw)
+            if capture_closure:
+                write_desktop_helper_response(evidence_root, 'desktop-stop-response.json', stop_raw)
         except Exception:
             write_desktop_lease_document(evidence_root, lease_document)
             raise
-        cleanup_observed = isinstance(stopped, dict) and stopped.get('status') == 'stopped'
+        cleanup_observed = (isinstance(stopped, dict) and stopped.get('status') == 'stopped' and
+                            (not capture_closure or
+                             (stopped.get('leaseId') == lease['leaseId'] and
+                              stopped.get('lifecycleStatus') == 'closed')))
         lease_document['stop_status'] = 'stopped' if cleanup_observed else 'failed'
         lease_document['cleanup_observed'] = cleanup_observed
         write_desktop_lease_document(evidence_root, lease_document)
@@ -747,7 +767,7 @@ def managed_desktop(args, evidence_root=None):
 
 def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
                            suite_timeout=CONTROLLER_SUITE_TIMEOUT_SECONDS,
-                           stdout=None, stderr=None):
+                           stdout=None, stderr=None, capture_desktop_closure=False):
     """Run one exact controller through managed closure and failure preservation."""
     receipt_path = output / 'owned-cleanup-strict-failure-preservation.json'
     command = None
@@ -769,7 +789,9 @@ def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
             raise RuntimeError('The exact VM controller exceeded its bounded cleanup wait.') from error
 
     try:
-        with managed_desktop(args, root) as desktop:
+        desktop_scope = (managed_desktop(args, root, capture_closure=True)
+                         if capture_desktop_closure else managed_desktop(args, root))
+        with desktop_scope as desktop:
             command = command_for_desktop(desktop)
             environment = (host_tools.child_environment() if args.ssh_host
                            else os.environ.copy())

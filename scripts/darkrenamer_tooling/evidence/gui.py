@@ -23,6 +23,8 @@ from darkrenamer_tooling.contracts.platform import (
 from darkrenamer_tooling.contracts.tooling import (
     RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
 )
+from darkrenamer_tooling.contracts.owned_cleanup import verify_owned_performance_text_scale
+from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -114,6 +116,8 @@ ICON_SETTLEMENT_PLAN = {
     "poll_interval_ms": 100, "maximum_seconds": 600,
 }
 PERFORMANCE_RUN_ID = "performance-sample-v2-1366x768-96-text100"
+OWNED_PERFORMANCE_RUN_ID = "performance-sample-v2-owned-r3-1366x768-96-text100"
+OWNED_PERFORMANCE_PROFILE_SHA256 = "11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f"
 PERFORMANCE_ORDERS = ("hidden-visible", "visible-hidden")
 PERFORMANCE_PLAN = {
     "iterations": 2, "idle_seconds": 30, "maximum_seconds": 600,
@@ -136,6 +140,11 @@ PERFORMANCE_TIMING_DEFINITIONS = {
 def performance_run_id(order: str) -> str:
     require(order in PERFORMANCE_ORDERS, "Performance long-path order is invalid.")
     return f"{PERFORMANCE_RUN_ID}-{order}"
+
+
+def owned_performance_run_id(order: str) -> str:
+    require(order in PERFORMANCE_ORDERS, "Performance long-path order is invalid.")
+    return f"{OWNED_PERFORMANCE_RUN_ID}-{order}"
 PERFORMANCE_PHASES = (
     "empty-idle", "ordinary-100", "ordinary-1000", "ordinary-10000",
     "single-row", "full-preview", "long-hidden", "long-visible", "extensions",
@@ -554,11 +563,14 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         required.update({"tooling_source_sha", "tooling_source_tree"})
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and value["request"].get("mode") == FIRST_CLEAR_MODE:
         required.add("product_inputs")
+    owned_performance = isinstance(value, dict) and isinstance(value.get("request"), dict) and (
+        value["request"].get("mode") == PERFORMANCE_MODE and
+        value.get("run_id") in {owned_performance_run_id(order) for order in PERFORMANCE_ORDERS})
     fixed_v2 = isinstance(value, dict) and isinstance(value.get("request"), dict) and (
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
-            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2):
+            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance):
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID or value["request"].get("mode") == FIRST_CLEAR_MODE:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -583,9 +595,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE or fixed_v2 else
+                ({V2_PROFILE_ID} if request["mode"] == ICON_SETTLEMENT_MODE or fixed_v2 or owned_performance else
                  {V1_PROFILE_ID} if request["mode"] == FIRST_CLEAR_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
         if request["mode"] == FIRST_CLEAR_MODE:
@@ -606,8 +618,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
             require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
                     profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 3),
                     "Appearance V2 profile definition is invalid.")
-            if fixed_v2:
-                require(expected_profile_sha256 == profile_artifact["sha256"],
+            if fixed_v2 or owned_performance:
+                require(expected_profile_sha256 == profile_artifact["sha256"] and
+                        (not owned_performance or profile_artifact["sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256),
                         "Fixed GUI V2 profile differs from the selected source blob.")
     if request["mode"] == FIRST_CLEAR_MODE:
         product = exact_keys(manifest["product_inputs"],
@@ -623,7 +636,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -662,11 +675,13 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         prepared_args = (["--prepared-bundle-root", "<external-prepared-bundle-root>",
                           "--expected-prepared-application-sha256", prepared["application_sha256"]]
                          if prepared is not None else [])
-        require(manifest["run_id"] == performance_run_id(order) and
+        require(manifest["run_id"] == (owned_performance_run_id(order) if owned_performance
+                                       else performance_run_id(order)) and
                 command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
                             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
                             "--diagnostic", PERFORMANCE_MODE, "--performance-column-order", order,
-                            *prepared_args],
+                            *prepared_args,
+                            *(["--acceptance-profile-id", V2_PROFILE_ID] if owned_performance else [])],
                 "Performance manifest identity or command is invalid.")
     if request["mode"] == FOCUSED_CLEAR_MODE:
         require(manifest["source_sha"] == FOCUSED_PRODUCT_SOURCE_SHA and
@@ -4005,11 +4020,119 @@ def validate_focused_clear_run(root: Path, run_id: str, source_sha: str,
             "performance_batch": "not-run", "release_campaign": "not-run"}
 
 
-def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
-    require(run_id in {performance_run_id(order) for order in PERFORMANCE_ORDERS}, "Performance run id is invalid.")
+def validate_owned_performance_desktop(run_root: Path, files: dict[str, dict],
+                                       manifest: dict, transport: dict, owned: dict) -> str:
+    documents = {}
+    for leaf in ("desktop-lease.json", "desktop-start-response.json", "desktop-stop-response.json"):
+        require(leaf in files and files[leaf]["bytes"] <= 64 * 1024,
+                f"Owned performance indexed {leaf} is unavailable.")
+        value, data = read_json(run_root / "output", Path(leaf), f"owned performance {leaf}")
+        require(files[leaf]["bytes"] == len(data) and
+                files[leaf]["sha256"] == sha256_bytes(data),
+                f"Owned performance {leaf} differs from indexed bytes.")
+        documents[leaf] = value
+    lease, start, stop = (documents[name] for name in
+                          ("desktop-lease.json", "desktop-start-response.json", "desktop-stop-response.json"))
+    lease_id = lease.get("lease_id")
+    desktop = manifest["request"]["desktop"]
+    require(type(lease_id) is str and re.fullmatch(r"[0-9a-f]{32}", lease_id) is not None and
+            transport.get("desktop_lease_id") == start.get("leaseId") == stop.get("leaseId") == lease_id and
+            start.get("status") == "ready" and stop.get("status") == "stopped" and
+            stop.get("lifecycleStatus") == "closed" and
+            type(start.get("processId")) is int and start["processId"] > 0 and
+            stop.get("processId") == start["processId"] and
+            start.get("expectedGuestSid") == owned["runner_sid"] and
+            start.get("expectedDpi") == lease.get("expected_dpi") == desktop["dpi"] and
+            start.get("expectedDesktopWidth") == lease.get("requested_width") == desktop["width"] and
+            start.get("expectedDesktopHeight") == lease.get("requested_height") == desktop["height"] and
+            lease.get("mode") == "managed-rdp" and lease.get("start_status") == "ready" and
+            lease.get("stop_status") == "stopped" and lease.get("cleanup_observed") is True and
+            lease.get("requested_scale") == 100,
+            "Owned performance actual managed desktop lease did not stop with its bound identity.")
+    return lease_id
+
+
+def validate_owned_performance_transport(run_root: Path, files: dict[str, dict], manifest: dict,
+                                         raw: dict, scenario: dict, postlaunch: dict) -> dict:
+    transport = validate_transport_exit(run_root, files, 0)
+    cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
+                                        profile_sha256=manifest["acceptance_profile_sha256"])
+    validate_current_protected_transport(manifest, transport)
+    owned = cleanup["owned_resource_evidence"]
+    jobs = raw.get("process_job_cleanup")
+    require(type(jobs) is list and len(jobs) == 1 and
+            typed_equal(jobs, owned["process_job_cleanup"]) and
+            typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]),
+            "Owned performance must bind one candidate Job and the raw observer lifetime.")
+    lifecycle_rows = raw.get("process_lifecycles")
+    require(type(lifecycle_rows) is list and len(lifecycle_rows) == 1 and
+            type(lifecycle_rows[0]) is dict and set(lifecycle_rows[0]) == {"process_lifecycle"},
+            "Owned performance must retain one candidate lifecycle.")
+    lifecycle = exact_keys(lifecycle_rows[0]["process_lifecycle"], {
+        "pid", "session_id", "start_time_utc_ticks", "creation_filetime", "executable_path",
+        "executable_sha256", "start_observed", "exit_observed", "exit_method", "exit_code",
+    }, "owned performance process lifecycle")
+    native = exact_keys(scenario.get("native_process_lifetime"), {
+        "pid", "creation_filetime", "checkpoints", "terminal_exit_filetime",
+    }, "owned performance native lifetime")
+    pid = lifecycle["pid"]
+    filetime = native["creation_filetime"]
+    ticks = lifecycle["start_time_utc_ticks"]
+    require(type(pid) is int and 0 < pid <= 0xFFFFFFFF and
+            type(filetime) is int and 0 < filetime < 2**63 and
+            type(native["pid"]) is int and native["pid"] == pid and
+            type(lifecycle["creation_filetime"]) is int and lifecycle["creation_filetime"] == filetime and
+            type(ticks) is str and re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None and
+            int(ticks) == filetime + 504_911_232_000_000_000 and
+            type(scenario.get("process_start_utc_ticks")) is int and
+            scenario["process_start_utc_ticks"] == int(ticks) and
+            scenario["process_id"] == postlaunch["target"]["process_id"] == pid and
+            lifecycle["session_id"] == owned["runner_session_id"] and
+            lifecycle["executable_sha256"] == manifest["artifacts"]["application"]["sha256"] and
+            lifecycle["start_observed"] is True and lifecycle["exit_observed"] is True and
+            lifecycle["exit_method"] == "normal-close" and type(lifecycle["exit_code"]) is int and
+            lifecycle["exit_code"] == 0 and
+            type(native["terminal_exit_filetime"]) is int and
+            native["terminal_exit_filetime"] > filetime,
+            "Owned performance native candidate lifetime or normal exit is unbound.")
+    checkpoints = native["checkpoints"]
+    require(type(checkpoints) is list and [row.get("phase") if type(row) is dict else None
+                                               for row in checkpoints] ==
+            ["pre-work", "idle", "ordinary-10000", "post"] and
+            all(type(row.get("creation_filetime")) is int and row["creation_filetime"] == filetime
+                for row in checkpoints),
+            "Owned performance same-handle lifetime checkpoints are incomplete.")
+    verify_process_job_cleanup(jobs, expected_processes=[(pid, int(ticks))])
+    require(owned["declared_processes"] == [{"pid": pid, "start_time_utc_ticks": ticks}] and
+            owned["task_execution"]["terminal"] is True and
+            owned["task_execution"]["exit_code"] == 0,
+            "Owned performance process declaration or observer task differs.")
+    lease_id = validate_owned_performance_desktop(run_root, files, manifest, transport, owned)
+    ambient = {
+        phase: {"processes": cleanup[processes], "tasks": cleanup[tasks]}
+        for phase, processes, tasks in (
+            ("before", "unexpected_runner_processes", "unexpected_runner_tasks"),
+            ("after_intervention", "unexpected_runner_processes_after_intervention",
+             "unexpected_runner_tasks_after_intervention"),
+            ("after_delete", "unexpected_runner_processes_after_delete",
+             "unexpected_runner_tasks_after_delete"))
+    }
+    return {"owned_cleanup": "owned-clean", "desktop_lease_id": lease_id,
+            "ambient_delta_counts": {
+                phase: {kind: len(rows) for kind, rows in ledger.items()}
+                for phase, ledger in ambient.items()},
+            "ambient_delta_ledger": ambient}
+
+
+def validate_performance_run(root: Path, run_id: str, source_sha: str, *,
+                             expected_profile_sha256: str | None = None) -> dict:
+    owned = expected_profile_sha256 is not None
+    require(run_id in {(owned_performance_run_id(order) if owned else performance_run_id(order))
+                       for order in PERFORMANCE_ORDERS}, "Performance run id is invalid.")
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(), "Performance run directory is missing or unsafe.")
-    manifest, input_bytes = validate_input_manifest(run_root, source_sha)
+    manifest, input_bytes = validate_input_manifest(
+        run_root, source_sha, expected_profile_sha256=expected_profile_sha256)
     require(manifest["request"]["mode"] == PERFORMANCE_MODE, "Performance request mode is missing.")
     input_hash = sha256_bytes(input_bytes)
     _, cleanup_bytes = validate_cleanup(run_root, input_hash)
@@ -4067,6 +4190,11 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
             "Performance source executable, process, or display identity differs.")
     validate_performance_lifecycle(raw.get("process_lifecycles"), scenario,
                                    artifacts["application"]["sha256"])
+    owned_verdict = None
+    if owned:
+        verify_owned_performance_text_scale(observations)
+        owned_verdict = validate_owned_performance_transport(
+            run_root, files, manifest, raw, scenario, postlaunch)
     captures = raw.get("screenshots")
     require("performance-empty.png" in files, "Performance empty-idle PNG is absent from collection.")
     require(isinstance(captures, list) and len(captures) == 1 and
@@ -4078,6 +4206,8 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str) -> dict:
             "application_sha256": artifacts["application"]["sha256"],
             "bundle_mode": "prepared" if "prepared_bundle" in manifest else "built",
             "process_id": scenario["process_id"], "metrics": metrics,
+            **({"observation": "complete", **owned_verdict,
+                "environment_claim": "v2-owned-resources-revision-3"} if owned_verdict else {}),
             "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
 
@@ -4345,16 +4475,27 @@ def main(repo: Path, argv=None) -> int:
     args = parse_arguments(argv)
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
-    require(args.acceptance_profile_id is None or args.diagnostic is None,
-            "Fixed GUI profile selection cannot be used for a diagnostic.")
+    require(args.acceptance_profile_id is None or args.diagnostic is None or
+            (args.diagnostic == PERFORMANCE_MODE and args.acceptance_profile_id == V2_PROFILE_ID),
+            "Fixed GUI profile selection cannot be used for this diagnostic.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
     if args.diagnostic == PERFORMANCE_MODE:
+        owned = args.acceptance_profile_id == V2_PROFILE_ID
         require(not args.require_complete_set and args.configuration_set is None and
                 len(args.runs) == 1 and args.runs[0] in
-                {performance_run_id(order) for order in PERFORMANCE_ORDERS},
+                {(owned_performance_run_id(order) if owned else performance_run_id(order))
+                 for order in PERFORMANCE_ORDERS},
                 "Performance sample requires its single declared opt-in run and cannot complete acceptance.")
-        measured = validate_performance_run(root, args.runs[0], args.expected_source_sha)
+        profile_digest = None
+        if owned:
+            blob = subprocess.run(["git", "show", f"{args.expected_source_sha}:config/vm-automated-v2.json"],
+                                  cwd=repo, capture_output=True, check=False)
+            require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
+                    "Owned performance source profile differs from the reviewed revision-3 blob.")
+            profile_digest = OWNED_PERFORMANCE_PROFILE_SHA256
+        measured = validate_performance_run(root, args.runs[0], args.expected_source_sha,
+                                            expected_profile_sha256=profile_digest)
         print(json.dumps({"schema_version": 1, "diagnostic": PERFORMANCE_MODE,
                           "status": "measured", "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",

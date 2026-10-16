@@ -987,6 +987,8 @@ try {
             $RegressionMode = 'standard'
             $textOriginal = $null
             $textChanged = $false
+            $ownedPerformanceRun = $false
+            $ownedPerformanceTextBaseline = $null
             $cursor = $null
             $captures = [Collections.Generic.List[object]]::new()
             $observations = [ordered]@{ fixture = $Mode }
@@ -2290,6 +2292,42 @@ try {
         Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
     } 'binding mismatch'
     Initialize-AcceptanceNative
+    if ($IsWindows) {
+    # Execute the producer's retained-handle branch on a real short-lived child.
+    $lifetimeChild = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+        -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 3' `
+        -WindowStyle Hidden -PassThru
+    try {
+        $lifetimeApplication = [pscustomobject]@{
+            process=$lifetimeChild
+            owned=[ordered]@{process_start_time_utc_ticks=[long]$lifetimeChild.StartTime.ToUniversalTime().Ticks}
+            process_lifecycle=[ordered]@{}
+        }
+        $lifetimeObservations=[ordered]@{}
+        $lifetimeCheckpoints=[Collections.Generic.List[object]]::new()
+        $creationFileTime=Initialize-ObserverOwnedPerformanceLifetime `
+            -Application $lifetimeApplication -ObservationSink $lifetimeObservations `
+            -Checkpoints $lifetimeCheckpoints
+        if ($lifetimeObservations.native_process_lifetime.pid -ne $lifetimeChild.Id -or
+            $lifetimeCheckpoints.Count -ne 1 -or
+            $lifetimeApplication.process_lifecycle.creation_filetime -ne $creationFileTime) {
+            throw 'Owned performance producer did not retain the child process identity.'
+        }
+        if (-not $lifetimeChild.WaitForExit(15000) -or $lifetimeChild.ExitCode -ne 0) {
+            throw 'Owned performance lifetime child did not exit normally.'
+        }
+        $terminalLifetime=[DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+            [IntPtr]$lifetimeChild.Handle,[uint32]$lifetimeChild.Id,$creationFileTime,$true)
+        if ($terminalLifetime[0] -ne $creationFileTime -or
+            $terminalLifetime[1] -le $creationFileTime) {
+            throw 'Owned performance retained terminal lifetime is invalid.'
+        }
+    }
+    finally {
+        if (-not $lifetimeChild.HasExited) { $lifetimeChild.Kill(); $lifetimeChild.WaitForExit(5000) }
+        $lifetimeChild.Dispose()
+    }
+    }
     foreach ($method in @(
         'IsWindowEnabled',
         'IsMenuCommandEnabled',
@@ -3172,6 +3210,8 @@ try {
         -Appearance light -TextScalePercent 150 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     $candidatePerformanceInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidatePerformanceInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'performance-sample-v2-1366x768-96-text100-hidden-visible'
     $candidatePerformanceInput.request.mode = 'performance-sample'
     $candidatePerformanceInput.request.text_scale_percent = [long]100
     $candidatePerformanceInput.request.PSObject.Properties.Remove('layout_variant')
@@ -3187,6 +3227,7 @@ try {
         -Appearance light -TextScalePercent 100 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     $candidatePerformanceInput.request.performance_plan.long_path_order = 'visible-hidden'
+    $candidatePerformanceInput.run_id = 'performance-sample-v2-1366x768-96-text100-visible-hidden'
     Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
         -Verified $candidateRegressionResolved -RegressionMode performance-sample `
         -Appearance light -TextScalePercent 100 -HighContrast $false `
@@ -3199,6 +3240,7 @@ try {
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
     $candidatePerformanceInput.request.performance_plan.long_path_order = 'hidden-visible'
+    $candidatePerformanceInput.run_id = 'performance-sample-v2-1366x768-96-text100-hidden-visible'
     $candidatePerformanceInput.request.performance_plan.idle_seconds = 0
     Assert-Fails {
         Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `

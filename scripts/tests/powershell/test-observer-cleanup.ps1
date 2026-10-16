@@ -18,6 +18,297 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Execute the producer's initial owned lifetime branch with a native probe stub.
+# The separate Windows acceptance contract exercises the real retained handle.
+& {
+    $source = Join-Path $PSScriptRoot '../../modules/powershell/ui-context-scenarios.ps1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $definition = @($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Initialize-ObserverOwnedPerformanceLifetime'
+    },$true))
+    if ($errors.Count -or $definition.Count -ne 1) {
+        throw 'Owned performance producer initialization is missing.'
+    }
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    if ('DarkReNamerVmAcceptanceNative' -as [type]) {
+        throw 'Owned performance producer fixture requires an isolated native probe.'
+    }
+    Add-Type -TypeDefinition @'
+using System;
+public static class DarkReNamerVmAcceptanceNative {
+    public static int Calls;
+    public static long[] ReadPerformanceLifetime(IntPtr handle, uint pid, long expected, bool terminal) {
+        Calls++;
+        if (handle != new IntPtr(7) || pid != 42 || expected != 0 || terminal)
+            throw new InvalidOperationException("Producer initial lifetime arguments differ.");
+        return new long[] { 123456789000000000L, 0L };
+    }
+}
+'@
+    $application=[pscustomobject]@{
+        process=[pscustomobject]@{Handle=[IntPtr]7;Id=42}
+        owned=[ordered]@{process_start_time_utc_ticks=[long]628368021000000000}
+        process_lifecycle=[ordered]@{}
+    }
+    $observations=[ordered]@{}
+    $checkpoints=[Collections.Generic.List[object]]::new()
+    $creation=Initialize-ObserverOwnedPerformanceLifetime -Application $application `
+        -ObservationSink $observations -Checkpoints $checkpoints
+    if ($creation -ne 123456789000000000 -or
+        $application.process_lifecycle.creation_filetime -ne $creation -or
+        $observations.native_process_lifetime.pid -ne 42 -or
+        $checkpoints.Count -ne 1 -or
+        [DarkReNamerVmAcceptanceNative]::Calls -ne 1) {
+        throw 'Owned performance producer failed to bind initial retained lifetime.'
+    }
+}
+
+# The new performance cleanup path requires the same observed 100% text-scale
+# state in both snapshots before it can authorize either root deletion.
+& {
+    $source = Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    $definition = @($ast.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Assert-DrControllerOwnedPerformanceTextScale'
+    },$true))
+    if ($errors.Count -or $definition.Count -ne 1) { throw 'Owned restoration gate is missing.' }
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    $snapshot = [pscustomobject]@{
+        registry_key_existed=$true; registry_value_existed=$true
+        registry_value_kind='DWord'; registry_value=[long]100
+        ui_settings_raw_factor=[double]1.0; ui_settings_percent=100
+    }
+    $proof = [pscustomobject]@{text_scale_restoration=[pscustomobject]@{
+        schema_version=1; baseline=$snapshot; final=$snapshot.PSObject.Copy(); snapshot_equal=$true}}
+    Assert-DrControllerOwnedPerformanceTextScale -Observations $proof
+    foreach ($field in @('registry_value','registry_value_kind','ui_settings_raw_factor',
+            'ui_settings_percent','registry_value_existed')) {
+        $bad = $snapshot.PSObject.Copy()
+        switch ($field) {
+            'registry_value' { $bad.$field = [long]150 }
+            'registry_value_kind' { $bad.$field = 'String' }
+            'ui_settings_raw_factor' { $bad.$field = [double]1.5 }
+            'ui_settings_percent' { $bad.$field = 150 }
+            'registry_value_existed' { $bad.$field = $false }
+        }
+        $proof.text_scale_restoration.final = $bad
+        Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+            'Owned performance'
+    }
+    $proof.text_scale_restoration.final = $null
+    Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+        'Owned performance'
+    $proof.text_scale_restoration.final = $snapshot.PSObject.Copy()
+    $proof.text_scale_restoration.snapshot_equal = $false
+    Assert-Fails { Assert-DrControllerOwnedPerformanceTextScale -Observations $proof } `
+        'missing or incomplete'
+}
+
+# Exercise the controller-owned frozen file gate with real hash-bound files.
+& {
+    $source = Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+    foreach ($name in @('Assert-DrControllerOwnedPerformanceTextScale',
+                        'New-DrControllerOwnedPerformancePredelete',
+                        'Invoke-DrControllerBoundRootDelete')) {
+        $definition = @($ast.FindAll({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        },$true))
+        if ($errors.Count -or $definition.Count -ne 1) { throw "Controller gate $name is missing." }
+        . ([scriptblock]::Create($definition[0].Extent.Text))
+    }
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-owned-performance-' +
+        [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($root)
+    function Save-DrOwnedFixture {
+        param([string]$Name,[object]$Value)
+        $path = Join-Path $root $Name
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            ($Value | ConvertTo-Json -Depth 24 -Compress) + "`n")
+        [IO.File]::WriteAllBytes($path,$bytes)
+        [ordered]@{file=$Name;bytes=[long]$bytes.Length;
+            sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()}
+    }
+    try {
+        $run='DarkReNamerTests-' + ('a' * 32)
+        $runId='performance-sample-v2-owned-r3-1366x768-96-text100-hidden-visible'
+        $vm='11111111-2222-3333-4444-555555555555'
+        $nonce='b' * 32; $leaseId='c' * 32; $sourceSha='d' * 40
+        $profileSha='11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f'
+        $appSha='e' * 64
+        $baseId='3'*48
+        $roots=[ordered]@{
+            guest=[ordered]@{file_id='1'*48;base_file_id=$baseId;
+                path="C:\ProgramData\DarkReNamerVmRuns\$run"}
+            trusted=[ordered]@{file_id='2'*48;base_file_id=$baseId;
+                path="C:\ProgramData\DarkReNamerVmRuns\$run-trusted"}
+        }
+        $profilePath = Join-Path $root 'owned-performance-profile.json'
+        [IO.File]::Copy((Join-Path $PSScriptRoot '../../../config/vm-automated-v2.json'),$profilePath)
+        $profileRef=[ordered]@{file='owned-performance-profile.json';
+            bytes=(Get-Item $profilePath).Length;
+            sha256=(Get-FileHash $profilePath -Algorithm SHA256).Hash.ToLowerInvariant()}
+        if ($profileRef.sha256 -cne $profileSha) { throw 'Owned test profile bytes changed.' }
+        $bundleRef=Save-DrOwnedFixture 'bundle.json' @{source_sha=$sourceSha}
+        $text=[ordered]@{registry_key_existed=$true;registry_value_existed=$true;
+            registry_value_kind='DWord';registry_value=[long]100;
+            ui_settings_raw_factor=[double]1.0;ui_settings_percent=100}
+        $observations=[ordered]@{run_id=$runId;text_scale_restoration=[ordered]@{
+            schema_version=1;baseline=$text;final=$text;snapshot_equal=$true}}
+        $observationRef=Save-DrOwnedFixture 'acceptance-observations.json' $observations
+        $resultRef=Save-DrOwnedFixture 'acceptance-result.json' ([ordered]@{
+            source_sha=$sourceSha;application=@{sha256=$appSha};
+            observations=@{sha256=$observationRef.sha256};acceptance_observations=$observations})
+        $inputRef=Save-DrOwnedFixture 'owned-performance-input-manifest.json' ([ordered]@{
+            run_id=$runId;source_sha=$sourceSha;bundle_manifest=@{sha256=$bundleRef.sha256};
+            acceptance_profile_id='vm-automated-v2-owned-resources';
+            acceptance_profile_sha256=$profileSha;acceptance_profile=@{sha256=$profileSha};
+            request=@{mode='performance-sample';performance_plan=@{long_path_order='hidden-visible'}};
+            artifacts=@{application=@{sha256=$appSha}}})
+        $transportRef=Save-DrOwnedFixture 'original-transport.json' ([ordered]@{
+            status='failed';task_kind='ui';owned_cleanup_failure_context=[ordered]@{
+                acceptance_mode='performance-sample';source_sha=$sourceSha;
+                bundle=$bundleRef;root_records=$roots;output_preservation_verified=$true;
+                source_result=$resultRef}})
+        $fileRefs=@($transportRef,$resultRef,$observationRef,$inputRef,$profileRef,$bundleRef)
+        $receiptPath=Join-Path $root 'owned-cleanup-strict-failure-preservation.json'
+        $receiptRef=Save-DrOwnedFixture 'owned-cleanup-strict-failure-preservation.json' ([ordered]@{
+            schema_version=3;kind='owned_cleanup_strict_failure_preservation';
+            run_name=$run;vm_id=$vm;nonce=$nonce;desktop_lease_id=$leaseId;
+            profile_id='vm-automated-v2-owned-resources';profile_sha256=$profileSha;
+            root_records=$roots;original_transport=$transportRef;files=$fileRefs})
+        $signalRef=Save-DrOwnedFixture 'owned-cleanup-desktop-closed.json' ([ordered]@{
+            nonce=$nonce;preservation_sha256=$receiptRef.sha256})
+        $leaseRef=Save-DrOwnedFixture 'desktop-lease.json' ([ordered]@{
+            lease_id=$leaseId;stop_status='stopped';cleanup_observed=$true})
+        $arguments=@{OutputRoot=$root;PreservationPath=$receiptPath;
+            TransportPath=(Join-Path $root 'original-transport.json');
+            SignalPath=(Join-Path $root 'owned-cleanup-desktop-closed.json');
+            LeasePath=(Join-Path $root 'desktop-lease.json');RunName=$run;VmId=$vm;
+            Nonce=$nonce;LeaseId=$leaseId;SourceSha=$sourceSha;
+            BundleSha256=$bundleRef.sha256;ProfileSha256=$profileSha}
+        $accepted=New-DrControllerOwnedPerformancePredelete @arguments
+        if ($accepted.kind -cne 'owned_performance_predelete_restoration' -or
+            $accepted.files['acceptance-observations.json'].sha256 -cne $observationRef.sha256 -or
+            $accepted.files['desktop-lease.json'].sha256 -cne $leaseRef.sha256 -or
+            $accepted.files['owned-cleanup-desktop-closed.json'].sha256 -cne $signalRef.sha256) {
+            throw 'Controller pre-delete gate did not bind the accepted frozen files.'
+        }
+        $guestGuard=[pscustomobject]@{}
+        $trustedGuard=[pscustomobject]@{}
+        $guestGuard | Add-Member -MemberType ScriptMethod -Name Delete -Value {
+            $script:guestDeleteCalls++
+        }
+        $trustedGuard | Add-Member -MemberType ScriptMethod -Name Delete -Value {
+            $script:trustedDeleteCalls++
+        }
+        $v2Evidence=[pscustomobject]@{protected_anchor=[pscustomobject]@{
+            source_sha=$sourceSha;bundle_sha256=$bundleRef.sha256}}
+        $guestArguments=@{GuestGuard=$guestGuard;TrustedGuard=$trustedGuard;
+            RequireOwnedPerformance=$true;Name=$run;ActualVmId=$vm;
+            ExpectedNonce=$nonce;ExpectedLeaseId=$leaseId;
+            ProfileSha256=$profileSha;V2Evidence=$v2Evidence;Roots=$roots}
+        $acceptedJson=$accepted | ConvertTo-Json -Depth 24 -Compress
+        $acceptedHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false).GetBytes($acceptedJson))).ToLowerInvariant()
+        $script:guestDeleteCalls=0; $script:trustedDeleteCalls=0
+        $verifiedHash=Invoke-DrControllerBoundRootDelete @guestArguments `
+            -PredeleteJson $acceptedJson -PredeleteSha256 $acceptedHash
+        if ($verifiedHash -cne $acceptedHash -or
+            $script:guestDeleteCalls -ne 1 -or $script:trustedDeleteCalls -ne 1) {
+            throw 'Coherent guest pre-delete receipt did not authorize both root guards once.'
+        }
+        foreach ($mutation in @('missing','stale-hash','wrong-profile','wrong-lease',
+            'wrong-root','wrong-source','missing-file')) {
+            $script:guestDeleteCalls=0; $script:trustedDeleteCalls=0
+            $bad=$acceptedJson | ConvertFrom-Json
+            $caseArguments=$guestArguments.Clone()
+            switch ($mutation) {
+                'wrong-profile' { $bad.profile_sha256='0'*64 }
+                'wrong-lease' { $bad.desktop_lease_id='0'*32 }
+                'wrong-root' { $bad.roots.guest.file_id='0'*48 }
+                'wrong-source' { $bad.source_sha='0'*40 }
+                'missing-file' { $bad.files.PSObject.Properties.Remove('desktop-lease.json') }
+            }
+            $badJson=$bad | ConvertTo-Json -Depth 24 -Compress
+            $badHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                [Text.UTF8Encoding]::new($false).GetBytes($badJson))).ToLowerInvariant()
+            if ($mutation -ceq 'missing') { $badJson=$null; $badHash=$null }
+            if ($mutation -ceq 'stale-hash') { $badHash='0'*64 }
+            Assert-Fails {
+                Invoke-DrControllerBoundRootDelete @caseArguments `
+                    -PredeleteJson $badJson -PredeleteSha256 $badHash
+            } 'Owned performance'
+            if ($script:guestDeleteCalls -ne 0 -or $script:trustedDeleteCalls -ne 0) {
+                throw "Rejected $mutation receipt invoked a root guard Delete."
+            }
+        }
+        foreach ($mutation in @('missing-final','stale-observation','wrong-profile','wrong-lease',
+                                'missing-receipt')) {
+            $path=if ($mutation -ceq 'wrong-profile') { $profilePath }
+                elseif ($mutation -ceq 'wrong-lease') { Join-Path $root 'desktop-lease.json' }
+                elseif ($mutation -ceq 'missing-receipt') { $receiptPath }
+                else { Join-Path $root 'acceptance-observations.json' }
+            $original=[IO.File]::ReadAllBytes($path)
+            try {
+                if ($mutation -ceq 'missing-receipt') { [IO.File]::Delete($path) }
+                elseif ($mutation -ceq 'missing-final') {
+                    $changed=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+                    $changed.text_scale_restoration.final=$null
+                    [void](Save-DrOwnedFixture 'acceptance-observations.json' $changed)
+                }
+                else { [IO.File]::AppendAllText($path,'changed') }
+                Assert-Fails { New-DrControllerOwnedPerformancePredelete @arguments } `
+                    ''
+            }
+            finally { [IO.File]::WriteAllBytes($path,$original) }
+        }
+        # Rehash every dependent layer so rejection reaches the controller's
+        # own snapshot predicate instead of stopping at a stale file digest.
+        $changed=Get-Content -LiteralPath (Join-Path $root 'acceptance-observations.json') -Raw |
+            ConvertFrom-Json
+        $changed.text_scale_restoration.final.registry_value=[long]150
+        $changedObservationRef=Save-DrOwnedFixture 'acceptance-observations.json' $changed
+        $changedResult=Get-Content -LiteralPath (Join-Path $root 'acceptance-result.json') -Raw |
+            ConvertFrom-Json
+        $changedResult.observations.sha256=$changedObservationRef.sha256
+        $changedResult.acceptance_observations=$changed
+        $changedResultRef=Save-DrOwnedFixture 'acceptance-result.json' $changedResult
+        $changedTransport=Get-Content -LiteralPath (Join-Path $root 'original-transport.json') -Raw |
+            ConvertFrom-Json
+        $changedTransport.owned_cleanup_failure_context.source_result=$changedResultRef
+        $changedTransportRef=Save-DrOwnedFixture 'original-transport.json' $changedTransport
+        $changedReceipt=Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+        $changedReceipt.original_transport=$changedTransportRef
+        $changedReceipt.files=@($changedTransportRef,$changedResultRef,$changedObservationRef,
+            $inputRef,$profileRef,$bundleRef)
+        $changedReceiptRef=Save-DrOwnedFixture 'owned-cleanup-strict-failure-preservation.json' $changedReceipt
+        $changedSignal=Get-Content -LiteralPath (Join-Path $root 'owned-cleanup-desktop-closed.json') -Raw |
+            ConvertFrom-Json
+        $changedSignal.preservation_sha256=$changedReceiptRef.sha256
+        [void](Save-DrOwnedFixture 'owned-cleanup-desktop-closed.json' $changedSignal)
+        Assert-Fails { New-DrControllerOwnedPerformancePredelete @arguments } `
+            'not coherent 100 percent'
+        $body=(Get-Content -LiteralPath $source -Raw)
+        $gateAt=$body.IndexOf('$predelete = New-DrControllerOwnedPerformancePredelete')
+        $invokeAt=$body.IndexOf('$proof = Invoke-DrControllerOwnedCleanupAfterFailure')
+        $finalizerAt=$body.IndexOf('function Invoke-DrControllerBoundRootDelete')
+        $guestDeleteAt=$body.IndexOf('$GuestGuard.Delete()')
+        $trustedDeleteAt=$body.IndexOf('$TrustedGuard.Delete()')
+        if ($gateAt -lt 0 -or $gateAt -ge $invokeAt -or $finalizerAt -lt 0 -or
+            $finalizerAt -ge $guestDeleteAt -or $guestDeleteAt -ge $trustedDeleteAt) {
+            throw 'Owned performance deletion no longer follows both frozen gates.'
+        }
+    }
+    finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+
 # Reject case variants at real public boundaries before source or VM acquisition.
 foreach ($entry in @(
     @{file='run-windows-vm-tests.ps1';args=@{BundleRoot='unused';SshHost='fixture'}},

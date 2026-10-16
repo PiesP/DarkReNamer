@@ -1735,6 +1735,215 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "full-operation timing"):
             evidence.validate_performance_metrics(scenario)
 
+    def owned_run(self):
+        run_id = evidence.owned_performance_run_id('hidden-visible')
+        run = self.fixture.build(run_id, 'standard')
+        output = run / 'output'
+        profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+        profile_sha = digest(profile)
+        (run / 'inputs/vm-automated-v2.json').write_bytes(profile)
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(acceptance_profile_id=evidence.V2_PROFILE_ID,
+                        acceptance_profile_sha256=profile_sha,
+                        acceptance_profile={'file': 'inputs/vm-automated-v2.json',
+                                            'bytes': len(profile), 'sha256': profile_sha})
+        manifest['request'] = {'mode': evidence.PERFORMANCE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'performance_plan': {**deepcopy(evidence.PERFORMANCE_PLAN),
+                                 'long_path_order': 'hidden-visible'}}
+        manifest['command'] = ['python3', '-I', 'scripts/run-gui-regression.py',
+            '--output-root', '<external-output-root>', '--connection-profile',
+            '<private-connection-profile>', '--diagnostic', evidence.PERFORMANCE_MODE,
+            '--performance-column-order', 'hidden-visible', '--acceptance-profile-id',
+            evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        (output / 'screen.png').rename(output / 'performance-empty.png')
+        (output / 'text-raster-metrics.json').unlink()
+        ticks = 638965440000000000
+        filetime = ticks - 504911232000000000
+        job = deepcopy(clean_controller_cleanup_v2()['owned_resource_evidence']['process_job_cleanup'][0])
+        job.update(pid=4242, process_start_time_utc_ticks=str(ticks))
+        cleanup = clean_controller_cleanup_v3(profile_sha256=profile_sha,
+            process_jobs=[job], source_sha=SOURCE,
+            bundle_sha256=manifest['bundle_manifest']['sha256'])
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport.update(raw_cleanup=cleanup,
+                         vm_id=cleanup['owned_resource_evidence']['protected_anchor']['vm_id'],
+                         desktop_lease_id='a' * 32)
+        GuiEvidenceTests.bind_v2_fixture_vm(run, manifest, transport)
+        write_json(transport_path, transport)
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        baseline = raw['assertions']['scenario']
+        baseline['environment']['main_window'] = {'hwnd': 1001, 'process_id': 4242}
+        scenario = self.sample_scenario()
+        scenario.update(mode=evidence.PERFORMANCE_MODE, appearance='light',
+            process_id=4242, process_start_utc_ticks=ticks,
+            executable_sha256=manifest['artifacts']['application']['sha256'],
+            executable_bytes=849408, environment=baseline['environment'],
+            native_process_lifetime={'pid': 4242, 'creation_filetime': filetime,
+                'checkpoints': [{'phase': phase, 'creation_filetime': filetime}
+                    for phase in ('pre-work', 'idle', 'ordinary-10000', 'post')],
+                'terminal_exit_filetime': filetime + 5_000_000})
+        raw.update(assertions={'overall': 'passed', 'scope': 'performance-sample-p1-p3-v2',
+                               'scenario': scenario},
+                   process_cleanup=True,
+                   process_lifecycles=[{'process_lifecycle': {
+                       'pid': 4242, 'session_id': 2, 'start_time_utc_ticks': str(ticks),
+                       'creation_filetime': filetime, 'executable_path': r'C:\fixture\DarkReNamer.exe',
+                       'executable_sha256': manifest['artifacts']['application']['sha256'],
+                       'start_observed': True, 'exit_observed': True,
+                       'exit_method': 'normal-close', 'exit_code': 0}}],
+                   process_job_cleanup=cleanup['owned_resource_evidence']['process_job_cleanup'],
+                   observer_lifecycle=cleanup['owned_resource_evidence']['task_execution']['observer_lifecycle'],
+                   screenshots=[{'file': 'performance-empty.png',
+                       'sha256': digest((output / 'performance-empty.png').read_bytes())}])
+        write_json(raw_path, raw)
+        observations_path = output / 'acceptance-observations.json'
+        observations = json.loads(observations_path.read_text())
+        text_snapshot = {'registry_key_existed': True, 'registry_value_existed': True,
+            'registry_value_kind': 'DWord', 'registry_value': 100,
+            'ui_settings_raw_factor': 1.0, 'ui_settings_percent': 100}
+        observations['text_scale_restoration'] = {'schema_version': 1,
+            'baseline': text_snapshot, 'final': deepcopy(text_snapshot), 'snapshot_equal': True}
+        write_json(observations_path, observations)
+        lease = {'schema_version': 1, 'mode': 'managed-rdp', 'lease_id': 'a' * 32,
+            'requested_scale': 100, 'requested_width': 1366, 'requested_height': 768,
+            'expected_dpi': 96, 'start_status': 'ready', 'stop_status': 'stopped',
+            'cleanup_observed': True}
+        write_json(output / 'desktop-lease.json', lease)
+        write_json(output / 'desktop-start-response.json', {'status': 'ready',
+            'leaseId': 'a' * 32, 'processId': 9001,
+            'expectedGuestSid': cleanup['owned_resource_evidence']['runner_sid'],
+            'expectedDpi': 96, 'expectedDesktopWidth': 1366,
+            'expectedDesktopHeight': 768})
+        write_json(output / 'desktop-stop-response.json', {'status': 'stopped',
+            'lifecycleStatus': 'closed', 'leaseId': 'a' * 32, 'processId': 9001})
+        self.refresh_owned(run)
+        return run, profile_sha
+
+    def refresh_owned(self, run):
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        self.fixture.refresh(run)
+        manifest = json.loads(manifest_path.read_text())
+        raw_path = output / 'acceptance-result.json'
+        result = {'schema_version': 1, 'diagnostic': evidence.PERFORMANCE_MODE,
+            'run_id': run.name, 'input_manifest_sha256': digest(manifest_path.read_bytes()),
+            'collection_sha256': digest((run / 'collection.json').read_bytes()),
+            'cleanup_sha256': digest((output / 'cleanup.json').read_bytes()),
+            'source_sha': SOURCE,
+            'application_sha256': manifest['artifacts']['application']['sha256'],
+            'observer_sha256': manifest['artifacts']['observer']['sha256'],
+            'observer_result_sha256': digest(raw_path.read_bytes()),
+            'status': 'review_required', 'exit_code': 0}
+        write_json(output / 'run-result.json', result)
+
+    def test_owned_run_requires_exact_profile_lifetime_job_desktop_and_text(self):
+        run, profile_sha = self.owned_run()
+        verdict = evidence.validate_performance_run(self.root, run.name, SOURCE,
+                                                     expected_profile_sha256=profile_sha)
+        self.assertEqual(verdict['owned_cleanup'], 'owned-clean')
+        self.assertEqual(verdict['observation'], 'complete')
+        cleanup = json.loads((run / 'output/transport.json').read_text())['raw_cleanup']
+        for phase, suffix in (('before', ''), ('after_intervention', '_after_intervention'),
+                              ('after_delete', '_after_delete')):
+            ledger = verdict['ambient_delta_ledger'][phase]
+            self.assertEqual(ledger['processes'], cleanup['unexpected_runner_processes' + suffix])
+            self.assertEqual(ledger['tasks'], cleanup['unexpected_runner_tasks' + suffix])
+            self.assertEqual(verdict['ambient_delta_counts'][phase],
+                             {kind: len(rows) for kind, rows in ledger.items()})
+
+    def test_owned_adapter_rejects_rehashed_lifetime_job_lease_text_and_cleanup_mutations(self):
+        mutations = (
+            ('native-filetime', 'acceptance-result.json',
+             lambda d: d['assertions']['scenario']['native_process_lifetime'].__setitem__(
+                 'creation_filetime', d['assertions']['scenario']['native_process_lifetime'][
+                     'creation_filetime'] + 1)),
+            ('native-terminal', 'acceptance-result.json',
+             lambda d: d['assertions']['scenario']['native_process_lifetime'].__setitem__(
+                 'terminal_exit_filetime', 0)),
+            ('candidate-job', 'acceptance-result.json',
+             lambda d: d['process_job_cleanup'][0].__setitem__('forced_termination', True)),
+            ('extra-job', 'acceptance-result.json',
+             lambda d: d['process_job_cleanup'].append(deepcopy(d['process_job_cleanup'][0]))),
+            ('observer-lifetime', 'acceptance-result.json',
+             lambda d: d['observer_lifecycle'].__setitem__('pid', 9)),
+            ('desktop-stop', 'desktop-stop-response.json',
+             lambda d: d.__setitem__('lifecycleStatus', 'pending')),
+            ('desktop-lease', 'desktop-lease.json',
+             lambda d: d.__setitem__('lease_id', 'f' * 32)),
+            ('desktop-start', 'desktop-start-response.json',
+             lambda d: d.__setitem__('processId', 9002)),
+            ('text-registry', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration']['final'].__setitem__('registry_value', 150)),
+            ('text-integer-factor', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration']['final'].__setitem__('ui_settings_raw_factor', 1)),
+            ('text-missing-final', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration'].__setitem__('final', None)),
+            ('root-survivor', 'transport.json',
+             lambda d: d['raw_cleanup'].__setitem__('guest_root_present', True)),
+            ('ambient-duplicate', 'transport.json',
+             lambda d: d['raw_cleanup']['owned_resource_evidence']['process_snapshots'][
+                 'after_delete']['processes'].append(deepcopy(d['raw_cleanup'][
+                     'owned_resource_evidence']['process_snapshots']['after_delete']['processes'][0]))),
+        )
+        for label, leaf, mutate in mutations:
+            with self.subTest(label=label):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                path = run / 'output' / leaf
+                document = json.loads(path.read_text())
+                mutate(document)
+                write_json(path, document)
+                self.refresh_owned(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_manifest_rejects_cross_route_plan_and_profile(self):
+        mutations = (
+            lambda d: d['request']['performance_plan'].__setitem__('idle_seconds', 29),
+            lambda d: d['request']['performance_plan'].__setitem__('long_path_order', 'visible-hidden'),
+            lambda d: d['request']['desktop'].__setitem__('dpi', 120),
+            lambda d: d.__setitem__('acceptance_profile_sha256', '0' * 64),
+            lambda d: d['command'].remove('--acceptance-profile-id'),
+            lambda d: d.__setitem__('run_id', evidence.performance_run_id('hidden-visible')),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                manifest_path = run / 'input-manifest.json'
+                manifest = json.loads(manifest_path.read_text())
+                mutate(manifest)
+                write_json(manifest_path, manifest)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_new_id_enforces_collection_budget_and_one_png(self):
+        for extra_name, size in (('second.png', 1), ('oversize.bin', 33 * 1024 * 1024)):
+            with self.subTest(extra_name=extra_name):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                with (run / 'output' / extra_name).open('wb') as stream:
+                    stream.truncate(size)
+                self.refresh_owned(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_missing_desktop_stop_cannot_be_promoted_by_cleanup_boolean(self):
+        run, profile_sha = self.owned_run()
+        (run / 'output/desktop-stop-response.json').unlink()
+        self.refresh_owned(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_performance_run(self.root, run.name, SOURCE,
+                expected_profile_sha256=profile_sha)
+
 
 class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
     TOOLING_SOURCE = "c" * 40
