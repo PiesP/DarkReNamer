@@ -2,6 +2,8 @@
 """Synthetic scheduled Rust audit behavior and workflow policy checks."""
 
 import importlib.util
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tooling_test_paths import REPOSITORY_ROOT
 
@@ -273,6 +276,94 @@ class AuditResultTests(unittest.TestCase):
         self.assertIn("registry-index data unavailable", result)
 
 
+class VerifiedToolPathsTests(unittest.TestCase):
+    def run_fixture(self, mode: str = "clean", *, paths: str = "absolute") -> tuple[int, str, list[list[str]]]:
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-verified-audit-test-") as directory:
+            root = Path(directory)
+            summary = root / "summary.md"
+            tools = root / "verified-release-tools" / "tools"
+            calls: list[list[str]] = []
+
+            def scanner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(arguments)
+                binary = Path(arguments[0]).stem
+                self.assertEqual(Path(arguments[0]).parent, tools)
+                self.assertTrue(arguments[0].endswith(".exe"))
+                if arguments[1:] == ["--version"]:
+                    if binary == "cargo-deny" and mode == "missing":
+                        return subprocess.CompletedProcess(arguments, 127, "", "missing executable")
+                    version = "0.22.2" if binary == "cargo-audit" else "0.20.2"
+                    if binary == "cargo-deny" and mode == "version":
+                        version = "wrong"
+                    return subprocess.CompletedProcess(arguments, 0, f"{binary} {version}\n", "")
+                if binary == "cargo-audit":
+                    report = {"vulnerabilities": {"count": 0, "list": []}, "warnings": {}}
+                    return subprocess.CompletedProcess(arguments, 0, json.dumps(report), "")
+                if arguments[1:] == ["fetch", "db"]:
+                    return subprocess.CompletedProcess(arguments, int(mode == "refresh"), "", "refresh diagnostic")
+                output = json.dumps(SUMMARY)
+                if mode == "empty":
+                    output = ""
+                elif mode == "partial":
+                    output = json.dumps({"type": "summary", "fields": {"advisories": SUMMARY["fields"]["advisories"]}})
+                elif mode == "duplicate":
+                    output += "\n" + output
+                elif mode == "index":
+                    output += "\n" + json.dumps({"type": "diagnostic", "fields": {
+                        "severity": "warning", "message": "index unavailable", "code": "index-failure",
+                    }})
+                elif mode == "malformed":
+                    output = "not-json"
+                else:
+                    output += "\n" + json.dumps(LOGGER) + "\n" + json.dumps(NONERROR)
+                diagnostic = {"type": "log", "fields": {
+                    "timestamp": "2026-10-18T00:00:00Z", "level": "WARN", "message": "retained diagnostic",
+                }}
+                return subprocess.CompletedProcess(arguments, int(mode == "exit"), output, json.dumps(diagnostic) + "\n")
+
+            arguments = ["--cargo-audit", str(tools / "cargo-audit.exe"),
+                         "--cargo-deny", str(tools / "cargo-deny.exe")]
+            if paths == "relative":
+                arguments[1] = "cargo-audit.exe"
+            elif paths == "incomplete":
+                arguments = arguments[:2]
+            environment = {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "b" * 40,
+                           "RUNNER_TEMP": str(root), "SECURITY_TOOLS_ROOT": str(root / "unused-decoy")}
+            stdout, stderr = StringIO(), StringIO()
+            with mock.patch.dict(os.environ, environment), mock.patch.object(AUDIT, "command", side_effect=scanner), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = AUDIT.main(arguments)
+            if paths == "absolute" and mode not in ("refresh", "missing", "version"):
+                self.assertIn("retained diagnostic", stderr.getvalue())
+            self.assertEqual(list(root.glob("darkrenamer-rust-audit-*")), [])
+            return result, summary.read_text(encoding="utf-8"), calls
+
+    def test_verified_exe_layout_uses_explicit_paths_and_shared_clean_verdict(self) -> None:
+        result, summary, calls = self.run_fixture()
+        self.assertEqual(result, 0)
+        self.assertIn("Result: clean", summary)
+        self.assertEqual([call[1:] for call in calls if Path(call[0]).stem == "cargo-deny"], [
+            ["--version"], ["fetch", "db"], ["--format", "json", "--locked", "check"],
+        ])
+        self.assertIn("Source: `" + "b" * 40 + "`", summary)
+
+    def test_verified_exe_layout_rejects_incomplete_data_and_tool_failures(self) -> None:
+        for mode in ("empty", "partial", "duplicate", "index", "malformed", "refresh", "exit", "missing", "version"):
+            with self.subTest(mode=mode):
+                result, summary, _ = self.run_fixture(mode)
+                self.assertEqual(result, 1)
+                self.assertIn("failed or incomplete", summary)
+                self.assertNotIn("Result: clean", summary)
+
+    def test_explicit_paths_cannot_fall_back_to_ambient_binaries(self) -> None:
+        for paths in ("relative", "incomplete"):
+            with self.subTest(paths=paths):
+                result, summary, calls = self.run_fixture(paths=paths)
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertIn("tool failure", summary)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX executable fixtures; Windows runs verified-path and shared-verdict controls")
 class ScheduledRustAuditTests(unittest.TestCase):
     def run_fixture(self, **modes: str) -> tuple[subprocess.CompletedProcess[str], str, list[dict]]:
         with tempfile.TemporaryDirectory(prefix="darkrenamer-scheduled-audit-test-") as directory:
@@ -477,8 +568,15 @@ class ScheduledRustAuditTests(unittest.TestCase):
         self.assertNotIn('continue-on-error', ci_security)
         self.assertNotIn('"$SECURITY_TOOLS_ROOT/bin/cargo-audit" audit', ci_security)
         self.assertNotIn('"$SECURITY_TOOLS_ROOT/bin/cargo-deny" check', ci_security)
-        self.assertIn("cargo audit --deny warnings", release)
-        self.assertIn("cargo deny check", release)
+        self.assertIn('& $python -I ./scripts/run-scheduled-rust-audit.py', release)
+        self.assertIn("--cargo-audit (Join-Path $tools 'cargo-audit.exe')", release)
+        self.assertIn("--cargo-deny (Join-Path $tools 'cargo-deny.exe')", release)
+        self.assertIn("verified-release-tools/tools", release)
+        self.assertIn("sys.version_info >= (3, 11)", release)
+        self.assertIn('if ($LASTEXITCODE -ne 0)', release)
+        self.assertNotIn("continue-on-error", release)
+        self.assertNotIn("cargo audit --deny warnings", release)
+        self.assertNotIn("cargo deny check", release)
         self.assertIn("language: [rust, python, actions]", workflow)
 
 
