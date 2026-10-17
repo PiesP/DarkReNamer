@@ -8,6 +8,8 @@ struct Workflow {
     triggers: BTreeMap<String, Option<Dispatch>>,
     #[serde(default)]
     permissions: BTreeMap<String, String>,
+    #[serde(default)]
+    env: BTreeMap<String, Scalar>,
     concurrency: Option<Concurrency>,
     jobs: BTreeMap<String, Job>,
 }
@@ -61,6 +63,8 @@ struct Job {
     runs_on: String,
     #[serde(default)]
     permissions: BTreeMap<String, String>,
+    #[serde(default)]
+    env: BTreeMap<String, Scalar>,
     environment: Option<Environment>,
     strategy: Option<serde::de::IgnoredAny>,
     #[serde(default)]
@@ -84,6 +88,7 @@ struct Step {
     #[serde(rename = "continue-on-error")]
     continue_on_error: Option<Scalar>,
     uses: Option<String>,
+    shell: Option<String>,
     run: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, Scalar>,
@@ -237,6 +242,8 @@ fn step_condition(path: &str, step: &Step, expected: Option<&str>) -> Result<(),
 
 pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String> {
     const PATH: &str = ".github/workflows/ci.yaml";
+    const TOOLING_SCOPE: &str =
+        "${{ github.event_name == 'workflow_dispatch' && 'All' || 'Current' }}";
     const FULL: &str = "${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}";
     const FULL_AFTER_INVENTORY: &str = "${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}";
     const DOCS: &str = "${{ !cancelled() && steps.checkout.outcome == 'success' && needs.classify.result == 'success' && needs.classify.outputs.docs_only == 'true' }}";
@@ -252,6 +259,16 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
         format!("{PATH} must retain push, PR, merge queue, and manual triggers"),
     )?;
     permissions(PATH, &workflow.permissions, &[("contents", "read")])?;
+    require(
+        workflow.env.len() == 1
+            && workflow
+                .env
+                .get("TOOLING_TEST_SCOPE")
+                .map(Scalar::text)
+                .as_deref()
+                == Some(TOOLING_SCOPE),
+        format!("{PATH} must select All for manual tooling runs and Current otherwise"),
+    )?;
     require(
         workflow
             .concurrency
@@ -386,6 +403,25 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
     }
 
     let quality = workflow.jobs.get("quality").ok_or("missing quality job")?;
+    for (job, platform) in [
+        (quality, "Ubuntu"),
+        (
+            workflow.jobs.get("windows").ok_or("missing Windows job")?,
+            "Windows",
+        ),
+    ] {
+        let tooling = named_step(PATH, job, "Test tooling")?;
+        let command = format!(
+            "./scripts/test-tooling.ps1 -Platform {platform} -Scope $env:TOOLING_TEST_SCOPE"
+        );
+        require(
+            !job.env.contains_key("TOOLING_TEST_SCOPE")
+                && !tooling.env.contains_key("TOOLING_TEST_SCOPE")
+                && tooling.shell.as_deref() == Some("pwsh")
+                && tooling.run.as_deref().map(str::trim) == Some(command.as_str()),
+            format!("{PATH} must run {platform} tooling with the workflow-selected scope"),
+        )?;
+    }
     let inventory = named_step(PATH, quality, "Enforce the Rust-only source tree")?;
     require(
         inventory.id.as_deref() == Some("inventory"),
@@ -448,20 +484,6 @@ fn is_hosted_windows_runner(label: &str) -> bool {
             .strip_prefix("windows-")
             .and_then(|year| year.parse::<u16>().ok())
             .is_some_and(|year| year >= 2022)
-}
-
-fn simple_command(job: &Job, expected: &[&str]) -> bool {
-    job.steps
-        .iter()
-        .filter_map(|step| step.run.as_deref())
-        .any(|run| {
-            let lines = run
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>();
-            lines.len() == 1 && lines[0].split_whitespace().eq(expected.iter().copied())
-        })
 }
 
 fn actions<'a>(job: &'a Job, name: &str) -> Vec<&'a Step> {
@@ -879,23 +901,11 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
                 .jobs
                 .get("quality")
                 .ok_or_else(|| format!("{path} must retain its Ubuntu quality job"))?;
-            let windows = workflow
-                .jobs
-                .get("windows")
-                .ok_or_else(|| format!("{path} must retain its Windows job"))?;
             validate_ci_docs_routing_source(source)?;
             action_policy(path, quality, &["actions/checkout"])?;
             require(
-                quality.runs_on.starts_with("ubuntu-")
-                    && simple_command(
-                        quality,
-                        &["./scripts/test-tooling.ps1", "-Platform", "Ubuntu"],
-                    )
-                    && simple_command(
-                        windows,
-                        &["./scripts/test-tooling.ps1", "-Platform", "Windows"],
-                    ),
-                format!("{path} must run the tooling suite on Ubuntu and Windows"),
+                quality.runs_on.starts_with("ubuntu-"),
+                format!("{path} must retain its hosted Ubuntu tooling lane"),
             )?;
         }
         let job = workflow
