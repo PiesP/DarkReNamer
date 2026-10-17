@@ -68,8 +68,9 @@ contract; the pre-retirement revision is a reproduction entrypoint, not a claim
 that old evidence belongs to that source.
 
 Current campaign observers, v1/v2 profiles and independent verification remain
-active. GUI regression and Wine gallery tests remain opt-in with
-`-Scope Diagnostics`; see [Tooling tests](../../DEVELOPMENT.md#tooling-tests).
+active. GUI regression tests remain opt-in with `-Scope Diagnostics`; see
+[Tooling tests](../../DEVELOPMENT.md#tooling-tests). The retired Wine gallery
+is available only from the [pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/9df4d79e3891a1db6a5c4b6ff6ec63e7d4306ae5).
 
 Evidence files, screenshots, traces, benchmark roots, operator or machine
 identities, local paths, volume serials, and detailed narratives remain outside
