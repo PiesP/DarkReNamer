@@ -64,7 +64,6 @@ SUPPORTED_ROLES = MappingProxyType({
     "evidence-errors": ("python", "darkrenamer_tooling.evidence.errors"),
     "evidence-gui": ("python", "darkrenamer_tooling.evidence.gui"),
     "evidence-cli": ("python", "darkrenamer_tooling.evidence.cli"),
-    "powershell-common": ("powershell", None),
     "powershell-loader": ("powershell", None),
     "powershell-guest-contracts": ("powershell", None),
     "powershell-guest-process": ("powershell", None),
@@ -101,10 +100,6 @@ SUPPORTED_ROLES = MappingProxyType({
     "powershell-controller-poll": ("powershell", None),
     "powershell-controller-rescue": ("powershell", None),
     "powershell-controller-entry": ("powershell", None),
-    "powershell-guest": ("powershell", None),
-    "powershell-ui-observer": ("powershell", None),
-    "powershell-recovery-observer": ("powershell", None),
-    "release-tooling": ("powershell", None),
 })
 
 _ENTRY_KEYS = frozenset(
