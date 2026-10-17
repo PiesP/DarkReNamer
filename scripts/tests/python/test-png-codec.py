@@ -16,6 +16,7 @@ import zlib
 from tooling_test_paths import SCRIPT_ROOT
 from darkrenamer_tooling.formats import png as codec
 from darkrenamer_tooling.evidence import png as evidence
+from png_fixture import PNG_SIGNATURE, png_bytes, png_chunk
 
 
 RGB_POLICY = codec.PngPolicy(
@@ -23,15 +24,6 @@ RGB_POLICY = codec.PngPolicy(
     maximum_compressed_bytes=128 * 1024 * 1024, maximum_dimension=8192,
     maximum_decoded_bytes=128 * 1024 * 1024,
 )
-
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-def png_chunk(kind, payload, *, checksum=None):
-    if checksum is None:
-        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
 
 def paeth(left, above, upper_left):
     predictor = left + above - upper_left
@@ -56,18 +48,6 @@ def encode_filtered_rows(rows, channels, filters):
             encoded.append((value - predictor) & 0xFF)
         previous = row
     return bytes(encoded)
-
-
-def png_bytes(width, height, color_type, filtered, *, compressed=None,
-              before_idat=(), after_idat=(), include_iend=True,
-              iend_payload=b"", trailing=b""):
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
-    payload = zlib.compress(filtered) if compressed is None else compressed
-    result = PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
-    result += b"".join(before_idat) + png_chunk(b"IDAT", payload) + b"".join(after_idat)
-    if include_iend:
-        result += png_chunk(b"IEND", iend_payload)
-    return result + trailing
 
 
 def png(width=8, height=8, *_unused, transparent=False):

@@ -2,8 +2,6 @@
 
 import hashlib
 import json
-import struct
-import zlib
 from copy import deepcopy
 from pathlib import Path
 import tempfile
@@ -20,27 +18,7 @@ from gui_regression_fixture import (
     SOURCE as EVIDENCE_SOURCE, TREE as EVIDENCE_TREE,
     first_clear_product_tree,
 )
-
-
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-def png_chunk(kind, payload, *, checksum=None):
-    if checksum is None:
-        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
-
-def png_bytes(width, height, color_type, filtered, *, compressed=None,
-              before_idat=(), after_idat=(), include_iend=True,
-              iend_payload=b"", trailing=b""):
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
-    payload = zlib.compress(filtered) if compressed is None else compressed
-    result = PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
-    result += b"".join(before_idat) + png_chunk(b"IDAT", payload) + b"".join(after_idat)
-    if include_iend:
-        result += png_chunk(b"IEND", iend_payload)
-    return result + trailing
+from png_fixture import png_bytes
 
 
 class GuiRegressionRunnerTests(unittest.TestCase):

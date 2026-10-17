@@ -303,6 +303,26 @@ with verified.importer() as imports:
             cwd=REPOSITORY, check=True,
         )
 
+    def test_generator_detects_and_repairs_stale_public_cli_body(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(REPOSITORY / "scripts", root / "scripts",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(REPOSITORY / "config", root / "config")
+            wrapper = root / "scripts/run-gui-regression.py"
+            original = wrapper.read_bytes()
+            wrapper.write_bytes(original.replace(
+                b"while total <= 1024 * 1024:", b"while total <= 1024 * 1024 + 1:"))
+            command = [sys.executable, str(root / "scripts/update-tooling-bundle.py")]
+            stale = subprocess.run([*command, "--check"], capture_output=True)
+            self.assertEqual(stale.returncode, 1)
+            self.assertIn(b"Stale tooling bundle generated file: scripts/run-gui-regression.py",
+                          stale.stderr)
+            self.assertNotEqual(wrapper.read_bytes(), original)
+            subprocess.run(command, check=True, capture_output=True)
+            self.assertEqual(wrapper.read_bytes(), original)
+            subprocess.run([*command, "--check"], check=True, capture_output=True)
+
     def test_generator_requires_each_pin_once_and_preserves_encoding(self) -> None:
         generator = runpy.run_path(str(REPOSITORY / "scripts/update-tooling-bundle.py"))
         for function, names, quote, prefixes in (
