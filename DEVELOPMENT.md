@@ -55,10 +55,19 @@ These are authoring defaults; the [safety model](SAFETY.md),
 
 ## Native Windows development
 
-Install Git, PowerShell 7.4 or newer, and rustup. Opening this repository causes
-rustup to select the pinned compiler, `rustfmt`, `clippy`, and the Windows MSVC
-target. A Visual Studio Build Tools installation with the current Windows SDK is
-also required.
+Install Git, PowerShell 7.4 or newer, Python 3.11 or newer, and rustup. The tooling
+runner invokes `python` on Windows, so that command must resolve to a usable
+Python installation. Check its path and version in PowerShell:
+
+```powershell
+Get-Command python -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+python --version
+```
+
+Opening this repository causes rustup to select the pinned compiler, `rustfmt`,
+`clippy`, and the Windows MSVC target. A Visual Studio Build Tools installation
+with the current Windows SDK is also required. Prepared-VM validation has
+[additional host requirements](#native-tests-in-a-local-hyper-v-vm).
 
 Run the main gate:
 
@@ -77,9 +86,19 @@ in `SAFETY.md`.
 
 ## Portable checks on Linux or WSL
 
-Install PowerShell 7.4 or newer in addition to the pinned Rust toolchain. The
-Windows-target check also needs the LLVM resource compiler described below;
-set `RC` to its installed path when using a different location. The portable
+Install Git, PowerShell 7.4 or newer, and Python 3.11 or newer in addition to the
+pinned Rust toolchain. The tooling runner invokes `python3` on Linux/WSL. Check
+its path and version:
+
+```bash
+command -v python3
+python3 --version
+```
+
+The Windows-target check also needs the LLVM resource compiler described in
+[Linux cross-build](#linux-cross-build); set `RC` to its installed path when
+using a different location. Prepared-VM validation has
+[additional host requirements](#native-tests-in-a-local-hyper-v-vm). The portable
 gate is:
 
 ```bash
