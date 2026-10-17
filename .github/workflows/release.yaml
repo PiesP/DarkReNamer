@@ -72,16 +72,26 @@ jobs:
           ./scripts/install-verified-release-tools.ps1 `
             -DestinationRoot (Join-Path $env:RUNNER_TEMP 'verified-release-tools')
 
+      - name: Validate selected Rust dependencies
+        shell: pwsh
+        run: |
+          $python = (Get-Command python -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1).Source
+          & $python -I -c "import sys; print(sys.executable, sys.version); assert sys.version_info >= (3, 11)"
+          if ($LASTEXITCODE -ne 0) { throw 'Hosted Python 3.11 or newer is required for dependency validation.' }
+          $tools = Join-Path $env:RUNNER_TEMP 'verified-release-tools/tools'
+          & $python -I ./scripts/run-scheduled-rust-audit.py `
+            --cargo-audit (Join-Path $tools 'cargo-audit.exe') `
+            --cargo-deny (Join-Path $tools 'cargo-deny.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Selected dependency audit failed or was incomplete.' }
+          ./scripts/test-tooling.ps1 -Platform Windows -Id scheduled-rust-audit
+
       - name: Test and build selected source
         shell: pwsh
         run: |
           if ($env:SOURCE_DATE_EPOCH -notmatch '^\d+$') {
             throw 'SOURCE_DATE_EPOCH was not established before the build.'
           }
-          cargo audit --deny warnings
-          if ($LASTEXITCODE -ne 0) { throw 'Selected dependency audit failed.' }
-          cargo deny check
-          if ($LASTEXITCODE -ne 0) { throw 'Selected dependency policy check failed.' }
           $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
           cargo test --workspace --all-targets --all-features --locked -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Selected workspace tests failed.' }

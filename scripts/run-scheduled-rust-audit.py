@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run fresh Rust dependency checks and summarize their actual outcomes."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -160,10 +161,13 @@ def deny_result(process: subprocess.CompletedProcess[str]) -> str:
     return "clean"
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cargo-audit", type=Path, help="Verified absolute cargo-audit executable path")
+    parser.add_argument("--cargo-deny", type=Path, help="Verified absolute cargo-deny executable path")
+    options = parser.parse_args(arguments)
     summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
     source_sha = os.environ["GITHUB_SHA"]
-    tools_root = Path(os.environ["SECURITY_TOOLS_ROOT"])
     runner_temp = Path(os.environ["RUNNER_TEMP"])
     results: list[tuple[str, str]] = []
 
@@ -180,8 +184,22 @@ def main() -> int:
     if len(source_sha) != 40 or any(character not in "0123456789abcdef" for character in source_sha):
         results.append(("Setup", "tool or source failure (invalid full source SHA)"))
         return finish()
+    if (options.cargo_audit is None) != (options.cargo_deny is None):
+        results.append(("Setup", "tool failure (both verified scanner paths are required)"))
+        return finish()
+    if options.cargo_audit is not None:
+        scanners = {"cargo-audit": options.cargo_audit, "cargo-deny": options.cargo_deny}
+    else:
+        tools_root = os.environ.get("SECURITY_TOOLS_ROOT")
+        if not tools_root:
+            results.append(("Setup", "tool failure (verified scanner root is missing)"))
+            return finish()
+        scanners = {binary: Path(tools_root) / "bin" / binary for binary in ("cargo-audit", "cargo-deny")}
     for binary, expected in (("cargo-audit", "cargo-audit 0.22.2"), ("cargo-deny", "cargo-deny 0.20.2")):
-        path = tools_root / "bin" / binary
+        path = scanners[binary]
+        if path is None or not path.is_absolute():
+            results.append(("Setup", f"tool failure ({binary} path must be absolute)"))
+            return finish()
         version = command([str(path), "--version"])
         if version.returncode or version.stdout.strip() != expected:
             results.append(("Setup", f"tool failure ({binary} version mismatch or validation error)"))
@@ -190,14 +208,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="darkrenamer-rust-audit-", dir=runner_temp) as temporary:
         audit_db = str(Path(temporary) / "advisory-db")
         audit = command([
-            str(tools_root / "bin" / "cargo-audit"),
+            str(scanners["cargo-audit"]),
             "audit", "--db", audit_db, "--deny", "warnings", "--file", "Cargo.lock", "--format", "json",
         ])
         results.append(("cargo-audit", audit_result(audit)))
         if audit.stderr:
             print(audit.stderr, file=sys.stderr, end="")
 
-        deny = str(tools_root / "bin" / "cargo-deny")
+        deny = str(scanners["cargo-deny"])
         refresh = command([deny, "fetch", "db"])
         if refresh.returncode:
             results.append(("cargo-deny", "advisory-data failure (database refresh failed)"))

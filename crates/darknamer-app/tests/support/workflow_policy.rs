@@ -813,37 +813,6 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         ),
     )?;
 
-    let validation_steps = security
-        .steps
-        .iter()
-        .enumerate()
-        .filter(|(_, step)| {
-            step.run
-                .as_deref()
-                .is_some_and(|run| run.contains("cargo-audit\" --version"))
-        })
-        .collect::<Vec<_>>();
-    require(
-        validation_steps.len() == 1,
-        format!("{PATH} must contain one security tool version validation step"),
-    )?;
-    let (validation_index, validation) = validation_steps[0];
-    let validation_script = validation.run.as_deref().unwrap_or_default();
-    require(
-        validation.condition.is_none()
-            && validation.continue_on_error.is_none()
-            && validation
-                .env
-                .get("SECURITY_TOOLS_ROOT")
-                .map(Scalar::text)
-                .as_deref()
-                == Some(TOOLS_ROOT)
-            && validation_script.contains("cargo-audit 0.22.2")
-            && validation_script.contains("cargo-deny 0.20.2")
-            && !validation_script.contains("GITHUB_PATH"),
-        format!("{PATH} must always validate exact cached tool versions without relying on PATH"),
-    )?;
-
     let audit_steps = security
         .steps
         .iter()
@@ -851,7 +820,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         .filter(|(_, step)| {
             step.run
                 .as_deref()
-                .is_some_and(|run| run.contains("audit --deny warnings"))
+                .is_some_and(|run| run.contains("scripts/run-scheduled-rust-audit.py"))
         })
         .collect::<Vec<_>>();
     require(
@@ -876,12 +845,8 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
                 .map(Scalar::text)
                 .as_deref()
                 == Some(TOOLS_ROOT)
-            && audit_commands
-                == [
-                    "\"$SECURITY_TOOLS_ROOT/bin/cargo-audit\" audit --deny warnings",
-                    "\"$SECURITY_TOOLS_ROOT/bin/cargo-deny\" check",
-                ],
-        format!("{PATH} must run both security checks through the validated absolute tool paths"),
+            && audit_commands == ["python3 scripts/run-scheduled-rust-audit.py"],
+        format!("{PATH} must always run the shared version, freshness and completion validator"),
     )?;
 
     let cache_index = security
@@ -890,11 +855,9 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         .position(|step| step.id.as_deref() == Some("security-tools-cache"))
         .ok_or_else(|| format!("{PATH} is missing the security tools cache step"))?;
     require(
-        cache_index < install_index
-            && install_index < validation_index
-            && validation_index < audit_index,
+        cache_index < install_index && install_index < audit_index,
         format!(
-            "{PATH} must restore, conditionally install, validate, then execute the security tools"
+            "{PATH} must restore, conditionally install, then validate and execute the security tools"
         ),
     )
 }

@@ -88,7 +88,7 @@ fn ci_document_routing_preserves_required_gates_and_fails_closed() -> Result<(),
             "      - name: Enforce the Rust-only source tree\n        id: inventory\n        if: false",
         ),
         original.replace(
-            "\"$SECURITY_TOOLS_ROOT/bin/cargo-audit\" audit --deny warnings",
+            "python3 scripts/run-scheduled-rust-audit.py",
             "echo skipped-advisory-check",
         ),
     ] {

@@ -172,27 +172,10 @@ jobs:
           cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version 0.22.2
           cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version 0.20.2
 
-      - name: Validate pinned Rust security tools
+      - name: Refresh and audit Rust dependencies
         env:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
-        run: |
-          audit_version="$("$SECURITY_TOOLS_ROOT/bin/cargo-audit" --version)"
-          deny_version="$("$SECURITY_TOOLS_ROOT/bin/cargo-deny" --version)"
-          if [[ "$audit_version" != "cargo-audit 0.22.2" ]]; then
-            printf 'Expected cargo-audit 0.22.2, found %s\n' "$audit_version" >&2
-            exit 1
-          fi
-          if [[ "$deny_version" != "cargo-deny 0.20.2" ]]; then
-            printf 'Expected cargo-deny 0.20.2, found %s\n' "$deny_version" >&2
-            exit 1
-          fi
-
-      - name: Audit advisories, licenses, sources, and dependency policy
-        env:
-          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
-        run: |
-          "$SECURITY_TOOLS_ROOT/bin/cargo-audit" audit --deny warnings
-          "$SECURITY_TOOLS_ROOT/bin/cargo-deny" check
+        run: python3 scripts/run-scheduled-rust-audit.py
 
   windows:
     name: pr-gate/windows
