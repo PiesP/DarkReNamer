@@ -68,8 +68,9 @@ contract; the pre-retirement revision is a reproduction entrypoint, not a claim
 that old evidence belongs to that source.
 
 Current campaign observers, v1/v2 profiles and independent verification remain
-active. GUI regression and Wine gallery tests remain opt-in with
-`-Scope Diagnostics`; see [Tooling tests](../../DEVELOPMENT.md#tooling-tests).
+active. GUI regression tests remain opt-in with `-Scope Diagnostics`; see
+[Tooling tests](../../DEVELOPMENT.md#tooling-tests). The retired Wine gallery
+is available only from the [pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/9df4d79e3891a1db6a5c4b6ff6ec63e7d4306ae5).
 
 Evidence files, screenshots, traces, benchmark roots, operator or machine
 identities, local paths, volume serials, and detailed narratives remain outside
@@ -248,13 +249,12 @@ only. They could compare app-owned rendering or record timings, but could not
 establish native Windows acceptance, real device performance, power-loss
 durability, or a release verdict.
 
-The gallery requires Wine (`wine`, `wineboot`, `winepath`, and `wineserver`),
-Xvfb, ffmpeg, jq, GNU `timeout`, and `sha256sum`. Its compatibility entrypoint
-cross-builds and captures the production advanced-appearance window:
-
-```bash
-./scripts/capture-local-visual-gallery.sh
-```
+The retired gallery requires Wine (`wine`, `wineboot`, `winepath`, and `wineserver`),
+Xvfb, ffmpeg, jq, GNU `timeout`, and `sha256sum`. Reproduce its historical
+compatibility entrypoint from the
+[pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/9df4d79e3891a1db6a5c4b6ff6ec63e7d4306ae5).
+That source's gallery command cross-builds and captures the production
+advanced-appearance window.
 
 The external manifest records source state, executable digest, capture backend,
 geometry, color diversity, and whether custom colors were active. Wine cannot

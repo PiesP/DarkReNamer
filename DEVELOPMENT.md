@@ -104,7 +104,7 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
    the source-bound VM campaign below, then independently verify it through the
    existing hosted path. Maintenance CI is not a fresh candidate verdict;
    promotion and publication require separate authorization.
-4. Run RuntimeBroker, standalone GUI, Wine/gallery or optimization diagnostics
+4. Run RuntimeBroker, standalone GUI or optimization diagnostics
    only for a concrete investigation, using their existing bounded utilities
    and opt-in scopes. Ambient OS activity alone does not mandate diagnosis or
    create a release requirement. Preserve failures and inspect their evidence
@@ -189,7 +189,7 @@ are the only discovery exclusions. Add or move a test by updating its registry
 record in the same change.
 
 The default `Current` scope covers current runtime, release and evidence contracts.
-`Diagnostics` contains targeted GUI regression and Wine gallery tooling;
+`Diagnostics` contains targeted GUI regression and RuntimeBroker tooling;
 `Historical` remains a recognized scope for old registries, but the retired
 standalone chain has no current entries; selecting it here fails with no matches.
 Reproduce historical tests from the pre-retirement checkout linked below.
@@ -268,7 +268,6 @@ second command or asset registry.
 | `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release workflows cover their callers. Candidate validation does not promote a release. |
 | `write-release-files.ps1` / PowerShell | PowerShell 7.4+ in the release candidate checkout; prepared handoff directory, source SHA, run ID/attempt, temporary root | Measures the prepared PE/PDB/archive, writes metrics, handoff and sorted checksums, and removes its temporary measurement; the release workflow validates the result before attestation. The registered release test covers actual CLI output and failure cleanup. |
 | `get-release-product-notes.ps1` / PowerShell | PowerShell 7.4+; selected source and optional release tag | Reads the non-empty exact-version prepared section in `DISTRIBUTION.md`; candidate preparation checks it and promotion includes it alongside generated channel, provenance and support disclosures. |
-| `capture-local-visual-gallery.sh` → `diagnostics/capture-local-visual-gallery.sh` / Bash | Opt-in Linux/WSL diagnostic from repository root; Wine/Xvfb, cross-build tools, FFmpeg, jq, GNU tools, optional empty absolute output directory | Builds a Windows test executable, captures BMP/PNG and SHA256 manifest, and cleans temporary Wine state. `visual-gallery-diagnostics` tests its wrapper with inert tools; output is diagnostic only. |
 
 Workflow inline code remains owned by each workflow. The remaining bounded
 blocks have these owners and review triggers:
@@ -308,19 +307,11 @@ independent GUI evidence verification, and shared observer session/capture
 state. Update the authenticated role closure and run focused fixtures plus any
 affected Windows cleanup or UI evidence.
 
-The Bash gallery remains an explicit exception. Its public wrapper is called
-from the historical Windows acceptance documentation, its implementation runs a
-real Wine/Xvfb/FFmpeg pipeline, and its registered test remains in the
-`Diagnostics` scope. The prepared Windows VM does not supply the same local Wine
-rendering comparison. A Python port would still orchestrate those shell tools
-and their signal/cleanup behavior, so this stage retains the tested Bash chain.
-Revisit retirement if the local rendering diagnostic has no concrete consumer;
-then remove wrapper, implementation and exclusively dependent test/docs in one
-review. Revisit a port if a shared Python diagnostic contract demonstrably
-replaces the pipeline without changing its output or cleanup. Review embedded
-C# whenever a native signature, marshalling, handle lifetime or UI boundary
-changes; a separate stage must confirm that no portable policy is stranded in
-the CLR strings before changing that boundary. The reviewed `guest-native.ps1`
+The local Wine gallery was retired in issue #118 because its only remaining
+callers were a historical reproduction command and its own diagnostic test.
+The source-bound Windows GUI regression path remains a maintained visual diagnostic.
+Review embedded C# whenever a native signature, marshalling, handle lifetime,
+or UI boundary changes. The reviewed `guest-native.ps1`
 blocks implement Win32 signatures/structures and handle lifetimes, UI Automation
 provider registration, and the WinRT text-scale COM bridge. File-ID formatting
 encodes the native identity, and the window-count cap bounds `EnumWindows`;
@@ -1258,10 +1249,11 @@ available for interpreting historical evidence and targeted diagnostics; they
 do not replace the current VM-Automated campaign above or establish a release
 verdict.
 
-GUI/Wine tooling tests use the explicit diagnostic scope described in
+GUI tooling tests use the explicit diagnostic scope described in
 [Tooling tests](#tooling-tests). Historical standalone tests are retired;
-reproduce them from the linked pre-retirement revision. Keep the Wine gallery as
-a diagnostic fallback only when the prepared VM cannot perform the required check.
+reproduce them from the linked pre-retirement revision. The retired Wine gallery
+can be reproduced from the
+[pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/9df4d79e3891a1db6a5c4b6ff6ec63e7d4306ae5).
 
 The manually dispatched `benchmark-planning.yaml` is an optional directional
 measurement for a concrete planning investigation. Historical release-profile
