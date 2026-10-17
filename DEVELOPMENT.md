@@ -213,8 +213,9 @@ The default `Current` scope covers current runtime, release and evidence contrac
 standalone chain has no current entries; selecting it here fails with no matches.
 Reproduce historical tests from the pre-retirement checkout linked below.
 Diagnostics are opt-in and remain registered. Use `All` when changing the runner
-or shared code that affects every scope. List the current platform's selection or run a
-focused scope/category:
+or shared code that affects every scope. Manual CI workflow dispatches run `All`
+on both Ubuntu and Windows; push and pull-request CI retain `Current`. List the
+current platform's selection or run a focused scope/category:
 
 ```powershell
 ./scripts/test-tooling.ps1 -List
