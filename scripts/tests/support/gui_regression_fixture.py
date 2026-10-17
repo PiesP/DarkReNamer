@@ -6,10 +6,9 @@ import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
-import struct
-import zlib
 
 from tooling_test_paths import SCRIPT_ROOT
+from png_fixture import png_bytes
 
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
@@ -143,10 +142,6 @@ def write_json(path: Path, value: object) -> None:
     path.write_bytes(json_bytes(value))
 
 
-def png_chunk(kind: bytes, payload: bytes) -> bytes:
-    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
-
-
 def rgba_pixels(width: int, height: int, ink_height: int, ink_width: int,
                 *, transparent: bool = False) -> bytes:
     pixels = bytearray()
@@ -163,8 +158,7 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
     rgba = rgba_pixels(width, height, ink_height, ink_width, transparent=transparent)
     pixels = b"".join(b"\x00" + rgba[y * width * 4:(y + 1) * width * 4]
                       for y in range(height))
-    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b"")
+    return png_bytes(width, height, 6, pixels)
 
 
 @lru_cache(maxsize=64)
@@ -182,8 +176,7 @@ def pair_png(rgb: tuple[int, int, int], *, width: int = 800, height: int = 552,
             if top <= y < bottom:
                 row[left * 4:right * 4] = bytes((*color, 255)) * (right - left)
         pixels.extend(row)
-    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
+    return png_bytes(width, height, 6, bytes(pixels))
 
 
 def physical_menu_apply_entry() -> dict:

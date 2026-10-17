@@ -6,8 +6,6 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
-import struct
-import zlib
 
 from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign.planning import execution_slots, new_plan
@@ -15,6 +13,7 @@ from darkrenamer_tooling.campaign.verifier import EvidenceReader
 from darkrenamer_tooling.contracts.binding import COMPONENTS, Candidate
 from darkrenamer_tooling.evidence.archive import ExtractedEvidence, FileReference
 from menu_layout_fixture import layout_for_environment
+from png_fixture import png_bytes
 from recovery_profile_fixture import build_crash, build_worker
 from tooling_test_paths import REPOSITORY_ROOT
 
@@ -41,15 +40,10 @@ def encode(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def png_chunk(kind: bytes, body: bytes) -> bytes:
-    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-
 def tiny_png() -> bytes:
     pixels = (b"\x00" + b"\xff\x00\x00\xff" + b"\x00\xff\x00\xff" +
               b"\x00" + b"\x00\x00\xff\xff" + b"\xff\xff\xff\xff")
-    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) +
-            png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
+    return png_bytes(2, 2, 6, pixels)
 
 
 class CampaignFixture:

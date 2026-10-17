@@ -4,12 +4,11 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import PurePosixPath
-import struct
-import zlib
 
 from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.evidence.archive import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
+from png_fixture import png_bytes
 from recovery_fixture import build_recovery_fixture
 
 
@@ -25,18 +24,12 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def png_chunk(kind, body):
-    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-
 def png(uniform=False):
     colors = ([b"\xff\x00\x00\xff"] * 4 if uniform else
               [b"\xff\x00\x00\xff", b"\x00\xff\x00\xff",
                b"\x00\x00\xff\xff", b"\xff\xff\xff\xff"])
     pixels = b"\x00" + b"".join(colors[:2]) + b"\x00" + b"".join(colors[2:])
-    return (b"\x89PNG\r\n\x1a\n" +
-            png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) +
-            png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
+    return png_bytes(2, 2, 6, pixels)
 
 
 class Reader:

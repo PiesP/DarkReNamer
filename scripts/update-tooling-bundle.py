@@ -128,13 +128,27 @@ POWERSHELL_INVENTORY = (
 TOOLING_INVENTORY = PYTHON_INVENTORY + POWERSHELL_INVENTORY
 
 PUBLIC_BOOTSTRAPS = (
-    "scripts/diagnose-runtimebroker.py",
-    "scripts/test-windows-vm.py",
-    "scripts/run-gui-regression.py",
-    "scripts/run-vm-automated-campaign.py",
-    "scripts/validate-gui-regression-evidence.py",
-    "scripts/validate-vm-automated-evidence.py",
-    "scripts/validate-vm-automated-authority.py",
+    ("scripts/diagnose-runtimebroker.py",
+     "Run one frozen, bounded RuntimeBroker identity and lifetime diagnostic.",
+     "vm-runtimebroker-diagnostic", "str(error)"),
+    ("scripts/test-windows-vm.py",
+     "Build the current checkout's Windows tests and execute them in a Hyper-V VM.",
+     "vm-launcher", "str(error)"),
+    ("scripts/run-gui-regression.py",
+     "Run the four fixed GUI cells or an opt-in source-bound visual diagnostic.",
+     "vm-gui", "str(error)"),
+    ("scripts/run-vm-automated-campaign.py",
+     "Run and package a selected fixed VM campaign through the common VM CLI.",
+     "campaign-runner", "str(error)"),
+    ("scripts/validate-gui-regression-evidence.py",
+     "Validate source-bound raw GUI regression runs and direct references.",
+     "evidence-gui", "str(error)"),
+    ("scripts/validate-vm-automated-evidence.py",
+     "Verify private campaign bytes with trusted source and authenticated gate facts.",
+     "evidence-cli", '"VM-automated evidence verification failed closed."'),
+    ("scripts/validate-vm-automated-authority.py",
+     "Check GitHub metadata bindings after authenticated downloads and gh verification.",
+     "contracts-authority", "str(error)"),
 )
 POWERSHELL_BOOTSTRAPS = (
     "scripts/run-windows-vm-tests.ps1",
@@ -194,6 +208,22 @@ def updated_bootstrap(data: bytes, *, manifest_sha256: str, loader_sha256: str) 
     return changed.encode()
 
 
+def generated_bootstrap(template: str, *, description: str, role: str,
+                        error_expression: str, manifest_sha256: str,
+                        loader_sha256: str) -> bytes:
+    replacements = {
+        "@DESCRIPTION@": description,
+        "@ROLE@": role,
+        "@ERROR@": error_expression,
+    }
+    for placeholder, value in replacements.items():
+        if template.count(placeholder) != 1:
+            raise ValueError(f"Public CLI template must contain {placeholder} exactly once.")
+        template = template.replace(placeholder, value)
+    return updated_bootstrap(template.encode(), manifest_sha256=manifest_sha256,
+                             loader_sha256=loader_sha256)
+
+
 def updated_powershell_bootstrap(
     data: bytes, *, manifest_sha256: str, loader_sha256: str
 ) -> bytes:
@@ -236,10 +266,13 @@ def main(argv=None) -> int:
     manifest_sha256 = digest(manifest)
     loader_sha256 = digest((root / "scripts" / "tooling_bootstrap.py").read_bytes())
     expected = {root / "config" / "tooling-bundle.json": manifest}
-    for relative in PUBLIC_BOOTSTRAPS:
+    template = (root / "scripts" / "public-cli-template.py.in").read_text(encoding="utf-8")
+    for relative, description, role, error_expression in PUBLIC_BOOTSTRAPS:
         path = root / relative
-        expected[path] = updated_bootstrap(
-            path.read_bytes(), manifest_sha256=manifest_sha256, loader_sha256=loader_sha256
+        expected[path] = generated_bootstrap(
+            template, description=description, role=role,
+            error_expression=error_expression, manifest_sha256=manifest_sha256,
+            loader_sha256=loader_sha256,
         )
     powershell_loader_sha256 = digest((root / "scripts" / "tooling-bootstrap.ps1").read_bytes())
     for relative in POWERSHELL_BOOTSTRAPS:
