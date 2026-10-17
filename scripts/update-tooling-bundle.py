@@ -156,6 +156,10 @@ POWERSHELL_BOOTSTRAPS = (
     "scripts/windows-vm-acceptance.ps1",
     "scripts/windows-vm-recovery-acceptance.ps1",
 )
+POWERSHELL_FRAGMENTS = {
+    "@BOOTSTRAP_HELPERS@": "scripts/powershell-bootstrap-helpers.ps1.in",
+    "@VERIFIED_TOOLING_INITIALIZER@": "scripts/powershell-verified-tooling-initializer.ps1.in",
+}
 PIN_PATTERN = re.compile(
     r'^(TOOLING_(?:MANIFEST|LOADER)_SHA256 = )(?:(?:"[0-9a-f]{64}")|(?:"0" \* 64))$',
     re.MULTILINE,
@@ -235,6 +239,26 @@ def updated_powershell_bootstrap(
     return prefix + changed.encode("utf-8")
 
 
+def generated_powershell_bootstrap(
+    root: Path, relative: str, *, manifest_sha256: str, loader_sha256: str
+) -> bytes:
+    template = (root / (relative + ".in")).read_bytes()
+    text = template.decode("utf-8-sig")
+    for placeholder, fragment in POWERSHELL_FRAGMENTS.items():
+        count = text.count(placeholder)
+        required = (placeholder == "@BOOTSTRAP_HELPERS@" or
+                    relative != "scripts/run-windows-vm-tests.ps1")
+        if count != int(required):
+            raise ValueError(f"{relative} must contain {placeholder} at its expected location.")
+        if count:
+            text = text.replace(placeholder, (root / fragment).read_text(encoding="utf-8"))
+    prefix = b"\xef\xbb\xbf" if template.startswith(b"\xef\xbb\xbf") else b""
+    return updated_powershell_bootstrap(
+        prefix + text.encode("utf-8"), manifest_sha256=manifest_sha256,
+        loader_sha256=loader_sha256,
+    )
+
+
 def unregistered_modules(root: Path) -> list[str]:
     registered = {source for _role, source, _bundle, _kind, _module, _deps in TOOLING_INVENTORY}
     actual = {
@@ -277,8 +301,8 @@ def main(argv=None) -> int:
     powershell_loader_sha256 = digest((root / "scripts" / "tooling-bootstrap.ps1").read_bytes())
     for relative in POWERSHELL_BOOTSTRAPS:
         path = root / relative
-        expected[path] = updated_powershell_bootstrap(
-            path.read_bytes(), manifest_sha256=manifest_sha256,
+        expected[path] = generated_powershell_bootstrap(
+            root, relative, manifest_sha256=manifest_sha256,
             loader_sha256=powershell_loader_sha256,
         )
     stale = [path for path, data in expected.items() if not path.is_file() or path.read_bytes() != data]

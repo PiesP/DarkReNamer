@@ -276,7 +276,7 @@ second command or asset registry.
 | Command / implementation | Runtime and stage; input | Output or side effect; verification |
 | --- | --- | --- |
 | `test-tooling.ps1` / PowerShell runner | PowerShell 7.4+ on actual Linux or Windows; registry `-Scope`, `-Id`, `-Category`, `-Runner`, `-List` | Validates discovery before selection, invokes registered subprocesses with timeout, returns failure status and optional external result JSON. CI calls it on Ubuntu/Windows; `tooling-registry` tests selection. |
-| `update-tooling-bundle.py` / Python generator | Python 3.11+ in the checkout; explicit source inventory, `scripts/public-cli-template.py.in`, and `--check` | Regenerates the bundle manifest and seven self-contained public Python wrappers, updates PowerShell wrapper pins, or reports drift without writes under `--check`; `tooling-bundle` and `tooling-bootstrap` tests cover closure and rejection. |
+| `update-tooling-bundle.py` / Python generator | Python 3.11+ in the checkout; explicit source inventory, public CLI and PowerShell entrypoint templates, and `--check` | Regenerates the bundle manifest, seven self-contained public Python wrappers and four self-contained PowerShell wrappers, or reports drift without writes under `--check`; `tooling-bundle` and `tooling-bootstrap` tests cover closure and rejection. |
 | `tooling_bootstrap.py`, `tooling-bootstrap.ps1` / private authenticated loaders | Isolated Python or PowerShell 7.4+ after a public wrapper checks the pinned loader bytes; fixed manifest, role and layout | Validate and hold the required module closure, then expose verified import/scriptblock APIs. Bootstrap and bundle tests cover tampering, layouts and missing roles; neither loader is a general public CLI. |
 | `test-windows-vm.py`, `run-vm-automated-campaign.py` / Python `vm` and `campaign` modules | Isolated Python on host/WSL, prepared VM connection, selected profile/source/candidate | Prepare and run source-bound native tests/campaigns, producing private bundles and receipts; registered VM, campaign, authority and cleanup tests cover contracts. Actual VM evidence is a separate gate. |
 | `run-gui-regression.py`, `diagnose-runtimebroker.py` / Python `vm.gui` and diagnostic modules | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produce bounded GUI or RuntimeBroker diagnostic evidence. GUI/RuntimeBroker diagnostic tests are opt-in; neither command publishes acceptance by itself. |
@@ -385,8 +385,13 @@ python3 scripts/update-tooling-bundle.py
 python3 scripts/update-tooling-bundle.py --check
 ```
 
-The generator rejects unregistered implementation files; it does not discover
-new executable roles. Run the tooling gate after refreshing pins. Tooling checks
+The four PowerShell `.ps1.in` entrypoint templates retain their own public
+parameters and workload flow. Their repeated pre-verification helpers come from
+`scripts/powershell-bootstrap-helpers.ps1.in`; the three guest-side wrappers also
+share `scripts/powershell-verified-tooling-initializer.ps1.in`. The host
+initializer remains in its template because it verifies a fixed loader path and
+accepts multiple roles. The generator rejects unregistered implementation files;
+it does not discover new executable roles. Run the tooling gate after refreshing pins. Tooling checks
 exercise closure rejection and command compatibility; native execution and the
 source-bound VM campaign remain separate validation steps below.
 

@@ -1,0 +1,61 @@
+function Get-DrBootstrapSha256 {
+    param([Parameter(Mandatory)][byte[]] $Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+
+function Assert-DrBootstrapOrdinaryPath {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $Label
+    )
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label must be an ordinary file."
+    }
+    $rootItem = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $Root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The tooling root must be an ordinary directory.'
+    }
+    $cursor = $item.Directory
+    while ($null -ne $cursor -and
+        -not [string]::Equals($cursor.FullName, $rootItem.FullName, [StringComparison]::OrdinalIgnoreCase)) {
+        if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label must not traverse a reparse point."
+        }
+        $cursor = $cursor.Parent
+    }
+    if ($null -eq $cursor) { throw "$Label must remain beneath the tooling root." }
+    return $item
+}
+
+function Read-DrBootstrapBoundedBytes {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][int] $MaximumBytes,
+        [Parameter(Mandatory)][string] $Label
+    )
+    $buffer = [byte[]]::new($MaximumBytes + 1)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $count = 0
+        while ($count -lt $buffer.Length) {
+            $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+            if ($read -eq 0) { break }
+            $count += $read
+        }
+        if ($count -gt $MaximumBytes -or $stream.ReadByte() -ne -1) {
+            throw "$Label exceeds its size bound."
+        }
+        $result = [byte[]]::new($count)
+        [Array]::Copy($buffer, 0, $result, 0, $count)
+        return $result
+    }
+    finally { $stream.Dispose() }
+}

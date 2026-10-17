@@ -1,0 +1,131 @@
+﻿[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [string] $BundleRoot,
+
+    [Parameter(Mandatory)]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int] $ExpectedSessionId,
+
+    [ValidateRange(1, 3600)]
+    [int] $TestTimeoutSeconds = 300,
+
+    [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $FocusedIconTests,
+    [switch] $FocusedRefreshTests,
+    [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
+        'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
+    [string] $FocusedIconCase,
+    [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
+        'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
+    [string] $FocusedRefreshCase,
+
+    [string] $OutputRoot,
+
+    [string] $RuntimeRoot,
+
+    [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
+    [string] $AcceptanceProfileId = 'vm-automated-v1-win11-ntfs',
+
+    [switch] $ElevatedObserver,
+
+    [string] $TrustedResultPath,
+
+    [switch] $ValidateOnly
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    throw 'Unsupported VM acceptance profile identity.'
+}
+$ToolingManifestSha256 = '0f49d5450929e29c73c3af58aced2fe97390ca8aab975e6c86ab57392cd30391'
+$ToolingLoaderSha256 = '355bc675f7ea3dd1baa6532ca3ab0b3e6e6a969a319214c2f256d58206380e43'
+
+@BOOTSTRAP_HELPERS@
+@VERIFIED_TOOLING_INITIALIZER@
+$toolingRoot = [IO.Path]::GetDirectoryName($PSCommandPath)
+$manifestLocation = 'tooling-bundle.json'
+$loaderContext = Initialize-DrVerifiedTooling `
+    -Root $toolingRoot `
+    -ManifestLocation $manifestLocation `
+    -Mode 'bundle' `
+    -RequiredRole 'powershell-guest-entry'
+$module = $null
+$observerEnvironment = @{}
+foreach ($name in @(
+    'DARKRENAMER_VM_ELEVATED_OBSERVER'
+    'DARKRENAMER_VM_TRUSTED_RESULT_PATH'
+    'DARKRENAMER_VM_EXPECTED_SESSION_ID'
+)) {
+    $observerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+try {
+    if ($ElevatedObserver) {
+        if ([string]::IsNullOrWhiteSpace($TrustedResultPath) -or
+            -not [IO.Path]::IsPathRooted($TrustedResultPath)) {
+            throw 'The elevated VM observer requires an absolute trusted result path.'
+        }
+        $env:DARKRENAMER_VM_ELEVATED_OBSERVER = '1'
+        $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = [IO.Path]::GetFullPath($TrustedResultPath)
+        $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $ExpectedSessionId.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    else {
+        $env:DARKRENAMER_VM_ELEVATED_OBSERVER = $null
+        $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = $null
+        $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $null
+    }
+$verified = $loaderContext.verified
+$definitionRoles = @(
+    'powershell-guest-contracts'
+    'powershell-guest-process'
+    'powershell-guest-native'
+    'powershell-guest-platform'
+    'powershell-guest-uia'
+    'powershell-guest-state'
+    'powershell-guest-scenario'
+    'powershell-guest-runtime'
+)
+$libraries = @{}
+foreach ($role in $definitionRoles) {
+    $libraries[$role] = & $loaderContext.module {
+        param($VerifiedBundle,$RequestedRole)
+        New-DrToolingVerifiedScriptBlock -VerifiedBundle $VerifiedBundle -Role $RequestedRole
+    } $verified $role
+}
+$entry = & $loaderContext.module {
+    param($VerifiedBundle,$RequestedRole)
+    New-DrToolingVerifiedScriptBlock -VerifiedBundle $VerifiedBundle -Role $RequestedRole
+} $verified 'powershell-guest-entry'
+$moduleName = 'DarkReNamer.guest.' + [guid]::NewGuid().ToString('N')
+$module = Microsoft.PowerShell.Core\New-Module -Name $moduleName -ScriptBlock $entry -ArgumentList (, $libraries)
+    Microsoft.PowerShell.Core\Import-Module $module -Scope Local -Force | Microsoft.PowerShell.Core\Out-Null
+    $invokeParameters = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -notin @('ElevatedObserver', 'TrustedResultPath')) {
+            $invokeParameters[$key] = $PSBoundParameters[$key]
+        }
+    }
+    $invokeParameters['EntryPointPath'] = $PSCommandPath
+    & $module {
+        param($CommandName,$Parameters)
+        & $CommandName @Parameters
+    } 'Invoke-DrWindowsVmGuest' $invokeParameters
+}
+finally {
+    foreach ($name in $observerEnvironment.Keys) {
+        if ($null -eq $observerEnvironment[$name]) {
+            [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, $observerEnvironment[$name], 'Process')
+        }
+    }
+    if ($null -ne $module) {
+        Microsoft.PowerShell.Core\Remove-Module `
+            -Name $module.Name -Force -ErrorAction SilentlyContinue
+    }
+    Microsoft.PowerShell.Core\Remove-Module `
+        -Name $loaderContext.module.Name -Force -ErrorAction SilentlyContinue
+}

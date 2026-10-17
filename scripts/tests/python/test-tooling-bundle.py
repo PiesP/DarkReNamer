@@ -323,6 +323,38 @@ with verified.importer() as imports:
             self.assertEqual(wrapper.read_bytes(), original)
             subprocess.run([*command, "--check"], check=True, capture_output=True)
 
+    def test_generator_repairs_stale_powershell_bodies_without_check_writes(self) -> None:
+        wrappers = (
+            "run-windows-vm-tests.ps1", "windows-vm-guest.ps1",
+            "windows-vm-acceptance.ps1", "windows-vm-recovery-acceptance.ps1",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(REPOSITORY / "scripts", root / "scripts",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(REPOSITORY / "config", root / "config")
+            originals = {name: (root / "scripts" / name).read_bytes() for name in wrappers}
+            for name in wrappers:
+                wrapper = root / "scripts" / name
+                changed = originals[name].replace(
+                    b"Tooling manifest hash mismatch.", b"Tooling manifest hash changed.", 1)
+                self.assertNotEqual(changed, originals[name])
+                wrapper.write_bytes(changed)
+            command = [sys.executable, str(root / "scripts/update-tooling-bundle.py")]
+            stale = subprocess.run([*command, "--check"], capture_output=True)
+            self.assertEqual(stale.returncode, 1)
+            for name in wrappers:
+                self.assertIn(f"scripts/{name}".encode(), stale.stderr)
+                self.assertNotEqual((root / "scripts" / name).read_bytes(), originals[name],
+                                    "--check must not repair a stale body")
+            subprocess.run(command, check=True, capture_output=True)
+            self.assertEqual({name: (root / "scripts" / name).read_bytes() for name in wrappers},
+                             originals)
+            subprocess.run([*command, "--check"], check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True)
+            self.assertEqual({name: (root / "scripts" / name).read_bytes() for name in wrappers},
+                             originals)
+
     def test_generator_requires_each_pin_once_and_preserves_encoding(self) -> None:
         generator = runpy.run_path(str(REPOSITORY / "scripts/update-tooling-bundle.py"))
         for function, names, quote, prefixes in (
