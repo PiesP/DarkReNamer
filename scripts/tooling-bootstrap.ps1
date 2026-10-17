@@ -67,12 +67,7 @@
         @('powershell-controller-transport', 'powershell', $null),
         @('powershell-controller-poll', 'powershell', $null),
         @('powershell-controller-rescue', 'powershell', $null),
-        @('powershell-controller-entry', 'powershell', $null),
-        @('powershell-common', 'powershell', $null),
-        @('powershell-guest', 'powershell', $null),
-        @('powershell-ui-observer', 'powershell', $null),
-        @('powershell-recovery-observer', 'powershell', $null),
-        @('release-tooling', 'powershell', $null)
+        @('powershell-controller-entry', 'powershell', $null)
     )
     foreach ($definition in $definitions) {
         $roles.Add($definition[0], [pscustomobject]@{

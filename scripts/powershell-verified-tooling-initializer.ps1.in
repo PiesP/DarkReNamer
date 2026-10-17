@@ -1,0 +1,84 @@
+function Initialize-DrVerifiedTooling {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $ManifestLocation,
+        [Parameter(Mandatory)][ValidateSet('checkout', 'bundle')][string] $Mode,
+        [Parameter(Mandatory)][string] $RequiredRole
+    )
+    $rootPath = [IO.Path]::GetFullPath($Root)
+    $manifestPath = [IO.Path]::GetFullPath([IO.Path]::Combine($rootPath, $ManifestLocation))
+    $manifestItem = Assert-DrBootstrapOrdinaryPath `
+        -Path $manifestPath -Root $rootPath -Label 'Tooling manifest'
+    if ($manifestItem.Length -gt 512KB) { throw 'Tooling manifest exceeds its size bound.' }
+    $manifestBytes = Read-DrBootstrapBoundedBytes `
+        -Path $manifestPath -MaximumBytes (512KB) -Label 'Tooling manifest'
+    if ($manifestBytes.Length -gt 512KB -or
+        (Get-DrBootstrapSha256 -Bytes $manifestBytes) -cne $ToolingManifestSha256) {
+        throw 'Tooling manifest hash mismatch.'
+    }
+    try {
+        $encoding = [Text.UTF8Encoding]::new($false, $true)
+        $manifest = $encoding.GetString($manifestBytes) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch { throw "Authenticated tooling manifest is invalid UTF-8 JSON: $($_.Exception.Message)" }
+    $loaders = [Collections.Generic.List[object]]::new()
+    foreach ($record in @($manifest.modules)) {
+        if ($record.role -ceq 'powershell-loader') { $loaders.Add($record) }
+    }
+    if ($loaders.Count -ne 1) { throw 'Authenticated tooling manifest must bind one PowerShell loader.' }
+    $loader = $loaders[0]
+    $relativeLoader = if ($Mode -ceq 'checkout') { $loader.source } else { $loader.bundle }
+    if ($loader.kind -cne 'powershell' -or $null -ne $loader.module -or
+        $loader.sha256 -cne $ToolingLoaderSha256 -or $relativeLoader -isnot [string]) {
+        throw 'Authenticated PowerShell loader binding is invalid.'
+    }
+    $loaderPath = [IO.Path]::GetFullPath([IO.Path]::Combine($rootPath, $relativeLoader))
+    $loaderItem = Assert-DrBootstrapOrdinaryPath `
+        -Path $loaderPath -Root $rootPath -Label 'PowerShell loader'
+    if ($loaderItem.Length -gt 2MB) { throw 'PowerShell loader exceeds its size bound.' }
+    $loaderBytes = Read-DrBootstrapBoundedBytes `
+        -Path $loaderPath -MaximumBytes (2MB) -Label 'PowerShell loader'
+    if ($loaderBytes.Length -gt 2MB -or
+        (Get-DrBootstrapSha256 -Bytes $loaderBytes) -cne $ToolingLoaderSha256) {
+        throw 'PowerShell loader hash mismatch.'
+    }
+    $loaderModule = $null
+    try {
+        $offset = if ($loaderBytes.Length -ge 3 -and $loaderBytes[0] -eq 0xef -and
+            $loaderBytes[1] -eq 0xbb -and $loaderBytes[2] -eq 0xbf) { 3 } else { 0 }
+        $encoding = [Text.UTF8Encoding]::new($false, $true)
+        $loaderText = $encoding.GetString($loaderBytes, $offset, $loaderBytes.Length - $offset)
+        $loaderDefinitions = [scriptblock]::Create($loaderText)
+        $loaderModule = Microsoft.PowerShell.Core\New-Module `
+            -Name ('DarkReNamer.loader.' + [guid]::NewGuid().ToString('N')) `
+            -ArgumentList $loaderDefinitions `
+            -ScriptBlock {
+                param([scriptblock] $Definitions)
+                . $Definitions
+                Microsoft.PowerShell.Core\Export-ModuleMember -Function @(
+                    'Get-DrToolingVerifiedBundle'
+                    'Get-DrToolingVerifiedBytes'
+                    'New-DrToolingVerifiedScriptBlock'
+                )
+            }
+        Microsoft.PowerShell.Core\Import-Module $loaderModule -Scope Local -Force | Microsoft.PowerShell.Core\Out-Null
+        $verified = & $loaderModule {
+            param($VerifiedRoot,$VerifiedManifest,$VerifiedManifestSha256,$VerifiedMode,$VerifiedRole)
+            Get-DrToolingVerifiedBundle `
+                -Root $VerifiedRoot `
+                -ManifestLocation $VerifiedManifest `
+                -ExpectedManifestSha256 $VerifiedManifestSha256 `
+                -Mode $VerifiedMode `
+                -RequiredRoles @($VerifiedRole)
+        } $rootPath $ManifestLocation $ToolingManifestSha256 $Mode $RequiredRole
+        [pscustomobject]@{ module = $loaderModule; verified = $verified }
+    }
+    catch {
+        if ($null -ne $loaderModule) {
+            Microsoft.PowerShell.Core\Remove-Module `
+                -Name $loaderModule.Name -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}

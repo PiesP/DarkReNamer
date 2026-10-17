@@ -102,6 +102,47 @@ fn ci_document_routing_preserves_required_gates_and_fails_closed() -> Result<(),
 }
 
 #[test]
+fn ci_tooling_scope_requires_manual_all_and_ordinary_current_on_both_hosts() -> Result<(), String> {
+    let original = include_str!("../../../.github/workflows/ci.yaml");
+    workflow_policy::validate_ci_docs_routing_source(original)?;
+    let selector = "${{ github.event_name == 'workflow_dispatch' && 'All' || 'Current' }}";
+    let mut changed = vec![
+        original.replace(selector, "${{ github.event_name == 'workflow_dispatch' && 'Current' || 'Current' }}"),
+        original.replace(selector, "${{ github.event_name == 'workflow_dispatch' && 'All' || 'All' }}"),
+        original.replace(selector, "Current"),
+        original.replace(
+            "    name: pr-gate/quality\n    needs: [classify]",
+            "    name: pr-gate/quality\n    env:\n      TOOLING_TEST_SCOPE: Current\n    needs: [classify]",
+        ),
+    ];
+    for platform in ["Ubuntu", "Windows"] {
+        let command = format!(
+            "run: ./scripts/test-tooling.ps1 -Platform {platform} -Scope $env:TOOLING_TEST_SCOPE"
+        );
+        changed.extend([
+            original.replace(&command, &format!("run: ./scripts/test-tooling.ps1 -Platform {platform}")),
+            original.replace(&command, &format!("run: ./scripts/test-tooling.ps1 -Platform {platform} -Scope Current")),
+            original.replace(&command, "run: Write-Host 'tooling suite omitted'"),
+            original.replace(
+                &format!("shell: pwsh\n        {command}"),
+                &format!("shell: pwsh\n        env:\n          TOOLING_TEST_SCOPE: Current\n        {command}"),
+            ),
+        ]);
+    }
+    for mutation in changed {
+        assert_ne!(
+            mutation, original,
+            "tooling-scope fixture did not change CI"
+        );
+        assert!(
+            workflow_policy::validate_ci_docs_routing_source(&mutation).is_err(),
+            "unsafe tooling-scope mutation was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn release_workflows_promote_the_immutable_candidate_without_rebuilding() -> Result<(), String> {
     workflow_policy::validate_release_handoff_policy()
 }

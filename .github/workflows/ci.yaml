@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  TOOLING_TEST_SCOPE: ${{ github.event_name == 'workflow_dispatch' && 'All' || 'Current' }}
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -106,7 +109,7 @@ jobs:
       - name: Test tooling
         if: ${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
-        run: ./scripts/test-tooling.ps1 -Platform Ubuntu
+        run: ./scripts/test-tooling.ps1 -Platform Ubuntu -Scope $env:TOOLING_TEST_SCOPE
 
       - name: Check formatting and lints
         if: ${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
@@ -194,7 +197,7 @@ jobs:
       - name: Test tooling
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
-        run: ./scripts/test-tooling.ps1 -Platform Windows
+        run: ./scripts/test-tooling.ps1 -Platform Windows -Scope $env:TOOLING_TEST_SCOPE
 
       - name: Install pinned Rust toolchain
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}

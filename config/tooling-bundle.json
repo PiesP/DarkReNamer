@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "e1fa9acec8d287cb3a37379ec5a6176e900ec1f69ec65c354b11556b1aaba3e9",
+      "sha256": "fd227a8ae9c678185a6b674a5ea44c3bf1ccbe5239212bfd9d2c29755f10f223",
       "dependencies": [
         "package-root"
       ]
@@ -474,7 +474,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "355bc675f7ea3dd1baa6532ca3ab0b3e6e6a969a319214c2f256d58206380e43",
+      "sha256": "455d2b82f5def378fa9b1d8ff3ef21755e4994d55c866c718314044aa126b174",
       "dependencies": []
     },
     {

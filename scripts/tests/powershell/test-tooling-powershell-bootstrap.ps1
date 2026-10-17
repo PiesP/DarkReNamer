@@ -104,8 +104,8 @@ function New-DrTestFixture {
     )
     $sources = [Collections.Generic.Dictionary[string, byte[]]]::new([StringComparer]::Ordinal)
     $sources.Add('package-root', $packageBytes)
-    $sources.Add('powershell-common', $commonBytes)
-    $sources.Add('powershell-guest', $guestBytes)
+    $sources.Add('powershell-controller-contracts', $commonBytes)
+    $sources.Add('powershell-guest-contracts', $guestBytes)
     $sources.Add('powershell-loader', $loaderBytes)
 
     $entries = [Collections.Generic.List[object]]::new()
@@ -119,7 +119,7 @@ function New-DrTestFixture {
         dependencies = [object[]] @()
     })
     $entries.Add([pscustomobject][ordered]@{
-        role = 'powershell-common'
+        role = 'powershell-controller-contracts'
         source = 'scripts/tooling/common.psm1'
         bundle = 'tooling-common.psm1'
         kind = 'powershell'
@@ -128,13 +128,13 @@ function New-DrTestFixture {
         dependencies = [object[]] @()
     })
     $entries.Add([pscustomobject][ordered]@{
-        role = 'powershell-guest'
+        role = 'powershell-guest-contracts'
         source = 'scripts/tooling/guest.ps1'
         bundle = 'tooling-guest.ps1'
         kind = 'powershell'
         module = $null
         sha256 = Get-DrTestSha256 -Bytes $guestBytes
-        dependencies = [object[]] @('powershell-common')
+        dependencies = [object[]] @('powershell-controller-contracts')
     })
     $entries.Add([pscustomobject][ordered]@{
         role = 'powershell-loader'
@@ -170,7 +170,7 @@ function New-DrTestFixture {
 }
 
 function Get-DrTestVerified {
-    param([object] $Fixture, [string[]] $RequiredRoles = @('powershell-common'))
+    param([object] $Fixture, [string[]] $RequiredRoles = @('powershell-controller-contracts'))
     $digest = Write-DrTestManifest -Fixture $Fixture
     return Get-DrToolingVerifiedBundle `
         -Root $Fixture.Root `
@@ -238,7 +238,7 @@ try {
         $fixture = New-DrTestFixture -Mode $mode
         $verified = Get-DrTestVerified `
             -Fixture $fixture `
-            -RequiredRoles @('package-root', 'powershell-common')
+            -RequiredRoles @('package-root', 'powershell-controller-contracts')
         Assert-DrTestTrue -Condition ($verified.Mode -ceq $mode) -Message "Wrong mode for $mode."
         Assert-DrTestTrue -Condition ($verified.Records.Count -eq 2) -Message 'Wrong closure size.'
         Assert-DrTestTrue `
@@ -250,7 +250,7 @@ try {
             -Message 'Python bytes were not frozen in the verified closure.'
         $scriptBlock = New-DrToolingVerifiedScriptBlock `
             -VerifiedBundle $verified `
-            -Role 'powershell-common'
+            -Role 'powershell-controller-contracts'
         & $scriptBlock
         Assert-DrTestTrue `
             -Condition ($global:DrToolingExecutionMarker -ceq 'original') `
@@ -273,7 +273,7 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $manifestDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-guest')
+            -RequiredRoles @('powershell-guest-contracts')
     }
     Assert-DrTestTrue `
         -Condition (-not (Test-Path Variable:global:DrToolingExecutionMarker)) `
@@ -287,16 +287,16 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $manifestDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-guest')
+            -RequiredRoles @('powershell-guest-contracts')
     }
 
     $fixture = New-DrTestFixture
     $invalidBytes = $script:DrTestUtf8.GetBytes('function Broken-DrToolingModule {')
-    $fixture.Sources['powershell-guest'] = $invalidBytes
+    $fixture.Sources['powershell-guest-contracts'] = $invalidBytes
     $fixture.Entries[2].sha256 = Get-DrTestSha256 -Bytes $invalidBytes
     Write-DrTestModules -Fixture $fixture
     Assert-DrTestThrows -Message 'Later invalid PowerShell was accepted.' -Action {
-        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-guest')
+        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-guest-contracts')
     }
     Assert-DrTestTrue `
         -Condition (-not (Test-Path Variable:global:DrToolingExecutionMarker)) `
@@ -310,13 +310,23 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 ('0' * 64) `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
     }
     $fixture.Entries[1].role = 'unknown-role'
     Assert-DrTestThrows -Message 'Unknown role was accepted.' -Action {
         Get-DrTestVerified -Fixture $fixture
     }
-    $fixture.Entries[1].role = 'powershell-common'
+    $fixture.Entries[1].role = 'powershell-controller-contracts'
+    foreach ($role in @(
+            'powershell-common', 'powershell-guest', 'powershell-ui-observer',
+            'powershell-recovery-observer', 'release-tooling'
+        )) {
+        $retiredFixture = New-DrTestFixture
+        $retiredFixture.Entries[1].role = $role
+        Assert-DrTestThrows -Message "Retired role $role was accepted." -Action {
+            Get-DrTestVerified -Fixture $retiredFixture -RequiredRoles @($role)
+        }
+    }
     $fixture.Entries[1].dependencies = [object[]] @('missing-role')
     Assert-DrTestThrows -Message 'Unknown dependency was accepted.' -Action {
         Get-DrTestVerified -Fixture $fixture
@@ -343,7 +353,7 @@ try {
 
     $fixture = New-DrTestFixture
     $collision = [pscustomobject][ordered]@{
-        role = 'release-tooling'
+        role = 'powershell-ui-bootstrap'
         source = $fixture.Entries[1].source.ToUpperInvariant()
         bundle = 'tooling-release.psm1'
         kind = 'powershell'
@@ -360,7 +370,7 @@ try {
         $fixture = New-DrTestFixture
         $commonPath = Get-DrTestModulePath -Fixture $fixture -Entry $fixture.Entries[1]
         $targetPath = Join-Path $fixture.Root 'outside-common.psm1'
-        Write-DrTestBytes -Path $targetPath -Bytes $fixture.Sources['powershell-common']
+        Write-DrTestBytes -Path $targetPath -Bytes $fixture.Sources['powershell-controller-contracts']
         Remove-Item -LiteralPath $commonPath
         [void] (New-Item -ItemType SymbolicLink -Path $commonPath -Target $targetPath)
         Assert-DrTestThrows -Message 'Linked module was accepted.' -Action {
@@ -381,7 +391,7 @@ try {
     [void] [IO.Directory]::CreateDirectory($realTooling)
     Write-DrTestBytes `
         -Path (Join-Path $realTooling 'common.psm1') `
-        -Bytes $fixture.Sources['powershell-common']
+        -Bytes $fixture.Sources['powershell-controller-contracts']
     $linkedTooling = Join-Path (Join-Path $fixture.Root 'scripts') 'linked-tooling'
     $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         'Junction'
@@ -406,7 +416,7 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $duplicateDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
     }
     $escapedDuplicateJson = $script:DrTestUtf8.GetBytes(
         '{"schem\u0061_version":1,"schema_version":1,"modules":[]}'
@@ -420,7 +430,7 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $escapedDuplicateDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
     }
 
     $fixture = New-DrTestFixture
@@ -439,13 +449,13 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $extraDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
     }
 
     $fixture = New-DrTestFixture
-    $fixture.Entries[1].dependencies = [object[]] @('powershell-guest')
+    $fixture.Entries[1].dependencies = [object[]] @('powershell-guest-contracts')
     Assert-DrTestThrows -Message 'Dependency cycle was accepted.' -Action {
-        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-guest')
+        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-guest-contracts')
     }
 
     $fixture = New-DrTestFixture
@@ -460,12 +470,12 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $oversizeDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
     }
 
     $fixture = New-DrTestFixture
     $oversizedModule = [byte[]]::new((8 * 1024 * 1024) + 1)
-    $fixture.Sources['powershell-common'] = $oversizedModule
+    $fixture.Sources['powershell-controller-contracts'] = $oversizedModule
     $fixture.Entries[1].sha256 = Get-DrTestSha256 -Bytes $oversizedModule
     Write-DrTestModules -Fixture $fixture
     Assert-DrTestThrows -Message 'Oversized module was accepted.' -Action {
@@ -478,7 +488,7 @@ try {
         -Path (Get-DrTestModulePath -Fixture $fixture -Entry $fixture.Entries[0]) `
         -Text 'tampered python initializer'
     Assert-DrTestThrows -Message 'Tampered Python dependency was accepted.' -Action {
-        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-common')
+        Get-DrTestVerified -Fixture $fixture -RequiredRoles @('powershell-controller-contracts')
     }
     Assert-DrTestTrue `
         -Condition (-not (Test-Path Variable:global:DrToolingExecutionMarker)) `
@@ -498,16 +508,16 @@ try {
             -ManifestLocation $fixture.ManifestLocation `
             -ExpectedManifestSha256 $manifestDigest `
             -Mode checkout `
-            -RequiredRoles @('powershell-common')
+            -RequiredRoles @('powershell-controller-contracts')
         $shadowBytes = Get-DrToolingVerifiedBytes `
             -VerifiedBundle $shadowVerified `
-            -Role 'powershell-common'
+            -Role 'powershell-controller-contracts'
         Assert-DrTestTrue `
             -Condition ((Get-DrTestSha256 -Bytes $shadowBytes) -ceq $fixture.Entries[1].sha256) `
             -Message 'A shadowed built-in command changed verified bytes.'
         $shadowScriptBlock = New-DrToolingVerifiedScriptBlock `
             -VerifiedBundle $shadowVerified `
-            -Role 'powershell-common'
+            -Role 'powershell-controller-contracts'
         & $shadowScriptBlock
         Assert-DrTestTrue `
             -Condition ($global:DrToolingExecutionMarker -ceq 'original') `
@@ -526,13 +536,13 @@ try {
     $verified.Records[0].Kind = 'powershell'
     $verifiedBytes = Get-DrToolingVerifiedBytes `
         -VerifiedBundle $verified `
-        -Role 'powershell-common'
+        -Role 'powershell-controller-contracts'
     Assert-DrTestTrue `
         -Condition ((Get-DrTestSha256 -Bytes $verifiedBytes) -ceq $fixture.Entries[1].sha256) `
         -Message 'Mutated public closure data changed verified bytes.'
     $scriptBlock = New-DrToolingVerifiedScriptBlock `
         -VerifiedBundle $verified `
-        -Role 'powershell-common'
+        -Role 'powershell-controller-contracts'
     & $scriptBlock
     Assert-DrTestTrue `
         -Condition ($global:DrToolingExecutionMarker -ceq 'original') `
@@ -543,7 +553,7 @@ try {
         "`$global:DrToolingExecutionMarker = 'forged'`n"
     )
     $forgedRecord = [pscustomobject]@{
-        Role = 'powershell-common'
+        Role = 'powershell-controller-contracts'
         Kind = 'powershell'
         FrozenBase64 = [Convert]::ToBase64String($forgedBytes)
         Length = $forgedBytes.Length
@@ -554,12 +564,12 @@ try {
     Assert-DrTestThrows -Message 'A forged verified-bundle handle returned bytes.' -Action {
         Get-DrToolingVerifiedBytes `
             -VerifiedBundle $forgedBundle `
-            -Role 'powershell-common'
+            -Role 'powershell-controller-contracts'
     }
     Assert-DrTestThrows -Message 'A forged verified-bundle handle produced a ScriptBlock.' -Action {
         New-DrToolingVerifiedScriptBlock `
             -VerifiedBundle $forgedBundle `
-            -Role 'powershell-common'
+            -Role 'powershell-controller-contracts'
     }
 
     $fixture = New-DrTestFixture
@@ -569,7 +579,7 @@ try {
         -Text "`$global:DrToolingExecutionMarker = 'mutated'`n"
     $scriptBlock = New-DrToolingVerifiedScriptBlock `
         -VerifiedBundle $verified `
-        -Role 'powershell-common'
+        -Role 'powershell-controller-contracts'
     & $scriptBlock
     Assert-DrTestTrue `
         -Condition ($global:DrToolingExecutionMarker -ceq 'original') `

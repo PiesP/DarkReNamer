@@ -200,10 +200,10 @@ class ToolingBootstrapTests(unittest.TestCase):
 
     def test_powershell_module_suffix_and_null_module_are_supported(self) -> None:
         source = b"function Invoke-Test { 'verified' }\n"
-        self.fixture.sources["powershell-common"] = source
+        self.fixture.sources["powershell-controller-contracts"] = source
         self.fixture.entries.append(
             self.fixture.entry(
-                "powershell-common",
+                "powershell-controller-contracts",
                 "scripts/modules/common.psm1",
                 "tooling-common.psm1",
                 "powershell",
@@ -212,15 +212,32 @@ class ToolingBootstrapTests(unittest.TestCase):
             )
         )
         self.fixture.write_modules()
-        verified = self.fixture.verify(("powershell-common",))
-        self.assertEqual([entry.role for entry in verified.entries], ["powershell-common"])
+        verified = self.fixture.verify(("powershell-controller-contracts",))
+        self.assertEqual([entry.role for entry in verified.entries], ["powershell-controller-contracts"])
         self.fixture.module_path(self.fixture.entries[-1]).write_bytes(b"throw 'changed'\n")
-        self.assertEqual(verified.bytes_for_role("powershell-common"), source)
+        self.assertEqual(verified.bytes_for_role("powershell-controller-contracts"), source)
         with self.assertRaises(bootstrap.ToolingBootstrapError):
             verified.bytes_for_role("campaign-planning")
         with verified.importer() as imports:
             with self.assertRaises(bootstrap.ToolingBootstrapError):
-                imports.import_role("powershell-common")
+                imports.import_role("powershell-controller-contracts")
+
+    def test_retired_powershell_roles_are_rejected(self) -> None:
+        retired = (
+            "powershell-common", "powershell-guest", "powershell-ui-observer",
+            "powershell-recovery-observer", "release-tooling",
+        )
+        for role in retired:
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                fixture = Fixture(Path(directory))
+                fixture.sources[role] = b"function Invoke-Test { 'verified' }\n"
+                fixture.entries.append(fixture.entry(
+                    role, "scripts/tooling/fixture.ps1", "tooling-fixture.ps1",
+                    "powershell", None, [],
+                ))
+                fixture.write_modules()
+                with self.assertRaises(bootstrap.ToolingBootstrapError):
+                    fixture.verify((role,))
 
     def test_selected_closure_has_an_aggregate_byte_limit(self) -> None:
         with mock.patch.object(bootstrap, "MAX_TOTAL_MODULE_BYTES", len(PACKAGE_SOURCE)):
