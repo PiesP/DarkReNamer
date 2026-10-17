@@ -362,6 +362,24 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertIn("tool failure", summary)
 
+    def test_isolated_cli_rejects_missing_verified_exe_on_actual_host(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-missing-exe-test-") as directory:
+            root = Path(directory)
+            summary = root / "summary.md"
+            environment = os.environ.copy()
+            environment.update({"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "c" * 40,
+                                "RUNNER_TEMP": str(root), "PATH": str(root)})
+            result = subprocess.run(
+                [sys.executable, "-I", str(SCAN),
+                 "--cargo-audit", str(root / "missing-cargo-audit.exe"),
+                 "--cargo-deny", str(root / "missing-cargo-deny.exe")],
+                cwd=REPOSITORY_ROOT, env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("cargo-audit version mismatch or validation error", summary.read_text(encoding="utf-8"))
+            self.assertIn("failed or incomplete", summary.read_text(encoding="utf-8"))
+            self.assertEqual(list(root.glob("darkrenamer-rust-audit-*")), [])
+
 
 @unittest.skipIf(os.name == "nt", "POSIX executable fixtures; Windows runs verified-path and shared-verdict controls")
 class ScheduledRustAuditTests(unittest.TestCase):
