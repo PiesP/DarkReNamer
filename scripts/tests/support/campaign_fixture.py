@@ -464,12 +464,19 @@ class CampaignFixture:
             target.update(self.profile["stability"]["environment"])
         return target
 
-    def v2_cleanup(self, result: dict, index: int) -> dict:
-        from controller_cleanup_fixture import clean_controller_cleanup_v2
-        cleanup = clean_controller_cleanup_v2(
+    def v2_cleanup(self, result: dict, index: int, *, bundle: dict | None = None) -> dict:
+        from controller_cleanup_fixture import clean_controller_cleanup_v2, clean_controller_cleanup_v3
+        source_bundle = self.bundle if bundle is None else bundle
+        factory = (clean_controller_cleanup_v3 if self.profile["revision"] == 3
+                   else clean_controller_cleanup_v2)
+        binding = ({"source_sha": source_bundle["harness"]["source_sha"] if
+                    source_bundle["schema_version"] == 2 else source_bundle["source_sha"],
+                    "bundle_sha256": hashlib.sha256(encode(source_bundle)).hexdigest(),
+                    "vm_id": VM_ID} if self.profile["revision"] == 3 else {})
+        cleanup = factory(
             profile_sha256=self.profile_sha256,
             process_jobs=result["process_job_cleanup"],
-            run_name=f"DarkReNamerTests-{index:032x}")
+            run_name=f"DarkReNamerTests-{index:032x}", **binding)
         lifecycle = cleanup["owned_resource_evidence"]["task_execution"]["observer_lifecycle"]
         lifecycle["pid"] = 700_000 + index
         lifecycle["start_time_utc_ticks"] = str(134041000000100000 + index)
@@ -506,7 +513,7 @@ class CampaignFixture:
                     self.add_bytes(path, data)
                 observer_prefix = prefix + "bundle/observer-output/"
                 result_path = observer_prefix + "recovery-acceptance-test/summary.json"
-            if self.profile["revision"] == 2:
+            if self.profile["revision"] in (2, 3):
                 host_cleanup = self.v2_cleanup(result, index)
             transport = {"raw_cleanup": host_cleanup, "vm_id": VM_ID,
                          "vm_identity_kind": "hyper-v-guest-parameters-virtual-machine-id-v1",
@@ -551,7 +558,8 @@ class CampaignFixture:
         result = {"schema_version": 1, "source_sha": self.candidate.source_sha,
                   "source_state": "clean",
                   "target": "x86_64-pc-windows-msvc", "failure_reason": None,
-                  "transport": {"guest_cleanup": True, "raw_cleanup": backend_cleanup},
+                  "transport": {"guest_cleanup": True, "raw_cleanup": backend_cleanup,
+                                "vm_id": VM_ID},
                   "gui": {"process_lifecycle": {"pid": 80_001,
                                                   "start_time_utc_ticks": "639100001000000001"}},
                   "tests": [{"file": "required-tests.exe", "sha256": binary.sha256,
@@ -564,13 +572,13 @@ class CampaignFixture:
             self.process_job_cleanup(lifecycle)[0] for lifecycle in
             (result["tests"][0]["process_lifecycle"], result["gui"]["process_lifecycle"])
         ]
-        if self.profile["revision"] == 2:
-            backend_cleanup = self.v2_cleanup(result, 31)
+        if self.profile["revision"] in (2, 3):
+            backend_cleanup = self.v2_cleanup(result, 31, bundle=bundle)
             result["transport"]["raw_cleanup"] = backend_cleanup
         self.add_json("backend/bundle.json", bundle)
         self.add_json("backend/result.json", result)
         self.add_json("backend/transport.json", {
-            "guest_cleanup": True, "raw_cleanup": backend_cleanup})
+            "guest_cleanup": True, "raw_cleanup": backend_cleanup, "vm_id": VM_ID})
         backend_paths = sorted(path for path in self.files if path.startswith("backend/"))
         self.campaign["backend"] = {
             "source_sha": self.candidate.source_sha, "bundle": "backend/bundle.json",

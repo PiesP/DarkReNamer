@@ -75,7 +75,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "3db81b989b10be70ccc7a9b9189a62799ecd7472c5661a9a1216427c1cb78bd4",
+      "sha256": "bda997ab328017053ff7518b2842c5d864ae24e896b1dbc28d75c0fd92a5a281",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "d84c84195dcbc6fee17db3d78043907f7f60aaeb198cb5c6d4ae9b471fb8cd97",
+      "sha256": "9a2c146f68cc67e437a30d05990457f644de4682fa5eb9acc9a3f1accdcc7d03",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -219,7 +219,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "e75bc1ecb4c0e7b440b8116aeb8b474fc4d32a863dbbad7974333e0b5c91acf6",
+      "sha256": "0b66e189b4a626568d95ea14367ec86ad9ec575fb7fa6734592819bf35f80b77",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -228,6 +228,7 @@
         "vm-host-tools",
         "package-contracts",
         "contracts-tooling",
+        "contracts-owned-cleanup",
         "package-evidence",
         "evidence-errors",
         "vm-connection",
@@ -282,7 +283,7 @@
       "bundle": "tooling-contracts-platform.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.platform",
-      "sha256": "31025eb833c7542c530abf1df6b6a9d1317ecc6ecdfe3a2fc7978bfd212f51fa",
+      "sha256": "664c77cd78213bd8fd8b6c503bc71a1410b893d62c97ee72ba739654ac29df64",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -299,7 +300,7 @@
       "bundle": "tooling-contracts-owned-cleanup.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.owned_cleanup",
-      "sha256": "23d4e8da6d1c958664aa30028107b0a0c03deb6170174519dae9274646a2d952",
+      "sha256": "0f24c24a248c561ce6648a74ec3e905a74f248e3431297f41417428b2ae38471",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -330,7 +331,7 @@
       "bundle": "tooling-contracts-authority.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.authority",
-      "sha256": "58b1a560105e6854771c06e4e70f95746eb4425aa885eb419b7c09b159f2a695",
+      "sha256": "4d65b0b7c01fbf2fbb1e71015c62cc2fd1148807e97136e02bcabd9f1f25c2ea",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -368,7 +369,7 @@
       "bundle": "tooling-evidence-archive.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.archive",
-      "sha256": "35ecef66728be85aa112bbb004972d840fba19013027cb12c1984d9426677011",
+      "sha256": "db360d001efd31894ff5dd5f34ce60e9655169d432f82cd1152f91867e70f84f",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -436,7 +437,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "0c111a0d29be0b5186852f87aac29a1d8d3fd987377497e20d91ea871e510c80",
+      "sha256": "9828989360a806ed2b4b24869c4337b5572d6910ff9018bf74cd523ad24ff776",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -444,7 +445,8 @@
         "evidence-errors",
         "evidence-png",
         "contracts-platform",
-        "contracts-tooling"
+        "contracts-tooling",
+        "contracts-owned-cleanup"
       ]
     },
     {
@@ -590,7 +592,7 @@
       "bundle": "ui-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "c5985a07bdffef6b5ea6058bd8c776d238308d25ace914270898a6e65ae42dbc",
+      "sha256": "d6068910766a058a2ab085bdc7456aa2e732a15d2e4f562155227993d0109b4d",
       "dependencies": []
     },
     {
@@ -617,7 +619,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b7a7e6df49780b5d09c0a598e1ba8856e2ae7442f89d27ba57293b7f5d38f608",
+      "sha256": "e0a8925581be2f2f60bb7db7cd3bffab0731929b457179f85ab162df1b5cbd90",
       "dependencies": []
     },
     {
@@ -635,7 +637,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "29ef5e49648b2d2902d53c9566a973f839421dd6b365cbbbe0143588154449ed",
+      "sha256": "d10bf1bb61b3630656aa3a1e99c79b3e469856c43e53a4e2c957a108e8fd89f5",
       "dependencies": []
     },
     {
@@ -644,7 +646,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "1ca3309c66cc4e7b4c7b44f770369a828bd2f2c7a195f75cb73cf09bf2724e8d",
+      "sha256": "f7278160cd3e1b2287497fdd450638b3ce89d5dfb2bdf60acd376e58369a90ed",
       "dependencies": []
     },
     {
@@ -662,7 +664,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "add11637a5a9863cee732f4c1564ce5ff416d66af849f01821c330695c495a10",
+      "sha256": "979e14f9ffa543040ce163d275c59f6d2a9acfe53ad24c202c75b2b3ee790e53",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -839,7 +841,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "64cae8a686ad16d6bdbc6b6156226b664c7684723bb0643339fb8ebdd956483c",
+      "sha256": "ad73d73d66b875f294e139faa4796559836e122de03fdb9f2c922aaef29b3d39",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

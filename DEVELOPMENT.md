@@ -707,6 +707,17 @@ process crash, recovery export and Intent-only candidate discard share one
 execution group, then adds 10 independent core-UIA stability executions. The
 result is a predeclared 30-slot first-attempt plan.
 
+The owned-resources profile ID remains `vm-automated-v2-owned-resources`; its
+current source blob, statement, and raw cleanup inventory are revision 3. The
+controller captures a complete process inventory and any held protected OS
+lifetime before minting the run name. Its source, bundle, VM, profile, native
+lifetime, and held path proof stay bound through cleanup or the optional
+same-session strict-failure finalizer. An omitted or newly opaque process still
+blocks cleanup. The old revision-2 profile SHA selects only read-only historical
+cleanup verification; it cannot enter the current campaign. See
+[`SAFETY.md`](SAFETY.md#owned-resources-v2-runner-environment) for the exact
+exception and its observation limits.
+
 [`scripts/run-vm-automated-campaign.py`](scripts/run-vm-automated-campaign.py)
 uses the common [`scripts/test-windows-vm.py`](scripts/test-windows-vm.py) host
 controller for each VM cell. It requires a new absolute output directory outside
@@ -892,9 +903,9 @@ height 600–1080, and DPI 96, 120, 144, or 192. Each new attempt needs a new
 external output directory. The observer has a 600-second timeout and the
 collected output is capped at 120 MiB. The immutable run input records the
 existing `vm-automated-v1-win11-ntfs` cleanup profile by default. An explicit
-`--acceptance-profile-id vm-automated-v2-owned-resources` selects the existing
-V2 owned-resource cleanup contract for this diagnostic only. The launcher
-freezes the unchanged `config/vm-automated-v2.json` bytes and digest in each
+`--acceptance-profile-id vm-automated-v2-owned-resources` selects the current
+revision-3 owned-resource cleanup contract for this diagnostic only. The launcher
+freezes the selected `config/vm-automated-v2.json` bytes and digest in each
 input, binds the controller arguments to them, and independently verifies the
 complete V2 cleanup inventory and the observer Job and process lifetimes.
 For this diagnostic, use the selector with `--diagnostic appearance-pair`.
@@ -1034,7 +1045,7 @@ Read and freeze `application.sha256` from its `bundle.json`, then pass
 `--prepared-bundle-root /absolute/private/native-bundle` and
 `--expected-prepared-application-sha256` with that digest to each performance
 invocation. Prepared reuse is restricted to declared performance, focused-clear,
-and icon-settlement diagnostics; the runner verifies
+first-clear-observation, and icon-settlement diagnostics; the runner verifies
 the clean source, executable, test binaries and trusted native tooling closure
 before contacting the VM. Each attempt retains its own authenticated inputs and
 prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
@@ -1076,6 +1087,51 @@ tail latency. These samples do not
 complete the four-cell GUI regression, appearance diagnostic, release campaign,
 or physical-media acceptance.
 
+### Owned-resource fixed-performance sample
+
+The fixed sample uses strict V1 cleanup by default. To select the separately
+named revision-3 owned-resource contract, use a clean committed source and the
+exact application already exercised by its native runner:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic performance-sample \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --performance-column-order hidden-visible \
+  --prepared-bundle-root /absolute/private/verified-native-bundle \
+  --expected-prepared-application-sha256 <native-executed-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-owned-performance-attempt
+```
+
+This route uses `performance-sample-v2-owned-r3-1366x768-96-text100-` run
+IDs followed by `hidden-visible` or `visible-hidden`. It pins the reviewed
+revision-3 profile bytes; a different profile requires a reviewed contract.
+The fixed workload and timing scope above are unchanged. The explicit profile
+branch retains the 600-second observer and 1,200-second controller limits,
+5,000-ms command deadline, and one-PNG/32-MiB collection budget. No profile
+fallback or automatic retry occurs.
+
+The observer binds native PID and creation FILETIME through its original held
+process handle, then requires normal exit and one closed sole-primary Job.
+Actual pre-work and final text-scale snapshots must agree at effective 100%.
+A present registry value must be `DWord` 100; successfully observed absence is
+allowed only with an effective factor of 1.0. The sample does not change these
+settings to satisfy admission.
+
+The independent verifier retains complete process/task observations and ambient
+deltas and requires the revision-3 owned-resource proof plus the indexed
+managed-desktop start, stopped lease, and stop response. Failed preservation
+uses the [pre-delete restoration gate](SAFETY.md#owned-resource-fixed-performance-diagnostic);
+missing evidence leaves roots retained and the attempt incomplete. A successful
+observation with incomplete cleanup is not a passing sample.
+
+Report the selected contract and ambient delta ledger with the metrics. V2
+owned cleanup does not prove V1 whole-session process stasis or harmless ambient
+activity. Preserved V1 failures keep their original verdicts. Do not combine
+V1 and V2 runs into a common timing baseline or balanced-order median; compare
+products only under the same reviewed profile, workload, and desktop conditions.
+
 ### Focused first-10k-clear diagnostic
 
 The first-clear replay for the original issue #32 bundle is a source-bound,
@@ -1084,6 +1140,50 @@ are in [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-f
 A new investigation needs its own authorization and clean source/tooling bindings;
 failed or partial attempts remain failed. This observation cannot replace the
 fixed performance sample or a release verdict.
+
+### First-clear failure observation
+
+The `first-clear-observation` mode is a separate, one-attempt diagnostic of the
+first 10,000-row clear on the current native-tested product. It requires a clean
+committed checkout, a newly prepared source-built native bundle, an explicit
+pin to that bundle's `application.sha256`, and the strict V1 profile. The
+immutable input records the V1 profile file hash and compares the complete
+non-tooling product/build Git inventory with
+`d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2`. The new executable hash is
+frozen separately; the historical executable is not reused.
+The diagnostic and its independent verifier read the historical Git tree, so
+the local checkout must contain that commit; a depth-one CI checkout cannot run
+the diagnostic. Check this without changing the checkout:
+
+```bash
+git cat-file -e d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2^{commit}
+```
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic first-clear-observation \
+  --acceptance-profile-id vm-automated-v1-win11-ntfs \
+  --prepared-bundle-root /absolute/private/new-native-bundle \
+  --expected-prepared-application-sha256 <new-bundle-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-first-clear-observation
+```
+
+The observer keeps the fixed 30-second idle and 100/1,000/10,000-row import and
+preview/reset prefix, then sends `WM_COMMAND 32782` once with the unchanged
+5,000-ms native timeout. If that send times out with error 1460, it retains the
+failed command and performs at most 50 passive slots over 10 monotonic seconds.
+Each slot checks the original held process creation FILETIME and main/ListView
+HWND identity before and after bounded, pointer-free count and responsiveness
+queries with 50-ms native request limits. Missed slots, identity loss, and
+actual wall-time overruns remain visible; neither a later zero row count nor a
+structurally complete observation changes the failed command. The observer,
+controller, and producer exits remain nonzero on timeout. The separate verifier
+may report `failure-observed` only when all 50 bound slots and strict cleanup
+are complete; otherwise it reports `incomplete`. Resource cleanup can pass
+independently of the failed command. The raw original receipt and any failed
+follow-up roots remain preserved. This mode never substitutes for the fixed
+performance sample, native/GUI acceptance, or release evidence.
 
 ### Icon settlement diagnostic
 

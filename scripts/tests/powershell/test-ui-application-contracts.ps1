@@ -413,8 +413,11 @@ public static class DarkReNamerVmAcceptanceNative {
     $window = [Windows.Automation.AutomationElement]::new()
     $startupFixture = @{ owned = $owned; process = $process; window = $window }
     function Get-LowerSha256 { param($Path) $events.Add("hash:$Path"); 'd' * 64 }
-    function Start-OwnedProcess { param($FilePath, $Arguments, $WorkingDirectory)
-        if ($FilePath -cne 'verified-app.exe' -or $WorkingDirectory -cne 'owned-root' -or $Arguments -cne '') { throw 'Startup lost its verified application arguments.' }
+    function Start-OwnedProcess { param($FilePath, $Arguments, $WorkingDirectory, [switch]$SingleProcessOnly)
+        if ($FilePath -cne 'verified-app.exe' -or $WorkingDirectory -cne 'owned-root' -or
+            $Arguments -cne '' -or -not $SingleProcessOnly) {
+            throw 'Startup lost its verified single-process application contract.'
+        }
         $events.Add('start'); $startupFixture.owned
     }
     function Wait-ExactApplicationMainWindow { param($Process, $ExpectedSession, $ExpectedClassName, $ExpectedTitle, $TimeoutSeconds, $Label)

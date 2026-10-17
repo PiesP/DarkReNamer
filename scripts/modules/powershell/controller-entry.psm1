@@ -179,6 +179,16 @@ function Get-DrControllerPreservedFiles {
     @($files.ToArray() | Sort-Object file)
 }
 
+function Test-DrControllerOwnedFailureModeSupported {
+    param([string] $TaskKind, [string] $AcceptanceMode,
+          [int] $TextScalePercent, [bool] $HighContrast)
+    if ($TaskKind -cne 'ui') { return $true }
+    if ($AcceptanceMode -cin @('current-dpi', 'full-context', 'standard', 'text-scale',
+            'tooltip')) { return $true }
+    $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
+        'first-clear-observation') -and $TextScalePercent -eq 100 -and -not $HighContrast
+}
+
 function Remove-DrControllerProofRemotingMetadata {
     param([Parameter(Mandatory)] $Proof)
     # These are transport annotations added by PowerShell remoting, not proof fields.
@@ -258,15 +268,196 @@ function Test-DrControllerV2OwnedProcessLifetime {
     return $false
 }
 
+function Assert-DrControllerOwnedPerformanceTextScale {
+    param([Parameter(Mandatory)] $Observations)
+    $proof = $Observations.text_scale_restoration
+    $expected = @('registry_key_existed','registry_value_existed','registry_value_kind',
+        'registry_value','ui_settings_raw_factor','ui_settings_percent')
+    if ($null -eq $proof) { throw 'Owned performance restoration proof is missing or incomplete.' }
+    if ($null -eq $proof.baseline -or $null -eq $proof.final) {
+        throw 'Owned performance restoration proof is missing or incomplete.'
+    }
+    if (($proof.schema_version -isnot [long] -and
+        $proof.schema_version -isnot [int]) -or $proof.schema_version -ne 1 -or
+        $proof.snapshot_equal -isnot [bool] -or -not $proof.snapshot_equal) {
+        throw 'Owned performance restoration proof is missing or incomplete.'
+    }
+    foreach ($row in @($proof.baseline,$proof.final)) {
+        if ($null -eq $row -or
+            @(Compare-Object -CaseSensitive $expected @($row.PSObject.Properties.Name)).Count -ne 0 -or
+            $row.registry_key_existed -isnot [bool] -or
+            $row.registry_value_existed -isnot [bool] -or
+            ($row.registry_value_existed -and (-not $row.registry_key_existed -or
+                $row.registry_value_kind -cne 'DWord' -or
+                $row.registry_value -isnot [long] -and $row.registry_value -isnot [int] -or
+                $row.registry_value -ne 100)) -or
+            (-not $row.registry_value_existed -and
+                ($null -ne $row.registry_value_kind -or $null -ne $row.registry_value)) -or
+            $row.ui_settings_raw_factor -isnot [double] -or
+            [double]::IsNaN($row.ui_settings_raw_factor) -or
+            [double]::IsInfinity($row.ui_settings_raw_factor) -or
+            [Math]::Abs($row.ui_settings_raw_factor - 1.0) -ge 0.000001 -or
+            $row.ui_settings_percent -isnot [long] -and $row.ui_settings_percent -isnot [int] -or
+            $row.ui_settings_percent -ne 100 -or
+            [Math]::Round($row.ui_settings_raw_factor * 100.0) -ne $row.ui_settings_percent) {
+            throw 'Owned performance registry or UISettings observation is not coherent 100 percent.'
+        }
+    }
+    $a,$b = $proof.baseline,$proof.final
+    if ($a.registry_key_existed -ne $b.registry_key_existed -or
+        $a.registry_value_existed -ne $b.registry_value_existed -or
+        $a.registry_value_kind -cne $b.registry_value_kind -or
+        $a.registry_value -ne $b.registry_value -or
+        $a.ui_settings_percent -ne $b.ui_settings_percent -or
+        [Math]::Abs($a.ui_settings_raw_factor - $b.ui_settings_raw_factor) -ge 0.000001) {
+        throw 'Owned performance text scale changed between frozen snapshots.'
+    }
+}
+
+function New-DrControllerOwnedPerformancePredelete {
+    param([Parameter(Mandatory)][string] $OutputRoot,
+          [Parameter(Mandatory)][string] $PreservationPath,
+          [Parameter(Mandatory)][string] $TransportPath,
+          [Parameter(Mandatory)][string] $SignalPath,
+          [Parameter(Mandatory)][string] $LeasePath,
+          [Parameter(Mandatory)][string] $RunName,
+          [Parameter(Mandatory)][string] $VmId,
+          [Parameter(Mandatory)][string] $Nonce,
+          [Parameter(Mandatory)][string] $LeaseId,
+          [Parameter(Mandatory)][string] $SourceSha,
+          [Parameter(Mandatory)][string] $BundleSha256,
+          [Parameter(Mandatory)][string] $ProfileSha256)
+    $preservation = Get-Content -LiteralPath $PreservationPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $original = Get-Content -LiteralPath $TransportPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $signal = Get-Content -LiteralPath $SignalPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $lease = Get-Content -LiteralPath $LeasePath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($preservation.schema_version -ne 3 -or
+        $preservation.kind -cne 'owned_cleanup_strict_failure_preservation' -or
+        $preservation.run_name -cne $RunName -or $preservation.vm_id -cne $VmId -or
+        $preservation.nonce -cne $Nonce -or $preservation.desktop_lease_id -cne $LeaseId -or
+        $preservation.profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $preservation.profile_sha256 -cne $ProfileSha256 -or
+        $original.status -cne 'failed' -or $original.task_kind -cne 'ui' -or
+        $original.owned_cleanup_failure_context.acceptance_mode -cne 'performance-sample' -or
+        $original.owned_cleanup_failure_context.source_sha -cne $SourceSha -or
+        $original.owned_cleanup_failure_context.bundle.sha256 -cne $BundleSha256 -or
+        $original.owned_cleanup_failure_context.root_records.guest.file_id -cne
+            $preservation.root_records.guest.file_id -or
+        $original.owned_cleanup_failure_context.root_records.trusted.file_id -cne
+            $preservation.root_records.trusted.file_id -or
+        $original.owned_cleanup_failure_context.output_preservation_verified -isnot [bool] -or
+        -not $original.owned_cleanup_failure_context.output_preservation_verified -or
+        $signal.nonce -cne $Nonce -or
+        $signal.preservation_sha256 -cne
+            (Get-FileHash -LiteralPath $PreservationPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $lease.lease_id -cne $LeaseId -or $lease.stop_status -cne 'stopped' -or
+        $lease.cleanup_observed -isnot [bool] -or -not $lease.cleanup_observed) {
+        throw 'Owned performance frozen failure or desktop binding differs.'
+    }
+    $indexed = @{}
+    foreach ($row in @($preservation.files)) {
+        if ($row.file -isnot [string] -or $indexed.ContainsKey($row.file) -or
+            $row.file -cmatch '[\\/]' -or $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
+            $row.bytes -lt 0 -or $row.bytes -gt 128MB) {
+            throw 'Owned performance preserved file index is unsafe.'
+        }
+        $path = Join-Path $OutputRoot $row.file
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Length -ne $row.bytes -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.sha256) {
+            throw 'Owned performance preserved bytes changed before deletion.'
+        }
+        $indexed[$row.file] = $row
+    }
+    foreach ($required in @('original-transport.json','acceptance-result.json',
+        'acceptance-observations.json','owned-performance-input-manifest.json',
+        'owned-performance-profile.json','bundle.json')) {
+        if (-not $indexed.ContainsKey($required)) {
+            throw 'Owned performance frozen source or observation is absent.'
+        }
+    }
+    if ($preservation.original_transport.sha256 -cne $indexed['original-transport.json'].sha256 -or
+        $original.owned_cleanup_failure_context.source_result.sha256 -cne
+            $indexed['acceptance-result.json'].sha256 -or
+        $original.owned_cleanup_failure_context.bundle.sha256 -cne $indexed['bundle.json'].sha256) {
+        throw 'Owned performance source, transport, or bundle reference differs.'
+    }
+    $result = Get-Content -LiteralPath (Join-Path $OutputRoot 'acceptance-result.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $observations = Get-Content -LiteralPath (Join-Path $OutputRoot 'acceptance-observations.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $input = Get-Content -LiteralPath (Join-Path $OutputRoot 'owned-performance-input-manifest.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $profile = Get-Content -LiteralPath (Join-Path $OutputRoot 'owned-performance-profile.json') -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $runId = [string]$input.run_id
+    if ($runId -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$') {
+        throw 'Owned performance frozen run ID differs.'
+    }
+    $columnOrder = $Matches[1]
+    if (
+        $input.source_sha -cne $SourceSha -or $input.bundle_manifest.sha256 -cne $BundleSha256 -or
+        $input.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $input.acceptance_profile_sha256 -cne $ProfileSha256 -or
+        $input.acceptance_profile.sha256 -cne $ProfileSha256 -or
+        $input.request.mode -cne 'performance-sample' -or
+        $input.request.performance_plan.long_path_order -cne $columnOrder -or
+        $profile.schema -cne 'darkrenamer-vm-automated-profile-v3' -or
+        $profile.profile_id -cne 'vm-automated-v2-owned-resources' -or
+        $profile.revision -ne 3 -or
+        $indexed['owned-performance-profile.json'].sha256 -cne $ProfileSha256 -or
+        $result.source_sha -cne $SourceSha -or $result.application.sha256 -cne
+            $input.artifacts.application.sha256 -or
+        $result.observations.sha256 -cne $indexed['acceptance-observations.json'].sha256 -or
+        $observations.run_id -cne $runId -or
+        ($result.acceptance_observations | ConvertTo-Json -Depth 24 -Compress) -cne
+            ($observations | ConvertTo-Json -Depth 24 -Compress)) {
+        throw 'Owned performance frozen input, profile, result, or observations differ.'
+    }
+    Assert-DrControllerOwnedPerformanceTextScale -Observations $observations
+    $refs = [ordered]@{}
+    foreach ($key in @('original-transport.json','acceptance-result.json',
+        'acceptance-observations.json','owned-performance-input-manifest.json',
+        'owned-performance-profile.json','bundle.json')) { $refs[$key] = $indexed[$key] }
+    $refs['owned-cleanup-strict-failure-preservation.json'] = [ordered]@{
+        file='owned-cleanup-strict-failure-preservation.json';
+        bytes=(Get-Item -LiteralPath $PreservationPath).Length
+        sha256=(Get-FileHash -LiteralPath $PreservationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $refs['owned-cleanup-desktop-closed.json'] = [ordered]@{
+        file='owned-cleanup-desktop-closed.json'; bytes=(Get-Item -LiteralPath $SignalPath).Length
+        sha256=(Get-FileHash -LiteralPath $SignalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $refs['desktop-lease.json'] = [ordered]@{
+        file='desktop-lease.json'; bytes=(Get-Item -LiteralPath $LeasePath).Length
+        sha256=(Get-FileHash -LiteralPath $LeasePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    [ordered]@{
+        schema_version=1; kind='owned_performance_predelete_restoration'
+        run_name=$RunName; run_id=$runId; vm_id=$VmId; nonce=$Nonce
+        desktop_lease_id=$LeaseId; source_sha=$SourceSha; bundle_sha256=$BundleSha256
+        profile_id='vm-automated-v2-owned-resources'; profile_sha256=$ProfileSha256
+        roots=$preservation.root_records; files=$refs
+    }
+}
+
 function Invoke-DrControllerOwnedCleanupAfterFailure {
-    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256)
-    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
-        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256,$startMapDefinition,$lifetimeDefinition)
+    param($Session,$TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,
+          $PredeleteJson,$PredeleteSha256,$ExpectedNonce,$ExpectedLeaseId,[bool]$RequireOwnedPerformance=$false)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$RunnerSid,$SessionId,$ExpectedVmId,$Frozen,$Roots,$V2Evidence,$ProfileSha256,$PredeleteJson,$PredeleteSha256,$ExpectedNonce,$ExpectedLeaseId,$RequireOwnedPerformance,(${function:Get-DrControllerV2OwnedStartMap}.ToString()),(${function:Test-DrControllerV2OwnedProcessLifetime}.ToString()) -ScriptBlock {
+        param($name,$sid,$desktopSession,$expectedVmId,$frozen,$roots,$v2Evidence,$profileSha256,
+              $predeleteJson,$predeleteSha256,$expectedNonce,$expectedLeaseId,$requireOwnedPerformance,
+              $startMapDefinition,$lifetimeDefinition)
         Set-Item -Path Function:Get-DrControllerV2OwnedStartMap -Value ([scriptblock]::Create($startMapDefinition))
         Set-Item -Path Function:Test-DrControllerV2OwnedProcessLifetime -Value ([scriptblock]::Create($lifetimeDefinition))
         $v2 = $null -ne $v2Evidence
         $proof = [ordered]@{
-            schema_version = if ($v2) { 2 } else { 1 }
+            schema_version = if ($v2) { 3 } else { 1 }
             kind = 'owned_cleanup_after_strict_failure'
             run_name = $name
             vm_id = $null
@@ -281,6 +472,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
         if ($v2) {
             $proof['profile_id'] = 'vm-automated-v2-owned-resources'
             $proof['profile_sha256'] = [string]$profileSha256
+            $proof['protected_anchor'] = $null
         }
         $guestGuard = $null
         $trustedGuard = $null
@@ -350,11 +542,26 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
             $known = @{}
             foreach ($row in @($Earlier.processes)) { $known[[int]$row.pid] = $row }
             foreach ($row in @($Inventory.processes)) {
-                $scope = ([string]$row.executable_path + ' ' + [string]$row.command_line)
+                $protected = $row.kind -ceq 'protected_pre_name'
+                $scope = if ($protected) { [string]$row.native_image_path } else {
+                    [string]$row.executable_path + ' ' + [string]$row.command_line
+                }
+                $validProtected = $protected -and
+                    $null -ne $global:DrVmProtectedAnchorContext -and
+                    -not $global:DrVmProtectedAnchorContext.closed -and
+                    $null -ne $global:DrVmProtectedAnchorContext.proof -and
+                    $row.identity -ceq $global:DrVmProtectedAnchorContext.proof.identity -and
+                    $null -eq $row.executable_path -and $null -eq $row.command_line -and
+                    $row.native_image_path -ceq
+                        $global:DrVmProtectedAnchorContext.proof.child_native_identity['image_path'] -and
+                    $row.protection_level -eq 3 -and
+                    $row.parent_pid -eq $global:DrVmProtectedAnchorContext.proof.parent_pid
                 if ($row.owner_sid -cne $sid -or [int]$row.session_id -ne $desktopSession -or
                     [string]::IsNullOrWhiteSpace([string]$row.identity) -or
-                    [string]::IsNullOrWhiteSpace([string]$row.executable_path) -or
-                    [string]::IsNullOrWhiteSpace([string]$row.command_line) -or
+                    ($protected -and -not $validProtected) -or
+                    (-not $protected -and ($row.kind -cne 'full' -or
+                        [string]::IsNullOrWhiteSpace([string]$row.executable_path) -or
+                        [string]::IsNullOrWhiteSpace([string]$row.command_line))) -or
                     $scope.IndexOf($name,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                     $scope.IndexOf([string]$roots.guest.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                     $scope.IndexOf([string]$roots.trusted.path,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -363,12 +570,74 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 }
                 if ($known.ContainsKey([int]$row.pid) -and
                     ($known[[int]$row.pid].identity -cne $row.identity -or
+                     $known[[int]$row.pid].kind -cne $row.kind -or
                      $known[[int]$row.pid].executable_path -cne $row.executable_path -or
                      $known[[int]$row.pid].command_line -cne $row.command_line -or
+                     $known[[int]$row.pid].native_image_path -cne $row.native_image_path -or
                      $known[[int]$row.pid].parent_pid -ne $row.parent_pid)) {
                     throw 'V2 process PID was reused or its lifetime changed.'
                 }
             }
+        }
+        function Invoke-DrControllerBoundRootDelete {
+            param($GuestGuard,$TrustedGuard,[bool]$RequireOwnedPerformance,
+                  $PredeleteJson,$PredeleteSha256,$Name,$ActualVmId,$ExpectedNonce,
+                  $ExpectedLeaseId,$ProfileSha256,$V2Evidence,$Roots)
+            if ($requireOwnedPerformance) {
+                if ($predeleteJson -isnot [string] -or $predeleteJson.Length -lt 1 -or
+                    $predeleteJson.Length -gt 65536 -or
+                    $predeleteSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                    throw 'Owned performance pre-delete restoration receipt is unavailable.'
+                }
+                $bytes = [Text.UTF8Encoding]::new($false,$true).GetBytes($predeleteJson)
+                $hash = -join ([Security.Cryptography.SHA256]::HashData($bytes) |
+                    ForEach-Object { $_.ToString('x2') })
+                $predelete = $predeleteJson | ConvertFrom-Json -ErrorAction Stop
+                if ($hash -cne $predeleteSha256 -or
+                    $predelete.schema_version -ne 1 -or
+                    $predelete.kind -cne 'owned_performance_predelete_restoration' -or
+                    $predelete.run_name -cne $name -or
+                    $predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -or
+                    $predelete.vm_id -cne $actualVmId -or
+                    $predelete.nonce -cne $expectedNonce -or
+                    $predelete.desktop_lease_id -cne $expectedLeaseId -or
+                    $predelete.profile_id -cne 'vm-automated-v2-owned-resources' -or
+                    $predelete.profile_sha256 -cne $profileSha256 -or
+                    $predelete.source_sha -cne $v2Evidence.protected_anchor.source_sha -or
+                    $predelete.bundle_sha256 -cne $v2Evidence.protected_anchor.bundle_sha256 -or
+                    $predelete.roots.guest.file_id -cne $roots.guest.file_id -or
+                    $predelete.roots.trusted.file_id -cne $roots.trusted.file_id -or
+                    $predelete.roots.guest.base_file_id -cne $roots.guest.base_file_id -or
+                    $predelete.roots.trusted.base_file_id -cne $roots.trusted.base_file_id -or
+                    $predelete.roots.guest.path -cne $roots.guest.path -or
+                    $predelete.roots.trusted.path -cne $roots.trusted.path) {
+                    throw 'Owned performance pre-delete receipt differs from the held deletion target.'
+                }
+                $required = @('original-transport.json','acceptance-result.json',
+                    'acceptance-observations.json','owned-performance-input-manifest.json',
+                    'owned-performance-profile.json','bundle.json',
+                    'owned-cleanup-strict-failure-preservation.json',
+                    'owned-cleanup-desktop-closed.json','desktop-lease.json')
+                if (@(Compare-Object -ReferenceObject $required `
+                    -DifferenceObject @($predelete.files.PSObject.Properties.Name) `
+                    -CaseSensitive).Count -ne 0) {
+                    throw 'Owned performance pre-delete receipt omits a frozen binding.'
+                }
+                foreach ($key in $required) {
+                    $row = $predelete.files.$key
+                    if ($row.file -cne $key -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                        $row.bytes -isnot [long] -and $row.bytes -isnot [int] -or
+                        $row.bytes -lt 1 -or $row.bytes -gt 8MB) {
+                        throw 'Owned performance pre-delete receipt has an invalid file reference.'
+                    }
+                }
+            }
+            elseif ($null -ne $predeleteJson -or $null -ne $predeleteSha256) {
+                throw 'Pre-delete receipt was supplied to a different cleanup route.'
+            }
+            [void]$GuestGuard.Delete()
+            [void]$TrustedGuard.Delete()
+            if ($RequireOwnedPerformance) { return $PredeleteSha256 }
         }
         try {
             if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
@@ -396,12 +665,20 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
             }
             if ($v2) {
                 if ($profileSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                    $v2Evidence.schema_version -ne 2 -or
+                    $v2Evidence.schema_version -ne 3 -or
                     $v2Evidence.run_name -cne $name -or
                     $v2Evidence.runner_sid -cne $sid -or
                     $v2Evidence.runner_session_id -ne $desktopSession -or
                     $v2Evidence.root_records.guest.file_id -cne $roots.guest.file_id -or
-                    $v2Evidence.root_records.trusted.file_id -cne $roots.trusted.file_id) {
+                    $v2Evidence.root_records.trusted.file_id -cne $roots.trusted.file_id -or
+                    $null -eq $global:DrVmProtectedAnchorContext -or
+                    $global:DrVmProtectedAnchorContext.closed -or
+                    $v2Evidence.protected_anchor.anchor_nonce -cne
+                        $global:DrVmProtectedAnchorContext.anchor_nonce -or
+                    $v2Evidence.protected_anchor.source_sha -cne
+                        $global:DrVmProtectedAnchorContext.source_sha -or
+                    $v2Evidence.protected_anchor.vm_id -cne $actualVmId -or
+                    $v2Evidence.protected_anchor.all_handles_closed -ne $false) {
                     throw 'V2 frozen resource evidence differs from the cleanup target.'
                 }
                 Assert-V2Inventory -Inventory $frozen -Earlier $frozen
@@ -431,8 +708,14 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 }
             }
             $proof.observed_roots_before = $beforeRoots
-            $guestGuard.Delete()
-            $trustedGuard.Delete()
+            $verifiedPredeleteHash = Invoke-DrControllerBoundRootDelete `
+                -GuestGuard $guestGuard -TrustedGuard $trustedGuard `
+                -RequireOwnedPerformance $requireOwnedPerformance `
+                -PredeleteJson $predeleteJson -PredeleteSha256 $predeleteSha256 `
+                -Name $name -ActualVmId $actualVmId -ExpectedNonce $expectedNonce `
+                -ExpectedLeaseId $expectedLeaseId -ProfileSha256 $profileSha256 `
+                -V2Evidence $v2Evidence -Roots $roots
+            if ($requireOwnedPerformance) { $proof['predelete_sha256'] = $verifiedPredeleteHash }
         }
         catch { $proof.errors = @($_.Exception.Message) }
         finally {
@@ -463,6 +746,20 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                 $proof.status = 'owned-clean'
             }
         } catch { $proof.errors += $_.Exception.Message }
+        if ($v2 -and $null -ne $global:DrVmProtectedAnchorContext -and
+            -not $global:DrVmProtectedAnchorContext.closed) {
+            try {
+                $proof.protected_anchor = Close-DrVmProtectedAnchorContext `
+                    -Context $global:DrVmProtectedAnchorContext
+                if (-not $proof.protected_anchor.all_handles_closed) {
+                    $proof.errors += 'Protected-process anchor did not close after finalizer.'
+                    $proof.status = 'incomplete'
+                }
+            } catch {
+                $proof.errors += ('Protected-process anchor close failed: ' + $_.Exception.Message)
+                $proof.status = 'incomplete'
+            }
+        }
         [pscustomobject]$proof
     }
 }
@@ -1114,7 +1411,7 @@ function Invoke-DrWindowsVmController {
     [string] $FocusedRefreshCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1204,6 +1501,13 @@ if ($focusedTests -and ($taskSelection.kind -cne 'core' -or
 if ($refreshProfile -or $FocusedRefreshTests) { $coreTestOutputAggregateMaximumBytes = 32MB }
 
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
+$ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
+    $AcceptanceMode -ceq 'performance-sample'
+if ($ownedPerformance -and ($TestTimeoutSeconds -ne 600 -or
+    $SuiteTimeoutSeconds -ne 1200 -or $AcceptanceProfileSha256 -cne
+        '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f')) {
+    throw 'Owned performance requires exact revision-3 profile and 600/1200 second bounds.'
+}
 $v2Engine = $null
 $engineChild = $null
 if ($ownedV2 -and -not $PSBoundParameters.ContainsKey('AcceptanceProfileSha256')) {
@@ -1263,11 +1567,23 @@ $transport = [ordered]@{
     status = 'starting'
     guest_cleanup = $false
 }
+if ($ownedPerformance) {
+    $desktopBinding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($desktopBinding.lease_id -cnotmatch '^[0-9a-f]{32}$' -or
+        $desktopBinding.nonce -cnotmatch '^[0-9a-f]{32}$' -or
+        $desktopBinding.sid -cne $ExpectedDesktopSid) {
+        throw 'Owned performance desktop lease binding is unavailable.'
+    }
+    $transport['desktop_lease_id'] = [string]$desktopBinding.lease_id
+}
 $credential = $null
 $session = $null
 $guestRoot = $null
 $trustedTaskRoot = $null
-$taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+$taskName = if ($ownedV2) { $null } else {
+    'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+}
 $runnerTaskBaseline = @()
 $runnerProcessBaseline = @()
 $spotlightPreflight = $null
@@ -1549,6 +1865,18 @@ try {
     Assert-DrControllerGuestVmIdentity -ExpectedGuestVmId $ExpectedGuestVmId `
         -Endpoint $endpoint -Transport $transport -Acceptance $acceptance `
         -AcceptanceInput $acceptanceInput
+    if ($ownedV2 -and $ExpectedGuestVmId -eq [guid]::Empty) {
+        # SSH callers may omit a requested target ID. The protected anchor still
+        # needs the actual identity observed through this authenticated session.
+        try { $actualGuestId = ([guid]$endpoint.vm_id).ToString('D').ToLowerInvariant() }
+        catch { throw 'The guest did not expose a canonical Hyper-V Guest Parameters VM identity.' }
+        if ($actualGuestId -ceq [guid]::Empty.ToString('D')) {
+            throw 'The guest exposed an empty Hyper-V VM identity.'
+        }
+        $transport.vm_id = $actualGuestId
+        $transport.vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
+        $transport.vm_identity_sha256 = Get-LowerTextSha256 $actualGuestId
+    }
     $desktop = Invoke-Command -Session $session -ArgumentList $ExpectedDesktopSid -ScriptBlock {
         param($expectedSid)
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -1586,10 +1914,17 @@ public static class VmDesktopState {
             -RunId $RuntimeBrokerDiagnosticRunId -RunnerSid $desktop.sid -VmId $ExpectedGuestVmId
         Write-DrDiagnosticPhase -Phase 'desktop-session-bound' -Details @{ session_id=[int]$desktop.session_id; runner_sid=[string]$desktop.sid }
     }
-    $workspaceRoots = Invoke-Command -Session $session -ArgumentList $taskName,$desktop.sid -ScriptBlock {
-        param($name,$runnerSid)
-        if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
-            $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$') {
+    $anchorSourceSha = if ($splitLane) { [string]$manifest.harness.source_sha } else {
+        [string]$manifest.source_sha
+    }
+    $anchorBundleSha256 = (Get-FileHash -LiteralPath $bundleManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workspaceRoots = Invoke-Command -Session $session `
+        -ArgumentList $taskName,$desktop.sid,$desktop.session_id,$ownedV2,$AcceptanceProfileSha256,$anchorSourceSha,$anchorBundleSha256,$transport.vm_id -ScriptBlock {
+        param($name,$runnerSid,$runnerSession,$useV2,$profileSha256,$sourceSha,$bundleSha256,$vmId)
+        if (($useV2 -and $null -ne $name) -or
+            (-not $useV2 -and $name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$') -or
+            $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$' -or
+            $runnerSession -le 0) {
             throw 'The VM workspace identity is invalid.'
         }
         if (-not ('DarkReNamerVmOwnedRootGuard' -as [type])) {
@@ -1655,6 +1990,8 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
     [DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr memory);
 
@@ -1898,6 +2235,217 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
         for (int index = chain.Count - 1; index >= 0; --index) chain[index].Dispose();
         chain.Clear();
     }
+    public sealed class ProtectedPathChain : IDisposable {
+        const uint SHARE_ALL = 7, FILE_TRAVERSE = 0x20;
+        readonly List<SafeFileHandle> held = new List<SafeFileHandle>();
+        readonly string[] parts;
+        readonly string drive;
+        readonly bool finalDirectory;
+        readonly Dictionary<string, object>[] original;
+        bool closed;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr handle);
+        static int CloseAll(List<SafeFileHandle> handles) {
+            int firstError = 0;
+            for (int index = handles.Count - 1; index >= 0; index--) {
+                SafeFileHandle handle = handles[index];
+                if (!handle.IsInvalid && !handle.IsClosed) {
+                    if (!CloseHandle(handle.DangerousGetHandle())) {
+                        int error = Marshal.GetLastWin32Error();
+                        if (firstError == 0) firstError = error == 0 ? -1 : error;
+                    } else handle.SetHandleAsInvalid();
+                }
+                handle.Dispose();
+            }
+            handles.Clear();
+            return firstError;
+        }
+
+        static SafeFileHandle OpenProtectedDrive(string path) {
+            SafeFileHandle result = CreateFileW(path,
+                READ_ATTRIBUTES | READ_CONTROL | FILE_TRAVERSE | SYNCHRONIZE,
+                SHARE_ALL, IntPtr.Zero, OPEN_EXISTING,
+                BACKUP_SEMANTICS | OPEN_REPARSE_POINT, IntPtr.Zero);
+            if (result.IsInvalid) {
+                int error = Marshal.GetLastWin32Error(); result.Dispose();
+                throw new Win32Exception(error, "Protected image drive could not be opened.");
+            }
+            return result;
+        }
+        static SafeFileHandle OpenProtectedRelative(SafeFileHandle parent, string name, bool directory) {
+            if (name.Length == 0 || name.Length > 255 || name == "." || name == ".." ||
+                name.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0)
+                throw new InvalidOperationException("Protected image ancestry has an unsafe name.");
+            IntPtr characters = IntPtr.Zero, unicode = IntPtr.Zero;
+            try {
+                characters = Marshal.StringToHGlobalUni(name);
+                UnicodeString value = new UnicodeString();
+                value.Length = checked((ushort)(name.Length * 2));
+                value.MaximumLength = checked((ushort)((name.Length + 1) * 2));
+                value.Buffer = characters;
+                unicode = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                Marshal.StructureToPtr(value, unicode, false);
+                ObjectAttributes attributes = new ObjectAttributes();
+                attributes.Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes));
+                attributes.RootDirectory = parent.DangerousGetHandle();
+                attributes.ObjectName = unicode;
+                attributes.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+                IoStatusBlock status; SafeFileHandle result;
+                int code = NtCreateFile(out result,
+                    READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE | (directory ? FILE_TRAVERSE : 0),
+                    ref attributes, out status, IntPtr.Zero, 0, SHARE_ALL, FILE_OPEN,
+                    FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                    IntPtr.Zero, 0);
+                if (code != 0 || result == null || result.IsInvalid) {
+                    if (result != null) result.Dispose();
+                    throw new InvalidOperationException("Protected image relative open failed: NTSTATUS " +
+                        ((uint)code).ToString("x8"));
+                }
+                return result;
+            }
+            finally {
+                if (unicode != IntPtr.Zero) Marshal.FreeHGlobal(unicode);
+                if (characters != IntPtr.Zero) Marshal.FreeHGlobal(characters);
+            }
+        }
+        static Dictionary<string, object> Describe(SafeFileHandle file, bool directory) {
+            Ordinary(file, directory);
+            IntPtr owner, group, dacl, sacl, descriptor;
+            uint error = GetSecurityInfo(file, 1, 7,
+                out owner, out group, out dacl, out sacl, out descriptor);
+            if (error != 0) throw new Win32Exception((int)error, "Held protected image security query failed.");
+            IntPtr ownerText = IntPtr.Zero, sddlText = IntPtr.Zero;
+            try {
+                if (owner == IntPtr.Zero || dacl == IntPtr.Zero)
+                    throw new InvalidOperationException("Held protected image owner or DACL is absent.");
+                uint length;
+                if (!ConvertSidToStringSidW(owner, out ownerText) ||
+                    !ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                        descriptor, 1, 7, out sddlText, out length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Held protected image descriptor conversion failed.");
+                uint descriptorLength = GetSecurityDescriptorLength(descriptor);
+                if (descriptorLength < 20 || descriptorLength > 65536)
+                    throw new InvalidOperationException("Held protected image descriptor length is invalid.");
+                byte[] descriptorBytes = new byte[descriptorLength];
+                Marshal.Copy(descriptor, descriptorBytes, 0, (int)descriptorLength);
+                return new Dictionary<string, object> {
+                    {"file_id", Identity(file)}, {"attributes", Attributes(file)},
+                    {"owner_sid", Marshal.PtrToStringUni(ownerText)},
+                    {"sddl", Marshal.PtrToStringUni(sddlText)},
+                    {"security_descriptor_base64", Convert.ToBase64String(descriptorBytes)},
+                    {"is_directory", directory}
+                };
+            }
+            finally {
+                if (ownerText != IntPtr.Zero) LocalFree(ownerText);
+                if (sddlText != IntPtr.Zero) LocalFree(sddlText);
+                if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+            }
+        }
+        static List<SafeFileHandle> Walk(string drive, string[] parts, bool finalDirectory) {
+            List<SafeFileHandle> result = new List<SafeFileHandle>();
+            try {
+                result.Add(OpenProtectedDrive(drive));
+                Ordinary(result[0], true);
+                for (int index = 0; index < parts.Length; index++) {
+                    bool directory = index < parts.Length - 1 || finalDirectory;
+                    SafeFileHandle child = OpenProtectedRelative(result[result.Count - 1], parts[index], directory);
+                    result.Add(child);
+                    Ordinary(child, directory);
+                }
+                return result;
+            }
+            catch (Exception primary) {
+                int closeError = CloseAll(result);
+                if (closeError != 0)
+                    throw new AggregateException(primary,
+                        new Win32Exception(closeError, "Protected image partial walk close failed."));
+                throw;
+            }
+        }
+        static Dictionary<string, object>[] Snapshot(List<SafeFileHandle> handles, bool finalDirectory) {
+            var rows = new Dictionary<string, object>[handles.Count];
+            for (int index = 0; index < handles.Count; index++)
+                rows[index] = Describe(handles[index], index < handles.Count - 1 || finalDirectory);
+            return rows;
+        }
+        public ProtectedPathChain(string path) {
+            string canonical = Path.GetFullPath(path);
+            if (!String.Equals(canonical, path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Protected image path is not canonical.");
+            drive = Path.GetPathRoot(canonical);
+            if (drive == null || drive.Length != 3 || canonical.Length <= drive.Length)
+                throw new InvalidOperationException("Protected image path is not drive absolute.");
+            parts = canonical.Substring(drive.Length).Split(Path.DirectorySeparatorChar);
+            if (parts.Length != 6 || Array.Exists(parts, part => part.Length == 0 || part == "." || part == ".."))
+                throw new InvalidOperationException("Protected image path has an unexpected depth.");
+            finalDirectory = false;
+            try {
+                held.AddRange(Walk(drive, parts, finalDirectory));
+                original = Snapshot(held, finalDirectory);
+            } catch (Exception primary) {
+                Dispose();
+                if (CloseError != 0) throw new AggregateException(primary,
+                    new Win32Exception(CloseError, "Protected image initial handle close failed."));
+                throw;
+            }
+        }
+        public Dictionary<string, object>[] Original { get { return original; } }
+        public Dictionary<string, object>[] Recheck() {
+            if (closed) throw new ObjectDisposedException("ProtectedPathChain");
+            Dictionary<string, object>[] same = Snapshot(held, finalDirectory);
+            var current = new ProtectedPathChainView(drive, parts, finalDirectory);
+            Exception primary = null;
+            try {
+                Dictionary<string, object>[] fresh = current.Rows;
+                for (int index = 0; index < same.Length; index++) {
+                    foreach (string key in new [] { "file_id", "attributes", "owner_sid", "sddl",
+                                                   "security_descriptor_base64", "is_directory" }) {
+                        string expected = Convert.ToString(original[index][key]);
+                        if (!String.Equals(Convert.ToString(same[index][key]), expected, StringComparison.Ordinal) ||
+                            !String.Equals(Convert.ToString(fresh[index][key]), expected, StringComparison.Ordinal))
+                            throw new InvalidOperationException("Protected image held ancestry or namespace changed.");
+                    }
+                }
+            } catch (Exception error) { primary = error; }
+            int closeError = current.Close();
+            if (closeError != 0) {
+                var closeFailure = new Win32Exception(closeError, "Protected image refresh handle close failed.");
+                if (primary != null) throw new AggregateException(primary, closeFailure);
+                throw closeFailure;
+            }
+            if (primary != null) throw primary;
+            return same;
+        }
+        sealed class ProtectedPathChainView : IDisposable {
+            readonly List<SafeFileHandle> handles;
+            public Dictionary<string, object>[] Rows { get; private set; }
+            public ProtectedPathChainView(string drive, string[] parts, bool finalDirectory) {
+                handles = Walk(drive, parts, finalDirectory);
+                try { Rows = Snapshot(handles, finalDirectory); }
+                catch (Exception primary) {
+                    int error = Close();
+                    if (error != 0) throw new AggregateException(primary,
+                        new Win32Exception(error, "Protected image refresh close failed."));
+                    throw;
+                }
+            }
+            public int Close() { return CloseAll(handles); }
+            public void Dispose() {
+                int error = Close();
+                if (error != 0) throw new Win32Exception(error,
+                    "Protected image refresh handle close failed.");
+            }
+        }
+        public bool Closed { get { return closed; } }
+        public int CloseError { get; private set; }
+        public void Dispose() {
+            if (closed) return;
+            CloseError = CloseAll(held); closed = true;
+        }
+    }
 }
 '@
         }
@@ -2046,15 +2594,6 @@ public static class DarkReNamerVmControllerWorkspace {
         }
         else {
             [void][System.IO.FileSystemAclExtensions]::CreateDirectory($baseSecurity, $base)
-        }
-        $path = Join-Path $base $name
-        if (Test-Path -LiteralPath $path) {
-            throw 'The unique VM workspace path already exists.'
-        }
-        $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
-        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
-        $global:DrVmOwnedRootRecords = @{
-            guest = Get-DrVmOwnedRootRecord -Path $path
         }
         function global:Get-DrVmTrustedPowerShellPath {
             $programFiles = [Environment]::GetFolderPath(
@@ -2953,6 +3492,20 @@ public sealed class DrVmSpotlightLifetime : IDisposable {
         }
         return row;
     }
+    public Dictionary<string, object> Recheck() {
+        if (handle.IsClosed) throw new ObjectDisposedException("DrVmSpotlightLifetime");
+        var row = DrVmSpotlightNative.Inspect(handle, false, 0);
+        foreach (string key in new [] { "pid", "creation_filetime_100ns", "owner_sid", "session_id", "image_path" }) {
+            if (!String.Equals(Convert.ToString(row[key], CultureInfo.InvariantCulture),
+                               Convert.ToString(Identity[key], CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Same-handle process identity changed.");
+        }
+        return row;
+    }
+    public Dictionary<string, object> Protection() {
+        if (handle.IsClosed) throw new ObjectDisposedException("DrVmSpotlightLifetime");
+        return DrVmSpotlightNative.QueryProtection(handle);
+    }
     public void Dispose() { handle.Dispose(); }
 }
 public static class DrVmSpotlightNative {
@@ -2990,6 +3543,9 @@ public static class DrVmSpotlightNative {
     public static extern uint WaitForSingleObject(DrVmSpotlightHandle handle, uint milliseconds);
     [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetExitCodeProcess(DrVmSpotlightHandle handle, out uint code);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetProcessInformation(
+        DrVmSpotlightHandle handle, int informationClass, out uint information, uint informationSize);
     [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)] private static extern bool OpenProcessToken(DrVmSpotlightHandle process, uint access, out DrVmSpotlightHandle token);
     [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
@@ -3065,11 +3621,15 @@ public static class DrVmSpotlightNative {
             }
         }
     }
-    public static DrVmSpotlightLifetime Open(uint pid, bool package) {
-        WindowsOnly(); if (pid == 0) throw new ArgumentOutOfRangeException("pid");
-        DrVmSpotlightHandle handle = OpenProcess(ProcessAccess, false, pid);
-        int openError = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
-        try {
+    internal static Dictionary<string, object> QueryProtection(DrVmSpotlightHandle handle) {
+        uint level;
+        bool ok = GetProcessInformation(handle, 7, out level, 4);
+        return new Dictionary<string, object> {
+            {"success", ok}, {"win32_error", ok ? 0 : Marshal.GetLastWin32Error()},
+            {"level", ok ? (object)level : null}
+        };
+    }
+    internal static Dictionary<string, object> Inspect(DrVmSpotlightHandle handle, bool package, int openError) {
             var row = new Dictionary<string, object> {
                 {"pid", 0u}, {"creation_filetime_100ns", null}, {"owner_sid", null}, {"session_id", null}, {"image_path", null},
                 {"open_error", openError}, {"pid_error", 0}, {"times_error", 0}, {"image_error", 0},
@@ -3090,6 +3650,14 @@ public static class DrVmSpotlightNative {
                 if (ok && chars > 0 && chars < 32768 && image.Length == chars && image.ToString().IndexOf('\0') < 0) row["image_path"] = image.ToString();
                 if (package) { Name(handle, true, row); Name(handle, false, row); }
             }
+            return row;
+    }
+    public static DrVmSpotlightLifetime Open(uint pid, bool package) {
+        WindowsOnly(); if (pid == 0) throw new ArgumentOutOfRangeException("pid");
+        DrVmSpotlightHandle handle = OpenProcess(ProcessAccess, false, pid);
+        int openError = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        try {
+            var row = Inspect(handle, package, openError);
             return new DrVmSpotlightLifetime(handle, row);
         } catch { handle.Dispose(); throw; }
     }
@@ -3465,13 +4033,408 @@ public static class DrVmSpotlightNative {
                 }
             }
         }
+        function global:New-DrVmProtectedAnchorContext {
+            param([Parameter(Mandatory)][string] $UserSid,
+                [Parameter(Mandatory)][int] $SessionId,
+                [Parameter(Mandatory)][string] $ProfileSha256,
+                [Parameter(Mandatory)][string] $SourceSha,
+                [Parameter(Mandatory)][string] $BundleSha256,
+                [Parameter(Mandatory)][string] $VmId)
+            if ($ProfileSha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
+                $SourceSha -cnotmatch '^[0-9a-fA-F]{40}$' -or
+                $BundleSha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
+                $VmId -cnotmatch '^[0-9a-fA-F-]{36}$') {
+                throw 'Protected-process anchor source or profile binding is invalid.'
+            }
+            $actualVmId = ([guid](Get-ItemProperty `
+                -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' `
+                -Name VirtualMachineId -ErrorAction Stop).VirtualMachineId).ToString('D').ToLowerInvariant()
+            if ($actualVmId -cne ([guid]$VmId).ToString('D').ToLowerInvariant()) {
+                throw 'Protected-process anchor guest VM identity changed.'
+            }
+            [pscustomobject]@{
+                runner_sid = $UserSid
+                runner_session_id = $SessionId
+                profile_sha256 = $ProfileSha256.ToLowerInvariant()
+                source_sha = $SourceSha.ToLowerInvariant()
+                bundle_sha256 = $BundleSha256.ToLowerInvariant()
+                vm_id = $actualVmId
+                pre_name_utc = [DateTime]::UtcNow.ToString('o')
+                anchor_nonce = [guid]::NewGuid().ToString('N')
+                run_name = $null
+                child = $null
+                parent = $null
+                child_path_chain = $null
+                parent_path_chain = $null
+                proof = $null
+                closed = $false
+                accepted_snapshots = 0
+                rejected_opaque_observed = $false
+                pre_name_snapshot = $null
+                close_errors = @()
+            }
+        }
+        function global:Get-DrVmProtectedAnchorEvidence {
+            param([Parameter(Mandatory)] $Context,[switch] $Close)
+            if ($Close) {
+                if ($Context.closed) { throw 'Protected-process anchor was closed twice.' }
+                $errors = [Collections.Generic.List[string]]::new()
+                foreach ($property in @('parent_path_chain','child_path_chain','parent','child')) {
+                    $held = $Context.$property
+                    if ($null -eq $held) { continue }
+                    try { $held.Dispose() }
+                    catch { $errors.Add($property + ': ' + $_.Exception.GetType().Name) }
+                    if (-not $held.Closed -or $held.CloseError -ne 0) {
+                        $errors.Add($property + ': held handle closure is incomplete.')
+                    }
+                }
+                $Context.closed = $true
+                $Context.close_errors = @($errors.ToArray())
+            }
+            if ($null -ne $Context.proof) {
+                $Context.proof.handle_closed = [bool]($null -ne $Context.child -and
+                    $Context.child.Closed -and $Context.child.CloseError -eq 0)
+                $Context.proof.parent_handle_closed = [bool]($null -ne $Context.parent -and
+                    $Context.parent.Closed -and $Context.parent.CloseError -eq 0)
+                $Context.proof.child_path_closed = [bool]($null -ne $Context.child_path_chain -and
+                    $Context.child_path_chain.Closed -and $Context.child_path_chain.CloseError -eq 0)
+                $Context.proof.parent_path_closed = [bool]($null -ne $Context.parent_path_chain -and
+                    $Context.parent_path_chain.Closed -and $Context.parent_path_chain.CloseError -eq 0)
+                $Context.proof.accepted_snapshot_count = [int]$Context.accepted_snapshots
+            }
+            [ordered]@{
+                schema_version = 3
+                run_name = $Context.run_name
+                vm_id = $Context.vm_id
+                source_sha = $Context.source_sha
+                bundle_sha256 = $Context.bundle_sha256
+                profile_sha256 = $Context.profile_sha256
+                anchor_nonce = $Context.anchor_nonce
+                pre_name_utc = $Context.pre_name_utc
+                pre_name_snapshot = $Context.pre_name_snapshot
+                anchor_present = $null -ne $Context.proof
+                all_handles_closed = [bool]($Context.closed -and @($Context.close_errors).Count -eq 0)
+                errors = @($Context.close_errors)
+                proof = $Context.proof
+            }
+        }
+        function global:Close-DrVmProtectedAnchorContext {
+            param([Parameter(Mandatory)] $Context)
+            Get-DrVmProtectedAnchorEvidence -Context $Context -Close
+        }
+        function global:Open-DrVmProtectedImageAncestry {
+            param([Parameter(Mandatory)][string] $Path,
+                [Parameter(Mandatory)][string] $Leaf)
+            $programData = [IO.Path]::GetFullPath(
+                [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+            ).TrimEnd('\')
+            if ($programData -cnotmatch '^[A-Za-z]:\\ProgramData$' -or
+                $env:ProgramData -ine $programData) {
+                throw 'The canonical protected OS ProgramData root is unavailable.'
+            }
+            $full = [IO.Path]::GetFullPath($Path)
+            if ($full -ine $Path) { throw 'Protected OS native image path is not canonical.' }
+            $platform = Join-Path (Join-Path (Join-Path $programData 'Microsoft') 'Windows Defender') 'Platform'
+            $relative = $full.Substring([Math]::Min($full.Length,$platform.Length)).TrimStart('\')
+            $parts = $relative.Split('\')
+            if (-not $full.StartsWith($platform+'\',[StringComparison]::OrdinalIgnoreCase) -or
+                $parts.Count -ne 2 -or $parts[0] -cnotmatch '^4\.18\.[0-9]{5}\.[0-9]+-[0-9]+$' -or
+                $parts[1] -ine $Leaf) {
+                throw 'Protected OS image is outside the canonical Defender platform.'
+            }
+            $drive = [IO.Path]::GetPathRoot($programData)
+            $paths = @($drive,$programData,(Join-Path $programData 'Microsoft'),
+                (Join-Path (Join-Path $programData 'Microsoft') 'Windows Defender'),
+                $platform,(Join-Path $platform $parts[0]),$full)
+            $trusted = @('S-1-5-18','S-1-5-32-544',
+                'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+            $records = [Collections.Generic.List[object]]::new()
+            $chain = [DarkReNamerVmOwnedRootGuard+ProtectedPathChain]::new($full)
+            try {
+              $observed = @($chain.Recheck())
+              if ($observed.Count -ne $paths.Count) {
+                  throw 'Protected OS image ancestry depth changed.'
+              }
+              for ($index=0; $index -lt $paths.Count; $index++) {
+                $node = $paths[$index]
+                $directory = $index -lt $paths.Count-1
+                $entry = $observed[$index]
+                if ([bool]$entry['is_directory'] -ne $directory) {
+                    throw 'Protected OS image ancestry changed kind.'
+                }
+                $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                    [Convert]::FromBase64String([string]$entry['security_descriptor_base64']),0)
+                if (($raw.ControlFlags -band
+                    [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -eq 0 -or
+                    $null -eq $raw.DiscretionaryAcl -or $raw.DiscretionaryAcl.Count -lt 1 -or
+                    $raw.DiscretionaryAcl.Count -gt 64 -or $raw.Owner.Value -cnotin $trusted -or
+                    $raw.Owner.Value -cne [string]$entry['owner_sid']) {
+                    throw 'Protected OS image ancestry ownership or DACL is untrusted.'
+                }
+                $aces = [Collections.Generic.List[object]]::new()
+                foreach ($ace in $raw.DiscretionaryAcl) {
+                    if ($ace -isnot [Security.AccessControl.CommonAce] -or
+                        [int]$ace.AceType -notin @(0,1)) {
+                        throw 'Protected OS image ancestry has an unsupported ACE.'
+                    }
+                    $mask = [BitConverter]::ToUInt32(
+                        [BitConverter]::GetBytes([int]$ace.AccessMask),0)
+                    $sid = $ace.SecurityIdentifier.Value
+                    $flags = [int]$ace.AceFlags
+                    $type = [int]$ace.AceType
+                    $risk = [uint32]0x500D0156
+                    if ($index -eq 0) { $risk = $risk -band (-bnot [uint32]4) }
+                    if ($type -in @(0,9) -and ($flags -band 8) -eq 0 -and
+                        $sid -cnotin $trusted -and ($mask -band $risk) -ne 0 -and
+                        -not ($index -eq 1 -and $type -eq 0 -and $flags -eq 2 -and
+                            $sid -ceq 'S-1-5-32-545' -and $mask -eq 278)) {
+                        throw 'Protected OS image ancestry grants untrusted effective write access.'
+                    }
+                    $aces.Add([ordered]@{type=$type;flags=$flags;mask=$mask;sid=$sid})
+                }
+                $records.Add([ordered]@{path=$node;is_directory=$directory
+                    file_id=[string]$entry['file_id'];owner_sid=$raw.Owner.Value
+                    security_descriptor_base64=[string]$entry['security_descriptor_base64']
+                    aces=@($aces.ToArray())})
+              }
+              [pscustomobject]@{chain=$chain;records=@($records.ToArray())}
+              $chain=$null
+            } finally {
+              if ($null -ne $chain) { $chain.Dispose() }
+            }
+        }
+        function global:Assert-DrVmProtectedOsProvenance {
+            param([Parameter(Mandatory)] $Process,[Parameter(Mandatory)] $ParentProcess,
+                [Parameter(Mandatory)] $Child,[Parameter(Mandatory)] $Parent,
+                [Parameter(Mandatory)][string] $RunnerSid,
+                [Parameter(Mandatory)][int] $SessionId)
+            $created = ([datetime]$Process.CreationDate).ToUniversalTime().ToString('o')
+            $parentCreated = ([datetime]$ParentProcess.CreationDate).ToUniversalTime().ToString('o')
+            $childNative = $Child.Identity
+            $parentNative = $Parent.Identity
+            if (-not (Test-DrVmSpotlightNativeIdentity -Native $childNative -Candidate (
+                [pscustomobject]@{pid=[int]$Process.ProcessId;creation_time_utc=$created
+                    executable_path=[string]$childNative['image_path']}) -UserSid $RunnerSid -SessionId $SessionId) -or
+                -not (Test-DrVmSpotlightNativeIdentity -Native $parentNative -Candidate (
+                [pscustomobject]@{pid=[int]$ParentProcess.ProcessId;creation_time_utc=$parentCreated
+                    executable_path=[string]$parentNative['image_path']}) -UserSid 'S-1-5-18' -SessionId 0) -or
+                [datetime]$ParentProcess.CreationDate -ge [datetime]$Process.CreationDate -or
+                [string]$ParentProcess.Name -ine 'MsMpEng.exe' -or
+                ([string]$ParentProcess.ExecutablePath -and
+                    [string]$ParentProcess.ExecutablePath -ine [string]$parentNative['image_path']) -or
+                $Child.Poll()['wait_result'] -ne 258 -or
+                $Parent.Poll()['wait_result'] -ne 258) {
+                throw 'Protected OS child or service-parent native lifetime is untrusted.'
+            }
+            $protection = $Child.Protection()
+            if (-not $protection['success'] -or $protection['win32_error'] -ne 0 -or
+                $protection['level'] -ne 3) {
+                throw 'Protected OS child is not authenticated AntiMalware-Light.'
+            }
+            $parentProtection = $Parent.Protection()
+            if (-not $parentProtection['success'] -or
+                $parentProtection['win32_error'] -ne 0 -or
+                $parentProtection['level'] -ne 3) {
+                throw 'Protected OS service parent is not authenticated AntiMalware-Light.'
+            }
+            $childPath = [string]$childNative['image_path']
+            $parentPath = [string]$parentNative['image_path']
+            $childAncestry = $null; $parentAncestry = $null
+            try {
+            $childAncestry = Open-DrVmProtectedImageAncestry -Path $childPath `
+                -Leaf 'DefenderSessionHelper.exe'
+            $parentAncestry = Open-DrVmProtectedImageAncestry -Path $parentPath `
+                -Leaf 'MsMpEng.exe'
+            if ($childAncestry.records.Count -ne 7 -or $parentAncestry.records.Count -ne 7 -or
+                $childAncestry.records[5].file_id -cne $parentAncestry.records[5].file_id) {
+                throw 'Protected OS child and parent do not share one defended platform directory.'
+            }
+            $childSignature = Get-DrVmAuthenticodeEvidence -Path $childPath
+            $parentSignature = Get-DrVmAuthenticodeEvidence -Path $parentPath
+            foreach ($signature in @($childSignature,$parentSignature)) {
+                if ($signature.status -cne 'Valid' -or
+                    $signature.signer_subject -cnotmatch '(^|,)\s*(CN|O)=Microsoft( Corporation| Windows)?(,|$)' -or
+                    $signature.signer_thumbprint -cnotmatch '^[0-9A-F]{40}$') {
+                    throw 'Protected OS child or parent is not Microsoft signed.'
+                }
+            }
+            $services = @(Get-CimInstance Win32_Service `
+                -Filter "ProcessId=$([int]$ParentProcess.ProcessId)" `
+                -OperationTimeoutSec 5 -ErrorAction Stop)
+            if ($services.Count -ne 1 -or $services[0].Name -cne 'WinDefend' -or
+                $services[0].State -cne 'Running' -or
+                $services[0].StartName -cne 'LocalSystem' -or
+                [int]$services[0].ProcessId -ne [int]$ParentProcess.ProcessId) {
+                throw 'Protected OS parent is not the authenticated WinDefend service.'
+            }
+            $serviceArgs = [string[]](Get-DrVmCommandLineArguments -CommandLine ([string]$services[0].PathName))
+            if ($serviceArgs.Count -lt 1 -or $serviceArgs.Count -gt 8 -or
+                $serviceArgs[0] -ine $parentPath) {
+                throw 'Protected OS service action does not bind the held parent image.'
+            }
+            $result = [pscustomobject]@{
+                child_chain = $childAncestry.chain
+                parent_chain = $parentAncestry.chain
+                proof = [ordered]@{
+                    child_ancestry = $childAncestry.records
+                    parent_ancestry = $parentAncestry.records
+                    child_signature = $childSignature
+                    parent_signature = $parentSignature
+                    service = [ordered]@{name=[string]$services[0].Name
+                        state=[string]$services[0].State;start_name=[string]$services[0].StartName
+                        process_id=[int]$services[0].ProcessId;path_name=[string]$services[0].PathName}
+                    protection_level = 3
+                    parent_protection_level = 3
+                }
+            }
+            $childAncestry=$null; $parentAncestry=$null
+            $result
+            } finally {
+                if ($null -ne $parentAncestry) { $parentAncestry.chain.Dispose() }
+                if ($null -ne $childAncestry) { $childAncestry.chain.Dispose() }
+            }
+        }
+        function global:Get-DrVmProtectedProcessRow {
+            param([Parameter(Mandatory)] $Process,[Parameter(Mandatory)] $Owner,
+                [Parameter(Mandatory)] $Context,[switch] $Create)
+            $created = ([datetime]$Process.CreationDate).ToUniversalTime().ToString('o')
+            $identity = [string]$Process.ProcessId + '|' + $created
+            if ($null -ne $Process.ExecutablePath -or $null -ne $Process.CommandLine -or
+                $null -eq $Process.ParentProcessId -or
+                [string]$Process.Name -ine 'DefenderSessionHelper.exe' -or
+                [int]$Process.SessionId -ne $Context.runner_session_id -or
+                [string]$Owner.Sid -cne $Context.runner_sid) {
+                throw 'Protected-process CIM fields or ownership differ from the anchored form.'
+            }
+            if ($Create) {
+                if ($null -ne $Context.run_name -or $null -ne $Context.child -or
+                    $null -ne $Context.parent) {
+                    throw 'A protected-process anchor was requested after run disclosure or twice.'
+                }
+                $child = $null; $parent = $null; $provenance = $null
+                try {
+                    $child = Open-DrVmSpotlightLifetime -ProcessId ([uint32]$Process.ProcessId) -Parent
+                    $parentProcess = @(Get-CimInstance Win32_Process `
+                        -Filter "ProcessId=$([int]$Process.ParentProcessId)" `
+                        -OperationTimeoutSec 5 -ErrorAction Stop)
+                    if ($parentProcess.Count -ne 1 -or
+                        [int]$parentProcess[0].ProcessId -ne [int]$Process.ParentProcessId) {
+                        throw 'Protected-process parent metadata is unavailable.'
+                    }
+                    $parent = Open-DrVmSpotlightLifetime `
+                        -ProcessId ([uint32]$Process.ParentProcessId) -Parent
+                    $provenance = Assert-DrVmProtectedOsProvenance -Process $Process `
+                        -ParentProcess $parentProcess[0] -Child $child -Parent $parent `
+                        -RunnerSid $Context.runner_sid -SessionId $Context.runner_session_id
+                    $Context.child = $child
+                    $Context.parent = $parent
+                    $Context.child_path_chain = $provenance.child_chain
+                    $Context.parent_path_chain = $provenance.parent_chain
+                    $Context.proof = [ordered]@{
+                        schema_version = 1
+                        identity = $identity
+                        pid = [int]$Process.ProcessId
+                        creation_time_utc = $created
+                        parent_creation_time_utc = ([datetime]$parentProcess[0].CreationDate).ToUniversalTime().ToString('o')
+                        parent_pid = [int]$Process.ParentProcessId
+                        runner_sid = $Context.runner_sid
+                        runner_session_id = $Context.runner_session_id
+                        profile_sha256 = $Context.profile_sha256
+                        source_sha = $Context.source_sha
+                        bundle_sha256 = $Context.bundle_sha256
+                        vm_id = $Context.vm_id
+                        pre_name_utc = $Context.pre_name_utc
+                        anchor_nonce = $Context.anchor_nonce
+                        cim_executable_path = $null
+                        cim_command_line = $null
+                        child_native_identity = $child.Identity
+                        parent_native_identity = $parent.Identity
+                        provenance = $provenance.proof
+                        run_name = $null
+                        run_name_created_utc = $null
+                        handle_closed = $false
+                        parent_handle_closed = $false
+                        child_path_closed = $false
+                        parent_path_closed = $false
+                        accepted_snapshot_count = 0
+                    }
+                    $child = $null; $parent = $null
+                }
+                finally {
+                    if ($null -ne $parent) { $parent.Dispose() }
+                    if ($null -ne $child) { $child.Dispose() }
+                    if ($null -ne $provenance -and $null -eq $Context.proof) {
+                        $provenance.parent_chain.Dispose()
+                        $provenance.child_chain.Dispose()
+                    }
+                }
+            }
+            if ($null -eq $Context.child -or $null -eq $Context.parent -or
+                $Context.proof.identity -cne $identity -or
+                [int]$Context.proof.parent_pid -ne [int]$Process.ParentProcessId -or
+                $Context.child.Poll()['wait_result'] -ne 258 -or
+                $Context.parent.Poll()['wait_result'] -ne 258) {
+                throw 'Protected-process held lifetime changed or exited.'
+            }
+            $native = $Context.child.Recheck()
+            $parentNative = $Context.parent.Recheck()
+            if ($native['owner_sid'] -cne $Context.runner_sid -or
+                [int]$native['session_id'] -ne $Context.runner_session_id -or
+                [int]$native['pid'] -ne [int]$Process.ProcessId -or
+                [int]$parentNative['pid'] -ne [int]$Process.ParentProcessId -or
+                [string]$native['creation_filetime_100ns'] -cne
+                    [string]$Context.proof.child_native_identity['creation_filetime_100ns'] -or
+                [string]$parentNative['creation_filetime_100ns'] -cne
+                    [string]$Context.proof.parent_native_identity['creation_filetime_100ns']) {
+                throw 'Protected-process native lifetime changed.'
+            }
+            if ($null -eq $Context.child_path_chain -or $null -eq $Context.parent_path_chain) {
+                throw 'Protected-process ancestry handles are absent.'
+            }
+            $null = $Context.child_path_chain.Recheck()
+            $null = $Context.parent_path_chain.Recheck()
+            $protection = $Context.child.Protection()
+            if (-not $protection['success'] -or $protection['win32_error'] -ne 0 -or
+                $protection['level'] -ne 3) {
+                throw 'Protected-process AntiMalware-Light proof is unavailable.'
+            }
+            $parentProtection = $Context.parent.Protection()
+            if (-not $parentProtection['success'] -or
+                $parentProtection['win32_error'] -ne 0 -or
+                $parentProtection['level'] -ne 3) {
+                throw 'Protected-process service-parent AntiMalware-Light proof is unavailable.'
+            }
+            [pscustomobject][ordered]@{
+                kind = 'protected_pre_name'
+                identity = $identity
+                pid = [int]$Process.ProcessId
+                session_id = [int]$Process.SessionId
+                creation_time_utc = $created
+                executable_path = $null
+                command_line = $null
+                native_image_path = [string]$native['image_path']
+                protection_level = 3
+                parent_pid = [int]$Process.ParentProcessId
+                owner_sid = [string]$Owner.Sid
+            }
+        }
         function global:Get-DrVmRunnerProcesses {
             param(
                 [Parameter(Mandatory)][string] $UserSid,
                 [Parameter(Mandatory)][int] $SessionId,
                 [AllowNull()][object] $CaptureContext = $null,
+                [AllowNull()][object] $ProtectedAnchorContext = $null,
+                [switch] $CreateProtectedAnchor,
                 [switch] $IncludeExecutionScope
             )
+            if ($IncludeExecutionScope -and $null -eq $ProtectedAnchorContext -and
+                $null -ne (Get-Variable -Name DrVmProtectedAnchorContext -Scope Global -ErrorAction SilentlyContinue)) {
+                $ProtectedAnchorContext = $global:DrVmProtectedAnchorContext
+            }
+            if ($IncludeExecutionScope -and $null -ne $ProtectedAnchorContext -and
+                $ProtectedAnchorContext.closed) {
+                throw 'Protected-process anchor was closed before the final inventory.'
+            }
             for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $rows = [Collections.Generic.List[object]]::new()
                 $complete = $true
@@ -3510,10 +4473,22 @@ public static class DrVmSpotlightNative {
                         }
                     }
                     catch {
+                        if ($null -ne $ProtectedAnchorContext -and
+                            $null -ne $ProtectedAnchorContext.run_name -and
+                            $null -eq $process.ExecutablePath -and
+                            $null -eq $process.CommandLine) {
+                            $ProtectedAnchorContext.rejected_opaque_observed = $true
+                        }
                         $complete = $false
                         continue
                     }
                     if ($owner.ReturnValue -ne 0) {
+                        if ($null -ne $ProtectedAnchorContext -and
+                            $null -ne $ProtectedAnchorContext.run_name -and
+                            $null -eq $process.ExecutablePath -and
+                            $null -eq $process.CommandLine) {
+                            $ProtectedAnchorContext.rejected_opaque_observed = $true
+                        }
                         $complete = $false
                         continue
                     }
@@ -3532,12 +4507,30 @@ public static class DrVmSpotlightNative {
                                 [string]::IsNullOrWhiteSpace($commandLine) -or
                                 $commandLine.Length -gt 4096 -or
                                 $null -eq $process.ParentProcessId) {
-                                $complete = $false
-                                continue
+                                if ($null -ne $ProtectedAnchorContext -and
+                                    $null -eq $process.ExecutablePath -and
+                                    $null -eq $process.CommandLine) {
+                                    try {
+                                        $record = Get-DrVmProtectedProcessRow -Process $process `
+                                            -Owner $owner -Context $ProtectedAnchorContext `
+                                            -Create:($CreateProtectedAnchor -and
+                                                $null -eq $ProtectedAnchorContext.child)
+                                    }
+                                    catch {
+                                        if ($null -ne $ProtectedAnchorContext.run_name) {
+                                            $ProtectedAnchorContext.rejected_opaque_observed = $true
+                                        }
+                                        $complete = $false; continue
+                                    }
+                                }
+                                else { $complete = $false; continue }
                             }
-                            $record['command_line'] = $commandLine
-                            $record['parent_pid'] = [int]$process.ParentProcessId
-                            $record['owner_sid'] = [string]$owner.Sid
+                            else {
+                                $record['kind'] = 'full'
+                                $record['command_line'] = $commandLine
+                                $record['parent_pid'] = [int]$process.ParentProcessId
+                                $record['owner_sid'] = [string]$owner.Sid
+                            }
                         }
                         $rows.Add([pscustomobject]$record)
                     }
@@ -3550,12 +4543,27 @@ public static class DrVmSpotlightNative {
                         if (@($rows | Where-Object identity -CEQ $row.identity).Count -eq 0) { $rows.Add($row) }
                     }
                 }
+                if ($null -ne $ProtectedAnchorContext -and
+                    $null -ne $ProtectedAnchorContext.child -and
+                    @($rows | Where-Object identity -CEQ $ProtectedAnchorContext.proof.identity).Count -ne 1) {
+                    $complete = $false
+                }
+                if ($null -ne $ProtectedAnchorContext -and
+                    $ProtectedAnchorContext.rejected_opaque_observed) {
+                    $complete = $false
+                }
                 $snapshot = [pscustomobject]@{
                     complete = $complete
                     processes = @($rows.ToArray() | Sort-Object identity)
                     attempts = $attempt
                 }
-                if ($complete) { return $snapshot }
+                if ($complete) {
+                    if ($null -ne $ProtectedAnchorContext -and
+                        $null -ne $ProtectedAnchorContext.proof) {
+                        $ProtectedAnchorContext.accepted_snapshots++
+                    }
+                    return $snapshot
+                }
                 if ($attempt -lt 3) { Start-Sleep -Milliseconds 200 }
             }
             $snapshot
@@ -3994,10 +5002,65 @@ public static class DrVmCommandLineNative {
             }
         }
 
+        if ($useV2) {
+            # No run-specific name or root exists during this complete inventory.
+            $global:DrVmProtectedAnchorContext = New-DrVmProtectedAnchorContext `
+                -UserSid $runnerSid -SessionId $runnerSession -ProfileSha256 $profileSha256 `
+                -SourceSha $sourceSha -BundleSha256 $bundleSha256 -VmId $vmId
+            $preName = Get-DrVmRunnerProcesses -UserSid $runnerSid `
+                -SessionId $runnerSession -IncludeExecutionScope `
+                -ProtectedAnchorContext $global:DrVmProtectedAnchorContext -CreateProtectedAnchor
+            if ($null -eq $preName -or -not $preName.complete) {
+                throw 'The pre-name VM runner process inventory was incomplete.'
+            }
+            $global:DrVmProtectedAnchorContext.pre_name_snapshot = $preName
+            $name = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+            $global:DrVmProtectedAnchorContext.run_name = $name
+            if ($null -ne $global:DrVmProtectedAnchorContext.proof) {
+                $global:DrVmProtectedAnchorContext.proof.run_name = $name
+                $global:DrVmProtectedAnchorContext.proof.run_name_created_utc = `
+                    [DateTime]::UtcNow.ToString('o')
+            }
+        }
+        $path = Join-Path $base $name
+        if ((Test-Path -LiteralPath $path) -or
+            (Test-Path -LiteralPath (Join-Path $base ($name + '-trusted'))) -or
+            @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+                $_.TaskName -ceq $name -and $_.TaskPath -ceq '\'
+            }).Count -ne 0) {
+            throw 'The unique VM workspace or task identity already exists.'
+        }
+        $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
+        $global:DrVmOwnedRootRecords = @{
+            guest = Get-DrVmOwnedRootRecord -Path $path
+        }
         [pscustomobject]@{
+            run_name = $name
             guest_root = $path
             trusted_task_root = Join-Path $base ($name + '-trusted')
+            pre_name_snapshot = if ($useV2) { $preName } else { $null }
+            protected_anchor = if ($useV2) {
+                Get-DrVmProtectedAnchorEvidence -Context $global:DrVmProtectedAnchorContext
+            } else { $null }
         }
+    }
+    if ($ownedV2) {
+        $taskName = [string]$workspaceRoots.run_name
+        if ($taskName -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$') {
+            throw 'The guest-created VM run name is invalid.'
+        }
+        if ($null -eq $workspaceRoots.pre_name_snapshot -or
+            -not $workspaceRoots.pre_name_snapshot.complete -or
+            $workspaceRoots.protected_anchor.run_name -cne $taskName -or
+            $workspaceRoots.protected_anchor.profile_sha256 -cne $AcceptanceProfileSha256 -or
+            $workspaceRoots.protected_anchor.source_sha -cne $anchorSourceSha -or
+            $workspaceRoots.protected_anchor.bundle_sha256 -cne $anchorBundleSha256 -or
+            $workspaceRoots.protected_anchor.vm_id -cne $transport.vm_id) {
+            throw 'The pre-name protected-process anchor is not source bound.'
+        }
+        $transport['protected_pre_name_inventory'] = $workspaceRoots.pre_name_snapshot
+        $transport['protected_anchor_initial'] = $workspaceRoots.protected_anchor
     }
     $guestRoot = [string]$workspaceRoots.guest_root
     $trustedTaskRoot = [string]$workspaceRoots.trusted_task_root
@@ -5188,10 +6251,12 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     try {
         if ($session) {
             try {
-                Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
-                    param($name)
-                    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-                    if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+                if ($taskName -cmatch '^DarkReNamerTests-[0-9a-f]{32}$') {
+                    Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
+                        param($name)
+                        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+                        if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+                    }
                 }
                 if ($runtimeBrokerEnabled -and -not $RuntimeBrokerPreparationOnly -and $trustedTaskRoot) {
                     try {
@@ -5254,6 +6319,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         }
                         $cleanupTaskContext | Add-Member -NotePropertyName v2 -NotePropertyValue $true
                         $cleanupTaskContext | Add-Member -NotePropertyName profile_sha256 -NotePropertyValue $AcceptanceProfileSha256
+                        $cleanupTaskContext | Add-Member -NotePropertyName protected_anchor_initial `
+                            -NotePropertyValue $workspaceRoots.protected_anchor
+                        $cleanupTaskContext | Add-Member -NotePropertyName pre_name_snapshot `
+                            -NotePropertyValue $workspaceRoots.pre_name_snapshot
                         $cleanupTaskContext | Add-Member -NotePropertyName baseline_processes -NotePropertyValue @($runnerProcessBaseline)
                         $cleanupTaskContext | Add-Member -NotePropertyName task_execution -NotePropertyValue $taskExecution
                         $cleanupTaskContext | Add-Member -NotePropertyName candidate_task_may_have_started -NotePropertyValue $candidateTaskMayHaveStarted
@@ -5484,6 +6553,15 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 $null -ne $observedRootsAfter -and
                                 -not $observedRootsAfter.guest_present -and
                                 -not $observedRootsAfter.trusted_present
+                            $anchorEvidence = if ($complete) {
+                                Close-DrVmProtectedAnchorContext -Context $global:DrVmProtectedAnchorContext
+                            } else {
+                                Get-DrVmProtectedAnchorEvidence -Context $global:DrVmProtectedAnchorContext
+                            }
+                            if ($complete -and -not $anchorEvidence.all_handles_closed) {
+                                $errors.Add('Protected-process anchor handle closure is incomplete.')
+                                $complete = $false
+                            }
                             $raw = [ordered]@{
                                 scheduled_task_present = [bool]($null -ne $ownedTask -and $ownedTask.Count -gt 0)
                                 guest_root_present = [bool]($null -eq $observedRootsAfter -or $observedRootsAfter.guest_present)
@@ -5501,16 +6579,19 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                 removed_runner_tasks = @($removedTasks.ToArray() | Sort-Object -Unique)
                                 terminated_runner_processes = @()
                                 resource_cleanup_errors = @($errors.ToArray())
-                                runner_process_natural_exit = [ordered]@{schema_version=2;status='v2-owned-resources'}
+                                runner_process_natural_exit = [ordered]@{schema_version=3;status='v2-owned-resources'}
                                 owned_processes_after = @($ownedAfter)
-                                schema_version = 2
+                                schema_version = 3
                                 profile_id = 'vm-automated-v2-owned-resources'
                                 profile_sha256 = [string]$taskContext.profile_sha256
                                 owned_resource_evidence = [ordered]@{
-                                    schema_version = 2
+                                    schema_version = 3
                                     run_name = $name
                                     runner_sid = [string]$taskContext.runner_sid
                                     runner_session_id = [int]$taskContext.runner_session_id
+                                    pre_name_snapshot = $taskContext.pre_name_snapshot
+                                    protected_anchor_initial = $taskContext.protected_anchor_initial
+                                    protected_anchor = $anchorEvidence
                                     root_records = $rootRecords
                                     baseline_processes = $baselineProcesses
                                     baseline_tasks = $baselineTasks
@@ -5540,6 +6621,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                                     $null -ne $taskContext.task_execution -and
                                     $taskContext.task_execution.terminal -and
                                     $taskContext.task_execution.observer_lifetime_absent -and
+                                    -not $anchorEvidence.all_handles_closed -and
                                     $helpersClosed -and
                                     $ownedAfter.Count -eq 0 -and $ownedTask.Count -eq 0)
                                 failed_snapshot = if ($null -ne $intervention -and $null -ne $tasksIntervention) {
@@ -6026,7 +7108,11 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             $ownedHandshake = $null
             try {
                 $binding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE | ConvertFrom-Json -ErrorAction Stop
-                $pendingLease = Get-Content -LiteralPath (Join-Path $BundleRoot 'desktop-lease.json') `
+                $pendingLeasePath = Join-Path $BundleRoot 'desktop-lease.json'
+                if ($transportOutputRoot -cne $BundleRoot) {
+                    $pendingLeasePath = Join-Path (Split-Path -Parent $transportOutputRoot) 'desktop-lease.json'
+                }
+                $pendingLease = Get-Content -LiteralPath $pendingLeasePath `
                     -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($binding.nonce -cmatch '^[0-9a-f]{32}$' -and
                     $binding.lease_id -cmatch '^[0-9a-f]{32}$' -and
@@ -6038,7 +7124,11 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     $ownedHandshake = $binding
                 }
             } catch { }
-            if ((Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $cleanupResult) -and
+            $ownedUiModeSupported = Test-DrControllerOwnedFailureModeSupported `
+                -TaskKind $taskSelection.kind -AcceptanceMode $AcceptanceMode `
+                -TextScalePercent $AcceptanceTextScalePercent -HighContrast ([bool]$AcceptanceHighContrast)
+            if ($ownedUiModeSupported -and
+                (Test-DrControllerOwnedCleanupFailureEligible -CleanupResult $cleanupResult) -and
                 $transport.status -ceq 'collected' -and
                 $transport.guest_cleanup -eq $false -and
                 $processJobsClosed -and
@@ -6060,7 +7150,16 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     [IO.File]::Copy((Join-Path $BundleRoot 'result.json'),$sourceResultPath)
                 }
                 $sourceResultItem = Get-Item -LiteralPath $sourceResultPath -Force -ErrorAction Stop
-                $bundleItem = Get-Item -LiteralPath (Join-Path $BundleRoot 'bundle.json') -Force -ErrorAction Stop
+                $bundleSource = Join-Path $BundleRoot 'bundle.json'
+                $bundleCopy = Join-Path $transportOutputRoot 'bundle.json'
+                if ($transportOutputRoot -cne $BundleRoot) {
+                    [IO.File]::Copy($bundleSource, $bundleCopy, $false)
+                }
+                $bundleItem = Get-Item -LiteralPath $bundleCopy -Force -ErrorAction Stop
+                if ((Get-FileHash -LiteralPath $bundleSource -Algorithm SHA256).Hash -ine
+                    (Get-FileHash -LiteralPath $bundleCopy -Algorithm SHA256).Hash) {
+                    throw 'Frozen failure bundle copy differs from the staged source.'
+                }
                 $transport['owned_cleanup_failure_context'] = [ordered]@{
                     task_kind = [string]$taskSelection.kind
                     failed_snapshot = $cleanupResult.failed_snapshot
@@ -6081,6 +7180,12 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                     high_contrast_requested = [bool]($taskSelection.kind -ceq 'ui' -and $AcceptanceHighContrast)
                     output_preservation_verified = [bool](-not $observerTask -or $outputPreservedForCleanup)
                 }
+                if ($taskSelection.kind -ceq 'ui' -and
+                    $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
+                        'first-clear-observation')) {
+                    $transport['owned_cleanup_failure_context']['acceptance_text_scale_percent'] =
+                        [int]$AcceptanceTextScalePercent
+                }
                 $transport.status = 'failed'
                 $transport['cleanup_error'] = 'Strict OS cleanup delta failed; original raw cleanup is retained.'
                 $transportPath = Join-Path $transportOutputRoot 'original-transport.json'
@@ -6092,9 +7197,21 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $originalTransportFrozen = $true
                 $transportItem = Get-Item -LiteralPath $transportPath -Force
                 $transportHash = (Get-FileHash -LiteralPath $transportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($ownedPerformance) {
+                    $frozenInputPath = Join-Path $transportOutputRoot 'owned-performance-input-manifest.json'
+                    $frozenProfilePath = Join-Path $transportOutputRoot 'owned-performance-profile.json'
+                    [IO.File]::Copy($AcceptanceManifest,$frozenInputPath,$false)
+                    [IO.File]::Copy((Join-Path $BundleRoot 'vm-automated-v2.json'),$frozenProfilePath,$false)
+                    if ((Get-FileHash -LiteralPath $frozenInputPath -Algorithm SHA256).Hash -ine
+                            (Get-FileHash -LiteralPath $AcceptanceManifest -Algorithm SHA256).Hash -or
+                        (Get-FileHash -LiteralPath $frozenProfilePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                            $AcceptanceProfileSha256) {
+                        throw 'Owned performance frozen input or profile differs before preservation.'
+                    }
+                }
                 $nonce = [string]$ownedHandshake.nonce
                 $receipt = [ordered]@{
-                    schema_version = if ($ownedV2) { 2 } else { 1 }
+                    schema_version = if ($ownedV2) { 3 } else { 1 }
                     kind = 'owned_cleanup_strict_failure_preservation'
                     run_name = $taskName
                     vm_id = ([guid]$transport.vm_id).ToString('D').ToLowerInvariant()
@@ -6125,7 +7242,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 $proofPath = Join-Path $transportOutputRoot 'owned-cleanup-after-strict-failure.json'
                 Write-DrControllerExclusiveJson -Path $proofPath -Value ([ordered]@{
-                    schema_version=if ($ownedV2) { 2 } else { 1 }
+                    schema_version=if ($ownedV2) { 3 } else { 1 }
                     kind='owned_cleanup_after_strict_failure'; status='incomplete'
                     run_name=$taskName; vm_id=$receipt.vm_id; errors=@('Finalizer did not complete.')
                 }) -MaximumBytes 1MB
@@ -6157,16 +7274,46 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                         (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receiptHash) {
                         throw 'Frozen failure evidence or managed desktop closure differs from its receipt.'
                     }
+                    $predeleteJson = $null
+                    $predeleteHash = $null
+                    if ($ownedPerformance) {
+                        $predelete = New-DrControllerOwnedPerformancePredelete `
+                            -OutputRoot $transportOutputRoot -PreservationPath $receiptPath `
+                            -TransportPath $transportPath -SignalPath $signalPath -LeasePath $leasePath `
+                            -RunName $taskName -VmId $receipt.vm_id -Nonce $nonce `
+                            -LeaseId $ownedHandshake.lease_id `
+                            -SourceSha $transport.owned_cleanup_failure_context.source_sha `
+                            -BundleSha256 $transport.owned_cleanup_failure_context.bundle.sha256 `
+                            -ProfileSha256 $AcceptanceProfileSha256
+                        $predeletePath = Join-Path $transportOutputRoot 'owned-performance-predelete.json'
+                        Write-DrControllerExclusiveJson -Path $predeletePath -Value $predelete -MaximumBytes 64KB
+                        $predeleteJson = Get-Content -LiteralPath $predeletePath -Raw -ErrorAction Stop
+                        $predeleteHash = (Get-FileHash -LiteralPath $predeletePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                        foreach ($reference in $predelete.files.Values) {
+                            $sourcePath = if ($reference.file -ceq 'desktop-lease.json') {
+                                $leasePath
+                            } else { Join-Path $transportOutputRoot $reference.file }
+                            $item = Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+                            if ($item.Length -ne $reference.bytes -or
+                                (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                                    $reference.sha256) {
+                                throw 'Owned performance pre-delete bound bytes changed.'
+                            }
+                        }
+                    }
                     $proof = Invoke-DrControllerOwnedCleanupAfterFailure `
                         -Session $session -TaskName $taskName -RunnerSid $desktop.sid `
                         -SessionId $desktop.session_id -ExpectedVmId $receipt.vm_id `
                         -Frozen $receipt.failed_snapshot -Roots $receipt.root_records `
                         -V2Evidence $(if ($ownedV2) { $transport.raw_cleanup.owned_resource_evidence } else { $null }) `
-                        -ProfileSha256 $(if ($ownedV2) { $AcceptanceProfileSha256 } else { $null })
+                        -ProfileSha256 $(if ($ownedV2) { $AcceptanceProfileSha256 } else { $null }) `
+                        -PredeleteJson $predeleteJson -PredeleteSha256 $predeleteHash `
+                        -ExpectedNonce $nonce -ExpectedLeaseId $ownedHandshake.lease_id `
+                        -RequireOwnedPerformance $ownedPerformance
                 }
                 catch {
                     $proof = [pscustomobject]@{
-                        schema_version=if ($ownedV2) { 2 } else { 1 }
+                        schema_version=if ($ownedV2) { 3 } else { 1 }
                         kind='owned_cleanup_after_strict_failure'
                         run_name=$taskName; vm_id=$receipt.vm_id; status='incomplete'
                         pre=$null; post=$null; roots=$receipt.root_records
@@ -6183,6 +7330,9 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 $proof | Add-Member -NotePropertyName original_transport_sha256 -NotePropertyValue $transportHash -Force
                 $proof | Add-Member -NotePropertyName desktop_lease_sha256 -NotePropertyValue $leaseHash -Force
                 $proof | Add-Member -NotePropertyName nonce -NotePropertyValue $nonce -Force
+                if ($ownedPerformance) {
+                    $proof | Add-Member -NotePropertyName predelete_sha256 -NotePropertyValue $predeleteHash -Force
+                }
                 $temporaryProof = $proofPath + '.tmp'
                 Write-DrControllerExclusiveJson -Path $temporaryProof -Value $proof -MaximumBytes 1MB
                 # PowerShell coerces $null to an empty string for this string overload.
@@ -6192,6 +7342,30 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     finally {
         Write-DrDiagnosticPhase -Phase 'controller-cleanup' -State 'end' -Details @{ guest_cleanup=[bool]$transport.guest_cleanup }
+        if ($ownedV2 -and $null -ne $session) {
+            try {
+                $anchorFinal = Invoke-Command -Session $session -ScriptBlock {
+                    if ($null -eq $global:DrVmProtectedAnchorContext) {
+                        throw 'Protected-process anchor context was lost before session closure.'
+                    }
+                    if ($global:DrVmProtectedAnchorContext.closed) {
+                        Get-DrVmProtectedAnchorEvidence -Context $global:DrVmProtectedAnchorContext
+                    } else {
+                        Close-DrVmProtectedAnchorContext -Context $global:DrVmProtectedAnchorContext
+                    }
+                }
+                $transport['protected_anchor_final'] = $anchorFinal
+                if (-not $anchorFinal.all_handles_closed) {
+                    $transport.status = 'failed'; $transport.guest_cleanup = $false
+                    $transport['protected_anchor_error'] = 'Protected-process anchor closure is incomplete.'
+                }
+                Write-DrControllerExclusiveJson -Path (Join-Path $transportOutputRoot `
+                    'protected-anchor-closure.json') -Value $anchorFinal -MaximumBytes 1MB
+            } catch {
+                $transport.status = 'failed'; $transport.guest_cleanup = $false
+                $transport['protected_anchor_error'] = $_.Exception.Message
+            }
+        }
         if ($runtimeBrokerEnabled) {
             try {
                 $remotePhaseErrors = @(Invoke-Command -Session $session -ScriptBlock { @($global:DrRuntimeBrokerPhaseErrors.ToArray()) })

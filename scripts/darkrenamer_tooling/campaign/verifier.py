@@ -14,6 +14,7 @@ from darkrenamer_tooling.contracts.binding import Candidate, verify_result_bindi
 from darkrenamer_tooling.contracts.menu_layout import verify_native_menu_layout
 from darkrenamer_tooling.contracts.platform import (
     contains, rectangle, verify_cleanup, verify_controller_cleanup,
+    verify_current_protected_anchor_binding,
     verify_environment, verify_keyboard_events,
 )
 from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints, core_startup_checkpoint
@@ -654,6 +655,11 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
         require(type(result) is dict and type(transport) is dict, "Execution result and transport must be objects.")
         verify_candidate_bundle(bundle, expected=candidate, harness_sha=candidate.source_sha,
                                 component_hashes=component_hashes, release=True)
+        if revision == 3:
+            verify_current_protected_anchor_binding(
+                transport, source_sha=bundle["harness"]["source_sha"] if
+                bundle["schema_version"] == 2 else bundle["source_sha"],
+                bundle_sha256=reader.evidence.files[attempt["bundle"]].sha256)
         if tooling_inventory is not None:
             prefix = str(PurePosixPath(attempt["bundle"]).parent) + "/"
             tooling_digests.append(verify_retained_tooling(reader, prefix, tooling_inventory))
@@ -712,7 +718,7 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             require(verified == set(slot["targets"]), "Recovery raw observations do not satisfy the complete execution group.")
         verify_execution_freshness(reader, result, transport, run_prefix="runs/" + slot["id"] + "/",
                                    seen=process_identities, vm_ids=vm_ids)
-        if revision == 2:
+        if revision in (2, 3):
             verify_owned_execution_freshness(transport, seen=owned_observer_identities,
                                             run_names=owned_run_names)
         completed.update(slot["targets"])
@@ -747,6 +753,11 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     backend_result = reader.json(backend["result"])
     require(type(backend_result) is dict and type(backend_result.get("transport")) is dict,
             "Backend embedded controller transport is unavailable.")
+    if revision == 3:
+        for item in (backend_transport, backend_result["transport"]):
+            verify_current_protected_anchor_binding(
+                item, source_sha=backend_bundle["source_sha"],
+                bundle_sha256=reader.evidence.files[backend["bundle"]].sha256)
     external_cleanup = verify_controller_cleanup(backend_transport.get("raw_cleanup"), profile_id=profile_id,
                                                  profile_sha256=profile_sha256)
     embedded_cleanup = verify_controller_cleanup(backend_result["transport"].get("raw_cleanup"), profile_id=profile_id,

@@ -15,6 +15,7 @@ import uuid
 
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
+    verify_current_protected_anchor_binding,
 )
 from darkrenamer_tooling.contracts.tooling import stage_verified_tooling
 from darkrenamer_tooling.vm import host_tools
@@ -673,8 +674,19 @@ def write_desktop_lease_document(root, document):
     temporary.replace(path)
 
 
+def write_desktop_helper_response(root, leaf, raw):
+    path = Path(root) / leaf
+    encoded = raw.encode('utf-8')
+    if not (0 < len(encoded) <= 64 * 1024):
+        raise ValueError('Desktop helper response exceeds its evidence bound.')
+    with path.open('xb') as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 @contextmanager
-def managed_desktop(args, evidence_root=None):
+def managed_desktop(args, evidence_root=None, *, capture_closure=False):
     if args.desktop_mode == 'existing':
         yield None
         return
@@ -693,9 +705,10 @@ def managed_desktop(args, evidence_root=None):
     lease_document_path = None if evidence_root is None else Path(evidence_root) / 'desktop-lease.json'
     if lease_document_path is not None and lease_document_path.exists():
         raise ValueError('Managed desktop lease evidence path already exists.')
-    lease = json.loads(windows_host_command(
+    start_raw = windows_host_command(
         '& ' + helper + ' -Action Start' + selector + ' -ScalePercent '
-        + str(args.desktop_scale) + geometry))
+        + str(args.desktop_scale) + geometry)
+    lease = json.loads(start_raw)
     if (not isinstance(lease, dict) or lease.get('status') != 'ready' or
             not isinstance(lease.get('leasePath'), str) or
             not re.fullmatch(r'[A-Za-z]:\\[^\r\n]+', lease['leasePath']) or
@@ -715,6 +728,8 @@ def managed_desktop(args, evidence_root=None):
         'cleanup_observed': False,
     }
     try:
+        if capture_closure:
+            write_desktop_helper_response(evidence_root, 'desktop-start-response.json', start_raw)
         write_desktop_lease_document(evidence_root, lease_document)
         if (not isinstance(lease.get('expectedGuestSid'), str) or
                 not re.fullmatch(r'S-1-5-21-(?:\d+-){2}\d+-\d+', lease['expectedGuestSid']) or
@@ -730,13 +745,19 @@ def managed_desktop(args, evidence_root=None):
         yield lease
     finally:
         try:
-            stopped = json.loads(windows_host_command(
+            stop_raw = windows_host_command(
                 '& ' + helper + ' -Action Stop -LeasePath ' + psquote(lease['leasePath'])
-                + ' -LeaseId ' + psquote(lease['leaseId'])))
+                + ' -LeaseId ' + psquote(lease['leaseId']))
+            stopped = json.loads(stop_raw)
+            if capture_closure:
+                write_desktop_helper_response(evidence_root, 'desktop-stop-response.json', stop_raw)
         except Exception:
             write_desktop_lease_document(evidence_root, lease_document)
             raise
-        cleanup_observed = isinstance(stopped, dict) and stopped.get('status') == 'stopped'
+        cleanup_observed = (isinstance(stopped, dict) and stopped.get('status') == 'stopped' and
+                            (not capture_closure or
+                             (stopped.get('leaseId') == lease['leaseId'] and
+                              stopped.get('lifecycleStatus') == 'closed')))
         lease_document['stop_status'] = 'stopped' if cleanup_observed else 'failed'
         lease_document['cleanup_observed'] = cleanup_observed
         write_desktop_lease_document(evidence_root, lease_document)
@@ -744,8 +765,10 @@ def managed_desktop(args, evidence_root=None):
             raise RuntimeError('Desktop helper did not confirm session cleanup.')
 
 
-def run_controller(root, args, defaults=None, pwsh=None):
-    output = root if args.task_kind == 'core' else root / 'observer-output'
+def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
+                           suite_timeout=CONTROLLER_SUITE_TIMEOUT_SECONDS,
+                           stdout=None, stderr=None, capture_desktop_closure=False):
+    """Run one exact controller through managed closure and failure preservation."""
     receipt_path = output / 'owned-cleanup-strict-failure-preservation.json'
     command = None
     process = None
@@ -766,10 +789,10 @@ def run_controller(root, args, defaults=None, pwsh=None):
             raise RuntimeError('The exact VM controller exceeded its bounded cleanup wait.') from error
 
     try:
-        with managed_desktop(args, root) as desktop:
-            command = controller_invocation(root, args, defaults, pwsh,
-                                            desktop['expectedGuestSid'] if desktop else None)
-            cwd = root if args.ssh_host else Path('/mnt/c')
+        desktop_scope = (managed_desktop(args, root, capture_closure=True)
+                         if capture_desktop_closure else managed_desktop(args, root))
+        with desktop_scope as desktop:
+            command = command_for_desktop(desktop)
             environment = (host_tools.child_environment() if args.ssh_host
                            else os.environ.copy())
             environment.pop('DR_VM_OWNED_CLEANUP_HANDSHAKE', None)
@@ -780,13 +803,9 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     'sid': desktop['expectedGuestSid'],
                 }
                 environment['DR_VM_OWNED_CLEANUP_HANDSHAKE'] = json.dumps(handshake, separators=(',', ':'))
-            process = subprocess.Popen(command, cwd=cwd, text=True, env=environment)
-            # The controller's default whole-suite budget is 2400 seconds; the
-            # allowance covers natural OS-process exit and evidence collection.
-            suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
-                                    getattr(args, 'focused_icon_tests', False) or
-                                    getattr(args, 'focused_refresh_tests', False))
-                             else CONTROLLER_SUITE_TIMEOUT_SECONDS)
+            streams = {key: value for key, value in (('stdout', stdout), ('stderr', stderr))
+                       if value is not None}
+            process = subprocess.Popen(command, cwd=cwd, text=True, env=environment, **streams)
             deadline = (time.monotonic() + suite_timeout +
                         CONTROLLER_CLEANUP_ALLOWANCE_SECONDS)
             while process.poll() is None:
@@ -813,7 +832,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
             lease = read_json_strict(lease_path, maximum_bytes=64 * 1024)
             v2 = getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID
             if (type(preserved) is not dict or type(preserved.get('schema_version')) is not int or
-                    preserved['schema_version'] != (2 if v2 else 1) or
+                    preserved['schema_version'] != (3 if v2 else 1) or
                     (v2 and (preserved.get('profile_id') != V2_PROFILE_ID or
                              preserved.get('profile_sha256') != args.acceptance_profile_sha256 or
                              (original.get('raw_cleanup') or {}).get('profile_id') != V2_PROFILE_ID or
@@ -833,7 +852,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
                     lease.get('cleanup_observed') is not True):
                 raise ValueError('Frozen strict failure or desktop closure is incomplete.')
             signal = {
-                'schema_version': 2 if v2 else 1,
+                'schema_version': 3 if v2 else 1,
                 'nonce': preserved['nonce'],
                 'preservation_sha256': sha256(receipt_path),
                 'desktop_lease_sha256': sha256(lease_path),
@@ -850,16 +869,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
             os.link(temporary, signal_path)
             temporary.unlink()
         code = reap(300)
-        if code:
-            raise subprocess.CalledProcessError(code, command)
-        if (desktop and args.task_kind == 'core' and
-                not getattr(args, 'profile_refresh_stages', False) and
-                not getattr(args, 'focused_icon_tests', False) and
-                not getattr(args, 'focused_refresh_tests', False)):
-            result = read_json_strict(
-                root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
-            if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
-                raise ValueError('Production window DPI differs from the requested RDP scale.')
+        return subprocess.CompletedProcess(command, code), desktop
     except BaseException:
         if process is not None and process.poll() is None:
             try:
@@ -867,6 +877,30 @@ def run_controller(root, args, defaults=None, pwsh=None):
             except Exception:
                 pass
         raise
+
+
+def run_controller(root, args, defaults=None, pwsh=None):
+    output = root if args.task_kind == 'core' else root / 'observer-output'
+    suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
+                            getattr(args, 'focused_icon_tests', False) or
+                            getattr(args, 'focused_refresh_tests', False))
+                     else CONTROLLER_SUITE_TIMEOUT_SECONDS)
+    completed, desktop = run_managed_controller(
+        root, args,
+        lambda lease: controller_invocation(
+            root, args, defaults, pwsh, lease['expectedGuestSid'] if lease else None),
+        output=output, cwd=root if args.ssh_host else Path('/mnt/c'),
+        suite_timeout=suite_timeout,
+    )
+    if completed.returncode:
+        raise subprocess.CalledProcessError(completed.returncode, completed.args)
+    if (desktop and args.task_kind == 'core' and
+            not getattr(args, 'profile_refresh_stages', False) and
+            not getattr(args, 'focused_icon_tests', False) and
+            not getattr(args, 'focused_refresh_tests', False)):
+        result = read_json_strict(root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
+        if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
+            raise ValueError('Production window DPI differs from the requested RDP scale.')
 
 
 def test_artifacts(messages):
@@ -1169,6 +1203,17 @@ def verify_transport_binding(transport, expected_transport_kind=None, expected_v
     return True
 
 
+def verify_current_anchor_from_bundle(root, manifest, transport):
+    """Join a current owned-resource claim to the actual staged bundle bytes."""
+    raw = transport.get('raw_cleanup') if isinstance(transport, dict) else None
+    if not isinstance(raw, dict) or raw.get('schema_version') != 3:
+        return
+    source = (manifest['harness']['source_sha'] if manifest['schema_version'] == 2
+              else manifest['source_sha'])
+    verify_current_protected_anchor_binding(
+        transport, source_sha=source, bundle_sha256=sha256(Path(root) / 'bundle.json'))
+
+
 def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None,
                   *, profile_id=V1_PROFILE_ID, profile_sha256=None):
     if type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in (1, 2):
@@ -1263,6 +1308,7 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     else:
         verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
                                   profile_sha256=profile_sha256)
+        verify_current_anchor_from_bundle(root, manifest, transport)
         if profile_id == V2_PROFILE_ID:
             _verify_v2_result_owned_binding(result, transport)
     if not candidate and total == 0:
@@ -1857,6 +1903,7 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
         raise ValueError('Refresh diagnostic transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
     _verify_v2_result_owned_binding(result, transport)
     verify_transport_binding(transport, transport_kind, expected_vm_id)
     return {'order': order, 'status': 'passed', 'test_binary_sha256': binary['sha256'],
@@ -1969,6 +2016,7 @@ def verify_focused_native_result(root, manifest, result, transport_kind,
         raise ValueError('Focused native transport did not finish with clean collection.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
                               profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
     _verify_v2_result_owned_binding(result, transport)
     verify_transport_binding(transport, transport_kind, expected_vm_id)
     return {'status': 'passed' if succeeded else 'failed', 'passed': passed_total,
@@ -2056,6 +2104,9 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
         raise ValueError('Observer transport result is incomplete or invalid.')
     verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=profile_id,
                               profile_sha256=profile_sha256)
+    if isinstance(transport.get('raw_cleanup'), dict) and transport['raw_cleanup'].get('schema_version') == 3:
+        manifest = read_json_strict(Path(root).parent / 'bundle.json')
+        verify_current_anchor_from_bundle(Path(root).parent, manifest, transport)
     if profile_id == V2_PROFILE_ID:
         _verify_v2_result_owned_binding(result, transport)
     if not is_supported_powershell_version(engine.get('version')):
@@ -2152,9 +2203,9 @@ def main(repo, argv=None, tooling=None):
         profile_path = repo / 'config' / 'vm-automated-v2.json'
         profile = read_json_strict(profile_path, maximum_bytes=1024 * 1024)
         if (not isinstance(profile, dict) or
-                profile.get('schema') != 'darkrenamer-vm-automated-profile-v2' or
+                profile.get('schema') != 'darkrenamer-vm-automated-profile-v3' or
                 profile.get('profile_id') != V2_PROFILE_ID or
-                type(profile.get('revision')) is not int or profile['revision'] != 2):
+                type(profile.get('revision')) is not int or profile['revision'] != 3):
             raise ValueError('V2 launcher profile definition is unavailable.')
         args.acceptance_profile_sha256 = sha256(profile_path)
     if args.prepare_only:

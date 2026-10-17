@@ -10,8 +10,10 @@ import re
 import stat
 
 from darkrenamer_tooling.contracts.platform import (
-    V1_PROFILE_ID, V2_PROFILE_ID, _v2_matches_owned_lifetime, _v2_process_rows, _v2_task_rows,
-    _verify_v2_owned_resources, require_fixture_root,
+    V1_PROFILE_ID, V2_PROFILE_ID, HISTORICAL_V2_PROFILE_SHA256, _v2_matches_owned_lifetime,
+    _v2_process_rows, _v3_process_rows, _v3_anchor, _v2_task_rows,
+    _verify_v2_owned_resources, verify_current_protected_anchor_binding,
+    require_fixture_root,
 )
 from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys
@@ -21,6 +23,9 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX48 = re.compile(r"[0-9a-f]{48}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 RUN = re.compile(r"DarkReNamerTests-[0-9a-f]{32}\Z")
+OWNED_PERFORMANCE_PROFILE_SHA256 = "11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f"
+OWNED_PERFORMANCE_RUN = re.compile(
+    r"performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)\Z")
 
 
 def require(condition: bool, message: str) -> None:
@@ -92,7 +97,7 @@ def _reference(value: object, filename: str, data: bytes, label: str) -> None:
             f"{label} does not bind the preserved bytes.")
 
 
-def _snapshot(value: object, label: str, *, final: bool) -> dict:
+def _snapshot(value: object, label: str, *, final: bool, schema: int = 2) -> dict:
     fields = {"complete", "processes", "tasks", "owned_processes"}
     if final:
         fields.add("owned_tasks")
@@ -105,9 +110,11 @@ def _snapshot(value: object, label: str, *, final: bool) -> dict:
         known = set()
         require(len(row[key]) <= 20_000, f"{label} inventory exceeds its bound.")
         for item in row[key]:
+            process = key == "processes" and schema == 3
             require(type(item) is dict and type(item.get("identity")) is str and
-                    bool(item["identity"]) and type(item.get(binding)) is str and
-                    bool(item[binding]) and item["identity"] not in known,
+                    bool(item["identity"]) and
+                    (process or (type(item.get(binding)) is str and bool(item[binding]))) and
+                    item["identity"] not in known,
                     f"{label} has an unknown or duplicate {key} identity.")
             known.add(item["identity"])
             if binding == "definition_sha256":
@@ -125,7 +132,8 @@ def _subset(current: dict, frozen: dict, label: str) -> None:
 
 def _reject_owned_entries(snapshot: dict, roots: dict, run_name: str) -> None:
     prefixes = tuple(row["path"].rstrip("\\").casefold() + "\\" for row in roots.values())
-    require(not any(row["executable_path"].casefold().startswith(prefixes)
+    require(not any((row.get("native_image_path") if row.get("kind") == "protected_pre_name"
+                     else row["executable_path"]).casefold().startswith(prefixes)
                     for row in snapshot["processes"]) and
             not any(row["identity"].casefold() == ("\\" + run_name).casefold()
                     for row in snapshot["tasks"]),
@@ -289,6 +297,117 @@ def _setting_snapshot(value: dict, kind: str) -> None:
             require(valid, "Text scale registry value kind or raw value is unknown.")
 
 
+def verify_owned_performance_text_scale(observations: object) -> dict:
+    """Verify actual coherent 100% registry/UISettings snapshots for the owned route."""
+    require(type(observations) is dict, "Owned performance observations are unavailable.")
+    proof = require_exact_keys(observations.get("text_scale_restoration"),
+                               {"schema_version", "baseline", "final", "snapshot_equal"},
+                               "Owned performance restoration")
+    require(type(proof["schema_version"]) is int and proof["schema_version"] == 1 and
+            proof["snapshot_equal"] is True,
+            "Owned performance restoration is not terminal and equal.")
+    fields = {"registry_key_existed", "registry_value_existed", "registry_value_kind",
+              "registry_value", "ui_settings_raw_factor", "ui_settings_percent"}
+    normalized = []
+    for label in ("baseline", "final"):
+        row = require_exact_keys(proof[label], fields, f"Owned performance {label}")
+        require(type(row["registry_key_existed"]) is bool and
+                type(row["registry_value_existed"]) is bool and
+                (not row["registry_value_existed"] or row["registry_key_existed"]) and
+                type(row["ui_settings_raw_factor"]) is float and
+                math.isfinite(row["ui_settings_raw_factor"]) and
+                abs(row["ui_settings_raw_factor"] - 1.0) < 0.000001 and
+                type(row["ui_settings_percent"]) is int and
+                row["ui_settings_percent"] == round(row["ui_settings_raw_factor"] * 100) == 100,
+                f"Owned performance {label} effective text scale is incoherent.")
+        if row["registry_value_existed"]:
+            require(row["registry_value_kind"] == "DWord" and
+                    type(row["registry_value"]) is int and row["registry_value"] == 100,
+                    f"Owned performance {label} registry text scale is not DWord 100.")
+        else:
+            require(row["registry_value_kind"] is None and row["registry_value"] is None,
+                    f"Owned performance {label} registry absence was not observed.")
+        normalized.append(row)
+    before, after = normalized
+    require(all(before[key] == after[key] for key in fields - {"ui_settings_raw_factor"}) and
+            abs(before["ui_settings_raw_factor"] - after["ui_settings_raw_factor"]) < 0.000001,
+            "Owned performance text scale differs after the workload.")
+    return proof
+
+
+def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
+                                 proof: dict, indexed: dict[str, dict],
+                                 receipt_bytes: bytes, signal_bytes: bytes,
+                                 lease_bytes: bytes) -> None:
+    path = root / "owned-performance-predelete.json"
+    require(path.exists(), "Owned performance pre-delete receipt is missing.")
+    data = _read_file(path, 64 * 1024)
+    frozen = require_exact_keys(_json(data, "Owned performance pre-delete receipt"), {
+        "schema_version", "kind", "run_name", "run_id", "vm_id", "nonce",
+        "desktop_lease_id", "source_sha", "bundle_sha256", "profile_id",
+        "profile_sha256", "roots", "files",
+    }, "Owned performance pre-delete receipt")
+    context = original["owned_cleanup_failure_context"]
+    run_id = frozen["run_id"]
+    match = OWNED_PERFORMANCE_RUN.fullmatch(run_id) if type(run_id) is str else None
+    require(frozen["schema_version"] == 1 and
+            frozen["kind"] == "owned_performance_predelete_restoration" and match is not None and
+            frozen["run_name"] == receipt["run_name"] and
+            frozen["vm_id"] == receipt["vm_id"] and
+            frozen["nonce"] == receipt["nonce"] and
+            frozen["desktop_lease_id"] == receipt["desktop_lease_id"] and
+            frozen["source_sha"] == context["source_sha"] and
+            frozen["bundle_sha256"] == context["bundle"]["sha256"] and
+            frozen["profile_id"] == V2_PROFILE_ID and
+            frozen["profile_sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256 and
+            frozen["roots"] == receipt["root_records"] and
+            proof["predelete_sha256"] == _digest(data),
+            "Owned performance pre-delete identity or proof hash differs.")
+    required = ("original-transport.json", "acceptance-result.json",
+                "acceptance-observations.json", "owned-performance-input-manifest.json",
+                "owned-performance-profile.json", "bundle.json")
+    require(all(name in indexed for name in required),
+            "Owned performance frozen source files are missing.")
+    expected = {name: indexed[name] for name in required}
+    for name, blob in (("owned-cleanup-strict-failure-preservation.json", receipt_bytes),
+                       ("owned-cleanup-desktop-closed.json", signal_bytes),
+                       ("desktop-lease.json", lease_bytes)):
+        expected[name] = {"file": name, "bytes": len(blob), "sha256": _digest(blob)}
+    require(type(frozen["files"]) is dict and set(frozen["files"]) == set(expected) and
+            all(require_exact_keys(frozen["files"][name], {"file", "bytes", "sha256"}, name)
+                == row for name, row in expected.items()) and
+            context["source_result"] == expected["acceptance-result.json"] and
+            receipt["original_transport"] == expected["original-transport.json"],
+            "Owned performance pre-delete file bindings differ.")
+    def document(name: str) -> dict:
+        return _json(_read_file(root / name, 4 * 1024 * 1024), name)
+    manifest = document("owned-performance-input-manifest.json")
+    profile = document("owned-performance-profile.json")
+    result = document("acceptance-result.json")
+    observations = document("acceptance-observations.json")
+    require(expected["owned-performance-profile.json"]["sha256"] ==
+            OWNED_PERFORMANCE_PROFILE_SHA256 and
+            profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
+            profile.get("profile_id") == V2_PROFILE_ID and profile.get("revision") == 3 and
+            manifest.get("run_id") == observations.get("run_id") == run_id and
+            manifest.get("source_sha") == result.get("source_sha") == frozen["source_sha"] and
+            manifest.get("acceptance_profile_id") == V2_PROFILE_ID and
+            manifest.get("acceptance_profile_sha256") == OWNED_PERFORMANCE_PROFILE_SHA256 and
+            manifest.get("acceptance_profile", {}).get("sha256") ==
+                OWNED_PERFORMANCE_PROFILE_SHA256 and
+            manifest.get("bundle_manifest", {}).get("sha256") == frozen["bundle_sha256"] and
+            manifest.get("request", {}).get("mode") == "performance-sample" and
+            manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
+                match.group(1) and
+            result.get("application", {}).get("sha256") ==
+                manifest.get("artifacts", {}).get("application", {}).get("sha256") and
+            result.get("observations", {}).get("sha256") ==
+                expected["acceptance-observations.json"]["sha256"] and
+            result.get("acceptance_observations") == observations,
+            "Owned performance frozen input, profile, result, or observations differ.")
+    verify_owned_performance_text_scale(observations)
+
+
 def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> None:
     if context["task_kind"] != "ui":
         return
@@ -344,12 +463,17 @@ def _restoration(root: Path, result: dict, context: dict, listed: set[str]) -> N
                     f"{kind} result does not bind the copied restoration document.")
 
 
-def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) -> dict:
-    context = require_exact_keys(original.get("owned_cleanup_failure_context"), {
+def _source_result(root: Path, original: dict, receipt: dict,
+                   listed: set[str]) -> tuple[dict, dict]:
+    raw_context = original.get("owned_cleanup_failure_context")
+    bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
+                  raw_context.get("acceptance_mode") in
+                  ("appearance-pair", "performance-sample", "first-clear-observation"))
+    context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
         "output_preservation_verified", "task_kind",
-    }, "Original failure context")
+    } | ({"acceptance_text_scale_percent"} if bounded_ui else set()), "Original failure context")
     require(context["failed_snapshot"] == receipt["failed_snapshot"] and
             context["root_records"] == receipt["root_records"] and
             context["task_kind"] == original.get("task_kind") and
@@ -368,8 +492,14 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
             "Copied source result is unavailable.")
     result_data = _read_file(root.joinpath(*result_name.split("/")), 8 * 1024 * 1024)
     _reference(source, result_name, result_data, "Original source result")
-    bundle_root = root if context["task_kind"] == "core" else root.parent
-    bundle_data = _read_file(bundle_root / "bundle.json", 4 * 1024 * 1024)
+    bundle_reference = require_exact_keys(context["bundle"], {"file", "bytes", "sha256"},
+                                          "Source bundle reference")
+    require(bundle_reference["file"] == "bundle.json", "Source bundle path differs.")
+    frozen_here = context["task_kind"] == "core" or "bundle.json" in listed
+    bundle_path = root / "bundle.json" if frozen_here else root.parent / "bundle.json"
+    require(frozen_here or not (root / "bundle.json").exists(),
+            "Unlisted output bundle conflicts with the historical parent layout.")
+    bundle_data = _read_file(bundle_path, 4 * 1024 * 1024)
     _reference(context["bundle"], "bundle.json", bundle_data, "Source bundle")
     result = _json(result_data, "Original source result")
     bundle = _json(bundle_data, "Source bundle")
@@ -390,15 +520,21 @@ def _source_result(root: Path, original: dict, receipt: dict, listed: set[str]) 
                     "Copied recovery observer differs from the original context.")
     require(type(context["high_contrast_requested"]) is bool and
             (context["acceptance_mode"] in
-             ("current-dpi", "full-context", "standard", "text-scale", "tooltip")
+             ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
+             (context["acceptance_mode"] in
+              ("appearance-pair", "performance-sample", "first-clear-observation") and
+              type(context["acceptance_text_scale_percent"]) is int and
+              context["acceptance_text_scale_percent"] == 100 and
+              context["high_contrast_requested"] is False)
              if context["task_kind"] == "ui" else context["acceptance_mode"] is None),
             "Original acceptance mode is unavailable.")
     _restoration(root, result, context, listed)
-    return result
+    return result, bundle
 
 
 def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
-                            raw: dict, roots: dict, run_name: str) -> None:
+                            raw: dict, roots: dict, run_name: str, *, schema: int = 2,
+                            final_anchor: dict | None = None) -> None:
     evidence = raw["owned_resource_evidence"]
     sid, session = evidence["runner_sid"], evidence["runner_session_id"]
     baseline_tasks = _v2_task_rows(evidence["baseline_tasks"], "V2 baseline")
@@ -406,7 +542,10 @@ def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
     for label, snapshot in (("frozen", frozen), ("before", before), ("after", after)):
         require(_v2_task_rows(snapshot["tasks"], f"V2 finalizer {label}") == baseline_tasks,
                 f"V2 finalizer {label} task definition changed.")
-        rows = _v2_process_rows(snapshot["processes"], sid, session, f"V2 finalizer {label}")
+        rows = (_v3_process_rows(snapshot["processes"], sid, session,
+                                 f"V2 finalizer {label}", final_anchor)
+                if schema == 3 else
+                _v2_process_rows(snapshot["processes"], sid, session, f"V2 finalizer {label}"))
         for row in rows.values():
             prior = identities.get(row["pid"])
             require(prior is None or prior == row,
@@ -421,7 +560,9 @@ def _v2_finalizer_inventory(frozen: dict, before: dict, after: dict,
         owned_starts.setdefault(lifetime["pid"], []).append(int(lifetime["start_time_utc_ticks"]))
     paths = tuple(row["path"].casefold() for row in roots.values())
     for row in identities.values():
-        scope = (row["executable_path"] + " " + row["command_line"]).casefold()
+        scope = ((row["native_image_path"] if schema == 3 and
+                  row["kind"] == "protected_pre_name" else
+                  row["executable_path"] + " " + row["command_line"])).casefold()
         require(not _v2_matches_owned_lifetime(row, owned_starts) and
                 run_name.casefold() not in scope and not any(path in scope for path in paths),
                 "V2 finalizer retained a protected process scope.")
@@ -442,6 +583,8 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     lease_bytes = _read_file(lease_path, 64 * 1024)
     original = _json(original_bytes, "Original transport")
     v2 = profile_id == V2_PROFILE_ID
+    schema = (2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3) if v2 else 1
+    possible_owned_performance = v2 and profile_sha256 == OWNED_PERFORMANCE_PROFILE_SHA256
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
@@ -452,13 +595,16 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         "schema_version", "kind", "run_name", "vm_id", "status", "pre", "post", "roots",
         "observed_roots_before", "observed_roots_after", "errors", "preservation_sha256",
         "desktop_lease_sha256", "original_transport_sha256", "nonce",
-    } | profile_fields, "Owned cleanup proof")
+    } | profile_fields | ({"protected_anchor"} if schema == 3 else set()) |
+        ({"predelete_sha256"} if possible_owned_performance and
+         "predelete_sha256" in _json(proof_bytes, "Owned cleanup proof") else set()),
+        "Owned cleanup proof")
     signal = require_exact_keys(_json(signal_bytes, "Desktop closure signal"), {
         "schema_version", "nonce", "preservation_sha256", "desktop_lease_sha256",
     } | profile_fields, "Desktop closure signal")
     lease = _json(lease_bytes, "Desktop lease")
     require(all(type(document["schema_version"]) is int and
-                document["schema_version"] == (2 if v2 else 1)
+                document["schema_version"] == schema
                 for document in (receipt, proof, signal)) and
             receipt["kind"] == "owned_cleanup_strict_failure_preservation" and
             proof["kind"] == "owned_cleanup_after_strict_failure" and
@@ -494,7 +640,8 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
             type(original.get("raw_cleanup")) is dict, "Original strict failure is unavailable.")
     raw = original["raw_cleanup"]
     if v2:
-        _verify_v2_owned_resources(raw, profile_sha256=profile_sha256, deleted=False)
+        _verify_v2_owned_resources(raw, profile_sha256=profile_sha256,
+                                   deleted=False, schema=schema)
         require(raw.get("scheduled_task_present") is False and
                 raw.get("guest_root_present") is True and
                 raw.get("trusted_task_root_present") is True and
@@ -547,7 +694,31 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         total += row["bytes"]
     require(total <= 512 * 1024 * 1024 and "original-transport.json" in listed,
             "Preserved files exceed their bound or omit the original transport.")
-    result = _source_result(root, original, receipt, listed)
+    result, bundle = _source_result(root, original, receipt, listed)
+    if possible_owned_performance:
+        context = original["owned_cleanup_failure_context"]
+        embedded = result.get("acceptance_observations")
+        run_id = embedded.get("run_id") if type(embedded) is dict else None
+        candidate = (context["acceptance_mode"] == "performance-sample" or
+                     type(run_id) is str and
+                     run_id.startswith("performance-sample-v2-owned-r3-") or
+                     any(name.startswith("owned-performance-") for name in listed) or
+                     "predelete_sha256" in proof or
+                     (root / "owned-performance-predelete.json").exists())
+        if candidate:
+            require(context["acceptance_mode"] == "performance-sample" and
+                    type(run_id) is str and OWNED_PERFORMANCE_RUN.fullmatch(run_id) is not None and
+                    "predelete_sha256" in proof,
+                    "Owned performance route lacks its frozen restoration gate.")
+            _owned_performance_predelete(root, original, receipt, proof,
+                                         {row["file"]: row for row in files},
+                                         receipt_bytes, signal_bytes, lease_bytes)
+    if schema == 3:
+        source = (bundle["harness"]["source_sha"] if bundle["schema_version"] == 2
+                  else bundle["source_sha"])
+        verify_current_protected_anchor_binding(
+            original, source_sha=source,
+            bundle_sha256=original["owned_cleanup_failure_context"]["bundle"]["sha256"])
     if v2:
         require(result.get("process_job_cleanup") ==
                 raw["owned_resource_evidence"]["process_job_cleanup"] and
@@ -565,7 +736,7 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
                     document.get("observer_lifecycle") ==
                     rescue["task_execution"]["observer_lifecycle"],
                     "V2 rescue result is unbound to its exact task lifetime.")
-    frozen = _snapshot(receipt["failed_snapshot"], "Frozen failure", final=False)
+    frozen = _snapshot(receipt["failed_snapshot"], "Frozen failure", final=False, schema=schema)
     roots = _roots(receipt["root_records"], receipt["run_name"])
     require(proof["roots"] == roots, "Finalizer root records differ from creation.")
     observed = require_exact_keys(proof["observed_roots_before"], {"guest", "trusted"},
@@ -574,14 +745,36 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         require(type(observed[role]) is dict and observed[role] == {
             **roots[role], "ordinary_directory": True},
             f"{role} root was replaced, reparse, or changed its descriptor.")
-    before = _snapshot(proof["pre"], "Finalizer pre-inventory", final=True)
-    after = _snapshot(proof["post"], "Finalizer post-inventory", final=True)
+    before = _snapshot(proof["pre"], "Finalizer pre-inventory", final=True, schema=schema)
+    after = _snapshot(proof["post"], "Finalizer post-inventory", final=True, schema=schema)
     for inventory in (frozen, before, after):
         _reject_owned_entries(inventory, roots, receipt["run_name"])
     if v2:
         require(raw["owned_resource_evidence"]["root_records"] == roots,
                 "V2 root creation differs from the original raw evidence.")
-        _v2_finalizer_inventory(frozen, before, after, raw, roots, receipt["run_name"])
+        final_anchor = None
+        if schema == 3:
+            evidence = raw["owned_resource_evidence"]
+            final_anchor = _v3_anchor(proof["protected_anchor"],
+                                      name=receipt["run_name"], sid=evidence["runner_sid"],
+                                      session=evidence["runner_session_id"],
+                                      profile_sha256=profile_sha256, closed=True)
+            held_anchor = evidence["protected_anchor"]
+            require(all(final_anchor[key] == held_anchor[key] for key in (
+                "run_name", "vm_id", "source_sha", "bundle_sha256", "profile_sha256",
+                "anchor_nonce", "pre_name_utc", "pre_name_snapshot", "anchor_present")),
+                "Finalizer protected anchor differs from its original held context.")
+            if final_anchor["anchor_present"]:
+                require(all(final_anchor["proof"][key] == held_anchor["proof"][key]
+                            for key in held_anchor["proof"] if key not in (
+                                "handle_closed", "parent_handle_closed", "child_path_closed",
+                                "parent_path_closed", "accepted_snapshot_count")),
+                        "Finalizer protected lifetime changed after original preservation.")
+                require(final_anchor["proof"]["accepted_snapshot_count"] >=
+                        held_anchor["proof"]["accepted_snapshot_count"] + 2,
+                        "Finalizer did not recheck the held protected lifetime in both inventories.")
+        _v2_finalizer_inventory(frozen, before, after, raw, roots, receipt["run_name"],
+                                schema=schema, final_anchor=final_anchor)
     else:
         _subset(before, frozen, "Finalizer pre-inventory")
         _subset(after, frozen, "Finalizer post-inventory")

@@ -194,9 +194,9 @@ class AuthorityTests(unittest.TestCase):
                           expected_exe_sha256=DIGEST)
             authority.validate_statement_profile(statement, **kwargs)
             mutations = [
-                ('schema', 'darkrenamer-vm-automated-statement-v1' if revision == 2
+                ('schema', 'darkrenamer-vm-automated-statement-v1' if revision == 3
                  else 'darkrenamer-vm-automated-statement-v2'),
-                ('profile.id', 'vm-automated-v1-win11-ntfs' if revision == 2
+                ('profile.id', 'vm-automated-v1-win11-ntfs' if revision == 3
                  else 'vm-automated-v2-owned-resources'),
                 ('profile.revision', True), ('profile.sha256', 'c' * 64),
                 ('candidate.run_id', 99), ('candidate.source_sha', 'c' * 40),

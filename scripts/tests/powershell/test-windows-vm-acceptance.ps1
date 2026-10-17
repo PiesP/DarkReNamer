@@ -12,6 +12,60 @@ $ErrorActionPreference = 'Stop'
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
+$controllerAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'),
+    [ref]$null, [ref]$null)
+$modeGate = @($controllerAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Test-DrControllerOwnedFailureModeSupported'
+}, $true))
+if ($modeGate.Count -ne 1) { throw 'Production strict-failure mode gate is unavailable.' }
+. ([scriptblock]::Create($modeGate[0].Extent.Text))
+
+foreach ($mode in @('performance-sample', 'first-clear-observation')) {
+    if (-not (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode $mode `
+        -TextScalePercent 100 -HighContrast $false)) {
+        throw "Strict-failure UI mode $mode cannot reach its independent finalizer."
+    }
+}
+$firstClearScale = [pscustomobject]@{
+    KeyExists=$true; ValueExists=$true; ValueKind='DWord'; Value=[int64]100;
+    UiFactor=[double]1.0; UiPercent=100
+}
+$firstClearProof = New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $firstClearScale
+if (-not $firstClearProof.snapshot_equal -or
+    $firstClearProof.baseline.registry_value_kind -cne 'DWord' -or
+    $firstClearProof.final.ui_settings_percent -ne 100) {
+    throw 'First-clear text-scale restoration helper lost the baseline or final snapshot.'
+}
+if ((New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $null).snapshot_equal) {
+    throw 'First-clear text-scale restoration accepted a missing final read.'
+}
+$changedFirstClearScale = [pscustomobject]@{
+    KeyExists=$true; ValueExists=$true; ValueKind='QWord'; Value=[int64]100;
+    UiFactor=[double]1.0; UiPercent=100
+}
+if ((New-FirstClearTextScaleRestoration -Baseline $firstClearScale -Final $changedFirstClearScale).snapshot_equal) {
+    throw 'First-clear text-scale restoration accepted a changed registry kind.'
+}
+if (-not (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode appearance-pair `
+    -TextScalePercent 100 -HighContrast $false)) {
+    throw 'Approved appearance-pair settings cannot reach strict finalization.'
+}
+foreach ($case in @(
+    @{ mode='appearance-pair'; percent=150; contrast=$false },
+    @{ mode='appearance-pair'; percent=100; contrast=$true },
+    @{ mode='performance-sample'; percent=150; contrast=$false },
+    @{ mode='first-clear-observation'; percent=100; contrast=$true },
+    @{ mode='focused-10k-clear'; percent=100; contrast=$false },
+    @{ mode='icon-settlement'; percent=100; contrast=$false }
+)) {
+    if (Test-DrControllerOwnedFailureModeSupported -TaskKind ui -AcceptanceMode $case.mode `
+        -TextScalePercent $case.percent -HighContrast $case.contrast) {
+        throw "Unsupported UI mode $($case.mode) could delete its failed roots."
+    }
+}
+
 function Invoke-TestAcceptance {
     [CmdletBinding()]
     param(
@@ -36,6 +90,172 @@ function Invoke-TestAcceptance {
     $parameters = @{} + $PSBoundParameters
     [void]$parameters.Remove('EntryPointPath')
     & $EntryPointPath @parameters
+}
+
+# Execute the maintained collector with a held pre-name row and a transient
+# owner-query failure. Count only complete inventories and reject a newly opaque
+# lifetime after the run name is minted.
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw 'The production protected collector did not parse.' }
+    $definitions = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmRunnerProcesses'
+    }, $true))
+    if ($definitions.Count -ne 1) { throw 'The production protected collector is ambiguous.' }
+    . ([scriptblock]::Create($definitions[0].Extent.Text))
+    $sid = 'S-1-5-21-1-2-3-1001'
+    $created = [datetime]::SpecifyKind([datetime]'2026-09-30T01:02:03', 'Utc')
+    $identity = '7001|' + $created.ToString('o')
+    $protected = [pscustomobject]@{ProcessId=7001;SessionId=2;CreationDate=$created
+        ParentProcessId=499;ExecutablePath=$null;CommandLine=$null}
+    $ordinary = [pscustomobject]@{ProcessId=7002;SessionId=2;CreationDate=$created
+        ParentProcessId=100;ExecutablePath='C:\Windows\System32\ordinary.exe'
+        CommandLine='C:\Windows\System32\ordinary.exe'}
+    $newOpaque = [pscustomobject]@{ProcessId=7003;SessionId=2;CreationDate=$created
+        ParentProcessId=499;ExecutablePath=$null;CommandLine=$null}
+    $fixture = [pscustomobject]@{reads=0;owner_calls=0;protected_calls=0;new_opaque=$false;fail_owner_once=$true}
+    function Get-CimInstance {
+        param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+        if ($ClassName -cne 'Win32_Process' -or $OperationTimeoutSec -ne 5) {
+            throw 'The collector changed its bounded process query.'
+        }
+        [void]($fixture.reads++)
+        @($protected,$ordinary) + $(if ($fixture.new_opaque) { @($newOpaque) } else { @() })
+    }
+    function Invoke-CimMethod {
+        param($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction)
+        [void]($fixture.owner_calls++)
+        if ($MethodName -cne 'GetOwnerSid' -or $OperationTimeoutSec -ne 5) {
+            throw 'The collector changed its bounded owner query.'
+        }
+        if ($InputObject.ProcessId -eq 7002 -and $fixture.fail_owner_once) {
+            $fixture.fail_owner_once = $false
+            throw 'Transient owner query failure.'
+        }
+        [pscustomobject]@{ReturnValue=0;Sid=$sid}
+    }
+    function Get-DrVmProtectedProcessRow {
+        param($Process,$Owner,$Context,[switch]$Create)
+        [void]($fixture.protected_calls++)
+        if ($Process.ProcessId -ne 7001) { throw 'New opaque process was not held pre-name.' }
+        [pscustomobject][ordered]@{kind='protected_pre_name';identity=$identity;pid=7001
+            session_id=2;creation_time_utc=$Process.CreationDate.ToUniversalTime().ToString('o');executable_path=$null
+            command_line=$null;native_image_path='C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26090.9-0\DefenderSessionHelper.exe'
+            protection_level=3;parent_pid=499;owner_sid=$sid}
+    }
+    $context = [pscustomobject]@{closed=$false;run_name='DarkReNamerTests-' + ('a' * 32)
+        proof=[ordered]@{identity=$identity};child=[pscustomobject]@{};accepted_snapshots=0
+        rejected_opaque_observed=$false}
+    $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
+        -IncludeExecutionScope -ProtectedAnchorContext $context
+    if (-not $snapshot.complete -or $snapshot.attempts -ne 2 -or
+        $context.accepted_snapshots -ne 1 -or @($snapshot.processes).Count -ne 2) {
+        throw "An incomplete retry was counted as a complete protected inventory: complete=$($snapshot.complete), attempts=$($snapshot.attempts), accepted=$($context.accepted_snapshots), rows=$(@($snapshot.processes).Count), owner_calls=$($fixture.owner_calls), protected_calls=$($fixture.protected_calls), rejected=$($context.rejected_opaque_observed), first=$($fixture.fail_owner_once), identities=$(@($snapshot.processes | ForEach-Object identity) -join ',')."
+    }
+    $fixture.reads=0; $fixture.new_opaque=$true
+    $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
+        -IncludeExecutionScope -ProtectedAnchorContext $context
+    if ($snapshot.complete -or $snapshot.attempts -ne 3 -or
+        $context.accepted_snapshots -ne 1 -or -not $context.rejected_opaque_observed) {
+        throw 'A newly opaque process passed the held pre-name collector.'
+    }
+}
+
+# Exercise the actual held-row predicate with inert lifetime/path objects. The
+# initial Windows native opens remain the runtime gate; these checks protect the
+# policy used on every later complete inventory and its explicit close proof.
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerPath, [ref]$tokens, [ref]$errors)
+    foreach ($name in @('global:Get-DrVmProtectedProcessRow',
+            'global:Get-DrVmProtectedAnchorEvidence', 'global:Close-DrVmProtectedAnchorContext')) {
+        $definitions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        }, $true))
+        if ($definitions.Count -ne 1) { throw "The held protected policy $name is ambiguous." }
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $sid = 'S-1-5-21-1-2-3-1001'
+    $created = [datetime]::SpecifyKind([datetime]'2026-09-30T01:02:03', 'Utc')
+    $process = [pscustomobject]@{ ProcessId=7001;ParentProcessId=499;SessionId=2;
+        CreationDate=$created;Name='DefenderSessionHelper.exe';ExecutablePath=$null;CommandLine=$null }
+    $child = [pscustomobject]@{ wait_result=258;filetime='134036677230000000';level=3;
+        Closed=$false;CloseError=0;pid=7001;parent=$false }
+    $parent = [pscustomobject]@{ wait_result=258;filetime='134036677220000000';level=3;
+        Closed=$false;CloseError=0;pid=499;parent=$true }
+    foreach ($held in @($child,$parent)) {
+        $held | Add-Member -MemberType ScriptMethod -Name Poll -Value { @{ wait_result=$this.wait_result } }
+        $held | Add-Member -MemberType ScriptMethod -Name Recheck -Value {
+            @{ owner_sid=if ($this.parent) { 'S-1-5-18' } else { 'S-1-5-21-1-2-3-1001' };
+                session_id=if ($this.parent) { 0 } else { 2 };pid=$this.pid;
+                creation_filetime_100ns=$this.filetime;image_path='C:\Windows\System32\held.exe' }
+        }
+        $held | Add-Member -MemberType ScriptMethod -Name Protection -Value {
+            @{ success=$true;win32_error=0;level=$this.level }
+        }
+        $held | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Closed=$true }
+    }
+    $childPath = [pscustomobject]@{ fail=$false;Closed=$false;CloseError=0 }
+    $parentPath = [pscustomobject]@{ fail=$false;Closed=$false;CloseError=0 }
+    foreach ($path in @($childPath,$parentPath)) {
+        $path | Add-Member -MemberType ScriptMethod -Name Recheck -Value {
+            if ($this.fail) { throw 'Held ancestry changed.' }
+            @{ stable=$true }
+        }
+        $path | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Closed=$true }
+    }
+    $context = [pscustomobject]@{
+        runner_sid=$sid;runner_session_id=2;child=$child;parent=$parent;
+        child_path_chain=$childPath;parent_path_chain=$parentPath;closed=$false;close_errors=@();
+        accepted_snapshots=1;run_name='DarkReNamerTests-' + ('a' * 32);
+        vm_id='11111111-2222-3333-4444-555555555555';source_sha='a' * 40;
+        bundle_sha256='a' * 64;profile_sha256='a' * 64;
+        anchor_nonce='a' * 32;pre_name_utc=$created.ToString('o');pre_name_snapshot=$null;
+        proof=[ordered]@{identity='7001|' + $created.ToString('o');parent_pid=499;
+            child_native_identity=@{creation_filetime_100ns='134036677230000000'};
+            parent_native_identity=@{creation_filetime_100ns='134036677220000000'};
+            handle_closed=$false;parent_handle_closed=$false;child_path_closed=$false;
+            parent_path_closed=$false;accepted_snapshot_count=0}
+    }
+    $owner = [pscustomobject]@{ Sid=$sid }
+    $row = Get-DrVmProtectedProcessRow -Process $process -Owner $owner -Context $context
+    if ($row.kind -cne 'protected_pre_name' -or $row.command_line -ne $null -or
+        $row.identity -cne $context.proof.identity) {
+        throw 'The held protected row was not admitted in its typed opaque form.'
+    }
+    foreach ($fault in @('lifetime','protection','ancestry')) {
+        $expected = switch ($fault) {
+            lifetime { 'Protected-process native lifetime changed.' }
+            protection { 'Protected-process AntiMalware-Light proof is unavailable.' }
+            ancestry { 'Held ancestry changed.' }
+        }
+        try {
+            switch ($fault) {
+                lifetime { $child.filetime='1' }
+                protection { $child.level=0 }
+                ancestry { $childPath.fail=$true }
+            }
+            $null = Get-DrVmProtectedProcessRow -Process $process -Owner $owner -Context $context
+            throw "A $fault fault passed the production held-row predicate."
+        } catch {
+            if ($_.Exception.Message.IndexOf($expected,[StringComparison]::Ordinal) -lt 0) { throw }
+        } finally {
+            $child.filetime='134036677230000000';$child.level=3;$childPath.fail=$false
+        }
+    }
+    $parentPath.CloseError=5
+    $closed = Close-DrVmProtectedAnchorContext -Context $context
+    if ($closed.all_handles_closed -or $closed.proof.parent_path_closed -or
+        @($closed.errors).Count -ne 1) {
+        throw 'A held ancestry handle closure fault was accepted as complete.'
+    }
 }
 
 function Assert-Fails {
@@ -314,6 +534,46 @@ try {
         $controllerText, [ref]$controllerParseTokens, [ref]$controllerParseErrors)
     if ($controllerParseErrors.Count -ne 0) {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
+    }
+    # Exercise the controller's actual pending-lease admission block with the
+    # GUI output layout, whose mutable lease is outside immutable inputs.
+    & {
+        $admission = @($controllerAst.FindAll({ param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+                $node.Body.Statements.Count -gt 0 -and
+                $node.Body.Statements[0].Extent.Text.StartsWith('$binding = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE')
+        }, $true))
+        if ($admission.Count -ne 1) { throw 'Managed cleanup lease admission is ambiguous.' }
+        $admit = [scriptblock]::Create($admission[0].Extent.Text)
+        $savedHandshake = $env:DR_VM_OWNED_CLEANUP_HANDSHAKE
+        try {
+            foreach ($case in @('core', 'gui', 'wrong-sid', 'wrong-lease', 'already-closed')) {
+                $root = Join-Path $temporaryRoot ('pending-lease-' + $case)
+                [void](New-Item -ItemType Directory -Path $root)
+                $BundleRoot = if ($case -ceq 'core') { $root } else { Join-Path $root 'inputs' }
+                $transportOutputRoot = if ($case -ceq 'core') { $root } else { Join-Path $root 'output' }
+                if ($case -cne 'core') {
+                    [void](New-Item -ItemType Directory -Path $BundleRoot, $transportOutputRoot)
+                }
+                $ExpectedDesktopSid = 'S-1-5-21-1-2-3-1001'
+                $env:DR_VM_OWNED_CLEANUP_HANDSHAKE = @{
+                    nonce = 'b' * 32; lease_id = 'a' * 32
+                    sid = if ($case -ceq 'wrong-sid') { 'S-1-5-21-1-2-3-1002' } else { $ExpectedDesktopSid }
+                } | ConvertTo-Json -Compress
+                Write-Utf8Json -Path (Join-Path $root 'desktop-lease.json') -Value @{
+                    lease_id = if ($case -ceq 'wrong-lease') { 'c' * 32 } else { 'a' * 32 }
+                    mode = 'managed-rdp'; start_status = 'ready'
+                    stop_status = if ($case -ceq 'already-closed') { 'stopped' } else { 'failed' }
+                }
+                $ownedHandshake = $null
+                . $admit
+                $expected = $case -cin @('core', 'gui')
+                if (($null -ne $ownedHandshake) -ne $expected) {
+                    throw "Pending managed lease admission mismatch for $case."
+                }
+            }
+        }
+        finally { $env:DR_VM_OWNED_CLEANUP_HANDSHAKE = $savedHandshake }
     }
     $runnerParseErrors = $null
     $runnerParseTokens = $null
@@ -727,6 +987,8 @@ try {
             $RegressionMode = 'standard'
             $textOriginal = $null
             $textChanged = $false
+            $ownedPerformanceRun = $false
+            $ownedPerformanceTextBaseline = $null
             $cursor = $null
             $captures = [Collections.Generic.List[object]]::new()
             $observations = [ordered]@{ fixture = $Mode }
@@ -2030,6 +2292,86 @@ try {
         Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
     } 'binding mismatch'
     Initialize-AcceptanceNative
+    if ($IsWindows) {
+    # Hold a same-host child on stdin until the retained-handle producer probe finishes.
+    $lifetimeChildCommand = "[Console]::Out.WriteLine('owned-performance-ready'); " +
+        "[Console]::Out.Flush(); if ([Console]::ReadLine() -cne 'release') { exit 2 }; exit 0"
+    $lifetimeStart = [Diagnostics.ProcessStartInfo]::new()
+    $lifetimeStart.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $lifetimeStart.UseShellExecute = $false
+    $lifetimeStart.CreateNoWindow = $true
+    $lifetimeStart.RedirectStandardInput = $true
+    $lifetimeStart.RedirectStandardOutput = $true
+    $lifetimeStart.RedirectStandardError = $true
+    $lifetimeStart.ArgumentList.Add('-NoProfile')
+    $lifetimeStart.ArgumentList.Add('-NonInteractive')
+    $lifetimeStart.ArgumentList.Add('-EncodedCommand')
+    $lifetimeStart.ArgumentList.Add([Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($lifetimeChildCommand)))
+    $lifetimeChild = [Diagnostics.Process]::new()
+    $lifetimeChild.StartInfo = $lifetimeStart
+    $lifetimeStarted = $false
+    $lifetimeError = $null
+    function Get-OwnedPerformanceChildState {
+        param([Diagnostics.Process]$Child,[bool]$Started,$ErrorTask)
+        if (-not $Started) { return 'start=pending' }
+        $exited = $Child.HasExited
+        $exitCode = if ($exited) { [string]$Child.ExitCode } else { 'pending' }
+        $errorText = if ($null -ne $ErrorTask -and $ErrorTask.IsCompletedSuccessfully) {
+            [string]$ErrorTask.Result
+        } else { '<pending>' }
+        if ($errorText.Length -gt 2000) { $errorText = $errorText.Substring(0,2000) }
+        return "pid=$($Child.Id); hasExited=$exited; exitCode=$exitCode; stderr=$errorText"
+    }
+    try {
+        $lifetimeStarted = $lifetimeChild.Start()
+        if (-not $lifetimeStarted) { throw 'Owned performance lifetime child did not start.' }
+        $lifetimeError = $lifetimeChild.StandardError.ReadToEndAsync()
+        $readyLine = $lifetimeChild.StandardOutput.ReadLineAsync()
+        if (-not $readyLine.Wait(15000)) {
+            throw "Owned performance lifetime child readiness timed out: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        if ($readyLine.GetAwaiter().GetResult() -cne 'owned-performance-ready') {
+            throw "Owned performance lifetime child gave no readiness marker: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        $lifetimeApplication = [pscustomobject]@{
+            process=$lifetimeChild
+            owned=[ordered]@{process_start_time_utc_ticks=[long]$lifetimeChild.StartTime.ToUniversalTime().Ticks}
+            process_lifecycle=[ordered]@{}
+        }
+        $lifetimeObservations=[ordered]@{}
+        $lifetimeCheckpoints=[Collections.Generic.List[object]]::new()
+        $creationFileTime=Initialize-ObserverOwnedPerformanceLifetime `
+            -Application $lifetimeApplication -ObservationSink $lifetimeObservations `
+            -Checkpoints $lifetimeCheckpoints
+        if ($lifetimeObservations.native_process_lifetime.pid -ne $lifetimeChild.Id -or
+            $lifetimeCheckpoints.Count -ne 1 -or
+            $lifetimeApplication.process_lifecycle.creation_filetime -ne $creationFileTime) {
+            throw 'Owned performance producer did not retain the child process identity.'
+        }
+        $lifetimeChild.StandardInput.WriteLine('release')
+        $lifetimeChild.StandardInput.Close()
+        if (-not $lifetimeChild.WaitForExit(15000)) {
+            throw "Owned performance lifetime child exit timed out after release: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        if ($lifetimeChild.ExitCode -ne 0) {
+            throw "Owned performance lifetime child exited abnormally: $(Get-OwnedPerformanceChildState $lifetimeChild $lifetimeStarted $lifetimeError)"
+        }
+        $terminalLifetime=[DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+            [IntPtr]$lifetimeChild.Handle,[uint32]$lifetimeChild.Id,$creationFileTime,$true)
+        if ($terminalLifetime[0] -ne $creationFileTime -or
+            $terminalLifetime[1] -le $creationFileTime) {
+            throw 'Owned performance retained terminal lifetime is invalid.'
+        }
+    }
+    finally {
+        if ($lifetimeStarted -and -not $lifetimeChild.HasExited) {
+            $lifetimeChild.Kill()
+            [void]$lifetimeChild.WaitForExit(5000)
+        }
+        $lifetimeChild.Dispose()
+    }
+    }
     foreach ($method in @(
         'IsWindowEnabled',
         'IsMenuCommandEnabled',
@@ -2912,6 +3254,8 @@ try {
         -Appearance light -TextScalePercent 150 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     $candidatePerformanceInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidatePerformanceInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'performance-sample-v2-1366x768-96-text100-hidden-visible'
     $candidatePerformanceInput.request.mode = 'performance-sample'
     $candidatePerformanceInput.request.text_scale_percent = [long]100
     $candidatePerformanceInput.request.PSObject.Properties.Remove('layout_variant')
@@ -2927,6 +3271,7 @@ try {
         -Appearance light -TextScalePercent 100 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     $candidatePerformanceInput.request.performance_plan.long_path_order = 'visible-hidden'
+    $candidatePerformanceInput.run_id = 'performance-sample-v2-1366x768-96-text100-visible-hidden'
     Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
         -Verified $candidateRegressionResolved -RegressionMode performance-sample `
         -Appearance light -TextScalePercent 100 -HighContrast $false `
@@ -2939,6 +3284,7 @@ try {
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
     $candidatePerformanceInput.request.performance_plan.long_path_order = 'hidden-visible'
+    $candidatePerformanceInput.run_id = 'performance-sample-v2-1366x768-96-text100-hidden-visible'
     $candidatePerformanceInput.request.performance_plan.idle_seconds = 0
     Assert-Fails {
         Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
@@ -2946,6 +3292,35 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    $candidateFirstClearInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $candidateFirstClearInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'first-clear-observation-v1-1366x768-96-text100'
+    $candidateFirstClearInput | Add-Member -NotePropertyName acceptance_profile_id `
+        -NotePropertyValue 'vm-automated-v1-win11-ntfs'
+    $candidateFirstClearInput.request.mode = 'first-clear-observation'
+    $candidateFirstClearInput.request.text_scale_percent = [long]100
+    $candidateFirstClearInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidateFirstClearInput.request.desktop.width = [long]1366
+    $candidateFirstClearInput.request.desktop.height = [long]768
+    $candidateFirstClearInput.request | Add-Member -NotePropertyName first_clear_observation_plan -NotePropertyValue ([ordered]@{
+        ordinary_rows=@(100,1000,10000); idle_seconds=30; sample_interval_ms=200
+        maximum_seconds=600; clear_command_id=32782; command_timeout_ms=5000
+        passive_poll_limit=50; passive_window_ms=10000; passive_interval_ms=200
+        individual_query_timeout_ms=50; stop_after_first_clear=$true
+        full_performance_sample=$false
+    })
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFirstClearInput `
+        -Verified $candidateRegressionResolved -RegressionMode first-clear-observation `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidateFirstClearInput.request.first_clear_observation_plan.command_timeout_ms = 5001
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateFirstClearInput `
+            -Verified $candidateRegressionResolved -RegressionMode first-clear-observation `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidateFirstClearInput.request.first_clear_observation_plan.command_timeout_ms = 5000
     $candidateFocusedInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     $candidateFocusedInput | Add-Member -NotePropertyName run_id `
         -NotePropertyValue 'focused-10k-clear-v1-1366x768-96-text100'
@@ -3717,7 +4092,10 @@ foreach ($call in $applicationStartCalls) {
             })) {
         . ([scriptblock]::Create($definition.Extent.Text))
     }
-    $fixture = New-AcceptanceFixture -Name 'controller-incomplete-baseline'
+    $explicitFixture = New-AcceptanceFixture -Name 'controller-incomplete-baseline'
+    $optionalFixture = New-AcceptanceFixture -Name 'controller-incomplete-baseline-no-expected-id'
+    foreach ($requestGuestId in @($true, $false)) {
+    $fixture = if ($requestGuestId) { $explicitFixture } else { $optionalFixture }
     $probe = [pscustomobject]@{ calls = 0; candidate_started = $false; cleanup_context = $null }
     $priorProgramData = $env:ProgramData
     $priorRootRecords = Get-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue
@@ -3739,13 +4117,32 @@ foreach ($call in $applicationStartCalls) {
         $probe.calls++
         switch ($probe.calls) {
             1 { return [pscustomobject]@{ platform = 'Win32NT'; powershell_version = '7.4.0';
-                    is_administrator = $true; vm_id = $null } }
+                    is_administrator = $true; vm_id = '11111111-2222-3333-4444-555555555555' } }
             2 { return [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1001'; session_id = 7 } }
             3 {
-                $name = [string]$ArgumentList[0]
+                if ($null -ne $ArgumentList[0]) {
+                    throw 'A v2 run name was disclosed before the protected-process anchor.'
+                }
+                $name = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
                 $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
-                return [pscustomobject]@{ guest_root = Join-Path $base $name;
-                    trusted_task_root = Join-Path $base ($name + '-trusted') }
+                # The real guest keeps this pre-name context in the same session
+                # through no-result cleanup; only the native-handle seam is inert.
+                $global:DrVmProtectedAnchorContext = [pscustomobject]@{ closed = $false }
+                function global:Get-DrVmProtectedAnchorEvidence {
+                    param($Context)
+                    [pscustomobject]@{ all_handles_closed = [bool]$Context.closed }
+                }
+                function global:Close-DrVmProtectedAnchorContext {
+                    param($Context)
+                    $Context.closed = $true
+                    Get-DrVmProtectedAnchorEvidence -Context $Context
+                }
+                return [pscustomobject]@{ run_name = $name; guest_root = Join-Path $base $name;
+                    trusted_task_root = Join-Path $base ($name + '-trusted');
+                    pre_name_snapshot = [pscustomobject]@{ complete = $true; processes = @(); attempts = 1 };
+                    protected_anchor = [pscustomobject]@{ run_name = $name;
+                        profile_sha256 = $ArgumentList[4]; source_sha = $ArgumentList[5];
+                        bundle_sha256 = $ArgumentList[6]; vm_id = $ArgumentList[7] } }
             }
             4 { return [pscustomobject]@{ manifest_sha256 = 'a' * 64; records = @() } }
             5 {
@@ -3764,12 +4161,17 @@ foreach ($call in $applicationStartCalls) {
                 $probe.cleanup_context = $ArgumentList[5]
                 return (& $ScriptBlock @ArgumentList)
             }
+            10 { return (& $ScriptBlock @ArgumentList) }
             default { $probe.candidate_started = $true; throw 'Candidate reached the fixture VM.' }
         }
     }
     try {
+        $identityArgs = if ($requestGuestId) {
+            @{ ExpectedGuestVmId = [guid]'11111111-2222-3333-4444-555555555555' }
+        } else { @{} }
         Assert-Fails {
             Invoke-DrWindowsVmController -BundleRoot $fixture.bundle_root -SshHost 'inert-fixture' `
+                @identityArgs `
                 -AcceptanceProfileId 'vm-automated-v2-owned-resources' `
                 -AcceptanceProfileSha256 ('a' * 64) -TaskKind core `
                 -EntryPointPath $controller -VerifiedTooling ([pscustomobject]@{})
@@ -3778,7 +4180,8 @@ foreach ($call in $applicationStartCalls) {
             ConvertFrom-Json
         $primary = Get-Content -LiteralPath (Join-Path $fixture.bundle_root 'transport-error.txt') -Raw
         $retained = Get-Content -LiteralPath (Join-Path $fixture.bundle_root 'retained-guest-directory.txt') -Raw
-        if ($probe.calls -ne 9 -or $probe.candidate_started -or
+        if ($probe.calls -ne 10 -or $probe.candidate_started -or
+            $transport.vm_id -cne '11111111-2222-3333-4444-555555555555' -or
             $null -eq $probe.cleanup_context -or
             $probe.cleanup_context.candidate_task_may_have_started -or
             $null -ne $probe.cleanup_context.task_execution -or
@@ -3798,6 +4201,7 @@ foreach ($call in $applicationStartCalls) {
         $env:ProgramData = $priorProgramData
         if ($null -ne $priorRootRecords) { $global:DrVmOwnedRootRecords = $priorRootRecords.Value }
         else { Remove-Variable -Name DrVmOwnedRootRecords -Scope Global -ErrorAction SilentlyContinue }
+    }
     }
 }
 
@@ -3870,6 +4274,10 @@ foreach ($call in $applicationStartCalls) {
     $script:DrVmV2RescueAttempts = 0
     $script:DrVmV2RescueExecutions = [Collections.Generic.List[object]]::new()
     $AcceptanceProfileSha256 = 'a' * 64
+    $workspaceRoots = [pscustomobject]@{
+        pre_name_snapshot = [pscustomobject]@{ complete = $true; processes = @(); attempts = 1 }
+        protected_anchor = [pscustomobject]@{ all_handles_closed = $false }
+    }
     $recovery = $false
     $declared = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $context = & $makeContext

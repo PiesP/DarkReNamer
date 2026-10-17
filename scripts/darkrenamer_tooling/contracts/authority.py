@@ -19,7 +19,7 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 PROFILE_DEFINITIONS = {
     'vm-automated-v1-win11-ntfs': (1, 'config/vm-automated-v1.json'),
-    'vm-automated-v2-owned-resources': (2, 'config/vm-automated-v2.json'),
+    'vm-automated-v2-owned-resources': (3, 'config/vm-automated-v2.json'),
 }
 
 

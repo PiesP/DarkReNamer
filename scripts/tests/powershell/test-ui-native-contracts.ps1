@@ -46,6 +46,12 @@ function Get-NativeFixtureMember {
 $members = foreach ($signature in @(
     'public sealed class HighContrastSnapshot', 'public sealed class ClipboardSnapshot',
     'public sealed class PerformanceCommandDiagnostic',
+    'public sealed class FirstClearIdentity', 'public sealed class FirstClearPoll',
+    'private struct NativeFileTime', 'private static long ReadCreationFileTime(',
+    'private static FirstClearIdentity ReadFirstClearIdentity(',
+    'public static FirstClearIdentity CaptureFirstClearIdentity(',
+    'public static FirstClearPoll PollFirstClear(',
+    'private static bool SameFirstClearIdentity(',
     'private struct NativeScrollInfo', 'private struct HIGHCONTRAST',
     'private struct KEYBDINPUT', 'private struct MOUSEINPUT', 'private struct INPUTUNION {', 'private struct INPUT {',
     'private static uint[] EnumerateClipboardFormats', 'private static string ReadClipboardUnicodeText',
@@ -79,15 +85,65 @@ public static class DarkReNamerVmAcceptanceNative {
     public static bool PerformanceTargetValid = true, PerformanceMenuEnabled = true;
     public static long PerformanceNativeReturn = 1, PerformanceMessageResult;
     public static int PerformanceErrorCode, PerformanceSendCalls;
+    public static bool FirstClearExited, FirstClearBadClass, FirstClearBadParent, FirstClearBadId;
+    public static bool FirstClearBadThread, FirstClearBadProcessTimes, FirstClearDriftAfterCount;
+    public static long FirstClearCreationFileTime = 134366378271308143L;
+    public static long FirstClearCountReturn = 1, FirstClearCountResult = 0, FirstClearResponseReturn = 1;
+    public static int FirstClearCountError, FirstClearResponseError;
     private static uint GetWindowThreadProcessId(IntPtr window, out uint processId) {
+        if (window == new IntPtr(102)) {
+            Calls.Add("list-target"); processId = 7;
+            return FirstClearBadThread ? 2u : 1u;
+        }
         Calls.Add("command-target"); processId = 7;
         return PerformanceTargetValid && window == new IntPtr(101) ? 1u : 0u;
     }
+    private static uint GetProcessId(IntPtr process) { return process == new IntPtr(301) ? 7u : 0u; }
+    private static uint WaitForSingleObject(IntPtr process, uint milliseconds) {
+        if (process != new IntPtr(301) || milliseconds != 0) throw new InvalidOperationException("wrong retained process handle");
+        return FirstClearExited ? 0u : 0x102u;
+    }
+    private static bool GetProcessTimes(IntPtr process, out NativeFileTime creation,
+        out NativeFileTime exit, out NativeFileTime kernel, out NativeFileTime user) {
+        ulong value = (ulong)FirstClearCreationFileTime;
+        creation = new NativeFileTime { Low = (uint)value, High = (uint)(value >> 32) };
+        exit = kernel = user = new NativeFileTime();
+        if (process != new IntPtr(301) || FirstClearBadProcessTimes) { Marshal.SetLastPInvokeError(5); return false; }
+        return true;
+    }
+    private static int GetClassName(IntPtr window, StringBuilder text, int count) {
+        string name = window == new IntPtr(101) ? "DarkReNamerWindow" :
+            window == new IntPtr(102) ? (FirstClearBadClass ? "OtherList" : "SysListView32") : "";
+        text.Append(name); return name.Length;
+    }
+    private static IntPtr GetAncestor(IntPtr window, uint flags) {
+        return window == new IntPtr(102) && flags == 2 && !FirstClearBadParent ? new IntPtr(101) : IntPtr.Zero;
+    }
+    private static IntPtr GetParent(IntPtr window) {
+        return window == new IntPtr(102) && !FirstClearBadParent ? new IntPtr(101) : IntPtr.Zero;
+    }
+    private static int GetDlgCtrlID(IntPtr window) { return FirstClearBadId ? 999 : 1000; }
     public static bool IsMenuCommandEnabled(IntPtr window, uint command) {
         Calls.Add("command-menu"); return PerformanceMenuEnabled;
     }
     private static IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
         IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result) {
+        if (message == 0x1004 || message == 0) {
+            Calls.Add(message == 0x1004 ? "count-send" : "response-send");
+            if (window != new IntPtr(message == 0x1004 ? 102 : 101) ||
+                wParam != IntPtr.Zero || lParam != IntPtr.Zero || flags != 3 || timeoutMs != 50 ||
+                Marshal.GetLastWin32Error() != 0)
+                throw new InvalidOperationException("first-clear passive ABI or cleared error changed");
+            if (message == 0x1004) {
+                result = new IntPtr(FirstClearCountResult);
+                Marshal.SetLastPInvokeError(FirstClearCountError);
+                if (FirstClearDriftAfterCount) FirstClearCreationFileTime++;
+                return new IntPtr(FirstClearCountReturn);
+            }
+            result = IntPtr.Zero;
+            Marshal.SetLastPInvokeError(FirstClearResponseError);
+            return new IntPtr(FirstClearResponseReturn);
+        }
         Calls.Add("command-send"); PerformanceSendCalls++;
         if (window != new IntPtr(101) || message != 0x0111 || wParam != new IntPtr(0x800E) ||
             lParam != IntPtr.Zero || flags != 3 || timeoutMs != 5000 ||
@@ -240,6 +296,50 @@ namespace Windows.Automation {
 }
 '@
 Add-Type -TypeDefinition $nativeFixture
+
+# Execute the production capture/poll bodies against inert native boundaries.
+$held = [IntPtr]301; $main = [IntPtr]101; $list = [IntPtr]102
+$identity = [DarkReNamerVmAcceptanceNative]::CaptureFirstClearIdentity($held, [uint32]7, $main, $list)
+Assert-Equal $identity.ProcessId 7 'Held process PID'
+Assert-Equal $identity.CreationFileTime 134366378271308143 'Held process FILETIME'
+Assert-Equal $identity.MainClass 'DarkReNamerWindow' 'Production main class'
+Assert-Equal $identity.ListClass 'SysListView32' 'Production ListView class'
+Assert-Equal $identity.ListParent 101 'Direct ListView parent'
+Assert-Equal $identity.ListControlId 1000 'Production ListView control ID'
+[DarkReNamerVmAcceptanceNative]::Calls.Clear()
+$poll = [DarkReNamerVmAcceptanceNative]::PollFirstClear($held, $identity)
+Assert-Equal $poll.Status 'identity-bound' 'Held poll identity'
+Assert-Equal $poll.RowCount 0 'Zero is a valid returned count'
+Assert-Equal $poll.CountStatus 'returned' 'Nonzero count native return'
+Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls | Where-Object { $_ -like '*-send' } | ForEach-Object { $_ } | Join-String -Separator ',') `
+    'count-send,response-send' 'Only count and WM_NULL sent'
+[DarkReNamerVmAcceptanceNative]::FirstClearCountReturn = 0
+[DarkReNamerVmAcceptanceNative]::FirstClearCountError = 1460
+$poll = [DarkReNamerVmAcceptanceNative]::PollFirstClear($held, $identity)
+Assert-Equal $poll.CountStatus 'failed' 'Zero native return is unknown count'
+Assert-Equal $poll.CountError 1460 'Immediate native count error'
+if ($null -ne $poll.RowCount) { throw 'Failed count call acquired a zero row count.' }
+[DarkReNamerVmAcceptanceNative]::FirstClearCountReturn = 1
+[DarkReNamerVmAcceptanceNative]::FirstClearCountError = 0
+[DarkReNamerVmAcceptanceNative]::FirstClearDriftAfterCount = $true
+$poll = [DarkReNamerVmAcceptanceNative]::PollFirstClear($held, $identity)
+Assert-Equal $poll.Status 'identity-drift' 'Post-query lifetime drift detected'
+if ($null -ne $poll.RowCount) { throw 'Post-query lifetime drift retained a row count.' }
+[DarkReNamerVmAcceptanceNative]::FirstClearDriftAfterCount = $false
+[DarkReNamerVmAcceptanceNative]::FirstClearCreationFileTime = 134366378271308143
+foreach ($field in @('FirstClearExited','FirstClearBadClass','FirstClearBadParent','FirstClearBadId',
+    'FirstClearBadThread','FirstClearBadProcessTimes')) {
+    [DarkReNamerVmAcceptanceNative]::$field = $true
+    Assert-Fails { [DarkReNamerVmAcceptanceNative]::CaptureFirstClearIdentity($held, [uint32]7, $main, $list) } `
+        $(if ($field -eq 'FirstClearBadProcessTimes') { 'Cannot read retained process lifetime' } else { 'identity is unavailable' })
+    [DarkReNamerVmAcceptanceNative]::$field = $false
+}
+[DarkReNamerVmAcceptanceNative]::FirstClearCreationFileTime++
+[DarkReNamerVmAcceptanceNative]::Calls.Clear()
+$poll = [DarkReNamerVmAcceptanceNative]::PollFirstClear($held, $identity)
+Assert-Equal $poll.Status 'identity-unavailable' 'Pre-query lifetime mismatch refuses poll'
+if ([DarkReNamerVmAcceptanceNative]::Calls -contains 'count-send') { throw 'Mismatched lifetime sent a count query.' }
+[DarkReNamerVmAcceptanceNative]::FirstClearCreationFileTime = 134366378271308143
 
 $commandSource = Get-NativeFixtureMember "public static void SendBoundPerformanceCommand(`n        IntPtr window"
 $clearErrorAt = $commandSource.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
@@ -680,3 +780,55 @@ catch {
         'Unwrapped message is not a trusted transient query'
 }
 Write-Output 'UI native/input behavior contracts passed.'
+
+if ($IsWindows) {
+    # A fresh process compiles the entire production type, including its real
+    # P/Invoke declarations, without the inert fixture type masking it.
+    $nativePath = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'
+    $childPath = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-native-$([guid]::NewGuid().ToString('N')).ps1"
+    $stdoutPath = "$childPath.stdout"
+    $stderrPath = "$childPath.stderr"
+    $quotedPath = $nativePath.Replace("'", "''")
+    $childSource = @"
+`$ErrorActionPreference = 'Stop'
+. '$quotedPath'
+Initialize-AcceptanceNative
+`$process = [Diagnostics.Process]::GetCurrentProcess()
+try {
+    `$method = [DarkReNamerVmAcceptanceNative].GetMethod('ReadCreationFileTime',
+        [Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Static)
+    if (`$null -eq `$method) { throw 'Production FILETIME method was not compiled.' }
+    `$nativeTime = [long]`$method.Invoke(`$null, [object[]]@(`$process.Handle))
+    if (`$nativeTime -ne `$process.StartTime.ToUniversalTime().ToFileTimeUtc()) {
+        throw 'Production process FILETIME does not match the owned current process.'
+    }
+    try {
+        [void][DarkReNamerVmAcceptanceNative]::CaptureFirstClearIdentity(
+            `$process.Handle, [uint32]`$process.Id, [IntPtr]::Zero, [IntPtr]::Zero)
+        throw 'Invalid main/List HWND was accepted.'
+    } catch [InvalidOperationException] {
+        if (`$_.Exception.Message -notlike '*identity is unavailable*') { throw }
+    }
+} finally { `$process.Dispose() }
+"@
+    [IO.File]::WriteAllText($childPath, $childSource)
+    $child = $null
+    try {
+        $child = Start-Process -FilePath (Get-Command pwsh).Source -PassThru -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-File', "`"$childPath`"") `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        if (-not $child.WaitForExit(90000)) {
+            $child.Kill($true)
+            throw 'Production native class child compilation exceeded 90 seconds.'
+        }
+        if ($child.ExitCode -ne 0) {
+            throw "Production native class child failed: $([IO.File]::ReadAllText($stderrPath))"
+        }
+    }
+    finally {
+        if ($null -ne $child) { $child.Dispose() }
+        foreach ($path in @($childPath, $stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        }
+    }
+}

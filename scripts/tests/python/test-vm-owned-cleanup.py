@@ -9,11 +9,15 @@ import unittest
 
 from darkrenamer_tooling.contracts.owned_cleanup import (
     _observer_finished, _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
-    _v2_finalizer_inventory,
+    _v2_finalizer_inventory, _owned_performance_predelete,
+    verify_owned_performance_text_scale, OWNED_PERFORMANCE_PROFILE_SHA256,
     verify_preserved_owned_cleanup,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
-from controller_cleanup_fixture import V2_PROFILE_SHA256, clean_controller_cleanup_v2
+from controller_cleanup_fixture import (
+    V2_PROFILE_SHA256, clean_controller_cleanup_v2,
+    clean_controller_cleanup_v3_protected,
+)
 
 
 RUN = 'DarkReNamerTests-' + 'a' * 32
@@ -56,6 +60,119 @@ def text_scale_snapshot(factor):
     return {'registry_key_existed': True, 'registry_value_existed': True,
             'registry_value_kind': 'DWord', 'registry_value': 100,
             'ui_settings_raw_factor': factor, 'ui_settings_percent': round(factor * 100)}
+
+
+class OwnedPerformanceRestorationTests(unittest.TestCase):
+    def test_coherent_registry_presence_and_observed_absence(self):
+        for present in (True, False):
+            row = text_scale_snapshot(1.0)
+            if not present:
+                row.update(registry_key_existed=False, registry_value_existed=False,
+                           registry_value_kind=None, registry_value=None)
+            proof = {'text_scale_restoration': {'schema_version': 1, 'baseline': row,
+                                                'final': deepcopy(row), 'snapshot_equal': True}}
+            self.assertEqual(verify_owned_performance_text_scale(proof)['snapshot_equal'], True)
+            for field, value in (('registry_value', 150), ('registry_value_kind', 'String'),
+                                 ('ui_settings_raw_factor', 1.5), ('ui_settings_percent', 150)):
+                broken = deepcopy(proof)
+                broken['text_scale_restoration']['final'][field] = value
+                with self.subTest(present=present, field=field), self.assertRaises(EvidenceError):
+                    verify_owned_performance_text_scale(broken)
+            broken = deepcopy(proof)
+            broken['text_scale_restoration']['final'] = None
+            with self.assertRaises(EvidenceError):
+                verify_owned_performance_text_scale(broken)
+            broken = deepcopy(proof)
+            broken['text_scale_restoration']['final']['ui_settings_raw_factor'] = 1
+            with self.assertRaises(EvidenceError):
+                verify_owned_performance_text_scale(broken)
+
+    def test_predelete_receipt_recomputes_frozen_bytes_and_rejects_forgery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_id = 'performance-sample-v2-owned-r3-1366x768-96-text100-hidden-visible'
+            source = '9' * 40
+            bundle_sha = 'b' * 64
+            application_sha = 'c' * 64
+            profile_bytes = Path(__file__).resolve().parents[3].joinpath(
+                'config/vm-automated-v2.json').read_bytes()
+            self.assertEqual(digest(profile_bytes), OWNED_PERFORMANCE_PROFILE_SHA256)
+            (root / 'owned-performance-profile.json').write_bytes(profile_bytes)
+            manifest = {'run_id': run_id, 'source_sha': source,
+                        'acceptance_profile_id': 'vm-automated-v2-owned-resources',
+                        'acceptance_profile_sha256': OWNED_PERFORMANCE_PROFILE_SHA256,
+                        'acceptance_profile': {'sha256': OWNED_PERFORMANCE_PROFILE_SHA256},
+                        'bundle_manifest': {'sha256': bundle_sha},
+                        'request': {'mode': 'performance-sample',
+                                    'performance_plan': {'long_path_order': 'hidden-visible'}},
+                        'artifacts': {'application': {'sha256': application_sha}}}
+            observations = {'run_id': run_id,
+                            'text_scale_restoration': {'schema_version': 1,
+                                'baseline': text_scale_snapshot(1.0),
+                                'final': text_scale_snapshot(1.0), 'snapshot_equal': True}}
+            observation_bytes = write(root / 'acceptance-observations.json', observations)
+            result = {'source_sha': source, 'application': {'sha256': application_sha},
+                      'observations': {'sha256': digest(observation_bytes)},
+                      'acceptance_observations': observations}
+            write(root / 'acceptance-result.json', result)
+            write(root / 'owned-performance-input-manifest.json', manifest)
+            write(root / 'bundle.json', {'source_sha': source})
+            original_bytes = write(root / 'original-transport.json', {'status': 'failed'})
+            receipt_bytes = b'{"preserved":true}\n'
+            signal_bytes = b'{"closed":true}\n'
+            lease_bytes = b'{"stopped":true}\n'
+            indexed = {name: {'file': name, 'bytes': (root / name).stat().st_size,
+                              'sha256': digest((root / name).read_bytes())}
+                       for name in ('original-transport.json', 'acceptance-result.json',
+                                    'acceptance-observations.json', 'owned-performance-input-manifest.json',
+                                    'owned-performance-profile.json', 'bundle.json')}
+            roots = {'guest': {'file_id': 'a' * 48}, 'trusted': {'file_id': 'b' * 48}}
+            original = {'owned_cleanup_failure_context': {'source_sha': source,
+                'bundle': {'sha256': bundle_sha},
+                'source_result': indexed['acceptance-result.json']}}
+            receipt = {'run_name': RUN, 'vm_id': VM, 'nonce': 'f' * 32,
+                       'desktop_lease_id': 'd' * 32, 'root_records': roots,
+                       'original_transport': indexed['original-transport.json']}
+            refs = dict(indexed)
+            for name, blob in (('owned-cleanup-strict-failure-preservation.json', receipt_bytes),
+                               ('owned-cleanup-desktop-closed.json', signal_bytes),
+                               ('desktop-lease.json', lease_bytes)):
+                refs[name] = {'file': name, 'bytes': len(blob), 'sha256': digest(blob)}
+            frozen = {'schema_version': 1, 'kind': 'owned_performance_predelete_restoration',
+                      'run_name': RUN, 'run_id': run_id, 'vm_id': VM, 'nonce': 'f' * 32,
+                      'desktop_lease_id': 'd' * 32, 'source_sha': source,
+                      'bundle_sha256': bundle_sha, 'profile_id': 'vm-automated-v2-owned-resources',
+                      'profile_sha256': OWNED_PERFORMANCE_PROFILE_SHA256,
+                      'roots': roots, 'files': refs}
+            predelete_path = root / 'owned-performance-predelete.json'
+            def verify():
+                proof = {'predelete_sha256': (digest(predelete_path.read_bytes())
+                                              if predelete_path.exists() else '0' * 64)}
+                _owned_performance_predelete(root, original, receipt, proof, indexed,
+                                             receipt_bytes, signal_bytes, lease_bytes)
+            write(predelete_path, frozen)
+            verify()
+            for mutation in ('missing', 'stale-hash', 'wrong-root', 'wrong-observation',
+                             'wrong-profile', 'wrong-lease'):
+                with self.subTest(mutation=mutation):
+                    altered = deepcopy(frozen)
+                    if mutation == 'wrong-root':
+                        altered['roots']['guest']['file_id'] = 'e' * 48
+                    elif mutation == 'wrong-observation':
+                        altered['files']['acceptance-observations.json']['sha256'] = 'e' * 64
+                    elif mutation == 'wrong-profile':
+                        altered['profile_sha256'] = 'e' * 64
+                    elif mutation == 'wrong-lease':
+                        altered['desktop_lease_id'] = 'e' * 32
+                    if mutation == 'missing':
+                        predelete_path.unlink()
+                    elif mutation == 'stale-hash':
+                        predelete_path.write_bytes(b'{"forged":true}\n')
+                    else:
+                        write(predelete_path, altered)
+                    with self.assertRaises(EvidenceError):
+                        verify()
+                    write(predelete_path, frozen)
 
 
 class OwnedCleanupTests(unittest.TestCase):
@@ -188,6 +305,69 @@ class OwnedCleanupTests(unittest.TestCase):
             'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
             'acceptance': 'rejected',
         })
+
+    def test_first_clear_failed_ui_can_preserve_owned_cleanup_without_acceptance(self):
+        source_sha = '9' * 40
+        observer_sha = '8' * 64
+        ui_root = self.root / 'ui'
+        ui_root.mkdir()
+        for path in tuple(self.root.iterdir()):
+            if path != ui_root and path.name != 'bundle.json':
+                path.rename(ui_root / path.name)
+        (ui_root / 'bundle.json').write_bytes((self.root / 'bundle.json').read_bytes())
+        (self.root / 'bundle.json').unlink()
+        self.root = ui_root
+        result_path = self.root / 'acceptance-result.json'
+        result = process_result(source_sha)
+        result.update(status='failed', failure_reason='gui_regression_observer_failed',
+                      acceptance_script_sha256=observer_sha)
+        result_bytes = write(result_path, result)
+        (self.root / 'original-result.json').unlink()
+        context = self.original['owned_cleanup_failure_context']
+        context.update(task_kind='ui', observer_sha256=observer_sha,
+                       acceptance_mode='first-clear-observation',
+                       acceptance_text_scale_percent=100)
+        context['source_result'] = {'file': result_path.name, 'bytes': len(result_bytes),
+                                    'sha256': digest(result_bytes)}
+        self.original['task_kind'] = 'ui'
+        self.original['observer_process'] = {'state': 'exited', 'exit_code': 1}
+        self.receipt['files'][1] = context['source_result']
+        self.rebind_original()
+        self.assertEqual(verify_preserved_owned_cleanup(self.root), {
+            'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
+            'acceptance': 'rejected',
+        })
+        for mode in ('performance-sample', 'appearance-pair'):
+            context['acceptance_mode'] = mode
+            if mode == 'appearance-pair':
+                context['acceptance_text_scale_percent'] = 100
+            self.rebind_original()
+            with self.subTest(mode=mode):
+                self.assertEqual(verify_preserved_owned_cleanup(self.root)['acceptance'], 'rejected')
+        context['acceptance_text_scale_percent'] = 150
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_text_scale_percent'] = 100
+        context['high_contrast_requested'] = True
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['high_contrast_requested'] = False
+        context.pop('acceptance_text_scale_percent')
+        context['acceptance_mode'] = 'unrelated-mode'
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_mode'] = 'first-clear-observation'
+        context['acceptance_text_scale_percent'] = 100
+        # Old native UI roots can use the parent bundle when the frozen output
+        # inventory never claimed a copied bundle at the output root.
+        (self.root.parent / 'bundle.json').write_bytes((self.root / 'bundle.json').read_bytes())
+        (self.root / 'bundle.json').unlink()
+        self.receipt['files'] = [row for row in self.receipt['files'] if row['file'] != 'bundle.json']
+        self.rebind_original()
+        self.assertEqual(verify_preserved_owned_cleanup(self.root)['owned_cleanup'], 'owned-clean')
 
     def test_rejects_raw_owned_entries_despite_empty_owned_labels(self):
         for kind in ('process', 'task'):
@@ -479,6 +659,128 @@ class V2OwnedCleanupTests(unittest.TestCase):
                 self.rebind_original()
                 with self.assertRaises(EvidenceError):
                     self.verify_v2()
+
+
+class V3OwnedCleanupTests(unittest.TestCase):
+    def setUp(self):
+        OwnedCleanupTests.setUp(self)
+        bundle_bytes = write(self.root / 'bundle.json',
+                             {'schema_version': 1, 'source_sha': '9' * 40})
+        bundle_ref = {'file': 'bundle.json', 'bytes': len(bundle_bytes),
+                      'sha256': digest(bundle_bytes)}
+        self.original['owned_cleanup_failure_context']['bundle'] = bundle_ref
+        self.receipt['files'][2] = bundle_ref
+        raw = clean_controller_cleanup_v3_protected(
+            profile_sha256='a' * 64, source_sha='9' * 40,
+            bundle_sha256=digest(bundle_bytes), vm_id=VM, run_name=RUN)
+        evidence = raw['owned_resource_evidence']
+        job = evidence['process_job_cleanup'][0]
+        result = process_result('9' * 40)
+        result['process_lifecycle'] = {
+            'pid': job['pid'],
+            'start_time_utc_ticks': job['process_start_time_utc_ticks']}
+        result['process_job_cleanup'] = deepcopy(evidence['process_job_cleanup'])
+        result['observer_lifecycle'] = deepcopy(evidence['task_execution']['observer_lifecycle'])
+        result_bytes = write(self.root / 'original-result.json', result)
+        result_ref = {'file': 'original-result.json', 'bytes': len(result_bytes),
+                      'sha256': digest(result_bytes)}
+        self.receipt['files'][1] = result_ref
+        self.original['owned_cleanup_failure_context']['source_result'] = result_ref
+        self.roots = deepcopy(evidence['root_records'])
+        self.frozen = {'complete': True,
+                       'processes': deepcopy(evidence['process_snapshots'][
+                           'after_intervention']['processes']),
+                       'tasks': [], 'owned_processes': []}
+        raw.update(guest_root_present=True, trusted_task_root_present=True,
+                   runner_process_inventory_complete=False,
+                   unexpected_runner_processes_after_delete=None,
+                   unexpected_runner_tasks_after_delete=None,
+                   resource_cleanup_errors=['Original root deletion was deferred.'])
+        evidence['process_snapshots']['after_delete'] = None
+        evidence['task_snapshots']['after_delete'] = None
+        evidence['observed_roots_before'] = None
+        evidence['observed_roots_after'] = {'guest_present': True, 'trusted_present': True}
+        held = evidence['protected_anchor']
+        held['all_handles_closed'] = False
+        held['proof'].update(handle_closed=False, parent_handle_closed=False,
+                             child_path_closed=False, parent_path_closed=False,
+                             accepted_snapshot_count=4)
+        self.original['raw_cleanup'] = raw
+        self.original['owned_cleanup_failure_context'].update(
+            failed_snapshot=self.frozen, root_records=self.roots)
+        self.receipt.update(schema_version=3, run_name=RUN,
+                            profile_id='vm-automated-v2-owned-resources',
+                            profile_sha256='a' * 64,
+                            failed_snapshot=self.frozen, root_records=self.roots)
+        self.signal.update(schema_version=3,
+                           profile_id='vm-automated-v2-owned-resources',
+                           profile_sha256='a' * 64)
+        inventory = {**deepcopy(self.frozen), 'owned_tasks': []}
+        final_anchor = deepcopy(held)
+        final_anchor['all_handles_closed'] = True
+        final_anchor['proof'].update(handle_closed=True, parent_handle_closed=True,
+                                      child_path_closed=True, parent_path_closed=True,
+                                      accepted_snapshot_count=6)
+        self.proof.update(schema_version=3, run_name=RUN,
+                          profile_id='vm-automated-v2-owned-resources',
+                          profile_sha256='a' * 64,
+                          pre=inventory, post=deepcopy(inventory), roots=self.roots,
+                          observed_roots_before={role: {**row, 'ordinary_directory': True}
+                                                 for role, row in self.roots.items()},
+                          protected_anchor=final_anchor)
+        self.rebind_original()
+
+    def rebind_original(self):
+        OwnedCleanupTests.rebind_original(self)
+
+    def verify_v3(self):
+        return verify_preserved_owned_cleanup(self.root,
+                                              profile_id='vm-automated-v2-owned-resources',
+                                              profile_sha256='a' * 64)
+
+    def test_held_pre_name_lifetime_closes_only_after_finalizer(self):
+        self.assertEqual(self.verify_v3()['owned_cleanup'], 'owned-clean')
+        self.assertEqual(self.verify_v3()['acceptance'], 'rejected')
+
+    def test_new_performance_run_cannot_omit_restoration_gate(self):
+        def current_profile(value):
+            if type(value) is dict:
+                return {key: current_profile(item) for key, item in value.items()}
+            if type(value) is list:
+                return [current_profile(item) for item in value]
+            return OWNED_PERFORMANCE_PROFILE_SHA256 if value == 'a' * 64 else value
+        self.original = current_profile(self.original)
+        self.receipt = current_profile(self.receipt)
+        self.proof = current_profile(self.proof)
+        self.signal = current_profile(self.signal)
+        result = json.loads((self.root / 'original-result.json').read_text())
+        result['acceptance_observations'] = {
+            'run_id': 'performance-sample-v2-owned-r3-1366x768-96-text100-hidden-visible'}
+        result_bytes = write(self.root / 'original-result.json', result)
+        reference = {'file': 'original-result.json', 'bytes': len(result_bytes),
+                     'sha256': digest(result_bytes)}
+        self.receipt['files'][1] = reference
+        self.original['owned_cleanup_failure_context']['source_result'] = reference
+        self.rebind_original()
+        with self.assertRaisesRegex(EvidenceError, 'frozen restoration gate'):
+            verify_preserved_owned_cleanup(self.root,
+                                           profile_id='vm-automated-v2-owned-resources',
+                                           profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+
+    def test_finalizer_rejects_lost_handle_or_phase_recheck(self):
+        seed = deepcopy(self.proof)
+        for mode in ('handle', 'count', 'source'):
+            self.proof = deepcopy(seed)
+            anchor = self.proof['protected_anchor']
+            if mode == 'handle':
+                anchor['proof']['child_path_closed'] = False
+            elif mode == 'count':
+                anchor['proof']['accepted_snapshot_count'] = 5
+            else:
+                anchor['source_sha'] = 'f' * 40
+            self.rebind_original()
+            with self.subTest(mode=mode), self.assertRaises(EvidenceError):
+                self.verify_v3()
 
 
 if __name__ == '__main__':

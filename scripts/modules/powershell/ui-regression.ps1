@@ -47,6 +47,42 @@ function Test-TextScaleSnapshotEqual {
         [Math]::Abs([double]$Expected.UiFactor - [double]$Actual.UiFactor) -lt 0.000001 -and
         $Expected.UiPercent -eq $Actual.UiPercent
 }
+function New-FirstClearTextScaleRestoration {
+    param([object] $Baseline, [object] $Final)
+    [ordered]@{
+        schema_version = 1
+        baseline = if ($null -ne $Baseline) { ConvertTo-TextScaleDocumentSnapshot $Baseline } else { $null }
+        final = if ($null -ne $Final) { ConvertTo-TextScaleDocumentSnapshot $Final } else { $null }
+        snapshot_equal = $null -ne $Baseline -and $null -ne $Final -and
+            $Baseline.UiPercent -eq 100 -and $Final.UiPercent -eq 100 -and
+            (Test-TextScaleSnapshotEqual -Expected $Baseline -Actual $Final)
+    }
+}
+function Test-OwnedPerformanceTextScaleSnapshot {
+    param([AllowNull()][object] $Snapshot)
+    if ($null -eq $Snapshot -or $Snapshot.KeyExists -isnot [bool] -or
+        $Snapshot.ValueExists -isnot [bool] -or
+        ($Snapshot.ValueExists -and (-not $Snapshot.KeyExists -or
+            $Snapshot.ValueKind -cne 'DWord' -or $Snapshot.Value -isnot [int64] -or
+            $Snapshot.Value -ne 100)) -or
+        (-not $Snapshot.ValueExists -and
+            ($null -ne $Snapshot.ValueKind -or $null -ne $Snapshot.Value)) -or
+        $Snapshot.UiFactor -isnot [double] -or
+        [Math]::Abs($Snapshot.UiFactor - 1.0) -ge 0.000001 -or
+        $Snapshot.UiPercent -ne 100) { return $false }
+    return $true
+}
+function New-OwnedPerformanceTextScaleRestoration {
+    param([AllowNull()][object] $Baseline, [AllowNull()][object] $Final)
+    [ordered]@{
+        schema_version = 1
+        baseline = if ($null -ne $Baseline) { ConvertTo-TextScaleDocumentSnapshot $Baseline } else { $null }
+        final = if ($null -ne $Final) { ConvertTo-TextScaleDocumentSnapshot $Final } else { $null }
+        snapshot_equal = (Test-OwnedPerformanceTextScaleSnapshot $Baseline) -and
+            (Test-OwnedPerformanceTextScaleSnapshot $Final) -and
+            (Test-TextScaleSnapshotEqual -Expected $Baseline -Actual $Final)
+    }
+}
 function Wait-TextScaleSnapshot {
     param(
         [Parameter(Mandatory)][scriptblock] $Accept,
@@ -249,6 +285,10 @@ function Assert-GuiRegressionInvocationBinding {
     }
     $requestedContrast = $ManifestInput.request.PSObject.Properties['high_contrast']
     if ($RegressionMode -ceq 'performance-sample') {
+        $ownedPerformance = [string]$ManifestInput.run_id -clike 'performance-sample-v2-owned-r3-1366x768-96-text100-*'
+        $expectedRun = $(if ($ownedPerformance) {
+            'performance-sample-v2-owned-r3-1366x768-96-text100-'
+        } else { 'performance-sample-v2-1366x768-96-text100-' })
         $expectedPlan = [ordered]@{ iterations=2; idle_seconds=30; maximum_seconds=600;
             ordinary_rows=@(100,1000,10000); long_path_rows=1000; extension_classes=300;
             add_remove_reset_cycles=3; sample_interval_ms=200; long_path_order='hidden-visible' }
@@ -266,6 +306,15 @@ function Assert-GuiRegressionInvocationBinding {
         }
         if ($order -in @('hidden-visible','visible-hidden')) { $expectedPlan.long_path_order = $order }
         if ($null -eq $actualPlan -or
+            $ManifestInput.run_id -cne ($expectedRun + $order) -or
+            ($ownedPerformance -and ($ManifestInput.acceptance_profile_id -cne
+                'vm-automated-v2-owned-resources' -or
+                $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
+                $ManifestInput.acceptance_profile_sha256 -cne
+                    '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f' -or
+                $ManifestInput.acceptance_profile.sha256 -cne $ManifestInput.acceptance_profile_sha256)) -or
+            (-not $ownedPerformance -and $script:VmAcceptanceProfileId -ceq
+                'vm-automated-v2-owned-resources') -or
             $order -cnotin @('hidden-visible','visible-hidden') -or
             ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
             ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
@@ -274,6 +323,26 @@ function Assert-GuiRegressionInvocationBinding {
             $ManifestInput.request.desktop.height -ne 768 -or
             $ManifestInput.request.desktop.dpi -ne 96) {
             throw 'Performance sample differs from its fixed immutable plan.'
+        }
+    }
+    elseif ($RegressionMode -ceq 'first-clear-observation') {
+        $expectedPlan = [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
+            sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
+            command_timeout_ms=5000; passive_poll_limit=50; passive_window_ms=10000;
+            passive_interval_ms=200; individual_query_timeout_ms=50;
+            stop_after_first_clear=$true; full_performance_sample=$false }
+        $actualPlan = $ManifestInput.request.PSObject.Properties['first_clear_observation_plan']
+        if ($null -eq $actualPlan -or
+            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+            $ManifestInput.run_id -cne 'first-clear-observation-v1-1366x768-96-text100' -or
+            $ManifestInput.acceptance_profile_id -cne 'vm-automated-v1-win11-ntfs' -or
+            $script:VmAcceptanceProfileId -cne 'vm-automated-v1-win11-ntfs' -or
+            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
+            $ManifestInput.request.desktop.width -ne 1366 -or
+            $ManifestInput.request.desktop.height -ne 768 -or
+            $ManifestInput.request.desktop.dpi -ne 96) {
+            throw 'First-clear observation differs from its fixed immutable plan.'
         }
     }
     elseif ($RegressionMode -ceq 'focused-10k-clear') {
@@ -334,6 +403,10 @@ function Assert-GuiRegressionInvocationBinding {
     if ($RegressionMode -cne 'focused-10k-clear' -and
         $null -ne $ManifestInput.request.PSObject.Properties['focused_clear_plan']) {
         throw 'Focused clear plan is restricted to focused-10k-clear.'
+    }
+    if ($RegressionMode -cne 'first-clear-observation' -and
+        $null -ne $ManifestInput.request.PSObject.Properties['first_clear_observation_plan']) {
+        throw 'First-clear observation plan is restricted to its diagnostic.'
     }
     if ($RegressionMode -ceq 'appearance-pair') {
         if ($null -eq $requestedContrast -or $requestedContrast.Value -isnot [bool] -or
@@ -657,6 +730,10 @@ function Invoke-GuiRegressionAcceptance {
     $textOriginal = $null
     $textAcceptance = $null
     $textChanged = $false
+    $firstClearTextBaseline = $null
+    $ownedPerformanceTextBaseline = $null
+    $ownedPerformanceRun = $RegressionMode -ceq 'performance-sample' -and
+        [string]$manifestInput.run_id -clike 'performance-sample-v2-owned-r3-1366x768-96-text100-*'
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     Initialize-TrustedResultWriter `
         -Root $resolved.root `
@@ -686,6 +763,19 @@ function Invoke-GuiRegressionAcceptance {
         Initialize-AcceptanceNative
         if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
             throw 'Windows refused Per-Monitor-V2 awareness.'
+        }
+        if ($ownedPerformanceRun) {
+            $ownedPerformanceTextBaseline = Get-TextScaleSnapshot
+            $observations['text_scale_restoration'] = New-OwnedPerformanceTextScaleRestoration `
+                -Baseline $ownedPerformanceTextBaseline -Final $null
+            if (-not (Test-OwnedPerformanceTextScaleSnapshot $ownedPerformanceTextBaseline)) {
+                throw 'Owned performance baseline text scale is not coherent 100 percent.'
+            }
+        }
+        if ($RegressionMode -eq 'first-clear-observation') {
+            $firstClearTextBaseline = Get-TextScaleSnapshot
+            $observations['text_scale_restoration'] = New-FirstClearTextScaleRestoration `
+                -Baseline $firstClearTextBaseline -Final $null
         }
         if ($RegressionMode -eq 'text-scale' -or
             ($RegressionMode -eq 'appearance-pair' -and $TextScalePercent -eq 150)) {
@@ -752,19 +842,24 @@ function Invoke-GuiRegressionAcceptance {
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations
             }
-            elseif ($RegressionMode -in @('performance-sample', 'focused-10k-clear')) {
+            elseif ($RegressionMode -in @('performance-sample', 'focused-10k-clear', 'first-clear-observation')) {
                 $scenarioSink = [ordered]@{}
                 $observations.scenario = $scenarioSink
                 $result.assertions.scenario = $scenarioSink
+                if ($RegressionMode -eq 'first-clear-observation') {
+                    $result.assertions['scope'] = 'first-clear-observation-v1'
+                }
                 $scenario = Invoke-ObserverPerformanceSampleScenario `
                     -Verified $verified `
                     -RuntimeRoot $effectiveRuntimeRoot `
                     -EvidenceRoot $resolved.output_root `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -LongPathOrder $(if ($RegressionMode -eq 'focused-10k-clear') {
+                    -LongPathOrder $(if ($RegressionMode -in @('focused-10k-clear','first-clear-observation')) {
                         'hidden-visible' } else { [string]$manifestInput.request.performance_plan.long_path_order }) `
                     -StopAfterFirstClear:($RegressionMode -eq 'focused-10k-clear') `
+                    -ObserveFirstClear:($RegressionMode -eq 'first-clear-observation') `
+                    -OwnedPerformance:$ownedPerformanceRun `
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations `
                     -ObservationSink $scenarioSink
@@ -832,8 +927,8 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','icon-settlement')) { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','first-clear-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','first-clear-observation','icon-settlement')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
@@ -843,6 +938,9 @@ function Invoke-GuiRegressionAcceptance {
         }
         elseif ($RegressionMode -eq 'focused-10k-clear') {
             $result.assertions['scope'] = 'focused-10k-clear-v1'
+        }
+        elseif ($RegressionMode -eq 'first-clear-observation') {
+            $result.assertions['scope'] = 'first-clear-observation-v1'
         }
         elseif ($RegressionMode -eq 'icon-settlement') {
             $result.assertions['scope'] = if ($manifestInput.request.endpoint_method -ceq
@@ -970,6 +1068,40 @@ function Invoke-GuiRegressionAcceptance {
             catch {
                 $result.status = 'failed'
                 $result.failure_reason = 'text_scale_restore_failed'
+            }
+        }
+        if ($ownedPerformanceRun) {
+            try {
+                $ownedPerformanceTextFinal = Get-TextScaleSnapshot
+                $observations['text_scale_restoration'] = New-OwnedPerformanceTextScaleRestoration `
+                    -Baseline $ownedPerformanceTextBaseline -Final $ownedPerformanceTextFinal
+                if (-not $observations.text_scale_restoration.snapshot_equal) {
+                    throw 'Owned performance text scale differs from coherent 100 percent baseline.'
+                }
+            }
+            catch {
+                $result.status = 'failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = 'text_scale_restore_failed'
+                }
+                $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
+            }
+        }
+        if ($RegressionMode -eq 'first-clear-observation') {
+            try {
+                $firstClearTextFinal = Get-TextScaleSnapshot
+                $observations['text_scale_restoration'] = New-FirstClearTextScaleRestoration `
+                    -Baseline $firstClearTextBaseline -Final $firstClearTextFinal
+                if (-not $observations.text_scale_restoration.snapshot_equal) {
+                    throw 'First-clear text scale differs from its baseline.'
+                }
+            }
+            catch {
+                $result.status = 'failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = 'text_scale_restore_failed'
+                }
+                $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
             }
         }
         try { Exit-TestExecutionState -Previous $executionState }

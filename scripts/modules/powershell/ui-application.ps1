@@ -114,7 +114,7 @@ function Stop-AndDisposeAcceptanceOwnedProcess {
         if ($null -eq $Owned.owner) {
             throw 'The acceptance candidate is not owned by a process job.'
         }
-        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
+        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive -RequireSolePrimary
         if ($cleanup.forced_termination -and
             ($cleanup.termination_exit_code -is [int] -or
                 $cleanup.termination_exit_code -is [long]) -and
@@ -183,7 +183,7 @@ function Start-AcceptanceApplication {
         $executableSha256 = Get-LowerSha256 -Path $FilePath
         # Captured immediately before launch; Stopwatch is monotonic across the readiness poll.
         $launchTicks = [Diagnostics.Stopwatch]::GetTimestamp()
-        $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory
+        $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory -SingleProcessOnly
         $process = $owned.process
         $application = [pscustomobject]@{
             owned = $owned

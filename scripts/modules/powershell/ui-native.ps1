@@ -128,6 +128,146 @@ public static class DarkReNamerVmAcceptanceNative {
         public string Status { get; set; }
     }
 
+    public sealed class FirstClearIdentity {
+        public uint ProcessId { get; set; }
+        public long CreationFileTime { get; set; }
+        public long MainHandle { get; set; }
+        public long ListHandle { get; set; }
+        public uint MainThreadId { get; set; }
+        public uint ListThreadId { get; set; }
+        public string MainClass { get; set; }
+        public string ListClass { get; set; }
+        public long ListParent { get; set; }
+        public int ListControlId { get; set; }
+    }
+
+    public sealed class FirstClearPoll {
+        public string Status { get; set; }
+        public int? RowCount { get; set; }
+        public string CountStatus { get; set; }
+        public int CountError { get; set; }
+        public double CountElapsedMs { get; set; }
+        public string ResponseStatus { get; set; }
+        public int ResponseError { get; set; }
+        public double ResponseElapsedMs { get; set; }
+        public long CreationFileTime { get; set; }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFileTime { public uint Low; public uint High; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(IntPtr process, out NativeFileTime creation,
+        out NativeFileTime exit, out NativeFileTime kernel, out NativeFileTime user);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetParent(IntPtr window);
+
+    private static long ReadCreationFileTime(IntPtr process) {
+        NativeFileTime creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read retained process lifetime.");
+        return checked((long)(((ulong)creation.High << 32) | creation.Low));
+    }
+
+    public static long[] ReadPerformanceLifetime(IntPtr process, uint expectedPid,
+        long expectedCreationFileTime, bool terminal) {
+        if (process == IntPtr.Zero || GetProcessId(process) != expectedPid)
+            throw new InvalidOperationException("Performance retained process handle or PID differs.");
+        uint state = WaitForSingleObject(process, 0);
+        if (state != (terminal ? 0u : 0x102u))
+            throw new InvalidOperationException("Performance retained process liveness differs.");
+        NativeFileTime creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Performance retained process time is unavailable.");
+        long start = checked((long)(((ulong)creation.High << 32) | creation.Low));
+        long end = checked((long)(((ulong)exit.High << 32) | exit.Low));
+        if (start <= 0 || (expectedCreationFileTime != 0 && start != expectedCreationFileTime) ||
+            (terminal && end <= start))
+            throw new InvalidOperationException("Performance native process lifetime differs.");
+        if (WaitForSingleObject(process, 0) != state || GetProcessId(process) != expectedPid)
+            throw new InvalidOperationException("Performance process lifetime changed during capture.");
+        return new long[] { start, end };
+    }
+
+    private static FirstClearIdentity ReadFirstClearIdentity(IntPtr process, uint expectedPid,
+        IntPtr main, IntPtr list) {
+        uint mainPid, listPid;
+        uint mainThread = GetWindowThreadProcessId(main, out mainPid);
+        uint listThread = GetWindowThreadProcessId(list, out listPid);
+        StringBuilder mainClass = new StringBuilder(128), listClass = new StringBuilder(128);
+        if (process == IntPtr.Zero || GetProcessId(process) != expectedPid ||
+            WaitForSingleObject(process, 0) != 0x102 ||
+            main == IntPtr.Zero || list == IntPtr.Zero || mainThread == 0 || listThread == 0 ||
+            mainPid != expectedPid || listPid != expectedPid || mainThread != listThread ||
+            GetClassName(main, mainClass, mainClass.Capacity) == 0 ||
+            GetClassName(list, listClass, listClass.Capacity) == 0 ||
+            mainClass.ToString() != "DarkReNamerWindow" ||
+            listClass.ToString() != "SysListView32" || GetAncestor(list, 2) != main ||
+            GetParent(list) != main || GetDlgCtrlID(list) != 1000)
+            throw new InvalidOperationException("First-clear native lifetime or window identity is unavailable.");
+        return new FirstClearIdentity { ProcessId = expectedPid,
+            CreationFileTime = ReadCreationFileTime(process), MainHandle = main.ToInt64(),
+            ListHandle = list.ToInt64(), MainThreadId = mainThread, ListThreadId = listThread,
+            MainClass = mainClass.ToString(), ListClass = listClass.ToString(),
+            ListParent = GetParent(list).ToInt64(), ListControlId = GetDlgCtrlID(list) };
+    }
+
+    public static FirstClearIdentity CaptureFirstClearIdentity(IntPtr process, uint expectedPid,
+        IntPtr main, IntPtr list) {
+        return ReadFirstClearIdentity(process, expectedPid, main, list);
+    }
+
+    public static FirstClearPoll PollFirstClear(IntPtr process, FirstClearIdentity original) {
+        FirstClearPoll poll = new FirstClearPoll { Status = "identity-unavailable",
+            CountStatus = "not-run", ResponseStatus = "not-run" };
+        FirstClearIdentity before, after;
+        try {
+            before = ReadFirstClearIdentity(process, original.ProcessId,
+                new IntPtr(original.MainHandle), new IntPtr(original.ListHandle));
+            if (!SameFirstClearIdentity(original, before)) return poll;
+            poll.CreationFileTime = before.CreationFileTime;
+        } catch (Exception) { return poll; }
+        IntPtr result;
+        SetLastErrorNative(0);
+        long countStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        IntPtr countReturn = SendMessageTimeoutW(new IntPtr(original.ListHandle), 0x1004,
+            IntPtr.Zero, IntPtr.Zero, 3, 50, out result);
+        poll.CountError = Marshal.GetLastWin32Error();
+        poll.CountElapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - countStart) *
+            1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        poll.CountStatus = countReturn == IntPtr.Zero ? "failed" : "returned";
+        if (countReturn != IntPtr.Zero && result.ToInt64() >= 0 && result.ToInt64() <= 10000)
+            poll.RowCount = checked((int)result.ToInt64());
+        else if (countReturn != IntPtr.Zero) poll.CountStatus = "invalid-result";
+        SetLastErrorNative(0);
+        long responseStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        IntPtr responseReturn = SendMessageTimeoutW(new IntPtr(original.MainHandle), 0,
+            IntPtr.Zero, IntPtr.Zero, 3, 50, out result);
+        poll.ResponseError = Marshal.GetLastWin32Error();
+        poll.ResponseElapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - responseStart) *
+            1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        poll.ResponseStatus = responseReturn == IntPtr.Zero ? "failed" : "returned";
+        try {
+            after = ReadFirstClearIdentity(process, original.ProcessId,
+                new IntPtr(original.MainHandle), new IntPtr(original.ListHandle));
+            poll.Status = SameFirstClearIdentity(original, after) ? "identity-bound" : "identity-drift";
+        } catch (Exception) { poll.Status = "identity-unavailable"; }
+        if (poll.Status != "identity-bound") poll.RowCount = null;
+        return poll;
+    }
+
+    private static bool SameFirstClearIdentity(FirstClearIdentity a, FirstClearIdentity b) {
+        return a.ProcessId == b.ProcessId && a.CreationFileTime == b.CreationFileTime &&
+            a.MainHandle == b.MainHandle && a.ListHandle == b.ListHandle &&
+            a.MainThreadId == b.MainThreadId && a.ListThreadId == b.ListThreadId &&
+            a.MainClass == b.MainClass && a.ListClass == b.ListClass &&
+            a.ListParent == b.ListParent && a.ListControlId == b.ListControlId;
+    }
+
     [ThreadStatic] private static PerformanceCommandDiagnostic lastPerformanceCommandDiagnostic;
     public static PerformanceCommandDiagnostic LastPerformanceCommandDiagnostic {
         get { return lastPerformanceCommandDiagnostic; }

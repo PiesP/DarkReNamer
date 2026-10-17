@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 import zlib
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from darkrenamer_tooling.formats import png as codec
 from gui_regression_fixture import (
     Fixture as EvidenceFixture, SCRIPT as EVIDENCE_SCRIPT,
     SOURCE as EVIDENCE_SOURCE, TREE as EVIDENCE_TREE,
+    first_clear_product_tree,
 )
 
 
@@ -56,6 +58,141 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
+    def test_first_clear_cleanup_requires_real_before_and_after_text_scale(self):
+        snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                    "registry_value_kind": "DWord", "registry_value": 100,
+                    "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        observations = {"environment": None, "scenario": {"environment": {
+            "text_scale_factor_percent": 100}}, "text_scale_restoration": {
+                "schema_version": 1, "baseline": deepcopy(snapshot),
+                "final": deepcopy(snapshot), "snapshot_equal": True}}
+        self.assertTrue(runner.first_clear_text_scale_restored(observations))
+        for mutation in ("missing", "final", "registry", "ui", "inconsistent-pair",
+                         "malformed-factor", "nonfinite-factor", "malformed"):
+            changed = deepcopy(observations)
+            if mutation == "missing":
+                changed.pop("text_scale_restoration")
+            elif mutation == "final":
+                changed["text_scale_restoration"]["final"] = None
+            elif mutation == "registry":
+                changed["text_scale_restoration"]["final"]["registry_value_kind"] = "QWord"
+            elif mutation == "ui":
+                changed["text_scale_restoration"]["final"]["ui_settings_percent"] = 101
+            elif mutation == "inconsistent-pair":
+                for key in ("baseline", "final"):
+                    changed["text_scale_restoration"][key]["ui_settings_raw_factor"] = 1.5
+            elif mutation == "malformed-factor":
+                changed["text_scale_restoration"]["final"]["ui_settings_raw_factor"] = "1.0"
+            elif mutation == "nonfinite-factor":
+                changed["text_scale_restoration"]["final"]["ui_settings_raw_factor"] = float("nan")
+            else:
+                changed["text_scale_restoration"]["final"]["registry_value"] = "100"
+            with self.subTest(mutation=mutation):
+                self.assertFalse(runner.first_clear_text_scale_restored(changed))
+
+    def test_failed_first_clear_cleanup_summary_uses_post_cleanup_proof(self):
+        snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                    "registry_value_kind": "DWord", "registry_value": 100,
+                    "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        for name, final, expected in (("restored", deepcopy(snapshot), True),
+                                      ("missing-final", None, False)):
+            with self.subTest(name=name):
+                run_root = self.root / name
+                run_root.mkdir()
+                self.write_json(run_root / "input-manifest.json", {"run_id": name})
+                proof = {"schema_version": 1, "baseline": deepcopy(snapshot),
+                         "final": final, "snapshot_equal": final is not None}
+
+                def controller(*_args, **kwargs):
+                    output = kwargs["output"]
+                    self.write_json(output / "acceptance-observations.json", {
+                        "environment": None,
+                        "scenario": {"environment": {"text_scale_factor_percent": 100}},
+                        "text_scale_restoration": proof})
+                    self.write_json(output / "acceptance-result.json", {
+                        "guest_cleanup": True, "process_cleanup": True})
+                    self.write_json(output / "transport.json", {"guest_cleanup": True})
+                    return SimpleNamespace(returncode=1), None
+
+                native = SimpleNamespace(run_managed_controller=controller)
+                with mock.patch.object(runner, "runtime_args", return_value=[]), \
+                     mock.patch.object(runner, "collection_document", return_value={}), \
+                     mock.patch.object(runner, "validate_failed_first_clear"):
+                    with self.assertRaisesRegex(ValueError, "transport failed"):
+                        runner.execute_run(self.root, self.root, run_root,
+                                           {"run_id": name, "mode": runner.FIRST_CLEAR_MODE,
+                                            "text_scale_percent": 100}, {}, native)
+                cleanup = json.loads((run_root / "output/cleanup.json").read_text())
+                self.assertEqual(cleanup["text_scale_restore"], expected)
+                self.assertEqual(cleanup["status"], "passed" if expected else "failed")
+
+    def test_first_clear_uses_current_prepared_bundle_and_strict_staged_v1_profile(self):
+        repo = Path(__file__).resolve().parents[3]
+        source_sha = runner.subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                     cwd=repo, text=True).strip()
+        # Hosted checkout is depth 1. Both Git replies come from frozen d37
+        # product entries, independent of later legitimate product edits.
+        historical_query = ["git", "ls-tree", "-rz", "--full-tree",
+                            runner.FIRST_CLEAR_PRODUCT_REFERENCE_SHA]
+        current_query = ["git", "ls-tree", "-rz", "--full-tree", source_sha]
+        frozen_tree = first_clear_product_tree()
+        real_check_output = runner.subprocess.check_output
+        def offline_tree(command, **kwargs):
+            if command == historical_query or command == current_query:
+                return frozen_tree
+            return real_check_output(command, **kwargs)
+        with mock.patch.object(runner.subprocess, "check_output", side_effect=offline_tree):
+            product = runner.first_clear_product_inputs(repo, source_sha)
+        altered_tree = frozen_tree.replace(b"100644 blob", b"100755 blob", 1)
+        self.assertNotEqual(altered_tree, frozen_tree)
+        for changed_query in (current_query, historical_query):
+            with self.subTest(changed_query=changed_query[-1]), \
+                 mock.patch.object(runner.subprocess, "check_output",
+                                   side_effect=lambda command, **kwargs:
+                                   altered_tree if command == changed_query else
+                                   frozen_tree if command in (historical_query, current_query) else
+                                   real_check_output(command, **kwargs)):
+                with self.assertRaisesRegex(ValueError, "product/build inputs differ"):
+                    runner.first_clear_product_inputs(repo, source_sha)
+        self.assertEqual(product["reference_source_sha"],
+                         "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2")
+        self.assertEqual(product["entries_count"], 109)
+        self.assertEqual(product["entries_sha256"],
+                         "ddec9417f39e08db6ede551ce7cd63b79673a82e03be16e49b5061dac6ba5c78")
+        profile_source = repo / "config/vm-automated-v1.json"
+        profile_hash = runner.digest(profile_source)
+        application_hash = "a" * 64
+        run_root = self.root / runner.FIRST_CLEAR_RUN_ID
+        (run_root / "inputs").mkdir(parents=True)
+        (run_root / "inputs" / runner.V1_PROFILE_FILE).write_bytes(profile_source.read_bytes())
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": application_hash}},
+                  "source_sha": source_sha, "source_tree": "c" * 40,
+                  "v1_acceptance_profile": {"file": "inputs/vm-automated-v1.json",
+                                             "sha256": profile_hash,
+                                             "bytes": profile_source.stat().st_size}}
+        run = runner.first_clear_run()
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)), \
+             mock.patch.object(runner, "first_clear_product_inputs", return_value=product):
+            manifest = runner.input_manifest(repo, self.root / "bundle", run_root, run,
+                                             "d" * 64, {}, {},
+                                             prepared_application_sha256=application_hash)
+        self.write_json(run_root / "input-manifest.json", manifest)
+        self.assertEqual(manifest["request"]["first_clear_observation_plan"], runner.FIRST_CLEAR_PLAN)
+        self.assertEqual(manifest["acceptance_profile_sha256"], profile_hash)
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V1_PROFILE_ID])
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"):
+            command = runner.controller_command(repo, self.root / "bundle", run_root, run,
+                                                {"ssh_host": "prepared", "expected_vm_id": "0" * 36},
+                                                {"expectedGuestSid": "sid"})
+        self.assertEqual(command[command.index("-AcceptanceProfileId") + 1], runner.V1_PROFILE_ID)
+        (run_root / "inputs" / runner.V1_PROFILE_FILE).write_bytes(b"changed")
+        with mock.patch.object(runner.host_tools, "require_pwsh74", return_value="/usr/bin/pwsh"), \
+             self.assertRaisesRegex(ValueError, "strict V1 profile"):
+            runner.controller_command(repo, self.root / "bundle", run_root, run,
+                                      {"ssh_host": "prepared", "expected_vm_id": "0" * 36},
+                                      {"expectedGuestSid": "sid"})
+
     def test_performance_sample_is_one_opt_in_bounded_run(self):
         run = runner.performance_run()
         self.assertEqual(run["mode"], "performance-sample")
@@ -93,6 +230,42 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["command"][-2:], ["--performance-column-order", "visible-hidden"])
         with self.assertRaises(ValueError):
             runner.performance_run("unknown")
+
+    def test_owned_performance_uses_separate_ids_exact_profile_and_deadlines(self):
+        profile = (Path(__file__).parents[3] / 'config' / runner.V2_PROFILE_FILE).read_bytes()
+        self.assertEqual(hashlib.sha256(profile).hexdigest(),
+                         runner.OWNED_PERFORMANCE_PROFILE_SHA256)
+        (self.root / 'config').mkdir()
+        (self.root / 'config' / runner.V2_PROFILE_FILE).write_bytes(profile)
+        for order in runner.PERFORMANCE_ORDERS:
+            run = runner.performance_run(order, owned=True)
+            run_root = self.root / order
+            (run_root / 'inputs').mkdir(parents=True)
+            (run_root / 'inputs' / runner.V2_PROFILE_FILE).write_bytes(profile)
+            inputs = {'bundle_manifest': {}, 'artifacts': {}, 'source_sha': 'a' * 40,
+                      'source_tree': 'b' * 40,
+                      'acceptance_profile': {'file': f'inputs/{runner.V2_PROFILE_FILE}',
+                                             'bytes': len(profile),
+                                             'sha256': runner.OWNED_PERFORMANCE_PROFILE_SHA256}}
+            with mock.patch.object(runner, 'run_input_artifacts', return_value=({}, inputs)):
+                manifest = runner.input_manifest(self.root, self.root / 'bundle', run_root,
+                                                 run, 'c' * 64, {}, {})
+            self.assertEqual(manifest['command'][-2:],
+                             ['--acceptance-profile-id', runner.V2_PROFILE_ID])
+            self.assertEqual(manifest['request']['performance_plan']['long_path_order'], order)
+            self.write_json(run_root / 'input-manifest.json', manifest)
+            with mock.patch.object(runner.host_tools, 'require_pwsh74',
+                                   return_value='/usr/bin/pwsh'):
+                command = runner.controller_command(self.root, self.root / 'bundle',
+                    run_root, run, {'ssh_host': 'fixture-vm', 'expected_vm_id': 'fixture-id'},
+                    {'expectedGuestSid': 'S-1-5-21-1-2-3-4'})
+            self.assertEqual(command[command.index('-TestTimeoutSeconds') + 1], '600')
+            self.assertEqual(command[command.index('-SuiteTimeoutSeconds') + 1], '1200')
+            self.assertEqual(command[command.index('-AcceptanceProfileSha256') + 1],
+                             runner.OWNED_PERFORMANCE_PROFILE_SHA256)
+            self.assertEqual(command[command.index('-AcceptanceProfileId') + 1],
+                             runner.V2_PROFILE_ID)
+            self.assertNotEqual(run['run_id'], runner.performance_run(order)['run_id'])
 
     def test_prepared_performance_manifest_records_copied_exe_and_bundle_hashes(self):
         pin = "a" * 64
@@ -285,9 +458,8 @@ class GuiRegressionRunnerTests(unittest.TestCase):
 
         config = self.root / "config"
         config.mkdir()
-        self.write_json(config / runner.V2_PROFILE_FILE, {
-            "schema": "darkrenamer-vm-automated-profile-v2",
-            "profile_id": runner.V2_PROFILE_ID, "revision": 2})
+        (config / runner.V2_PROFILE_FILE).write_bytes(
+            (Path(__file__).parents[3] / "config" / runner.V2_PROFILE_FILE).read_bytes())
         complete = base + ["--baseline-product-source-sha", runner.ICON_BASELINE_PRODUCT_SOURCE_SHA,
                            "--expected-run-source-sha", "c" * 40,
                            "--prepared-bundle-root", str(self.root / "prepared"),
@@ -795,10 +967,11 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.write_json(run_root / "input-manifest.json", {"run_id": "stream-run"})
 
         @contextmanager
-        def desktop(_arguments):
-            yield {"expectedGuestSid": "S-1-5-21-1-2-3-4"}
+        def desktop(_arguments, evidence_root):
+            self.assertEqual(evidence_root, run_root)
+            yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
 
-        native_runner = SimpleNamespace(managed_desktop=desktop)
+        native_runner = runner.launcher
 
         def controller(*_arguments, **keywords):
             self.assertEqual(list(output.iterdir()), [])
@@ -820,10 +993,11 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 "status": "collected", "guest_cleanup": True,
                 "observer_process": {"state": "exited", "exit_code": 0},
             })
-            return SimpleNamespace(returncode=0)
+            return SimpleNamespace(poll=lambda: 0, wait=lambda timeout: 0)
 
         with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
-                mock.patch.object(runner.subprocess, "run", side_effect=controller), \
+                mock.patch.object(runner.subprocess, "Popen", side_effect=controller), \
+                mock.patch.object(runner.launcher, "managed_desktop", side_effect=desktop), \
                 mock.patch.object(runner, "finalize_run"):
             runner.execute_run(
                 self.root, self.root, run_root,
@@ -855,8 +1029,9 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 self.write_json(run_root / "input-manifest.json", {"run_id": name})
 
                 @contextmanager
-                def desktop(_arguments):
-                    yield {"expectedGuestSid": "S-1-5-21-1-2-3-4"}
+                def desktop(_arguments, evidence_root):
+                    self.assertEqual(evidence_root, run_root)
+                    yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
 
                 def controller(*_arguments, **_keywords):
                     self.write_json(output / "acceptance-observations.json", {
@@ -867,20 +1042,21 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     })
                     if guest is not None:
                         self.write_json(output / "transport.json", {"guest_cleanup": guest})
-                    return SimpleNamespace(returncode=exit_code)
+                    return SimpleNamespace(poll=lambda: exit_code, wait=lambda timeout: exit_code)
 
                 with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
-                        mock.patch.object(runner.subprocess, "run", side_effect=controller), \
+                        mock.patch.object(runner.subprocess, "Popen", side_effect=controller), \
+                mock.patch.object(runner.launcher, "managed_desktop", side_effect=desktop), \
                         mock.patch.object(runner, "finalize_run") as finalize:
                     arguments = (
                         self.root, self.root, run_root,
                         {"run_id": name, "mode": "full-context", "text_scale_percent": 100,
                          "dpi": 96, "width": 800, "height": 600},
                         {"ssh_host": "fixture", "desktop_helper": "C:\\fixture.ps1"},
-                        SimpleNamespace(managed_desktop=desktop),
+                        runner.launcher,
                     )
-                    if exit_code:
-                        with self.assertRaisesRegex(ValueError, "transport failed"):
+                    if exit_code or guest is None:
+                        with self.assertRaisesRegex(ValueError, "transport failed|summary is incomplete"):
                             runner.execute_run(*arguments)
                         finalize.assert_not_called()
                     else:
@@ -894,6 +1070,190 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 self.assertEqual(cleanup["guest"], guest is True)
                 self.assertTrue(cleanup["desktop_restore"])
                 self.assertTrue(cleanup["text_scale_restore"])
+
+    def test_gui_failure_handshake_closes_desktop_before_signal_and_reaps_exact_child(self):
+        for variant in ("v1", "v2", "wrong-nonce", "wrong-profile", "changed-original", "stop-failed"):
+            with self.subTest(variant=variant):
+                run_root = self.root / variant
+                run_root.mkdir()
+                output = run_root / "output"
+                self.write_json(run_root / "input-manifest.json", {"run_id": variant})
+                run = {"run_id": variant, "mode": "performance-sample", "text_scale_percent": 100,
+                       "dpi": 96, "width": 1366, "height": 768}
+                v2 = variant in {"v2", "wrong-profile"}
+                if v2:
+                    run.update(acceptance_profile_id=runner.V2_PROFILE_ID,
+                               acceptance_profile_sha256="c" * 64)
+                events = []
+
+                @contextmanager
+                def desktop(_args, evidence_root, *, capture_closure=False):
+                    self.assertEqual(evidence_root, run_root)
+                    self.assertEqual(capture_closure, v2)
+                    if capture_closure:
+                        self.write_json(run_root / 'desktop-start-response.json',
+                                        {'status': 'ready', 'leaseId': 'a' * 32})
+                    events.append("start")
+                    try:
+                        yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
+                    finally:
+                        self.write_json(run_root / "desktop-lease.json", {
+                            "mode": "managed-rdp", "lease_id": "a" * 32,
+                            "stop_status": "failed" if variant == "stop-failed" else "stopped",
+                            "cleanup_observed": variant != "stop-failed",
+                        })
+                        if capture_closure:
+                            self.write_json(run_root / 'desktop-stop-response.json',
+                                {'status': 'stopped', 'lifecycleStatus': 'closed',
+                                 'leaseId': 'a' * 32})
+                        events.append("closed")
+                        if variant == "stop-failed":
+                            raise RuntimeError("fixture desktop stop failed")
+
+                def spawn(_command, **keywords):
+                    issued = json.loads(keywords["env"]["DR_VM_OWNED_CLEANUP_HANDSHAKE"])
+                    self.assertEqual(issued, {"nonce": "b" * 32, "lease_id": "a" * 32,
+                                              "sid": "S-1-5-21-1-2-3-4"})
+                    self.assertEqual(keywords["cwd"], self.root)
+                    raw_cleanup = {"unexpected_runner_tasks_after_delete": None,
+                                   "unexpected_runner_processes_after_delete": None}
+                    if v2:
+                        raw_cleanup.update(profile_id=runner.V2_PROFILE_ID, profile_sha256="c" * 64)
+                    original = {"guest_cleanup": False, "raw_cleanup": raw_cleanup}
+                    self.write_json(output / "original-transport.json", original)
+                    self.write_json(output / "transport.json", original)
+                    self.write_json(output / "acceptance-result.json", {
+                        "status": "failed", "guest_cleanup": True, "process_cleanup": True,
+                    })
+                    self.write_json(output / "acceptance-observations.json", {
+                        "environment": {"text_scale_factor_percent": 100},
+                    })
+                    receipt = {
+                        "schema_version": 3 if v2 else 1,
+                        "kind": "owned_cleanup_strict_failure_preservation",
+                        "nonce": "d" * 32 if variant == "wrong-nonce" else "b" * 32,
+                        "desktop_lease_id": "a" * 32,
+                        "original_transport": {"file": "original-transport.json",
+                            "sha256": runner.digest(output / "original-transport.json")},
+                    }
+                    if v2:
+                        receipt.update(profile_id=runner.V2_PROFILE_ID,
+                                       profile_sha256="d" * 64 if variant == "wrong-profile" else "c" * 64)
+                    self.write_json(output / "owned-cleanup-strict-failure-preservation.json", receipt)
+                    if variant == "changed-original":
+                        self.write_json(output / "original-transport.json", {**original, "changed": True})
+                    events.append("receipt")
+                    process = mock.Mock()
+                    process.poll.return_value = None
+                    def reap(timeout):
+                        events.append("reaped")
+                        if variant in {"v1", "v2"}:
+                            self.assertTrue((output / "owned-cleanup-desktop-closed.json").is_file())
+                        return 1
+                    process.wait.side_effect = reap
+                    return process
+
+                with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
+                        mock.patch.object(runner.launcher, "managed_desktop", side_effect=desktop), \
+                        mock.patch.object(runner.subprocess, "Popen", side_effect=spawn), \
+                        mock.patch.object(runner.launcher.uuid, "uuid4", return_value=mock.Mock(hex="b" * 32)), \
+                        mock.patch.dict("os.environ", {"DR_VM_OWNED_CLEANUP_HANDSHAKE": "stale"}), \
+                        mock.patch.object(runner, "finalize_run") as finalize:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        runner.execute_run(self.root, self.root, run_root, run,
+                            {"ssh_host": "fixture", "desktop_helper": "C:\\fixture.ps1"}, runner.launcher)
+                    finalize.assert_not_called()
+                self.assertEqual(events, ["start", "receipt", "closed", "reaped"])
+                signal_path = output / "owned-cleanup-desktop-closed.json"
+                self.assertEqual(signal_path.exists(), variant in {"v1", "v2"})
+                if signal_path.exists():
+                    signal = json.loads(signal_path.read_text())
+                    self.assertEqual(signal["preservation_sha256"], runner.digest(
+                        output / "owned-cleanup-strict-failure-preservation.json"))
+                    self.assertEqual(signal["desktop_lease_sha256"], runner.digest(run_root / "desktop-lease.json"))
+                self.assertEqual(json.loads((output / "acceptance-result.json").read_text())["status"], "failed")
+                self.assertEqual(json.loads((output / "cleanup.json").read_text())["status"], "failed")
+                self.assertTrue((output / "controller.stdout.txt").is_file())
+                self.assertTrue((output / "controller.stderr.txt").is_file())
+
+    def test_partial_controller_json_retains_failed_cleanup_without_rewriting_raw(self):
+        for name in ("acceptance-result.json", "acceptance-observations.json", "transport.json"):
+            for raw in (b'{"partial":', b'[]'):
+                for exit_code in (0, 1):
+                    with self.subTest(name=name, raw=raw, exit_code=exit_code):
+                        run_root = self.root / f"partial-{name}-{len(raw)}-{exit_code}"
+                        run_root.mkdir()
+                        output = run_root / "output"
+                        self.write_json(run_root / "input-manifest.json", {"run_id": run_root.name})
+
+                        @contextmanager
+                        def desktop(_args, _evidence_root):
+                            yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
+
+                        def spawn(*_args, **_keywords):
+                            self.write_json(output / "acceptance-result.json", {
+                                "guest_cleanup": True, "process_cleanup": True,
+                            })
+                            self.write_json(output / "acceptance-observations.json", {
+                                "environment": {"text_scale_factor_percent": 100},
+                            })
+                            self.write_json(output / "transport.json", {"guest_cleanup": True})
+                            (output / name).write_bytes(raw)
+                            return SimpleNamespace(poll=lambda: exit_code, wait=lambda timeout: exit_code)
+
+                        with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
+                                mock.patch.object(runner.launcher, "managed_desktop", side_effect=desktop), \
+                                mock.patch.object(runner.subprocess, "Popen", side_effect=spawn), \
+                                mock.patch.object(runner, "finalize_run") as finalize:
+                            with self.assertRaisesRegex(ValueError, "transport failed|summary is incomplete"):
+                                runner.execute_run(self.root, self.root, run_root,
+                                    {"run_id": run_root.name, "mode": "performance-sample",
+                                     "text_scale_percent": 100, "dpi": 96, "width": 1366, "height": 768},
+                                    {"ssh_host": "fixture", "desktop_helper": "C:\\fixture.ps1"}, runner.launcher)
+                            finalize.assert_not_called()
+                        self.assertEqual((output / name).read_bytes(), raw)
+                        cleanup = json.loads((output / "cleanup.json").read_text())
+                        self.assertEqual(cleanup["status"], "failed")
+                        self.assertEqual(cleanup["controller_exit_code"], exit_code)
+                        errors = json.loads((output / "cleanup-errors.json").read_text())
+                        self.assertEqual(errors["errors"], [{"file": name,
+                            "error_type": "JSONDecodeError" if raw.startswith(b'{') else "ValueError"}])
+                        self.assertTrue((output / "controller.stdout.txt").is_file())
+                        self.assertTrue((output / "controller.stderr.txt").is_file())
+
+    def test_missing_text_scale_observations_cannot_report_cleanup_passed(self):
+        run_root = self.root / "missing-text-scale-observations"
+        run_root.mkdir()
+        output = run_root / "output"
+        self.write_json(run_root / "input-manifest.json", {"run_id": run_root.name})
+
+        @contextmanager
+        def desktop(_args, _evidence_root):
+            yield {"expectedGuestSid": "S-1-5-21-1-2-3-4", "leaseId": "a" * 32}
+
+        def spawn(*_args, **_keywords):
+            self.write_json(output / "acceptance-result.json", {
+                "guest_cleanup": True, "process_cleanup": True,
+                "text_scale": {"restoration": "verified"},
+            })
+            self.write_json(output / "transport.json", {"guest_cleanup": True})
+            return SimpleNamespace(poll=lambda: 0, wait=lambda timeout: 0)
+
+        with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
+                mock.patch.object(runner.launcher, "managed_desktop", side_effect=desktop), \
+                mock.patch.object(runner.subprocess, "Popen", side_effect=spawn), \
+                mock.patch.object(runner, "finalize_run") as finalize:
+            with self.assertRaises(FileNotFoundError):
+                runner.execute_run(self.root, self.root, run_root,
+                    {"run_id": run_root.name, "mode": "text-scale", "text_scale_percent": 150,
+                     "dpi": 96, "width": 800, "height": 600},
+                    {"ssh_host": "fixture", "desktop_helper": "C:\\fixture.ps1"}, runner.launcher)
+            finalize.assert_not_called()
+        self.assertFalse((output / "acceptance-observations.json").exists())
+        self.assertEqual(json.loads((output / "cleanup.json").read_text())["status"], "failed")
+        errors = json.loads((output / "cleanup-errors.json").read_text())
+        self.assertEqual(errors["errors"], [{"file": "acceptance-observations.json",
+                                              "error_type": "FileNotFoundError"}])
 
     def test_four_finalized_producer_fixtures_pass_independent_validator_cli(self):
         validator = EVIDENCE_SCRIPT

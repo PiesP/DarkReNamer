@@ -17,11 +17,14 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from controller_cleanup_fixture import clean_controller_cleanup, clean_controller_cleanup_v2
+from controller_cleanup_fixture import (
+    clean_controller_cleanup, clean_controller_cleanup_v2,
+    clean_controller_cleanup_v3,
+)
 from darkrenamer_tooling.evidence import gui as evidence
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
-    physical_menu_apply_entry, scenario, Fixture,
+    physical_menu_apply_entry, scenario, Fixture, first_clear_product_tree,
 )
 
 
@@ -46,6 +49,24 @@ class SyntheticFixtureTestCase(unittest.TestCase):
 
 
 class GuiEvidenceTests(SyntheticFixtureTestCase):
+    @staticmethod
+    def bind_v2_fixture_vm(run: Path, manifest: dict, transport: dict) -> None:
+        """Make the synthetic preflight, postlaunch and transport one VM identity."""
+        vm_id = transport["vm_id"]
+        vm_hash = digest(vm_id.encode("ascii"))
+        manifest["guest_preflight"]["vm_identity_sha256"] = vm_hash
+        write_json(run / "input-manifest.json", manifest)
+        preflight_path = run / "output/platform-preflight.json"
+        preflight = json.loads(preflight_path.read_text())
+        preflight["guest_platform"]["vm_identity_sha256"] = vm_hash
+        write_json(preflight_path, preflight)
+        postlaunch_path = run / "output/platform-postlaunch.json"
+        postlaunch = json.loads(postlaunch_path.read_text())
+        postlaunch["vm_identity_sha256"] = vm_hash
+        write_json(postlaunch_path, postlaunch)
+        transport["vm_identity_kind"] = manifest["guest_preflight"]["vm_identity_kind"]
+        transport["vm_identity_sha256"] = vm_hash
+
     def test_fixture_semantics_do_not_follow_changed_verifier_expectations(self):
         baseline = json.loads((self.fixture.build("stable-standard", "standard") /
                                "output" / "run-result.json").read_text())
@@ -112,7 +133,9 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                 "start_observed": True, "exit_observed": True,
                 "exit_method": "normal-close", "exit_code": 0,
             }})
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, process_jobs=jobs, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         raw["process_lifecycles"] = lifecycles
         raw["process_job_cleanup"] = cleanup["owned_resource_evidence"]["process_job_cleanup"]
         raw["observer_lifecycle"] = cleanup["owned_resource_evidence"]["task_execution"]["observer_lifecycle"]
@@ -120,6 +143,8 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         transport_path = output / "transport.json"
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
+        transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
+        self.bind_v2_fixture_vm(run, manifest, transport)
         write_json(transport_path, transport)
         self.fixture.refresh(run)
         return run, profile_hash
@@ -142,6 +167,24 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                                                             stdout=(SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes())), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(evidence.main(SCRIPT_ROOT.parent, argv), 0)
+
+    def test_current_v2_rejects_coherent_foreign_transport_vm(self):
+        run, profile_hash = self.fixed_v2_run("standard")
+        self.assertEqual(evidence.validate_run(self.root, run.name, SOURCE,
+                         expected_profile_sha256=profile_hash)["result"]["status"], "review_required")
+        transport_path = run / "output/transport.json"
+        transport = json.loads(transport_path.read_text())
+        foreign_id = "87654321-4321-4321-4321-cba987654321"
+        transport["vm_id"] = foreign_id
+        transport["vm_identity_sha256"] = digest(foreign_id.encode("ascii"))
+        owned = transport["raw_cleanup"]["owned_resource_evidence"]
+        owned["protected_anchor_initial"]["vm_id"] = foreign_id
+        owned["protected_anchor"]["vm_id"] = foreign_id
+        write_json(transport_path, transport)
+        self.fixture.refresh(run)
+        with self.assertRaisesRegex(evidence.EvidenceError, "VM identity differs"):
+            evidence.validate_run(self.root, run.name, SOURCE,
+                                  expected_profile_sha256=profile_hash)
 
     def test_fixed_v2_selection_rejects_historical_single_v1_run(self):
         profile = (SCRIPT_ROOT.parent / "config" / "vm-automated-v2.json").read_bytes()
@@ -800,7 +843,9 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         second_job["pid"] = raw["assertions"]["scenario"]["default_columns"]["process_id"]
         second_job["process_start_time_utc_ticks"] = "134041000000000005"
         jobs.append(second_job)
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash, process_jobs=jobs)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, process_jobs=jobs, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         owned = cleanup["owned_resource_evidence"]
         raw["process_job_cleanup"] = owned["process_job_cleanup"]
         raw["observer_lifecycle"] = owned["task_execution"]["observer_lifecycle"]
@@ -808,6 +853,8 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         transport_path = self.pair_run / "output" / "transport.json"
         transport = json.loads(transport_path.read_text())
         transport["raw_cleanup"] = cleanup
+        transport["vm_id"] = cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]
+        GuiEvidenceTests.bind_v2_fixture_vm(self.pair_run, manifest, transport)
         write_json(transport_path, transport)
         self.fixture.refresh(self.pair_run)
         return manifest, transport, raw
@@ -880,7 +927,7 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_input_manifest(self.pair_run, SOURCE)
         original_document = json.loads(original_profile)
-        for field, value in (("profile_id", "unexpected-v2"), ("revision", 3)):
+        for field, value in (("profile_id", "unexpected-v2"), ("revision", 2)):
             with self.subTest(profile_field=field):
                 changed = {**original_document, field: value}
                 changed_bytes = json_bytes(changed)
@@ -1688,6 +1735,215 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "full-operation timing"):
             evidence.validate_performance_metrics(scenario)
 
+    def owned_run(self):
+        run_id = evidence.owned_performance_run_id('hidden-visible')
+        run = self.fixture.build(run_id, 'standard')
+        output = run / 'output'
+        profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+        profile_sha = digest(profile)
+        (run / 'inputs/vm-automated-v2.json').write_bytes(profile)
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(acceptance_profile_id=evidence.V2_PROFILE_ID,
+                        acceptance_profile_sha256=profile_sha,
+                        acceptance_profile={'file': 'inputs/vm-automated-v2.json',
+                                            'bytes': len(profile), 'sha256': profile_sha})
+        manifest['request'] = {'mode': evidence.PERFORMANCE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'performance_plan': {**deepcopy(evidence.PERFORMANCE_PLAN),
+                                 'long_path_order': 'hidden-visible'}}
+        manifest['command'] = ['python3', '-I', 'scripts/run-gui-regression.py',
+            '--output-root', '<external-output-root>', '--connection-profile',
+            '<private-connection-profile>', '--diagnostic', evidence.PERFORMANCE_MODE,
+            '--performance-column-order', 'hidden-visible', '--acceptance-profile-id',
+            evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        (output / 'screen.png').rename(output / 'performance-empty.png')
+        (output / 'text-raster-metrics.json').unlink()
+        ticks = 638965440000000000
+        filetime = ticks - 504911232000000000
+        job = deepcopy(clean_controller_cleanup_v2()['owned_resource_evidence']['process_job_cleanup'][0])
+        job.update(pid=4242, process_start_time_utc_ticks=str(ticks))
+        cleanup = clean_controller_cleanup_v3(profile_sha256=profile_sha,
+            process_jobs=[job], source_sha=SOURCE,
+            bundle_sha256=manifest['bundle_manifest']['sha256'])
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport.update(raw_cleanup=cleanup,
+                         vm_id=cleanup['owned_resource_evidence']['protected_anchor']['vm_id'],
+                         desktop_lease_id='a' * 32)
+        GuiEvidenceTests.bind_v2_fixture_vm(run, manifest, transport)
+        write_json(transport_path, transport)
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        baseline = raw['assertions']['scenario']
+        baseline['environment']['main_window'] = {'hwnd': 1001, 'process_id': 4242}
+        scenario = self.sample_scenario()
+        scenario.update(mode=evidence.PERFORMANCE_MODE, appearance='light',
+            process_id=4242, process_start_utc_ticks=ticks,
+            executable_sha256=manifest['artifacts']['application']['sha256'],
+            executable_bytes=849408, environment=baseline['environment'],
+            native_process_lifetime={'pid': 4242, 'creation_filetime': filetime,
+                'checkpoints': [{'phase': phase, 'creation_filetime': filetime}
+                    for phase in ('pre-work', 'idle', 'ordinary-10000', 'post')],
+                'terminal_exit_filetime': filetime + 5_000_000})
+        raw.update(assertions={'overall': 'passed', 'scope': 'performance-sample-p1-p3-v2',
+                               'scenario': scenario},
+                   process_cleanup=True,
+                   process_lifecycles=[{'process_lifecycle': {
+                       'pid': 4242, 'session_id': 2, 'start_time_utc_ticks': str(ticks),
+                       'creation_filetime': filetime, 'executable_path': r'C:\fixture\DarkReNamer.exe',
+                       'executable_sha256': manifest['artifacts']['application']['sha256'],
+                       'start_observed': True, 'exit_observed': True,
+                       'exit_method': 'normal-close', 'exit_code': 0}}],
+                   process_job_cleanup=cleanup['owned_resource_evidence']['process_job_cleanup'],
+                   observer_lifecycle=cleanup['owned_resource_evidence']['task_execution']['observer_lifecycle'],
+                   screenshots=[{'file': 'performance-empty.png',
+                       'sha256': digest((output / 'performance-empty.png').read_bytes())}])
+        write_json(raw_path, raw)
+        observations_path = output / 'acceptance-observations.json'
+        observations = json.loads(observations_path.read_text())
+        text_snapshot = {'registry_key_existed': True, 'registry_value_existed': True,
+            'registry_value_kind': 'DWord', 'registry_value': 100,
+            'ui_settings_raw_factor': 1.0, 'ui_settings_percent': 100}
+        observations['text_scale_restoration'] = {'schema_version': 1,
+            'baseline': text_snapshot, 'final': deepcopy(text_snapshot), 'snapshot_equal': True}
+        write_json(observations_path, observations)
+        lease = {'schema_version': 1, 'mode': 'managed-rdp', 'lease_id': 'a' * 32,
+            'requested_scale': 100, 'requested_width': 1366, 'requested_height': 768,
+            'expected_dpi': 96, 'start_status': 'ready', 'stop_status': 'stopped',
+            'cleanup_observed': True}
+        write_json(output / 'desktop-lease.json', lease)
+        write_json(output / 'desktop-start-response.json', {'status': 'ready',
+            'leaseId': 'a' * 32, 'processId': 9001,
+            'expectedGuestSid': cleanup['owned_resource_evidence']['runner_sid'],
+            'expectedDpi': 96, 'expectedDesktopWidth': 1366,
+            'expectedDesktopHeight': 768})
+        write_json(output / 'desktop-stop-response.json', {'status': 'stopped',
+            'lifecycleStatus': 'closed', 'leaseId': 'a' * 32, 'processId': 9001})
+        self.refresh_owned(run)
+        return run, profile_sha
+
+    def refresh_owned(self, run):
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        self.fixture.refresh(run)
+        manifest = json.loads(manifest_path.read_text())
+        raw_path = output / 'acceptance-result.json'
+        result = {'schema_version': 1, 'diagnostic': evidence.PERFORMANCE_MODE,
+            'run_id': run.name, 'input_manifest_sha256': digest(manifest_path.read_bytes()),
+            'collection_sha256': digest((run / 'collection.json').read_bytes()),
+            'cleanup_sha256': digest((output / 'cleanup.json').read_bytes()),
+            'source_sha': SOURCE,
+            'application_sha256': manifest['artifacts']['application']['sha256'],
+            'observer_sha256': manifest['artifacts']['observer']['sha256'],
+            'observer_result_sha256': digest(raw_path.read_bytes()),
+            'status': 'review_required', 'exit_code': 0}
+        write_json(output / 'run-result.json', result)
+
+    def test_owned_run_requires_exact_profile_lifetime_job_desktop_and_text(self):
+        run, profile_sha = self.owned_run()
+        verdict = evidence.validate_performance_run(self.root, run.name, SOURCE,
+                                                     expected_profile_sha256=profile_sha)
+        self.assertEqual(verdict['owned_cleanup'], 'owned-clean')
+        self.assertEqual(verdict['observation'], 'complete')
+        cleanup = json.loads((run / 'output/transport.json').read_text())['raw_cleanup']
+        for phase, suffix in (('before', ''), ('after_intervention', '_after_intervention'),
+                              ('after_delete', '_after_delete')):
+            ledger = verdict['ambient_delta_ledger'][phase]
+            self.assertEqual(ledger['processes'], cleanup['unexpected_runner_processes' + suffix])
+            self.assertEqual(ledger['tasks'], cleanup['unexpected_runner_tasks' + suffix])
+            self.assertEqual(verdict['ambient_delta_counts'][phase],
+                             {kind: len(rows) for kind, rows in ledger.items()})
+
+    def test_owned_adapter_rejects_rehashed_lifetime_job_lease_text_and_cleanup_mutations(self):
+        mutations = (
+            ('native-filetime', 'acceptance-result.json',
+             lambda d: d['assertions']['scenario']['native_process_lifetime'].__setitem__(
+                 'creation_filetime', d['assertions']['scenario']['native_process_lifetime'][
+                     'creation_filetime'] + 1)),
+            ('native-terminal', 'acceptance-result.json',
+             lambda d: d['assertions']['scenario']['native_process_lifetime'].__setitem__(
+                 'terminal_exit_filetime', 0)),
+            ('candidate-job', 'acceptance-result.json',
+             lambda d: d['process_job_cleanup'][0].__setitem__('forced_termination', True)),
+            ('extra-job', 'acceptance-result.json',
+             lambda d: d['process_job_cleanup'].append(deepcopy(d['process_job_cleanup'][0]))),
+            ('observer-lifetime', 'acceptance-result.json',
+             lambda d: d['observer_lifecycle'].__setitem__('pid', 9)),
+            ('desktop-stop', 'desktop-stop-response.json',
+             lambda d: d.__setitem__('lifecycleStatus', 'pending')),
+            ('desktop-lease', 'desktop-lease.json',
+             lambda d: d.__setitem__('lease_id', 'f' * 32)),
+            ('desktop-start', 'desktop-start-response.json',
+             lambda d: d.__setitem__('processId', 9002)),
+            ('text-registry', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration']['final'].__setitem__('registry_value', 150)),
+            ('text-integer-factor', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration']['final'].__setitem__('ui_settings_raw_factor', 1)),
+            ('text-missing-final', 'acceptance-observations.json',
+             lambda d: d['text_scale_restoration'].__setitem__('final', None)),
+            ('root-survivor', 'transport.json',
+             lambda d: d['raw_cleanup'].__setitem__('guest_root_present', True)),
+            ('ambient-duplicate', 'transport.json',
+             lambda d: d['raw_cleanup']['owned_resource_evidence']['process_snapshots'][
+                 'after_delete']['processes'].append(deepcopy(d['raw_cleanup'][
+                     'owned_resource_evidence']['process_snapshots']['after_delete']['processes'][0]))),
+        )
+        for label, leaf, mutate in mutations:
+            with self.subTest(label=label):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                path = run / 'output' / leaf
+                document = json.loads(path.read_text())
+                mutate(document)
+                write_json(path, document)
+                self.refresh_owned(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_manifest_rejects_cross_route_plan_and_profile(self):
+        mutations = (
+            lambda d: d['request']['performance_plan'].__setitem__('idle_seconds', 29),
+            lambda d: d['request']['performance_plan'].__setitem__('long_path_order', 'visible-hidden'),
+            lambda d: d['request']['desktop'].__setitem__('dpi', 120),
+            lambda d: d.__setitem__('acceptance_profile_sha256', '0' * 64),
+            lambda d: d['command'].remove('--acceptance-profile-id'),
+            lambda d: d.__setitem__('run_id', evidence.performance_run_id('hidden-visible')),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                manifest_path = run / 'input-manifest.json'
+                manifest = json.loads(manifest_path.read_text())
+                mutate(manifest)
+                write_json(manifest_path, manifest)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_new_id_enforces_collection_budget_and_one_png(self):
+        for extra_name, size in (('second.png', 1), ('oversize.bin', 33 * 1024 * 1024)):
+            with self.subTest(extra_name=extra_name):
+                self.reset_fixture()
+                run, profile_sha = self.owned_run()
+                with (run / 'output' / extra_name).open('wb') as stream:
+                    stream.truncate(size)
+                self.refresh_owned(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_performance_run(self.root, run.name, SOURCE,
+                        expected_profile_sha256=profile_sha)
+
+    def test_owned_missing_desktop_stop_cannot_be_promoted_by_cleanup_boolean(self):
+        run, profile_sha = self.owned_run()
+        (run / 'output/desktop-stop-response.json').unlink()
+        self.refresh_owned(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_performance_run(self.root, run.name, SOURCE,
+                expected_profile_sha256=profile_sha)
+
 
 class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
     TOOLING_SOURCE = "c" * 40
@@ -1954,6 +2210,298 @@ class FocusedClearEvidenceTests(SyntheticFixtureTestCase):
                     self.validate()
 
 
+class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
+    def test_independent_current_product_inventory_rejects_claimed_hash_mutation(self):
+        from darkrenamer_tooling.vm import gui as producer
+        repo = SCRIPT_ROOT.parent
+        source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                             text=True).strip()
+        historical_query = ["git", "ls-tree", "-rz", "--full-tree",
+                            evidence.FIRST_CLEAR_PRODUCT_REFERENCE_SHA]
+        current_query = ["git", "ls-tree", "-rz", "--full-tree", source_sha]
+        frozen_tree = first_clear_product_tree()
+        real_check_output = subprocess.check_output
+        def offline_tree(command, **kwargs):
+            return frozen_tree if command in (historical_query, current_query) else \
+                real_check_output(command, **kwargs)
+        with mock.patch.object(subprocess, "check_output", side_effect=offline_tree):
+            manifest = {"source_sha": source_sha,
+                        "product_inputs": producer.first_clear_product_inputs(repo, source_sha)}
+            evidence.verify_first_clear_product_inputs(repo, manifest)
+            original_product_inputs = dict(manifest["product_inputs"])
+            manifest["product_inputs"]["entries_sha256"] = "0" * 64
+            with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+                evidence.verify_first_clear_product_inputs(repo, manifest)
+        manifest["product_inputs"] = original_product_inputs
+        altered_tree = frozen_tree.replace(b"100644 blob", b"100755 blob", 1)
+        self.assertNotEqual(altered_tree, frozen_tree)
+        for changed_query in (current_query, historical_query):
+            with self.subTest(changed_query=changed_query[-1]), \
+                 mock.patch.object(subprocess, "check_output",
+                                   side_effect=lambda command, **kwargs:
+                                   altered_tree if command == changed_query else
+                                   frozen_tree if command in (historical_query, current_query) else
+                                   real_check_output(command, **kwargs)):
+                with self.assertRaisesRegex(evidence.EvidenceError, "product/build inputs"):
+                    evidence.verify_first_clear_product_inputs(repo, manifest)
+
+    def make_failed_observation(self):
+        run = self.focused_run
+        renamed = run.with_name(evidence.FIRST_CLEAR_RUN_ID)
+        run.rename(renamed)
+        output = renamed / "output"
+        (output / "run-result.json").unlink()
+        (output / "platform-postlaunch.json").unlink()
+        manifest_path = renamed / "input-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["run_id"] = evidence.FIRST_CLEAR_RUN_ID
+        manifest["request"] = {"mode": evidence.FIRST_CLEAR_MODE, "appearance": "light",
+            "desktop": {"width": 1366, "height": 768, "dpi": 96},
+            "text_scale_percent": 100,
+            "first_clear_observation_plan": deepcopy(evidence.FIRST_CLEAR_PLAN)}
+        manifest["acceptance_profile_id"] = evidence.V1_PROFILE_ID
+        manifest["acceptance_profile_sha256"] = digest(
+            (SCRIPT_ROOT.parent / "config/vm-automated-v1.json").read_bytes())
+        vm_id = "18338a47-f647-45c4-98b8-6107331e2602"
+        manifest["guest_preflight"]["vm_identity_kind"] = "hyper-v-guest-parameters-virtual-machine-id-v1"
+        manifest["guest_preflight"]["vm_identity_sha256"] = digest(vm_id.encode("ascii"))
+        write_json(manifest_path, manifest)
+        preflight_path = output / "platform-preflight.json"
+        preflight = json.loads(preflight_path.read_text())
+        preflight.update(run_id=renamed.name,
+                         input_manifest_sha256=digest(manifest_path.read_bytes()),
+                         phase="pre-launch", source_sha=SOURCE,
+                         application_sha256=manifest["artifacts"]["application"]["sha256"],
+                         runner_sha256=manifest["artifacts"]["runner"]["sha256"],
+                         observer_sha256=manifest["artifacts"]["observer"]["sha256"],
+                         guest_platform=manifest["guest_preflight"])
+        write_json(preflight_path, preflight)
+        observations_path = output / "acceptance-observations.json"
+        observations = json.loads(observations_path.read_text())
+        observations["environment"] = None
+        text_snapshot = {"registry_key_existed": True, "registry_value_existed": True,
+                         "registry_value_kind": "DWord", "registry_value": 100,
+                         "ui_settings_raw_factor": 1.0, "ui_settings_percent": 100}
+        observations["text_scale_restoration"] = {
+            "schema_version": 1, "baseline": deepcopy(text_snapshot),
+            "final": deepcopy(text_snapshot), "snapshot_equal": True}
+        scenario = observations["scenario"]
+        scenario["mode"] = evidence.FIRST_CLEAR_MODE
+        scenario["plan"] = deepcopy(evidence.FIRST_CLEAR_PLAN)
+        scenario["environment"]["physical_screen"] = {"left": 0, "top": 0,
+            "right": 1366, "bottom": 768, "width": 1366, "height": 768}
+        scenario["startup"] = {"empty_grid": True, "main_hwnd_bound": True,
+            "import_command_enabled": True}
+        scenario["ordinary_representatives"] = [
+            {"index": index, "name": f"ordinary-{index:05d}.txt"}
+            for index in (0, 4999, 9999)]
+        scenario["full_preview_rows"] = [
+            {"index": index, "source": f"ordinary-{index:05d}.txt",
+             "prefixed": f"sample-ordinary-{index:05d}.txt",
+             "reset": f"ordinary-{index:05d}.txt"}
+            for index in (0, 2499, 4999, 7499, 9999)]
+        scenario["partial_samples"] = [row for row in scenario.pop("samples")
+                                       if row["phase"] != "post"]
+        for field in ("phase_summary", "wakeups", "disk_unchanged",
+                      "journal_residue_count", "normal_exit_code"):
+            scenario.pop(field, None)
+        scenario["process_start_utc_ticks"] = 639277610271308143
+        scenario["first_clear"] = {"schema_version": 1, "stage": "send-failed",
+            "command_id": 32782, "process_id": 4242, "main_handle": 1001,
+            "pre_clear_rows": 10000, "post_clear_rows": None,
+            "preview_reset": [f"ordinary-{index:05d}.txt"
+                              for index in (0, 2499, 4999, 7499, 9999)],
+            "native_identity": {"process_id": 4242, "creation_filetime": 134366378271308143,
+                "main_handle": 1001, "list_handle": 1002, "main_thread_id": 20,
+                "list_thread_id": 20, "main_class": "DarkReNamerWindow", "list_class": "SysListView32",
+                "list_parent": 1001, "list_control_id": 1000},
+            "polls": [{"index": index, "elapsed_ms": index * 200 + 100, "status": "identity-bound",
+                "creation_filetime": 134366378271308143, "count_status": "failed",
+                "count_error": 1460, "count_elapsed_ms": 49.0,
+                "row_count": None, "response_status": "failed",
+                "response_error": 1460, "response_elapsed_ms": 49.0}
+                for index in range(50)], "poll_status": "poll-limit",
+            "poll_elapsed_ms": 9900}
+        scenario["command_sends"] = [{"command_id": 32782,
+            "scenario_phase": "full-preview-clear", "native_return": 0,
+            "message_result": None, "error_code": 1460, "elapsed_ms": 5006.0,
+            "status": "timeout"}]
+        write_json(observations_path, observations)
+        raw_path = output / "acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["source_sha"] = SOURCE
+        raw["status"] = "failed"
+        raw["failure_reason"] = "gui_regression_observer_failed"
+        raw["process_lifecycles"] = [{"process_lifecycle": {
+            "pid": 4242, "start_time_utc_ticks": "639277610271308143",
+            "executable_sha256": manifest["artifacts"]["application"]["sha256"],
+            "start_observed": True, "exit_observed": False}}]
+        raw["process_job_cleanup"] = [{"pid": 4242,
+            "process_start_time_utc_ticks": "639277610271308143",
+            "job_empty": True, "job_closed": True, "capture_complete": True,
+            "active_processes_at_close": 0, "forced_termination": True,
+            "primary_process_active_at_stop": True, "termination_exit_code": 1,
+            "status": "clean"}]
+        raw["assertions"] = {"scope": evidence.FIRST_CLEAR_SCOPE, "scenario": scenario}
+        raw["observations"] = {"file": "acceptance-observations.json",
+                               "sha256": digest(observations_path.read_bytes())}
+        raw["acceptance_observations"] = observations
+        write_json(raw_path, raw)
+        transport_path = output / "transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["observer_process"] = {"state": "exited", "exit_code": 1}
+        transport["guest_cleanup"] = True
+        transport["status"] = "collected"
+        transport["host_platform"] = "Unix"
+        transport["vm_id"] = vm_id
+        transport["vm_identity_kind"] = manifest["guest_preflight"]["vm_identity_kind"]
+        transport["vm_identity_sha256"] = manifest["guest_preflight"]["vm_identity_sha256"]
+        write_json(transport_path, transport)
+        cleanup_path = output / "cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup.update(run_id=renamed.name, input_manifest_sha256=digest(manifest_path.read_bytes()),
+                       controller_exit_code=1, status="passed", fixture=True, process=True,
+                       guest=True, desktop_restore=True, text_scale_restore=True)
+        write_json(cleanup_path, cleanup)
+        self.refresh_first_clear_collection(renamed)
+        return renamed, manifest
+
+    @staticmethod
+    def refresh_first_clear_collection(run):
+        output = run / "output"
+        rows = [{"relative_path": path.name, "bytes": path.stat().st_size,
+                 "sha256": digest(path.read_bytes())}
+                for path in sorted(output.iterdir()) if path.is_file()]
+        write_json(run / "collection.json", {"schema_version": 1, "run_id": run.name,
+            "input_manifest_sha256": digest((run / "input-manifest.json").read_bytes()),
+            "files": rows})
+
+    def validate_first_clear(self, run, manifest):
+        with mock.patch.object(evidence, "validate_input_manifest",
+                               return_value=(manifest, (run / "input-manifest.json").read_bytes())), \
+             mock.patch.object(evidence, "verify_first_clear_product_inputs"):
+            return evidence.validate_first_clear_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+
+    def test_failed_command_remains_failed_and_complete_cleanup_is_separate(self):
+        run, manifest = self.make_failed_observation()
+        result = self.validate_first_clear(run, manifest)
+        self.assertEqual(result["status"], "failure-observed")
+        self.assertEqual(result["command_status"], "timeout")
+        self.assertEqual(result["performance_acceptance"], "not-run")
+        self.assertIsNone(result["final_row_count"])
+        observation_path = run / "output/acceptance-observations.json"
+        raw_path = run / "output/acceptance-result.json"
+        original_observations = observation_path.read_bytes()
+        original_raw = raw_path.read_bytes()
+        observations = json.loads(original_observations)
+        observations["scenario"]["first_clear"]["polls"].pop()
+        observations["scenario"]["first_clear"]["poll_status"] = "budget-exhausted"
+        write_json(observation_path, observations)
+        raw = json.loads(original_raw)
+        raw["assertions"]["scenario"] = observations["scenario"]
+        raw["acceptance_observations"] = observations
+        raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+        write_json(raw_path, raw)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+        observation_path.write_bytes(original_observations)
+        raw_path.write_bytes(original_raw)
+        self.refresh_first_clear_collection(run)
+        observations = json.loads(original_observations)
+        observations["scenario"]["first_clear"]["poll_elapsed_ms"] = 10001
+        write_json(observation_path, observations)
+        raw = json.loads(original_raw)
+        raw["assertions"]["scenario"] = observations["scenario"]
+        raw["acceptance_observations"] = observations
+        raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+        write_json(raw_path, raw)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+        observation_path.write_bytes(original_observations)
+        raw_path.write_bytes(original_raw)
+        self.refresh_first_clear_collection(run)
+        cleanup = json.loads((run / "output/cleanup.json").read_text())
+        cleanup["guest"] = False
+        cleanup["status"] = "failed"
+        write_json(run / "output/cleanup.json", cleanup)
+        self.refresh_first_clear_collection(run)
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+
+    def test_first_clear_text_scale_proof_is_required_and_recomputed(self):
+        run, manifest = self.make_failed_observation()
+        observations_path = run / "output/acceptance-observations.json"
+        raw_path = run / "output/acceptance-result.json"
+        original = json.loads(observations_path.read_text())
+        self.assertEqual(self.validate_first_clear(run, manifest)["status"], "failure-observed")
+        for mutation in ("missing", "final-missing", "registry-kind", "registry-value",
+                         "ui-factor", "ui-percent", "inconsistent-pair", "malformed-factor",
+                         "claimed-unequal", "malformed"):
+            observations = deepcopy(original)
+            proof = observations["text_scale_restoration"]
+            if mutation == "missing":
+                observations.pop("text_scale_restoration")
+            elif mutation == "final-missing":
+                proof["final"] = None
+            elif mutation == "registry-kind":
+                proof["final"]["registry_value_kind"] = "QWord"
+            elif mutation == "registry-value":
+                proof["final"]["registry_value"] = 101
+            elif mutation == "ui-factor":
+                proof["final"]["ui_settings_raw_factor"] = 1.001
+            elif mutation == "ui-percent":
+                proof["final"]["ui_settings_percent"] = 101
+            elif mutation == "inconsistent-pair":
+                for key in ("baseline", "final"):
+                    proof[key]["ui_settings_raw_factor"] = 1.5
+            elif mutation == "malformed-factor":
+                proof["final"]["ui_settings_raw_factor"] = "1.0"
+            elif mutation == "claimed-unequal":
+                proof["snapshot_equal"] = False
+            else:
+                proof["final"]["registry_value"] = "100"
+            write_json(observations_path, observations)
+            raw = json.loads(raw_path.read_text())
+            raw["acceptance_observations"] = observations
+            raw["observations"]["sha256"] = digest(observations_path.read_bytes())
+            write_json(raw_path, raw)
+            self.refresh_first_clear_collection(run)
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.validate_first_clear(run, manifest)["status"], "incomplete")
+
+    def test_extra_command_and_lifetime_or_hash_mutations_refuse(self):
+        run, manifest = self.make_failed_observation()
+        raw_path = run / "output/acceptance-result.json"
+        observation_path = run / "output/acceptance-observations.json"
+        for mutate in ("second-command", "window-lifetime", "poll-invalid",
+                       "reclassified-command", "raw-hash"):
+            original_raw = raw_path.read_bytes()
+            original_observations = observation_path.read_bytes()
+            raw = json.loads(original_raw)
+            observations = json.loads(original_observations)
+            if mutate == "second-command":
+                observations["scenario"]["command_sends"].append(
+                    deepcopy(observations["scenario"]["command_sends"][0]))
+            elif mutate == "window-lifetime":
+                observations["scenario"]["first_clear"]["polls"][0]["creation_filetime"] += 1
+            elif mutate == "poll-invalid":
+                observations["scenario"]["first_clear"]["poll_elapsed_ms"] = 600001
+            elif mutate == "reclassified-command":
+                observations["scenario"]["command_sends"][0]["status"] = "success"
+            else:
+                raw["source_sha"] = "f" * 40
+            write_json(observation_path, observations)
+            raw["assertions"]["scenario"] = observations["scenario"]
+            raw["acceptance_observations"] = observations
+            raw["observations"]["sha256"] = digest(observation_path.read_bytes())
+            write_json(raw_path, raw)
+            self.refresh_first_clear_collection(run)
+            with self.subTest(mutate=mutate), self.assertRaises(evidence.EvidenceError):
+                self.validate_first_clear(run, manifest)
+            raw_path.write_bytes(original_raw)
+            observation_path.write_bytes(original_observations)
+            self.refresh_first_clear_collection(run)
+
+
 class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
     @staticmethod
     def status(generation, *, settled=True, bootstrap=1, pending=0, demand_remaining=0,
@@ -2080,12 +2628,17 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_input_manifest(run, SOURCE)
 
-        cleanup = clean_controller_cleanup_v2(profile_sha256=profile_hash)
+        cleanup = clean_controller_cleanup_v3(
+            profile_sha256=profile_hash, source_sha=manifest["source_sha"],
+            bundle_sha256=manifest["bundle_manifest"]["sha256"])
         owned = cleanup["owned_resource_evidence"]
         raw = {"process_job_cleanup": owned["process_job_cleanup"],
                "observer_lifecycle": owned["task_execution"]["observer_lifecycle"]}
         scenario = self.scenario()
-        evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest, raw, scenario)
+        transport = {"raw_cleanup": cleanup,
+                     "vm_id": cleanup["owned_resource_evidence"]["protected_anchor"]["vm_id"]}
+        GuiEvidenceTests.bind_v2_fixture_vm(run, manifest, transport)
+        evidence.validate_icon_owned_transport(transport, manifest, raw, scenario)
         for mutate in (
                 lambda r, s: s.__setitem__("process_start_utc_ticks", "134041000000000001"),
                 lambda r, s: r.__setitem__("process_job_cleanup", []),
@@ -2093,7 +2646,7 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
             copied_raw, copied_scenario = deepcopy(raw), deepcopy(scenario)
             mutate(copied_raw, copied_scenario)
             with self.assertRaises(evidence.EvidenceError):
-                evidence.validate_icon_owned_transport({"raw_cleanup": cleanup}, manifest,
+                evidence.validate_icon_owned_transport(transport, manifest,
                                                        copied_raw, copied_scenario)
 
     def test_synchronous_baseline_manifest_requires_explicit_method_and_original_ref(self):
