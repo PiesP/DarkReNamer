@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::mem::size_of;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr::{NonNull, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -92,12 +92,6 @@ impl CapturedWindowPixels {
         }
         Ok(mismatches)
     }
-}
-
-struct VisualCaptureRecord {
-    filename: &'static str,
-    measurement: CaptureMeasurement,
-    custom_colors_active: bool,
 }
 
 struct CaptureResources {
@@ -507,170 +501,5 @@ fn solid_color_detector_rejects_single_pixel_vertical_lines() -> io::Result<()> 
         capture.solid_color_mismatch_count(0, 0, 3, 4, background)?,
         0
     );
-    Ok(())
-}
-
-#[test]
-#[ignore = "writes an external diagnostic visual gallery"]
-fn write_appearance_dialog_visual_gallery() -> Result<(), Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-
-    use crate::{AppThemeMode, ForcedColorsState, ResolvedTheme, UiAppearance};
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW,
-    };
-
-    use super::appearance_dialog::{create_appearance_dialog_window, visual_custom_colors_active};
-    use super::text_io::wide;
-
-    let output = std::env::var_os("DARKRENAMER_VISUAL_OUTPUT_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("DARKRENAMER_VISUAL_OUTPUT_DIR is required"))?;
-    if !output.is_absolute() || !output.is_dir() {
-        return Err(io::Error::other(
-            "DARKRENAMER_VISUAL_OUTPUT_DIR must be an existing absolute directory",
-        )
-        .into());
-    }
-    let source_sha = std::env::var("DARKRENAMER_VISUAL_SOURCE_SHA")?;
-    if source_sha.len() != 40
-        || !source_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(io::Error::other(
-            "DARKRENAMER_VISUAL_SOURCE_SHA must be a lowercase full Git SHA",
-        )
-        .into());
-    }
-    let source_state = std::env::var("DARKRENAMER_VISUAL_SOURCE_STATE")?;
-    if !matches!(source_state.as_str(), "clean" | "dirty") {
-        return Err(
-            io::Error::other("DARKRENAMER_VISUAL_SOURCE_STATE must be clean or dirty").into(),
-        );
-    }
-    let runtime = std::env::var("DARKRENAMER_VISUAL_RUNTIME")?;
-    if !matches!(runtime.as_str(), "wine" | "windows") {
-        return Err(io::Error::other("DARKRENAMER_VISUAL_RUNTIME must be wine or windows").into());
-    }
-    let fixture_sha = std::env::var("DARKRENAMER_VISUAL_FIXTURE_SHA256")?;
-    if fixture_sha.len() != 64
-        || !fixture_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(io::Error::other(
-            "DARKRENAMER_VISUAL_FIXTURE_SHA256 must be a lowercase SHA-256",
-        )
-        .into());
-    }
-    // SAFETY: null requests the current process module.
-    let instance = unsafe { GetModuleHandleW(null_mut()) };
-    // SAFETY: the system STATIC class and current module remain live for this
-    // hidden, test-owned dialog owner.
-    let owner = unsafe {
-        CreateWindowExW(
-            0,
-            wide("STATIC").as_ptr(),
-            null_mut(),
-            WS_OVERLAPPEDWINDOW,
-            0,
-            0,
-            800,
-            600,
-            null_mut(),
-            null_mut(),
-            instance,
-            null_mut(),
-        )
-    };
-    if owner.is_null() {
-        return Err(io::Error::last_os_error().into());
-    }
-
-    let result = (|| -> Result<Vec<VisualCaptureRecord>, Box<dyn std::error::Error>> {
-        let mut captures = Vec::with_capacity(3);
-        for (filename, theme, forced_colors, system_theme) in [
-            (
-                "appearance-light.bmp",
-                AppThemeMode::Light,
-                ForcedColorsState::Inactive,
-                Some(ResolvedTheme::Light),
-            ),
-            (
-                "appearance-dark.bmp",
-                AppThemeMode::Dark,
-                ForcedColorsState::Inactive,
-                Some(ResolvedTheme::Dark),
-            ),
-            (
-                "appearance-forced-colors-fallback.bmp",
-                AppThemeMode::Dark,
-                ForcedColorsState::ActiveOrUnknown,
-                Some(ResolvedTheme::Dark),
-            ),
-        ] {
-            let appearance = UiAppearance {
-                theme,
-                ..UiAppearance::default()
-            };
-            let dialog =
-                create_appearance_dialog_window(owner, 1, appearance, forced_colors, system_theme)?;
-            let custom_colors_active = visual_custom_colors_active(dialog)
-                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
-            let capture = write_window_bmp(dialog, &output.join(filename));
-            // SAFETY: dialog is the live test-owned window returned above and is
-            // destroyed once after the synchronous capture attempt.
-            unsafe { DestroyWindow(dialog) };
-            captures.push(VisualCaptureRecord {
-                filename,
-                measurement: capture?,
-                custom_colors_active,
-            });
-        }
-        Ok(captures)
-    })();
-    // SAFETY: owner remains the live test-owned window after every dialog is closed.
-    unsafe { DestroyWindow(owner) };
-    let captures = result?;
-
-    let mut manifest = String::from(
-        "{\n  \"schema_version\": 1,\n  \"evidence_class\": \"diagnostic-fixture\",\n",
-    );
-    writeln!(&mut manifest, "  \"source_sha\": \"{source_sha}\",")?;
-    writeln!(&mut manifest, "  \"source_state\": \"{source_state}\",")?;
-    writeln!(&mut manifest, "  \"runtime\": \"{runtime}\",")?;
-    writeln!(
-        &mut manifest,
-        "  \"fixture_executable_sha256\": \"{fixture_sha}\","
-    )?;
-    manifest.push_str(
-        "  \"surface\": \"appearance-dialog\",\n  \"acceptance\": false,\n  \"captures\": [\n",
-    );
-    for (index, capture) in captures.iter().enumerate() {
-        let comma = if index + 1 == captures.len() { "" } else { "," };
-        let backend = if capture.measurement.used_window_dc_fallback {
-            "window-dc-bitblt-fallback"
-        } else {
-            "print-window"
-        };
-        writeln!(
-            &mut manifest,
-            "    {{\"filename\": \"{}\", \"width\": {}, \"height\": {}, \"distinct_colors_at_least\": {}, \"capture_backend\": \"{backend}\", \"custom_colors_active\": {}}}{comma}",
-            capture.filename,
-            capture.measurement.width,
-            capture.measurement.height,
-            capture.measurement.distinct_colors,
-            capture.custom_colors_active,
-        )?;
-    }
-    manifest.push_str("  ]\n}\n");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output.join("visual-gallery.json"))?;
-    file.write_all(manifest.as_bytes())?;
-    file.flush()?;
     Ok(())
 }

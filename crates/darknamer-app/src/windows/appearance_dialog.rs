@@ -788,16 +788,6 @@ pub(super) fn create_appearance_dialog_window(
     Ok(window)
 }
 
-#[cfg(test)]
-pub(super) fn visual_custom_colors_active(window: HWND) -> Option<bool> {
-    Some(
-        try_appearance_dialog_state(window)?
-            .state()
-            .appearance_resources
-            .is_some(),
-    )
-}
-
 fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io::Result<()> {
     let static_class = wide("STATIC");
     // SAFETY: the standard STATIC class, parent, and current module are live;
