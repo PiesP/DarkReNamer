@@ -18,12 +18,16 @@ function Assert-DrTestTrue {
 }
 
 function Assert-DrTestThrows {
-    param([scriptblock] $Action, [string] $Message)
+    param([scriptblock] $Action, [string] $Message, [string] $ExpectedMessage)
     $script:DrTestAssertions++
     try {
         & $Action
     }
     catch {
+        if ($PSBoundParameters.ContainsKey('ExpectedMessage') -and
+                $_.Exception.Message -cne $ExpectedMessage) {
+            throw "$Message Expected '$ExpectedMessage'; got '$($_.Exception.Message)'."
+        }
         return
     }
     throw $Message
@@ -322,10 +326,28 @@ try {
             'powershell-recovery-observer', 'release-tooling'
         )) {
         $retiredFixture = New-DrTestFixture
-        $retiredFixture.Entries[1].role = $role
-        Assert-DrTestThrows -Message "Retired role $role was accepted." -Action {
-            Get-DrTestVerified -Fixture $retiredFixture -RequiredRoles @($role)
-        }
+        $verifiedFixture = Get-DrTestVerified -Fixture $retiredFixture
+        Assert-DrTestTrue `
+            -Condition ($verifiedFixture.Records[0].Role -ceq 'powershell-controller-contracts') `
+            -Message "Supported fixture was rejected before testing retired role $role."
+        $retiredBytes = $script:DrTestUtf8.GetBytes("function Get-DrRetiredFixtureValue { 'retired' }`n")
+        $retiredFixture.Sources.Add($role, $retiredBytes)
+        $retiredFixture.Entries.Add([pscustomobject][ordered]@{
+            role = $role
+            source = 'scripts/tooling/retired.psm1'
+            bundle = 'tooling-retired.psm1'
+            kind = 'powershell'
+            module = $null
+            sha256 = Get-DrTestSha256 -Bytes $retiredBytes
+            dependencies = [object[]] @()
+        })
+        Write-DrTestModules -Fixture $retiredFixture
+        Assert-DrTestThrows `
+            -Message "Retired role $role was accepted." `
+            -ExpectedMessage "Unsupported tooling role: $role" `
+            -Action {
+                Get-DrTestVerified -Fixture $retiredFixture -RequiredRoles @($role) | Out-Null
+            }
     }
     $fixture.Entries[1].dependencies = [object[]] @('missing-role')
     Assert-DrTestThrows -Message 'Unknown dependency was accepted.' -Action {
