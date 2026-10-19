@@ -23,8 +23,9 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid,
-    GetAce, GetLengthSid, GetTokenInformation, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION,
-    TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    GetAce, GetLengthSid, GetTokenInformation, INHERIT_ONLY_ACE, IsValidAcl, IsValidSid,
+    OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
+    WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
@@ -35,6 +36,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+    SID_MAX_SUB_AUTHORITIES, SID_REVISION,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -57,13 +59,67 @@ fn refused() -> io::Error {
     )
 }
 
-struct LocalDescriptor(*mut c_void);
-impl Drop for LocalDescriptor {
+struct LocalAllocation(NonNull<c_void>);
+impl Drop for LocalAllocation {
     fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: the descriptor was allocated by a Win32 security API using LocalAlloc.
-            unsafe { LocalFree(self.0) };
+        // SAFETY: this non-null allocation came from a documented LocalFree API.
+        unsafe { LocalFree(self.0.as_ptr()) };
+    }
+}
+
+/// Owns only a security descriptor returned by a successful descriptor API.
+pub(super) struct SecurityDescriptor(LocalAllocation);
+impl SecurityDescriptor {
+    fn from_sddl(encoded: &[u16]) -> io::Result<Self> {
+        if encoded.last() != Some(&0) {
+            return Err(refused());
         }
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: encoded SDDL is terminated and Windows allocates the descriptor.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                encoded.as_ptr(),
+                SECURITY_DESCRIPTOR_REVISION,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(LocalAllocation(
+            NonNull::new(descriptor).ok_or_else(refused)?,
+        )))
+    }
+
+    fn from_file(file: &File) -> io::Result<(Self, *mut c_void, *mut ACL)> {
+        let mut owner = ptr::null_mut();
+        let mut dacl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: retained handle has READ_CONTROL; outputs are writable and tied to descriptor.
+        let code = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(code).unwrap_or(i32::MAX),
+            ));
+        }
+        let allocation = LocalAllocation(NonNull::new(descriptor).ok_or_else(refused)?);
+        Ok((Self(allocation), owner, dacl))
+    }
+
+    pub(super) fn as_ptr(&self) -> *mut c_void {
+        self.0.0.as_ptr()
     }
 }
 
@@ -114,18 +170,44 @@ fn token_sid(token: &impl AsRawHandle) -> io::Result<Sid> {
     {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: successful TokenUser query initializes a TOKEN_USER in the aligned buffer.
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    copy_sid(user.User.Sid)
-}
-
-fn copy_sid(sid: *mut c_void) -> io::Result<Sid> {
-    if sid.is_null() {
+    let returned = usize::try_from(size).map_err(|_| refused())?;
+    if returned < size_of::<TOKEN_USER>() || returned > buffer.len() * size_of::<u64>() {
         return Err(refused());
     }
-    // SAFETY: sid came from a live token or a successful Windows SID constructor.
+    // SAFETY: successful TokenUser query initialized at least a TOKEN_USER in
+    // this aligned, retained buffer; returned bytes were checked above.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let start = buffer.as_ptr() as usize;
+    let offset = (user.User.Sid as usize)
+        .checked_sub(start)
+        .filter(|offset| *offset <= returned)
+        .ok_or_else(refused)?;
+    // SAFETY: the u64 allocation remains live and returned never exceeds it.
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned) };
+    copy_sid(user.User.Sid, &bytes[offset..])
+}
+
+/// Validate the complete SID within a known accessible producer-owned extent.
+fn bounded_sid_length(bytes: &[u8]) -> io::Result<usize> {
+    let header = bytes.get(..8).ok_or_else(refused)?;
+    if u32::from(header[0]) != SID_REVISION || u32::from(header[1]) > SID_MAX_SUB_AUTHORITIES {
+        return Err(refused());
+    }
+    let length = 8 + usize::from(header[1]) * size_of::<u32>();
+    bytes.get(..length).ok_or_else(refused)?;
+    Ok(length)
+}
+
+fn copy_sid(sid: *mut c_void, bytes: &[u8]) -> io::Result<Sid> {
+    let length = bounded_sid_length(bytes)?;
+    // SAFETY: the complete SID is inside the live token output, as checked
+    // above. IsValidSid validates its semantics before GetLengthSid/CopySid.
+    if unsafe { IsValidSid(sid) } == 0 {
+        return Err(refused());
+    }
+    // SAFETY: IsValidSid accepted the complete, accessible source SID.
     let len = unsafe { GetLengthSid(sid) };
-    if !(8..=256).contains(&len) {
+    if usize::try_from(len).ok() != Some(length) {
         return Err(refused());
     }
     let mut words = vec![0_u32; (len as usize).div_ceil(4)];
@@ -138,12 +220,27 @@ fn copy_sid(sid: *mut c_void) -> io::Result<Sid> {
 
 fn well_known(kind: i32) -> io::Result<Sid> {
     let mut words = vec![0_u32; 64];
-    let mut size = u32::try_from(words.len() * 4).map_err(|_| refused())?;
+    let capacity = words.len() * size_of::<u32>();
+    let mut size = u32::try_from(capacity).map_err(|_| refused())?;
     // SAFETY: the bounded writable buffer is valid and size is initialized.
     if unsafe { CreateWellKnownSid(kind, ptr::null_mut(), words.as_mut_ptr().cast(), &mut size) }
         == 0
     {
         return Err(io::Error::last_os_error());
+    }
+    let used = usize::try_from(size).map_err(|_| refused())?;
+    if used > capacity {
+        return Err(refused());
+    }
+    // SAFETY: the successful constructor filled a SID in this live allocation;
+    // the reported byte count is bounded by its capacity above.
+    let bytes = unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), used) };
+    if bounded_sid_length(bytes)? != used {
+        return Err(refused());
+    }
+    // SAFETY: the complete constructor-produced SID is within the live buffer.
+    if unsafe { IsValidSid(words.as_mut_ptr().cast()) } == 0 {
+        return Err(refused());
     }
     words.truncate((size as usize).div_ceil(4));
     Ok(Sid(words))
@@ -155,7 +252,7 @@ fn sid_string(sid: *mut c_void) -> io::Result<String> {
     if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let text_owner = LocalDescriptor(text.cast());
+    let text_owner = LocalAllocation(NonNull::new(text.cast()).ok_or_else(refused)?);
     let mut len = 0;
     // SAFETY: the returned Windows string is null-terminated and remains allocated.
     while unsafe { *text.add(len) } != 0 {
@@ -208,29 +305,12 @@ fn expanded_mask(mut mask: u32) -> u32 {
 fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Result<()> {
     let system = well_known(WinLocalSystemSid)?;
     let admins = well_known(WinBuiltinAdministratorsSid)?;
-    let mut owner = ptr::null_mut();
-    let mut dacl: *mut ACL = ptr::null_mut();
-    let mut descriptor = ptr::null_mut();
-    // SAFETY: retained handle has READ_CONTROL; outputs are writable and tied to descriptor.
-    let code = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            &mut dacl,
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    };
-    if code != 0 {
-        return Err(io::Error::from_raw_os_error(
-            i32::try_from(code).unwrap_or(i32::MAX),
-        ));
+    let (_descriptor_owner, owner, dacl) = SecurityDescriptor::from_file(file)?;
+    if owner.is_null() {
+        return Err(refused());
     }
-    let _descriptor_owner = LocalDescriptor(descriptor);
-    if descriptor.is_null() || owner.is_null() {
+    // SAFETY: GetSecurityInfo returned this owner SID within its live descriptor.
+    if unsafe { IsValidSid(owner) } == 0 {
         return Err(refused());
     }
     // Application-owned state must belong to this user, even when an
@@ -245,6 +325,11 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
         return Err(refused());
     }
     let dacl = NonNull::new(dacl).ok_or_else(refused)?;
+    // SAFETY: checked non-null DACL is inside the live descriptor; validity
+    // checks that every indexed ACE fits its declared ACL allocation.
+    if unsafe { IsValidAcl(dacl.as_ptr()) } == 0 {
+        return Err(refused());
+    }
     // SAFETY: checked non-null dacl is inside the owned live GetSecurityInfo descriptor.
     let count = unsafe { dacl.as_ref().AceCount };
     for index in 0..count {
@@ -272,21 +357,23 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
         }
         // SAFETY: standard allow ACE has fixed mask and SID offset after its header.
         let allow = unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
-        // SAFETY: a standard allow ACE has its SID at SidStart within the ACE.
-        let sid = unsafe {
-            ace.cast::<u8>()
-                .as_ptr()
-                .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
-                .cast()
+        let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        // SAFETY: IsValidAcl established that this returned ACE, including its
+        // declared AceSize, fits the live ACL allocation.
+        let ace_bytes = unsafe {
+            std::slice::from_raw_parts(ace.as_ptr().cast::<u8>(), usize::from(header.AceSize))
         };
-        if offset_of!(ACCESS_ALLOWED_ACE, SidStart) + 8 > usize::from(header.AceSize) {
+        let sid_bytes = ace_bytes.get(sid_offset..).ok_or_else(refused)?;
+        let sid_len = bounded_sid_length(sid_bytes)?;
+        // SAFETY: bounded_sid_length established that the complete SID is in
+        // this live ACE before IsValidSid can inspect its subauthorities.
+        let sid = unsafe { ace.as_ptr().cast::<u8>().add(sid_offset).cast() };
+        // SAFETY: the SID's complete readable extent was checked above.
+        if unsafe { IsValidSid(sid) } == 0 {
             return Err(refused());
         }
-        // SAFETY: the ACE contains at least a SID header at this offset.
-        let sid_len = unsafe { GetLengthSid(sid) } as usize;
-        if sid_len < 8
-            || offset_of!(ACCESS_ALLOWED_ACE, SidStart) + sid_len > usize::from(header.AceSize)
-        {
+        // SAFETY: IsValidSid accepted the complete accessible ACE SID.
+        if unsafe { GetLengthSid(sid) } as usize != sid_len {
             return Err(refused());
         }
         if allowed_sid(sid, user, &system, &admins, ancestor)? {
@@ -327,7 +414,7 @@ fn validate(file: &File, user: &Sid, ancestor: bool, directory: bool) -> io::Res
 
 pub(super) struct PrivateState {
     user: Sid,
-    descriptor: LocalDescriptor,
+    descriptor: SecurityDescriptor,
 }
 
 impl PrivateState {
@@ -340,23 +427,8 @@ impl PrivateState {
             .encode_wide()
             .chain([0])
             .collect::<Vec<_>>();
-        let mut descriptor = ptr::null_mut();
-        // SAFETY: encoded SDDL is terminated and Windows allocates the descriptor.
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                encoded.as_ptr(),
-                SECURITY_DESCRIPTOR_REVISION,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            user,
-            descriptor: LocalDescriptor(descriptor),
-        })
+        let descriptor = SecurityDescriptor::from_sddl(&encoded)?;
+        Ok(Self { user, descriptor })
     }
 
     pub(super) fn validate(&self, file: &File, ancestor: bool, directory: bool) -> io::Result<()> {
@@ -372,7 +444,7 @@ impl PrivateState {
             0,
             FILE_CREATE,
             FILE_OPTIONS,
-            self.descriptor.0,
+            Some(&self.descriptor),
         )
     }
 
@@ -400,7 +472,7 @@ impl PrivateState {
                     SHARE_NO_DELETE,
                     FILE_CREATE,
                     DIRECTORY_OPTIONS,
-                    self.descriptor.0,
+                    Some(&self.descriptor),
                 )?
             }
             result => result?,
@@ -476,6 +548,19 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
+    #[test]
+    fn bounded_sid_rejects_invalid_revision_count_and_truncation() {
+        let mut sid = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        assert_eq!(bounded_sid_length(&sid).ok(), Some(sid.len()));
+        assert!(bounded_sid_length(&sid[..7]).is_err());
+        assert!(bounded_sid_length(&sid[..11]).is_err());
+        sid[0] = 2;
+        assert!(bounded_sid_length(&sid).is_err());
+        sid[0] = 1;
+        sid[1] = 16;
+        assert!(bounded_sid_length(&sid).is_err());
+    }
+
     fn set_dacl(path: &Path, anonymous: bool) -> io::Result<()> {
         let extra = if anonymous {
             "(A;OICI;FA;;;AN)"
@@ -493,26 +578,14 @@ mod tests {
             .encode_wide()
             .chain([0])
             .collect::<Vec<_>>();
-        let mut descriptor = ptr::null_mut();
-        // SAFETY: encoded SDDL is terminated; Windows owns the returned descriptor.
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                encoded.as_ptr(),
-                SECURITY_DESCRIPTOR_REVISION,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let _descriptor = LocalDescriptor(descriptor);
+        let descriptor = SecurityDescriptor::from_sddl(&encoded)?;
         let mut present = 0;
         let mut dacl: *mut ACL = ptr::null_mut();
         let mut defaulted = 0;
         // SAFETY: the descriptor remains live and all outputs are writable.
-        if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
-            == 0
+        if unsafe {
+            GetSecurityDescriptorDacl(descriptor.as_ptr(), &mut present, &mut dacl, &mut defaulted)
+        } == 0
             || present == 0
             || dacl.is_null()
         {
