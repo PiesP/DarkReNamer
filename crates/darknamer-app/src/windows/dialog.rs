@@ -616,11 +616,15 @@ impl PromptWindow {
 impl Drop for PromptWindow {
     fn drop(&mut self) {
         if let Err(error) = self.close() {
+            use std::io::Write as _;
             // A failed close can leave children using our fonts and palette,
             // as well as the published slot itself. Do not unwind or return
             // and release those resources. This matches the existing fatal
             // cleanup policy and bounds retained ownership to process exit.
-            eprintln!("prompt native destruction failed during teardown: {error}");
+            let _ = writeln!(
+                io::stderr().lock(),
+                "prompt native destruction failed during teardown: {error}"
+            );
             std::process::abort();
         }
         // SAFETY: native destruction completed synchronously, including child
@@ -2952,7 +2956,9 @@ mod tests {
                         windows_sys::Win32::Graphics::Gdi::GetObjectType(veto.brush) != 0,
                     )
                 };
-                eprintln!(
+                use std::io::Write as _;
+                let _ = writeln!(
+                    io::stdout().lock(),
                     "PROMPT_DESTROY_VETO:{}:published={}:drops={}:font={font_live}:brush={brush_live}",
                     veto.attempts,
                     prompt_state_slot(veto.window) == veto.slot,
@@ -3044,10 +3050,19 @@ mod tests {
             // the regression detects that path without dereferencing it.
             std::process::exit(0);
         }
-        let directory = tempfile::tempdir()?;
-        let stdout = directory.path().join("stdout.txt");
-        let stderr = directory.path().join("stderr.txt");
-        let mut child = Command::new(std::env::current_exe()?)
+        let mut expected_exit = None;
+        for writable_stderr in [true, false] {
+            let directory = tempfile::tempdir()?;
+            let stdout = directory.path().join("stdout.txt");
+            let stderr = directory.path().join("stderr.txt");
+            let stderr_file = File::create(&stderr)?;
+            let stderr_file = if writable_stderr {
+                stderr_file
+            } else {
+                drop(stderr_file);
+                File::open(&stderr)?
+            };
+            let mut child = Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 "windows::dialog::tests::native_prompt_persistent_destroy_failure_stops_before_reclaim",
@@ -3056,40 +3071,55 @@ mod tests {
             ])
             .env(CHILD, "1")
             .stdout(Stdio::from(File::create(&stdout)?))
-            .stderr(Stdio::from(File::create(&stderr)?))
+            .stderr(Stdio::from(stderr_file))
             .spawn()?;
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < Duration::from_secs(20) => {}
-                outcome => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(io::Error::other(format!(
-                        "prompt child failed to finish: {outcome:?}"
-                    )));
+            let started = Instant::now();
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if started.elapsed() < Duration::from_secs(20) => {}
+                    outcome => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(io::Error::other(format!(
+                            "prompt child failed to finish: {outcome:?}"
+                        )));
+                    }
                 }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        };
-        let diagnostics = std::fs::read_to_string(stderr)?;
-        assert!(
-            !status.success(),
-            "persistent destruction failure must stop the process"
-        );
-        for attempt in [1, 2] {
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            let diagnostics = std::fs::read_to_string(stdout)?;
             assert!(
-                diagnostics.contains(&format!(
-                    "PROMPT_DESTROY_VETO:{attempt}:published=true:drops=0:font=true:brush=true"
-                )),
-                "missing live-publication/resource proof: {diagnostics}"
+                !status.success(),
+                "persistent destruction failure must stop the process"
             );
+            for attempt in [1, 2] {
+                assert!(
+                    diagnostics.contains(&format!(
+                        "PROMPT_DESTROY_VETO:{attempt}:published=true:drops=0:font=true:brush=true"
+                    )),
+                    "missing live-publication/resource proof: {diagnostics}"
+                );
+            }
+            let stderr = std::fs::read_to_string(stderr)?;
+            if writable_stderr {
+                assert!(
+                    stderr.contains("prompt native destruction failed during teardown:"),
+                    "missing fail-stop diagnosis: {stderr}"
+                );
+                expected_exit = Some(status.code());
+            } else {
+                assert!(
+                    stderr.is_empty(),
+                    "read-only stderr must reject diagnostic writes"
+                );
+                assert_eq!(
+                    Some(status.code()),
+                    expected_exit,
+                    "stderr failure must preserve the same fatal outcome"
+                );
+            }
         }
-        assert!(
-            diagnostics.contains("prompt native destruction failed during teardown:"),
-            "missing fail-stop diagnosis: {diagnostics}"
-        );
         Ok(())
     }
 

@@ -466,6 +466,13 @@ remaining native crossings safe. Each registration retains an owned interface
 until its exact HWND is revoked, including partial list/overlay registration.
 Every callback holds a local strong reference before provider calls or UI
 dispatch, so reentrant revocation cannot reclaim its implementation mid-call.
+Main and appearance callbacks borrow state through their active
+`CallbackStateLease`, without a reusable raw value pointer. Drop registration
+requires a live lease to retain the allocation, while no `AppState` reference
+crosses OLE registration or revocation. Its disjoint retirement sidecar is
+installed before the first registration and receives each successful HWND
+before the next OLE call. Failure or destruction takes and revokes that sidecar,
+including second-registration failure and reentrant teardown.
 Provider callback arguments remain borrowed, and no application-state lease may
 survive a provider call. `#[implement(IDropTarget, Agile = false)]` disables the
 macro's default IAgileObject and free-threaded marshaler support. The target
