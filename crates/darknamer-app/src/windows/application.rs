@@ -1254,27 +1254,24 @@ unsafe extern "system" fn window_proc(
         // reference. Standard handling receives only copied callback arguments.
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
     };
-    let state_ptr = state_lease.state_mut() as *mut AppState;
+
     match message {
-        WM_CREATE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null Box::into_raw AppState stored for
-            // this HWND and remains exclusively owned by this callback thread.
-            if create_children(window, unsafe { &mut *state_ptr }).is_err() {
+        WM_CREATE => {
+            if create_children(window, state_lease.state_mut()).is_err() {
                 return -1;
             }
             // Copy child hit surfaces in a tiny borrow, then release it before
             // RegisterDragDrop can enter OLE.
-            // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (list, overlay) = unsafe {
-                let state = &*state_ptr;
+            let (list, overlay) = {
+                let state = state_lease.state();
                 (state.list_window, state.drop_overlay)
             };
-            if register_drop_targets(list, overlay, window, state_slot).is_err() {
+            if register_drop_targets(list, overlay, window, &state_lease).is_err() {
                 return -1;
             }
             // SAFETY: child creation succeeded and this callback retains the
             // allocation's sole AppState lease.
-            start_preferences_writers(window, unsafe { &mut *state_ptr });
+            start_preferences_writers(window, state_lease.state_mut());
             // SetWindowPos can synchronously reenter the callback graph. The
             // copied ListView HWND is sufficient for the z-order repair, so end
             // the AppState lease before placing it behind every direct sibling.
@@ -1285,26 +1282,24 @@ unsafe extern "system" fn window_proc(
                 0
             }
         }
-        WM_SIZE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is non-null window-owned AppState storage and no
-            // mutable reference exists while this shared layout borrow is live.
-            arrange(window, unsafe { &mut *state_ptr });
+        WM_SIZE => {
+            arrange(window, state_lease.state_mut());
             0
         }
-        WM_SETFOCUS if !state_ptr.is_null() => {
+        WM_SETFOCUS => {
             // SAFETY: this callback owns the sole state lease.
-            let target = restored_focus_target(window, unsafe { &mut *state_ptr });
+            let target = restored_focus_target(window, state_lease.state_mut());
             drop(state_lease);
             if let Some(target) = target {
                 apply_focus_target(target);
             }
             0
         }
-        WM_APP_RESTORE_FOCUS if !state_ptr.is_null() => {
+        WM_APP_RESTORE_FOCUS => {
             let requested = wparam as HWND;
             let target = if requested.is_null() {
                 // SAFETY: this callback owns the sole state lease.
-                restored_focus_target(window, unsafe { &mut *state_ptr })
+                restored_focus_target(window, state_lease.state_mut())
             } else {
                 valid_focus_target(window, requested).then_some(requested)
             };
@@ -1314,10 +1309,10 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_APP_FINISH_CLOSE if !state_ptr.is_null() => {
+        WM_APP_FINISH_CLOSE => {
             // SAFETY: the callback owns the sole AppState lease. The boolean
             // decision contains no borrowed state.
-            let close = prepare_window_close(window, unsafe { &mut *state_ptr });
+            let close = prepare_window_close(window, state_lease.state_mut());
             drop(state_lease);
             if close {
                 // SAFETY: the state lease and its AppState reference ended
@@ -1326,21 +1321,21 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_APP_LAYOUT if !state_ptr.is_null() => {
+        WM_APP_LAYOUT => {
             // SAFETY: this posted pointer-free callback begins after the
             // state mutation that requested it has returned.
-            arrange(window, unsafe { &mut *state_ptr });
+            arrange(window, state_lease.state_mut());
             0
         }
-        WM_APP_MENU_REDRAW if !state_ptr.is_null() => {
+        WM_APP_MENU_REDRAW => {
             // DrawMenuBar synchronously sends owner-draw measurement and paint
             // callbacks. End the current state lease first so those nested
             // callbacks can acquire their own non-aliasing lease.
             // SAFETY: this callback owns the sole AppState lease. The pending
             // tree and the current tree's accessibility metadata transfer out
             // exactly once so SetMenu and old-tree destruction run lease-free.
-            let (pending, attached, attached_owner_data) = unsafe {
-                let state = &mut *state_ptr;
+            let (pending, attached, attached_owner_data) = {
+                let state = state_lease.state_mut();
                 let pending = state.pending_menu.take();
                 if pending.is_some() {
                     (
@@ -1410,24 +1405,22 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_APP_POPUP_MENU_UPDATE if !state_ptr.is_null() => {
+        WM_APP_POPUP_MENU_UPDATE => {
             // wparam/lparam are intentionally ignored. Only the bounded
             // internal request queue is consumed and revalidated.
             process_popup_menu_updates(window, state_lease);
             0
         }
-        WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
-            handle_empty_safety_copy(state_lease, wparam)
-        }
-        WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {
+        WM_APP_EMPTY_SAFETY_COPY => handle_empty_safety_copy(state_lease, wparam),
+        WM_TIMER if wparam == STATUS_RENDER_TIMER_ID => {
             handle_status_render_timer(window, state_lease)
         }
-        WM_GETMINMAXINFO if !state_ptr.is_null() => {
+        WM_GETMINMAXINFO => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
-                // SAFETY: state_ptr is the live AppState. Query failure leaves
+                // The leased state is the live AppState. Query failure leaves
                 // the operating system's current tracking bounds unchanged.
-                if let Ok(minimum) = effective_minimum_track_size(window, unsafe { &*state_ptr }) {
+                if let Ok(minimum) = effective_minimum_track_size(window, state_lease.state()) {
                     // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO
                     // storage for the duration of this callback.
                     unsafe {
@@ -1438,9 +1431,8 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_DPICHANGED if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            let state = unsafe { &mut *state_ptr };
+        WM_DPICHANGED => {
+            let state = state_lease.state_mut();
             let dpi = u32::try_from(wparam & 0xFFFF).unwrap_or(BASE_DPI);
             state.dpi = dpi.max(BASE_DPI);
             refresh_system_fonts(state);
@@ -1474,9 +1466,8 @@ unsafe extern "system" fn window_proc(
             arrange(window, state);
             0
         }
-        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState.
-            let state = unsafe { &mut *state_ptr };
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            let state = state_lease.state_mut();
             refresh_forced_colors(state);
             refresh_system_theme(state);
             notify_appearance_dialog_accessibility(state);
@@ -1494,9 +1485,9 @@ unsafe extern "system" fn window_proc(
             arrange(window, state);
             0
         }
-        WM_APP_APPEARANCE_PREVIEW if !state_ptr.is_null() => {
+        WM_APP_APPEARANCE_PREVIEW => {
             // SAFETY: scalar payloads are validated before updating live state.
-            let state = unsafe { &mut *state_ptr };
+            let state = state_lease.state_mut();
             if handle_appearance_preview(state, wparam, lparam) {
                 apply_native_appearance_nonblocking(window, state);
                 update_controls(state);
@@ -1504,10 +1495,10 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_APP_APPEARANCE_FINISH if !state_ptr.is_null() => {
+        WM_APP_APPEARANCE_FINISH => {
             let released_session = {
                 // SAFETY: scalar payload/session ID are validated by the finish seam.
-                let state = unsafe { &mut *state_ptr };
+                let state = state_lease.state_mut();
                 let released = finish_appearance_dialog(window, state, wparam, lparam);
                 if released.is_some() {
                     if let Err(error) = ensure_minimum_track_size(window, state) {
@@ -1525,9 +1516,8 @@ unsafe extern "system" fn window_proc(
             drop(released_session);
             0
         }
-        WM_FONTCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState.
-            let state = unsafe { &mut *state_ptr };
+        WM_FONTCHANGE => {
+            let state = state_lease.state_mut();
             refresh_system_fonts(state);
             update_dpi_metrics(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
@@ -1540,19 +1530,16 @@ unsafe extern "system" fn window_proc(
             arrange(window, state);
             0
         }
-        WM_APP_APPLY_PROGRESS if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_apply_progress(unsafe { &mut *state_ptr });
+        WM_APP_APPLY_PROGRESS => {
+            handle_apply_progress(state_lease.state_mut());
             0
         }
-        WM_APP_APPLY_COMPLETE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_apply_completion(window, unsafe { &mut *state_ptr });
+        WM_APP_APPLY_COMPLETE => {
+            handle_apply_completion(window, state_lease.state_mut());
             0
         }
-        WM_APP_PLAN_COMPLETE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            let prepared = handle_plan_completion(window, unsafe { &mut *state_ptr });
+        WM_APP_PLAN_COMPLETE => {
+            let prepared = handle_plan_completion(window, state_lease.state_mut());
             run_prepared_worker_task_dialog_after_state_release(
                 state_lease,
                 window,
@@ -1561,9 +1548,8 @@ unsafe extern "system" fn window_proc(
             );
             0
         }
-        WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            let prepared = handle_admission_completion(window, unsafe { &mut *state_ptr });
+        WM_APP_ADMISSION_COMPLETE => {
+            let prepared = handle_admission_completion(window, state_lease.state_mut());
             run_prepared_worker_task_dialog_after_state_release(
                 state_lease,
                 window,
@@ -1572,48 +1558,44 @@ unsafe extern "system" fn window_proc(
             );
             0
         }
-        WM_APP_IMPORT_COMPLETE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_import_completion(window, unsafe { &mut *state_ptr });
+        WM_APP_IMPORT_COMPLETE => {
+            handle_import_completion(window, state_lease.state_mut());
             0
         }
-        WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
+        WM_APP_ADMISSION_STARTED => {
             // SAFETY: the posted handoff re-resolves live UI-thread state after
             // the OLE Drop callback and its AppState borrow have ended.
-            finalize_admission_start(unsafe { &mut *state_ptr });
+            finalize_admission_start(state_lease.state_mut());
             0
         }
-        WM_APP_PREFERENCES_WAKE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_preferences_wake(window, unsafe { &mut *state_ptr });
+        WM_APP_PREFERENCES_WAKE => {
+            handle_preferences_wake(window, state_lease.state_mut());
             0
         }
-        WM_TIMER if !state_ptr.is_null() && wparam == PREFERENCES_POLL_TIMER_ID => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_preferences_wake(window, unsafe { &mut *state_ptr });
+        WM_TIMER if wparam == PREFERENCES_POLL_TIMER_ID => {
+            handle_preferences_wake(window, state_lease.state_mut());
             0
         }
-        WM_TIMER if !state_ptr.is_null() && wparam == ICON_POLL_TIMER_ID => {
+        WM_TIMER if wparam == ICON_POLL_TIMER_ID => {
             // SAFETY: this callback owns the sole AppState lease; reconciliation
             // applies only scalar image indices to the current live ListView.
-            let state = unsafe { &mut *state_ptr };
+            let state = state_lease.state_mut();
             poll_icon_work(state);
             if state.close_pending {
                 try_finish_window_close(window, state);
             }
             0
         }
-        WM_APP_ICON_CONTINUE if !state_ptr.is_null() => {
+        WM_APP_ICON_CONTINUE => {
             // SAFETY: only the UI callback writes this coalescing flag and
             // reconciles at most one bounded row chunk per dispatch.
-            let state = unsafe { &mut *state_ptr };
+            let state = state_lease.state_mut();
             state.icon_continue_posted = false;
             poll_icon_work(state);
             0
         }
-        WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            let state = unsafe { &mut *state_ptr };
+        WM_TIMER if wparam == APPLY_POLL_TIMER_ID => {
+            let state = state_lease.state_mut();
             if state.import_worker.is_some() {
                 handle_import_completion(window, state);
                 return 0;
@@ -1657,9 +1639,8 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_CLOSE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            let state = unsafe { &mut *state_ptr };
+        WM_CLOSE => {
+            let state = state_lease.state_mut();
             let cancelled = cancel_appearance_dialog(window, state);
             request_window_close(window, state);
             drop(state_lease);
@@ -1668,11 +1649,11 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_ERASEBKGND if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live UI-thread state and wparam is the
+        WM_ERASEBKGND => {
+            // The leased state is live UI-thread state and wparam is the
             // callback-owned paint DC for this exact top-level window.
-            let (resources, status_chrome, workspace_chrome) = unsafe {
-                let state = &*state_ptr;
+            let (resources, status_chrome, workspace_chrome) = {
+                let state = state_lease.state();
                 (
                     state.appearance_resources.as_ref(),
                     state.status_chrome,
@@ -1688,10 +1669,10 @@ unsafe extern "system" fn window_proc(
             );
             1
         }
-        WM_DRAWITEM if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live UI-thread state and the renderer reads
+        WM_DRAWITEM => {
+            // The leased state is live UI-thread state and the renderer reads
             // only the synchronous WM_DRAWITEM payload.
-            let state = unsafe { &*state_ptr };
+            let state = state_lease.state();
             let resources = state.appearance_resources.as_ref();
             let apply_readiness_button = state
                 .left_rail
@@ -1719,10 +1700,10 @@ unsafe extern "system" fn window_proc(
             // SAFETY: unrecognized owner-draw payloads retain system handling.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
-        WM_MEASUREITEM if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live UI-thread state and lparam is the
+        WM_MEASUREITEM => {
+            // The leased state is live UI-thread state and lparam is the
             // synchronous writable measurement payload.
-            let state = unsafe { &*state_ptr };
+            let state = state_lease.state();
             if measure_owner_menu(window, state.font.as_raw(), state.dpi, lparam) {
                 1
             } else {
@@ -1730,11 +1711,11 @@ unsafe extern "system" fn window_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_MENUCHAR if !state_ptr.is_null() => {
+        WM_MENUCHAR => {
             // Native-system menus retain the default Windows mnemonic path.
-            // SAFETY: state_ptr is the live UI-thread AppState and only the
+            // The leased state is the live UI-thread AppState and only the
             // scalar rendering mode is copied before releasing the lease.
-            let owner_draw = unsafe { (*state_ptr).owner_draw_menu };
+            let owner_draw = state_lease.state().owner_draw_menu;
             if owner_draw {
                 handle_owner_menu_char(wparam, lparam)
             } else {
@@ -1743,14 +1724,14 @@ unsafe extern "system" fn window_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_INITMENUPOPUP | WM_MENUSELECT if !state_ptr.is_null() => {
+        WM_INITMENUPOPUP | WM_MENUSELECT => {
             // Store only handles that are currently reachable from the exact
             // attached root. Default processing and the pointer-free wake run
             // after the AppState lease has ended.
-            // SAFETY: state_ptr is exclusively leased for this callback and
+            // The leased state is exclusively leased for this callback and
             // the helper retains only validated scalar menu handles.
             let queued =
-                queue_popup_menu_notifications(unsafe { &mut *state_ptr }, message, wparam, lparam);
+                queue_popup_menu_notifications(state_lease.state_mut(), message, wparam, lparam);
             drop(state_lease);
             if queued {
                 // SAFETY: no caller pointer crosses the posted boundary. The
@@ -1760,13 +1741,12 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
+        WM_CTLCOLORSTATIC => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI
             // call.
-            // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (custom_colors, instruction, safety, status_message, status_count) = unsafe {
-                let state = &*state_ptr;
+            let (custom_colors, instruction, safety, status_message, status_count) = {
+                let state = state_lease.state();
                 (
                     static_control_colors(state, child),
                     state.empty_instruction,
@@ -1790,7 +1770,7 @@ unsafe extern "system" fn window_proc(
             // color handling with the original message arguments.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
-        WM_COMMAND if !state_ptr.is_null() => {
+        WM_COMMAND => {
             let command = (wparam & 0xFFFF) as u16;
             let notification = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
             let source = lparam as HWND;
@@ -1798,27 +1778,25 @@ unsafe extern "system" fn window_proc(
                 // Intercept the dedicated control before the generic mutation
                 // lock. It requests only the already-active worker token and
                 // never enters command dispatch or an Apply authorization path.
-                // SAFETY: state_ptr is the live UI-thread AppState installed in
-                // this callback window and is only read for HWND identity here.
-                if source == unsafe { (*state_ptr).cancel_worker } && notification == BN_CLICKED {
-                    // SAFETY: state_ptr is the live UI-thread AppState and the
+                if source == state_lease.state().cancel_worker && notification == BN_CLICKED {
+                    // The leased state is the live UI-thread AppState and the
                     // source was verified as its dedicated Cancel BUTTON.
-                    request_active_worker_cancel(unsafe { &mut *state_ptr });
+                    request_active_worker_cancel(state_lease.state_mut());
                 }
                 return 0;
             }
             if !source.is_null() && notification == BN_SETFOCUS {
                 // SAFETY: source is the live command button identified by this
-                // synchronous notification and state_ptr is UI-thread confined.
-                record_child_focus(unsafe { &mut *state_ptr }, source);
+                // synchronous notification and the lease is UI-thread confined.
+                record_child_focus(state_lease.state_mut(), source);
                 return 0;
             }
             if !source.is_null() && notification != BN_CLICKED {
                 return 0;
             }
-            // SAFETY: state_ptr is the non-null, window-thread-confined AppState
+            // The leased state is the non-null, window-thread-confined AppState
             // installed in GWLP_USERDATA and is uniquely borrowed for dispatch.
-            let action = dispatch_command(window, unsafe { &mut *state_ptr }, command);
+            let action = dispatch_command(window, state_lease.state_mut(), command);
             run_prepared_command_action_after_state_release(
                 state_lease,
                 window,
@@ -1829,7 +1807,7 @@ unsafe extern "system" fn window_proc(
             );
             0
         }
-        WM_NOTIFY if !state_ptr.is_null() => {
+        WM_NOTIFY => {
             let header = lparam as *const NMHDR;
             if !header.is_null() && programmatic_list_update_active() {
                 // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix. This
@@ -1843,38 +1821,36 @@ unsafe extern "system" fn window_proc(
             }
             // SAFETY: this callback owns the sole state lease; only the copied
             // ListView HWND is passed to the source-validating native query.
-            let list_window = unsafe { (*state_ptr).list_window };
+            let list_window = state_lease.state().list_window;
             if let Some(result) = handle_list_marquee_begin(list_window, lparam) {
                 return result;
             }
-            // SAFETY: state_ptr is the live UI-thread AppState and the custom
+            // The leased state is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.
-            if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+            if let Some(result) = handle_list_custom_draw(state_lease.state(), lparam) {
                 return result;
             }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
-            // SAFETY: state_ptr is the live UI-thread AppState and lparam is
+            // The leased state is the live UI-thread AppState and lparam is
             // inspected only for this synchronous WM_NOTIFY callback.
-            if handle_header_end_track(unsafe { &mut *state_ptr }, lparam) {
+            if handle_header_end_track(state_lease.state_mut(), lparam) {
                 return 0;
             }
             // SAFETY: same live callback-owned AppState and WM_NOTIFY payload.
-            if handle_list_infotip(unsafe { &*state_ptr }, lparam) {
+            if handle_list_infotip(state_lease.state(), lparam) {
                 return 0;
             }
             if !header.is_null()
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
-                && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
+                && unsafe { (*header).hwndFrom } == state_lease.state().list_window
             {
                 // SAFETY: header is the live NMHDR prefix supplied by the
                 // ListView for this synchronous notification.
                 if unsafe { (*header).code } == NM_SETFOCUS {
-                    // SAFETY: state_ptr is live UI-thread state and list_window
+                    // The leased state is live UI-thread state and list_window
                     // is the notification source just validated above.
-                    record_child_focus(unsafe { &mut *state_ptr }, unsafe {
-                        (*state_ptr).list_window
-                    });
+                    record_child_focus(state_lease.state_mut(), list_window);
                     return 0;
                 }
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
@@ -1890,15 +1866,15 @@ unsafe extern "system" fn window_proc(
                             unsafe { (*notification).uNewState },
                         )
                     {
-                        // SAFETY: state_ptr is non-null AppState storage owned by
+                        // The leased state is non-null AppState storage owned by
                         // this callback thread and is uniquely borrowed here.
-                        update_controls(unsafe { &mut *state_ptr });
+                        update_controls(state_lease.state_mut());
                     }
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
                 } else if unsafe { (*header).code } == NM_DBLCLK {
-                    // SAFETY: state_ptr is the non-null AppState installed for
+                    // The leased state is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
-                    let state = unsafe { &mut *state_ptr };
+                    let state = state_lease.state_mut();
                     // A double-click is an alternate gesture for the same
                     // exact-one-selection command exposed by the menu and rail.
                     if selected_indices(state.list_window).len() != 1 {
@@ -1919,21 +1895,19 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
-            let mut cancelled_appearance = None;
-            let mut menu = null_mut();
-            let mut menu_owner_data = OwnerMenuDataStore::new();
-            if !state_ptr.is_null() {
+            let (cancelled_appearance, menu, menu_owner_data) = {
                 // Stop the ListView from retaining AppState refdata before any
                 // child teardown can reenter through common-controls messages.
-                // SAFETY: state_ptr is live and UI-thread confined here.
-                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
+                // The leased state is live and UI-thread confined here.
+                remove_list_view_notification_subclass(state_lease.state().list_window);
                 // SAFETY: defensive owner teardown removes any appearance
                 // session now; native dialog destruction follows lease release.
-                cancelled_appearance = cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+                let cancelled_appearance =
+                    cancel_appearance_dialog(window, state_lease.state_mut());
                 // Copy overlay identity, then revoke the disjoint OLE sidecar
                 // without extending the AppState reference into COM teardown.
                 // SAFETY: this callback owns the sole AppState lease.
-                let overlay = unsafe { (*state_ptr).drop_overlay };
+                let overlay = state_lease.state().drop_overlay;
                 // SAFETY: the sidecar is UI-thread confined, disjoint from the
                 // leased state value, and taken at most once.
                 let registrations = unsafe { CallbackState::take_retirement(state_slot) };
@@ -1941,21 +1915,22 @@ unsafe extern "system" fn window_proc(
                 drop(registrations);
                 // Destroy tooltip windows before their CommandRail-owned text
                 // buffers are released, then destroy the direct child buttons.
-                // SAFETY: state_ptr is the live window-thread AppState and this
+                // The leased state is the live window-thread AppState and this
                 // message is its single deterministic command-rail teardown.
-                if let Some(rail) = unsafe { (&mut *state_ptr).left_rail.take() } {
+                if let Some(rail) = state_lease.state_mut().left_rail.take() {
                     rail.destroy();
                 }
                 // SAFETY: same exclusive AppState access as the left rail above.
-                if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
+                if let Some(rail) = state_lease.state_mut().right_rail.take() {
                     rail.destroy();
                 }
                 // Keep accessibility metadata alive until an attached tree is
                 // explicitly destroyed. A pending tree stays OwnedMenu-owned.
                 // SAFETY: this callback owns the sole AppState lease.
-                (menu, menu_owner_data) =
-                    take_attached_menu_for_destroy(unsafe { &mut *state_ptr });
-            }
+                let (menu, menu_owner_data) =
+                    take_attached_menu_for_destroy(state_lease.state_mut());
+                (cancelled_appearance, menu, menu_owner_data)
+            };
             drop(state_lease);
             if let Some(cancelled) = cancelled_appearance {
                 destroy_cancelled_appearance_dialog(cancelled);
