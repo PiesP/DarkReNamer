@@ -405,6 +405,15 @@ The following bounded design dispositions retain existing behavior:
   needs a separate state-lifetime change covering nested callbacks, modal owners,
   unpublished windows and final sidecar reclamation. The existing lease regression
   cases remain the current contract; COM ownership cleanup does not replace it.
+  The modal prompt's caller owns its complete slot, fonts and palette until
+  synchronous native window destruction ends the publication and child uses.
+  Logical acceptance/cancellation is separate from that retirement. A failed
+  close is retried once during owner teardown; if native destruction still
+  fails, the process aborts before reclaiming any prompt state or resources.
+  It neither returns with a live orphan nor accumulates retained prompt owners.
+  This fatal path does not delete recovery evidence. The same-thread CBT-hook
+  regression vetoes both destructions in an isolated bounded child process,
+  checking publication and live resources without dereferencing freed state.
 - **System popup discovery/subclassing: retain current appearance.** The code
   customizes native popup cascade markers using bounded same-thread discovery,
   exact subclass identity/generation checks and resource-specific cleanup. Removing
