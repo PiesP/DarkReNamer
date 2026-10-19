@@ -525,6 +525,173 @@ fn non_identifier_unicode_separators_end_lifetimes_and_identifiers() {
 }
 
 #[test]
+fn line_separator_between_unsafe_and_block_is_detected() {
+    let source = "fn sample() { let value = 7_i32; let pointer = &value as *const i32; let _read = unsafe\u{2028}{ *pointer }; }";
+    let counts = UnsafeCounts::from_source(source);
+    assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0));
+    assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+    assert!(unsafe_counts_allowed(
+        "src/rename/windows_native.rs",
+        counts
+    ));
+}
+
+#[test]
+fn line_separator_between_static_and_mut_is_detected() {
+    let source = "static\u{2028}mut VALUE: u32 = 0;";
+    let counts = UnsafeCounts::from_source(source);
+    assert_eq!(
+        counts,
+        UnsafeCounts {
+            prohibited: 1,
+            ..UnsafeCounts::new(0, 0, 0, 0)
+        }
+    );
+    assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+    assert!(!unsafe_counts_allowed(
+        "src/rename/windows_native.rs",
+        counts
+    ));
+}
+
+#[test]
+fn rust_source_whitespace_preserves_unsafe_block_and_mutable_static_adjacency() {
+    // Rust's Pattern_White_Space set includes vertical tab and five Unicode scalars.
+    for separator in [
+        '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}',
+        '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}',
+    ] {
+        let source = format!("unsafe{separator}{{}}");
+        let counts = UnsafeCounts::from_source(&source);
+        assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0), "{source:?}");
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+
+        let source = format!("static{separator}mut VALUE: u32 = 0;");
+        let counts = UnsafeCounts::from_source(&source);
+        assert_eq!(
+            counts,
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+            "{source:?}"
+        );
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(!unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+        assert!(!unsafe_counts_allowed("src/windows.rs", counts));
+    }
+}
+
+#[test]
+fn rust_source_whitespace_preserves_other_unsafe_construct_permissions() {
+    let cases = [
+        (
+            "unsafe",
+            "fn callback() {}",
+            UnsafeCounts::new(0, 1, 0, 0),
+            true,
+        ),
+        (
+            "unsafe",
+            "extern \"C\" fn callback() {}",
+            UnsafeCounts::new(0, 0, 1, 0),
+            true,
+        ),
+        (
+            "unsafe",
+            "impl Trait for Type {}",
+            UnsafeCounts::new(0, 0, 0, 1),
+            false,
+        ),
+        (
+            "unsafe",
+            "trait Trait {}",
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+            false,
+        ),
+        (
+            "#[unsafe",
+            "(no_mangle)] fn export() {}",
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+            false,
+        ),
+    ];
+    for separator in [
+        '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}',
+        '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}',
+    ] {
+        for (prefix, suffix, expected, allowed_in_windows) in cases {
+            let source = format!("{prefix}{separator}{suffix}");
+            let counts = UnsafeCounts::from_source(&source);
+            assert_eq!(counts, expected, "{source:?}");
+            assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+            assert!(!unsafe_counts_allowed(
+                "src/rename/windows_native.rs",
+                counts
+            ));
+            assert_eq!(
+                unsafe_counts_allowed("src/windows.rs", counts),
+                allowed_in_windows,
+                "{source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_rust_whitespace_and_punctuation_do_not_join_unsafe_tokens() {
+    // These strings are scanner inputs, not valid Rust source examples.
+    for separator in ['\u{00A0}', '\u{2003}', '\u{3002}'] {
+        for source in [
+            format!("unsafe{separator}{{}}"),
+            format!("static{separator}mut VALUE: u32 = 0;"),
+        ] {
+            let counts = UnsafeCounts::from_source(&source);
+            assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source:?}");
+            assert!(unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        }
+    }
+}
+
+#[test]
+fn unicode_source_whitespace_does_not_end_line_comments() {
+    for separator in [
+        '\u{0009}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}', '\u{200E}',
+        '\u{200F}', '\u{2028}', '\u{2029}',
+    ] {
+        let source = format!("// comment{separator}unsafe {{}} static mut VALUE: u32 = 0;");
+        assert_eq!(
+            UnsafeCounts::from_source(&source),
+            UnsafeCounts::new(0, 0, 0, 0),
+            "{source:?}"
+        );
+
+        let source = format!("{source}\nunsafe {{}} static mut VALUE: u32 = 0;");
+        assert_eq!(
+            UnsafeCounts::from_source(&source),
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(1, 0, 0, 0)
+            },
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
 fn identifier_table_matches_the_pinned_rust_unicode_version() {
     assert_eq!(unicode_ident::UNICODE_VERSION, std::char::UNICODE_VERSION);
 }
@@ -558,8 +725,11 @@ fn rust_tokens(source: &str) -> Vec<RustToken> {
     let mut tokens = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index].is_ascii_whitespace() {
-            index += 1;
+        let Some(character) = source.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        if is_rust_source_whitespace(character) {
+            index += character.len_utf8();
             continue;
         }
         if bytes[index..].starts_with(b"//") {
@@ -594,9 +764,6 @@ fn rust_tokens(source: &str) -> Vec<RustToken> {
             continue;
         }
         tokens.push(RustToken::Punctuation(bytes[index]));
-        let Some(character) = source.get(index..).and_then(|rest| rest.chars().next()) else {
-            break;
-        };
         index += character.len_utf8();
     }
     tokens
@@ -734,6 +901,23 @@ fn quoted_literal_end(bytes: &[u8], index: usize) -> Option<usize> {
 
 fn is_identifier_start(character: char) -> bool {
     character == '_' || unicode_ident::is_xid_start(character)
+}
+
+fn is_rust_source_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000A}'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\u{000D}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
 }
 
 fn is_identifier_continue(character: char) -> bool {
