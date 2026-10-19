@@ -579,6 +579,13 @@ pub(super) struct PromptState {
     pub(super) dpi: u32,
 }
 
+#[cfg(test)]
+impl Drop for PromptState {
+    fn drop(&mut self) {
+        tests::record_prompt_drop_for_test();
+    }
+}
+
 type PromptStateSlot = CallbackState<PromptState>;
 
 /// The modal caller owns the slot; callbacks only borrow its published pointer.
@@ -596,8 +603,8 @@ impl PromptWindow {
             .ok_or_else(|| io::Error::other("prompt callback state is busy"))
     }
 
-    fn close(&self) {
-        close_prompt(self.window, self.slot);
+    fn close(&self) -> io::Result<()> {
+        close_prompt(self.window, self.slot)
     }
 
     fn finished(&self) -> io::Result<bool> {
@@ -608,9 +615,22 @@ impl PromptWindow {
 
 impl Drop for PromptWindow {
     fn drop(&mut self) {
-        self.close();
-        // SAFETY: publication is cleared by window destruction. This is the
-        // unique owner, and any remaining lease defers allocation reclamation.
+        if let Err(error) = self.close() {
+            use std::io::Write as _;
+            // A failed close can leave children using our fonts and palette,
+            // as well as the published slot itself. Do not unwind or return
+            // and release those resources. This matches the existing fatal
+            // cleanup policy and bounds retained ownership to process exit.
+            let _ = writeln!(
+                io::stderr().lock(),
+                "prompt native destruction failed during teardown: {error}"
+            );
+            std::process::abort();
+        }
+        // SAFETY: native destruction completed synchronously, including child
+        // teardown and publication removal, or an earlier destruction already
+        // completed. Logical `done` alone never reaches this reclamation path.
+        // This is the unique owner; an active lease still defers reclamation.
         unsafe { CallbackState::request_reclaim(self.slot) };
     }
 }
@@ -621,12 +641,17 @@ fn prompt_state_slot(window: HWND) -> *mut PromptStateSlot {
     unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut PromptStateSlot }
 }
 
-fn close_prompt(window: HWND, slot: *mut PromptStateSlot) {
-    if prompt_state_slot(window) == slot {
+fn close_prompt(window: HWND, slot: *mut PromptStateSlot) -> io::Result<()> {
+    if prompt_state_slot(window) == slot && !window.is_null() {
         // SAFETY: this exact publication identifies our live prompt. No state
         // reference is held, and the modal owner retains the slot until return.
-        unsafe { DestroyWindow(window) };
+        if unsafe { DestroyWindow(window) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
+    // Only WM_NCDESTROY removes this exact publication. The same-thread owner
+    // cannot resume from the destroying native call until its callbacks return.
+    Ok(())
 }
 
 fn redraw_prompt(window: HWND, slot: *mut PromptStateSlot) {
@@ -757,11 +782,11 @@ fn run_prompt_message_loop(prompt: &PromptWindow) -> io::Result<bool> {
         tests::record_prompt_quit_for_test(status, &message);
         if status == -1 {
             let error = io::Error::last_os_error();
-            prompt.close();
+            let _ = prompt.close();
             return Err(error);
         }
         if status == 0 {
-            prompt.close();
+            let _ = prompt.close();
             // SAFETY: repost the original quit code after the prompt is closed.
             unsafe { PostQuitMessage(message.wParam as i32) };
             return Ok(false);
@@ -1671,13 +1696,13 @@ pub(super) unsafe extern "system" fn prompt_proc(
                     }
                     state.done = true;
                     drop(lease);
-                    close_prompt(window, slot);
+                    let _ = close_prompt(window, slot);
                     return 0;
                 }
                 PromptButtonAction::Close => {
                     lease.state_mut().done = true;
                     drop(lease);
-                    close_prompt(window, slot);
+                    let _ = close_prompt(window, slot);
                     return 0;
                 }
                 PromptButtonAction::None => {}
@@ -1687,7 +1712,7 @@ pub(super) unsafe extern "system" fn prompt_proc(
         WM_CLOSE => {
             lease.state_mut().done = true;
             drop(lease);
-            close_prompt(window, slot);
+            let _ = close_prompt(window, slot);
             return 0;
         }
         // SAFETY: arguments are unchanged values from the active callback.
@@ -2889,6 +2914,260 @@ mod tests {
     thread_local! {
         static PROMPT_QUIT_AT_ENTRY: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
         static PROMPT_QUIT_RECEIVED: std::cell::Cell<Option<(u32, usize)>> = const { std::cell::Cell::new(None) };
+        static PROMPT_DROPS: Cell<usize> = const { Cell::new(0) };
+        static PROMPT_DESTROY_VETO: Cell<Option<DestroyVeto>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn record_prompt_drop_for_test() {
+        PROMPT_DROPS.with(|drops| drops.set(drops.get() + 1));
+    }
+
+    #[derive(Clone, Copy)]
+    struct DestroyVeto {
+        window: HWND,
+        slot: *mut PromptStateSlot,
+        font: HFONT,
+        brush: windows_sys::Win32::Graphics::Gdi::HBRUSH,
+        attempts: usize,
+    }
+
+    unsafe extern "system" fn veto_prompt_destruction(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HCBT_DESTROYWND};
+        if code == HCBT_DESTROYWND as i32 {
+            let vetoed = PROMPT_DESTROY_VETO.with(|current| {
+                let Some(mut veto) = current.get() else {
+                    return false;
+                };
+                if veto.window != wparam as HWND {
+                    return false;
+                }
+                veto.attempts += 1;
+                current.set(Some(veto));
+                // SAFETY: these copied handles belong to the exact prompt
+                // whose destruction is still vetoed. Querying their type and
+                // publication never dereferences a possibly reclaimed slot.
+                let (font_live, brush_live) = unsafe {
+                    (
+                        windows_sys::Win32::Graphics::Gdi::GetObjectType(veto.font) != 0,
+                        windows_sys::Win32::Graphics::Gdi::GetObjectType(veto.brush) != 0,
+                    )
+                };
+                use std::io::Write as _;
+                let _ = writeln!(
+                    io::stdout().lock(),
+                    "PROMPT_DESTROY_VETO:{}:published={}:drops={}:font={font_live}:brush={brush_live}",
+                    veto.attempts,
+                    prompt_state_slot(veto.window) == veto.slot,
+                    PROMPT_DROPS.with(Cell::get),
+                );
+                true
+            });
+            if vetoed {
+                return 1;
+            }
+        }
+        // SAFETY: all unrelated or negative codes retain the documented hook
+        // chain; no borrowed prompt state crosses this native call.
+        unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
+    }
+
+    struct PromptDestroyVeto(windows_sys::Win32::UI::WindowsAndMessaging::HHOOK);
+
+    impl PromptDestroyVeto {
+        fn install(prompt: &PromptWindow) -> io::Result<Self> {
+            use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_CBT};
+            let state = prompt.lease()?;
+            let resources = state
+                .state()
+                .appearance_resources
+                .as_ref()
+                .ok_or_else(|| io::Error::other("prompt palette missing"))?;
+            let veto = DestroyVeto {
+                window: prompt.window,
+                slot: prompt.slot,
+                font: state.state().font.as_raw(),
+                brush: resources.dialog_brush(),
+                attempts: 0,
+            };
+            drop(state);
+            // SAFETY: this same-thread hook has a static callback and targets
+            // only the exact copied HWND; its guard removes the hook on exit.
+            let hook = unsafe {
+                SetWindowsHookExW(
+                    WH_CBT,
+                    Some(veto_prompt_destruction),
+                    null_mut(),
+                    GetCurrentThreadId(),
+                )
+            };
+            if hook.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            PROMPT_DESTROY_VETO.with(|current| current.set(Some(veto)));
+            Ok(Self(hook))
+        }
+    }
+
+    impl Drop for PromptDestroyVeto {
+        fn drop(&mut self) {
+            // SAFETY: this guard owns the exact same-thread hook. No native
+            // callback is in flight on the current stack while removing it.
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(self.0) };
+            PROMPT_DESTROY_VETO.with(|current| current.set(None));
+        }
+    }
+
+    #[test]
+    fn native_prompt_persistent_destroy_failure_stops_before_reclaim() -> io::Result<()> {
+        use std::fs::File;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "DARKRENAMER_PROMPT_DESTROY_FAILURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let owner = PromptTestOwner::create()?;
+            let prompt = create_prompt_window(
+                owner.0,
+                prompt_test_appearance(AppThemeMode::Dark),
+                prompt_test_spec(),
+                false,
+            )?;
+            PROMPT_DROPS.with(|drops| drops.set(0));
+            let _veto = PromptDestroyVeto::install(&prompt)?;
+            // SAFETY: use the actual close callback, then the real owner's
+            // destructor retry. The hook refuses both native destructions.
+            unsafe { SendMessageW(prompt.window, WM_CLOSE, 0, 0) };
+            assert!(prompt.finished()?);
+            assert_eq!(prompt_state_slot(prompt.window), prompt.slot);
+            assert_eq!(PROMPT_DROPS.with(Cell::get), 0);
+            drop(prompt);
+            // The old implementation returns after reclaiming a published
+            // allocation. Exit without further native dispatch or teardown so
+            // the regression detects that path without dereferencing it.
+            std::process::exit(0);
+        }
+        let mut expected_exit = None;
+        for writable_stderr in [true, false] {
+            let directory = tempfile::tempdir()?;
+            let stdout = directory.path().join("stdout.txt");
+            let stderr = directory.path().join("stderr.txt");
+            let stderr_file = File::create(&stderr)?;
+            let stderr_file = if writable_stderr {
+                stderr_file
+            } else {
+                drop(stderr_file);
+                File::open(&stderr)?
+            };
+            let mut child = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "windows::dialog::tests::native_prompt_persistent_destroy_failure_stops_before_reclaim",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::from(File::create(&stdout)?))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()?;
+            let started = Instant::now();
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if started.elapsed() < Duration::from_secs(20) => {}
+                    outcome => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(io::Error::other(format!(
+                            "prompt child failed to finish: {outcome:?}"
+                        )));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            let diagnostics = std::fs::read_to_string(stdout)?;
+            assert!(
+                !status.success(),
+                "persistent destruction failure must stop the process"
+            );
+            for attempt in [1, 2] {
+                assert!(
+                    diagnostics.contains(&format!(
+                        "PROMPT_DESTROY_VETO:{attempt}:published=true:drops=0:font=true:brush=true"
+                    )),
+                    "missing live-publication/resource proof: {diagnostics}"
+                );
+            }
+            let stderr = std::fs::read_to_string(stderr)?;
+            if writable_stderr {
+                assert!(
+                    stderr.contains("prompt native destruction failed during teardown:"),
+                    "missing fail-stop diagnosis: {stderr}"
+                );
+                expected_exit = Some(status.code());
+            } else {
+                assert!(
+                    stderr.is_empty(),
+                    "read-only stderr must reject diagnostic writes"
+                );
+                assert_eq!(
+                    Some(status.code()),
+                    expected_exit,
+                    "stderr failure must preserve the same fatal outcome"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_prompt_failed_close_keeps_resources_until_successful_retry() -> io::Result<()> {
+        let owner = PromptTestOwner::create()?;
+        let prompt = create_prompt_window(
+            owner.0,
+            prompt_test_appearance(AppThemeMode::Dark),
+            prompt_test_spec(),
+            false,
+        )?;
+        PROMPT_DROPS.with(|drops| drops.set(0));
+        let veto = PromptDestroyVeto::install(&prompt)?;
+        assert!(prompt.close().is_err());
+        assert_eq!(prompt_state_slot(prompt.window), prompt.slot);
+        assert_eq!(PROMPT_DROPS.with(Cell::get), 0);
+        drop(veto);
+        prompt.close()?;
+        assert!(prompt_state_slot(prompt.window).is_null());
+        assert_eq!(PROMPT_DROPS.with(Cell::get), 0);
+        drop(prompt);
+        assert_eq!(PROMPT_DROPS.with(Cell::get), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn native_prompt_accept_cancel_and_details_reclaim_once() -> io::Result<()> {
+        let owner = PromptTestOwner::create()?;
+        for (read_only, action) in [(false, IDOK), (false, IDCANCEL), (true, IDCANCEL)] {
+            let prompt = create_prompt_window(
+                owner.0,
+                prompt_test_appearance(AppThemeMode::Dark),
+                prompt_test_spec(),
+                read_only,
+            )?;
+            PROMPT_DROPS.with(|drops| drops.set(0));
+            // SAFETY: the exact prompt receives its ordinary native button
+            // notification; publication ends before the modal owner reclaims.
+            unsafe { SendMessageW(prompt.window, WM_COMMAND, action as usize, 0) };
+            assert!(prompt.finished()?);
+            assert!(prompt_state_slot(prompt.window).is_null());
+            assert_eq!(prompt.lease()?.state().result.is_some(), action == IDOK);
+            assert_eq!(PROMPT_DROPS.with(Cell::get), 0);
+            drop(prompt);
+            assert_eq!(PROMPT_DROPS.with(Cell::get), 1);
+        }
+        Ok(())
     }
 
     pub(super) fn inject_prompt_quit_for_test() {

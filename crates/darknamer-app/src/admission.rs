@@ -975,7 +975,6 @@ mod windows {
     use std::borrow::Cow;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::fs::File;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::fs::MetadataExt;
     use std::path::{Component, Prefix};
@@ -983,8 +982,8 @@ mod windows {
     use darknamer_core::validate_windows_leaf_name;
 
     use crate::rename::windows_native::{
-        DirectoryQueryError, NativeParent, file_identity, open_directory_entry, open_entry,
-        query_directory_names, query_directory_names_cancellable,
+        DirectoryQueryError, NativeParent, SynchronousDirectory, file_identity,
+        open_directory_entry, open_entry, query_directory_names, query_directory_names_cancellable,
     };
 
     use super::*;
@@ -993,7 +992,7 @@ mod windows {
     #[derive(Debug, Default)]
     pub struct WindowsAdmissionAdapter {
         parents: RefCell<BTreeMap<PathBuf, NativeParent>>,
-        directories: RefCell<BTreeMap<PathBuf, File>>,
+        directories: RefCell<BTreeMap<PathBuf, SynchronousDirectory>>,
         metadata_cache: RefCell<BTreeMap<PathBuf, AdmissionMetadata>>,
     }
 

@@ -382,6 +382,36 @@ are released once. Unknown security forms fail closed before journal decoding.
 Successful descriptor, DACL and ACE outputs are explicitly checked for null;
 ACL/ACE dereferences use checked `NonNull` values while the descriptor remains owned.
 
+Admission retains `SynchronousDirectory`, constructed only by opening a directory
+with `SYNCHRONIZE`, `FILE_DIRECTORY_FILE` and `FILE_SYNCHRONOUS_IO_NONALERT`.
+Both directory-query APIs require a borrow of that owner; no safe conversion
+from an arbitrary `File` exists. The [synchronous create option](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-zwcreatefile)
+ensures each query finishes using its local result and status buffers before
+returning. Cancellation and single-entry, bounded UTF-16 enumeration are unchanged.
+`SecurityDescriptor` is constructed only by successful descriptor operations;
+its borrow outlives `NtCreateFile`. General `LocalFree` storage for a SID string
+is a separate `LocalAllocation`, so allocation lifetime alone cannot stand in
+for descriptor identity. Both owners free their allocations exactly once.
+
+SID validation follows the producer's accessible-memory contract before the
+semantic [IsValidSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidsid)
+check and [GetLengthSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid),
+which requires a valid SID. The bounded review has these dispositions:
+
+- Token-user SIDs from [GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation)
+  are checked within the returned buffer: pointer location, header, revision,
+  subauthority count and complete extent precede validation and copying.
+- [CreateWellKnownSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createwellknownsid)
+  must succeed within its caller-owned buffer; the returned size and complete
+  SID structure are checked before semantic validation and retention.
+- Owner SIDs from [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+  remain within its successful, owned descriptor output. Null and invalid SIDs
+  are rejected before comparison or string conversion; the descriptor stays live.
+- ACE SIDs stay within that descriptor's DACL. [IsValidAcl](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidacl)
+  and `GetAce` establish the live ACE extent. Only supported ACE forms are used;
+  header, revision, count and the complete SID extent are checked before the SID
+  APIs and allow-list comparison. Malformed data fails closed without ACL repair.
+
 The TaskDialog source guard checks identifiers and dynamic-lookup source strings.
 It does not measure a compiled executable's PE import table.
 
@@ -405,6 +435,15 @@ The following bounded design dispositions retain existing behavior:
   needs a separate state-lifetime change covering nested callbacks, modal owners,
   unpublished windows and final sidecar reclamation. The existing lease regression
   cases remain the current contract; COM ownership cleanup does not replace it.
+  The modal prompt's caller owns its complete slot, fonts and palette until
+  synchronous native window destruction ends the publication and child uses.
+  Logical acceptance/cancellation is separate from that retirement. A failed
+  close is retried once during owner teardown; if native destruction still
+  fails, the process aborts before reclaiming any prompt state or resources.
+  It neither returns with a live orphan nor accumulates retained prompt owners.
+  This fatal path does not delete recovery evidence. The same-thread CBT-hook
+  regression vetoes both destructions in an isolated bounded child process,
+  checking publication and live resources without dereferencing freed state.
 - **System popup discovery/subclassing: retain current appearance.** The code
   customizes native popup cascade markers using bounded same-thread discovery,
   exact subclass identity/generation checks and resource-specific cleanup. Removing
@@ -427,6 +466,13 @@ remaining native crossings safe. Each registration retains an owned interface
 until its exact HWND is revoked, including partial list/overlay registration.
 Every callback holds a local strong reference before provider calls or UI
 dispatch, so reentrant revocation cannot reclaim its implementation mid-call.
+Main and appearance callbacks borrow state through their active
+`CallbackStateLease`, without a reusable raw value pointer. Drop registration
+requires a live lease to retain the allocation, while no `AppState` reference
+crosses OLE registration or revocation. Its disjoint retirement sidecar is
+installed before the first registration and receives each successful HWND
+before the next OLE call. Failure or destruction takes and revokes that sidecar,
+including second-registration failure and reentrant teardown.
 Provider callback arguments remain borrowed, and no application-state lease may
 survive a provider call. `#[implement(IDropTarget, Agile = false)]` disables the
 macro's default IAgileObject and free-threaded marshaler support. The target
@@ -459,6 +505,14 @@ threads. Its resource-specific destructor balances initialization on the UI
 apartment after the WinRT queries finish. The existing module-private OLE guard
 remains local to its initialization and UI run scope; broader guard redesign is
 deferred because no wrong-thread use was identified in those call sites.
+
+`WorkerCom` likewise exists only after `CoInitializeEx` returns `S_OK` or
+`S_FALSE`, and its private `PhantomData<Rc<()>>` prevents transfer or sharing
+across threads. Failed STA initialization over an existing explicit MTA creates
+no guard and leaves that MTA initialized. Only the factory crosses the worker
+thread boundary; its constructed Shell lookup remains local. `SavedDcState`
+and `SavedPopupDc` exist only after a nonzero `SaveDC` result and restore that
+exact still-live DC state. A failed save creates no guard or `RestoreDC` call.
 
 The native UI exceptions exist where Win32 handle, message, drawing, theme, and
 subclass APIs cannot be expressed through the safe bindings. Those call sites

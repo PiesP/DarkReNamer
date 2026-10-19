@@ -2112,11 +2112,10 @@ unsafe extern "system" fn appearance_dialog_proc(
         // same-state nested entry is rejected before constructing a reference.
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
     };
-    let state_ptr = state_lease.state_mut() as *mut AppearanceDialogWindowState;
+
     match message {
-        WM_CREATE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_CREATE => {
+            let state = state_lease.state_mut();
             if create_controls(window, state).is_err() {
                 return -1;
             }
@@ -2132,13 +2131,12 @@ unsafe extern "system" fn appearance_dialog_proc(
             schedule_appearance_focus_repair(window, state, true);
             0
         }
-        WM_COMMAND if !state_ptr.is_null() => {
+        WM_COMMAND => {
             let id = (wparam & 0xFFFF) as u16;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
             if notification == BN_CLICKED {
                 let close = {
-                    // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-                    let state = unsafe { &mut *state_ptr };
+                    let state = state_lease.state_mut();
                     action_for_command(state, id)
                         .is_some_and(|action| apply_action(window, state, action))
                 };
@@ -2152,10 +2150,10 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
-        WM_NOTIFY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live dialog state and lparam is the
+        WM_NOTIFY => {
+            // The leased state is live dialog state and lparam is the
             // synchronous button custom-draw notification.
-            let state = unsafe { &*state_ptr };
+            let state = state_lease.state();
             if let Some(result) = draw_custom_button(
                 state.appearance_resources.as_deref(),
                 state.ok,
@@ -2168,9 +2166,9 @@ unsafe extern "system" fn appearance_dialog_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_ERASEBKGND if !state_ptr.is_null() => {
-            // SAFETY: state_ptr and paint DC are live for this callback.
-            let state = unsafe { &*state_ptr };
+        WM_ERASEBKGND => {
+            // The leased state and paint DC are live for this callback.
+            let state = state_lease.state();
             let mut rect = RECT::default();
             // SAFETY: window/DC are live and rect is writable.
             unsafe { GetClientRect(window, &mut rect) };
@@ -2185,9 +2183,9 @@ unsafe extern "system" fn appearance_dialog_proc(
             unsafe { FillRect(wparam as HDC, &rect, brush) };
             1
         }
-        WM_DRAWITEM if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live and draw payload is synchronous.
-            let state = unsafe { &*state_ptr };
+        WM_DRAWITEM => {
+            // The leased state is live and draw payload is synchronous.
+            let state = state_lease.state();
             let resources = state.appearance_resources.as_deref();
             if draw_owner_separator(resources, state.separator, SeparatorSurface::Dialog, lparam)
                 || draw_owner_button(resources, state.dpi, lparam)
@@ -2198,9 +2196,9 @@ unsafe extern "system" fn appearance_dialog_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live and the optional resources outlive this callback.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            // The leased state is live and the optional resources outlive this callback.
+            let resources = state_lease.state().appearance_resources.as_ref();
             if let Some(resources) = resources {
                 let palette = resources.palette();
                 // SAFETY: wparam is the callback-owned control DC.
@@ -2214,10 +2212,9 @@ unsafe extern "system" fn appearance_dialog_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_CLOSE if !state_ptr.is_null() => {
+        WM_CLOSE => {
             {
-                // SAFETY: state_ptr is the dialog-owned Box for this close callback.
-                let state = unsafe { &mut *state_ptr };
+                let state = state_lease.state_mut();
                 let _close = apply_action(window, state, AppearanceDialogAction::Cancel);
             }
             drop(state_lease);
@@ -2226,9 +2223,8 @@ unsafe extern "system" fn appearance_dialog_proc(
             unsafe { DestroyWindow(window) };
             0
         }
-        WM_DPICHANGED if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_DPICHANGED => {
+            let state = state_lease.state_mut();
             state.dpi = ((wparam & 0xFFFF) as u32).max(BASE_DPI);
             recreate_font(state);
             let placement = if lparam == 0 {
@@ -2242,9 +2238,8 @@ unsafe extern "system" fn appearance_dialog_proc(
             schedule_appearance_focus_repair(window, state, false);
             0
         }
-        WM_SETTINGCHANGE | WM_FONTCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_SETTINGCHANGE | WM_FONTCHANGE => {
+            let state = state_lease.state_mut();
             // SAFETY: window is the live appearance dialog HWND.
             state.dpi = unsafe { GetDpiForWindow(window) }.max(BASE_DPI);
             recreate_font(state);
@@ -2252,9 +2247,8 @@ unsafe extern "system" fn appearance_dialog_proc(
             schedule_appearance_focus_repair(window, state, false);
             0
         }
-        WM_APP_APPEARANCE_ACCESSIBILITY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_APP_APPEARANCE_ACCESSIBILITY => {
+            let state = state_lease.state_mut();
             if u32::try_from(lparam).ok() == Some(state.session_id) {
                 let (forced_colors, system_theme) = unpack_appearance_environment(wparam);
                 // SAFETY: GetFocus returns only a borrowed HWND. Capture whether
@@ -2271,11 +2265,10 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
-        WM_APP_APPEARANCE_REDRAW if !state_ptr.is_null() => {
+        WM_APP_APPEARANCE_REDRAW => {
             let session_matches = u32::try_from(lparam)
                 .ok()
-                // SAFETY: state_ptr is the live dialog-owned Box on this UI thread.
-                .is_some_and(|session_id| session_id == unsafe { (*state_ptr).session_id });
+                .is_some_and(|session_id| session_id == state_lease.state().session_id);
             drop(state_lease);
             if session_matches {
                 // Complete the invalidation only after the CallbackState lease
@@ -2295,18 +2288,17 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
-        WM_APP_APPEARANCE_RESTORE_FOCUS if !state_ptr.is_null() => {
+        WM_APP_APPEARANCE_RESTORE_FOCUS => {
             let session_matches = u32::try_from(lparam)
                 .ok()
-                // SAFETY: state_ptr is the live dialog-owned Box on this UI thread.
-                .is_some_and(|session_id| session_id == unsafe { (*state_ptr).session_id });
+                .is_some_and(|session_id| session_id == state_lease.state().session_id);
             if !session_matches {
                 return 0;
             }
             let target = {
-                // SAFETY: state_ptr is uniquely borrowed only inside this block;
+                // The leased state is uniquely borrowed only inside this block;
                 // the borrow ends before any SetFocus call below.
-                let state = unsafe { &mut *state_ptr };
+                let state = state_lease.state_mut();
                 // SAFETY: GetFocus returns a borrowed HWND and retains no storage.
                 let focused = unsafe { GetFocus() };
                 let focused_is_body = body_controls(state).any(|control| control == focused);
@@ -2334,18 +2326,17 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
-        WM_APP_APPEARANCE_DISMISS if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_APP_APPEARANCE_DISMISS => {
+            let state = state_lease.state_mut();
             if u32::try_from(lparam).ok() == Some(state.session_id) {
                 state.finished = true;
             }
             0
         }
-        WM_APP_APPEARANCE_ARM if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box on this UI thread. This
+        WM_APP_APPEARANCE_ARM => {
+            // The leased state is the dialog-owned Box on this UI thread. This
             // transition never calls or posts to the owner.
-            let state = unsafe { &mut *state_ptr };
+            let state = state_lease.state_mut();
             if u32::try_from(lparam).ok() == Some(state.session_id) && !state.finished {
                 state.armed = true;
                 1

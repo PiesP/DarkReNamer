@@ -503,17 +503,24 @@ struct SavedPopupDc {
     state: i32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SAVED_POPUP_DC_RESTORE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl SavedPopupDc {
     fn save(dc: HDC) -> Option<Self> {
         // SAFETY: dc is the live popup client DC; SaveDC snapshots every
         // mutable GDI attribute before local objects are selected.
         let state = unsafe { SaveDC(dc) };
-        (state != 0).then_some(Self { dc, state })
+        (state != 0).then(|| Self { dc, state })
     }
 }
 
 impl Drop for SavedPopupDc {
     fn drop(&mut self) {
+        #[cfg(test)]
+        SAVED_POPUP_DC_RESTORE_CALLS.with(|calls| calls.set(calls.get() + 1));
         // SAFETY: this exact state belongs to the same still-live popup DC.
         unsafe { RestoreDC(self.dc, self.state) };
     }
@@ -1329,5 +1336,59 @@ mod tests {
         }
         assert_eq!(requests.len(), PendingPopupMenuRequests::MAX_REQUESTS);
         assert!(!requests.push(PopupMenuRequest::new(root, 10_usize as HMENU, true)));
+    }
+}
+
+#[cfg(test)]
+mod saved_popup_dc_tests {
+    use super::*;
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, GetTextColor, SetTextColor,
+    };
+
+    #[test]
+    fn failed_save_never_restores() {
+        SAVED_POPUP_DC_RESTORE_CALLS.with(|calls| calls.set(0));
+        // SAFETY: SaveDC rejects a null DC without creating a saved state.
+        assert!(SavedPopupDc::save(null_mut()).is_none());
+        assert_eq!(SAVED_POPUP_DC_RESTORE_CALLS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn successful_save_restores_on_normal_and_early_return() {
+        // SAFETY: null creates an owned memory DC, released below after guards.
+        let dc = unsafe { CreateCompatibleDC(null_mut()) };
+        assert!(!dc.is_null());
+        // SAFETY: this owned DC stays live through all color queries and saves.
+        let original = unsafe { GetTextColor(dc) };
+        assert_ne!(original, 0x0012_3456);
+        assert_ne!(original, 0x0065_4321);
+        {
+            let _saved = SavedPopupDc::save(dc);
+            assert!(_saved.is_some(), "save owned DC");
+            // SAFETY: this only changes the live owned DC's text color.
+            unsafe { SetTextColor(dc, 0x0012_3456) };
+            // SAFETY: the owned DC is still live within the saved scope.
+            assert_eq!(unsafe { GetTextColor(dc) }, 0x0012_3456);
+        }
+        // SAFETY: the DC is still owned and live.
+        assert_eq!(unsafe { GetTextColor(dc) }, original);
+
+        fn change_then_maybe_return(dc: HDC, abort: bool) -> Option<()> {
+            let _saved = SavedPopupDc::save(dc)?;
+            // SAFETY: caller keeps its owned DC live through this scope.
+            unsafe { SetTextColor(dc, 0x0065_4321) };
+            // SAFETY: the caller-owned DC remains live until this return.
+            assert_eq!(unsafe { GetTextColor(dc) }, 0x0065_4321);
+            if abort {
+                return None;
+            }
+            Some(())
+        }
+        assert!(change_then_maybe_return(dc, true).is_none());
+        // SAFETY: the DC remains live until deletion after this assertion.
+        assert_eq!(unsafe { GetTextColor(dc) }, original);
+        // SAFETY: no saved states or selected test objects remain on this DC.
+        assert_ne!(unsafe { DeleteDC(dc) }, 0);
     }
 }
