@@ -370,6 +370,166 @@ fn lifetimes_and_labels_do_not_become_unsafe_policy_keywords() {
 }
 
 #[test]
+fn unicode_start_lifetime_stays_opaque_to_static_mut_detection() {
+    #[expect(
+        clippy::needless_lifetimes,
+        reason = "explicit lifetime syntax is the regression"
+    )]
+    fn unicode_start<'한static>(_value: &'한static mut u32) {}
+    let mut value = 0;
+    unicode_start(&mut value);
+
+    let source = "fn unicode_start<'한static>(_value: &'한static mut u32) {}";
+    let counts = UnsafeCounts::from_source(source);
+    assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0));
+    assert!(unsafe_counts_allowed("src/windows/new_module.rs", counts));
+}
+
+#[test]
+fn unicode_continuation_lifetime_stays_opaque_to_static_mut_detection() {
+    #[expect(
+        clippy::needless_lifetimes,
+        reason = "explicit lifetime syntax is the regression"
+    )]
+    fn unicode_continue<'a한static>(_value: &'a한static mut u32) {}
+    let mut value = 0;
+    unicode_continue(&mut value);
+
+    let source = "fn unicode_continue<'a한static>(_value: &'a한static mut u32) {}";
+    let counts = UnsafeCounts::from_source(source);
+    assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0));
+    assert!(unsafe_counts_allowed("src/windows/new_module.rs", counts));
+}
+
+#[test]
+fn raw_unicode_lifetimes_stay_opaque_to_static_mut_detection() {
+    #[expect(
+        clippy::needless_lifetimes,
+        reason = "explicit lifetime syntax is the regression"
+    )]
+    fn raw_start<'r#한static>(_value: &'r#한static mut u32) {}
+    #[expect(
+        clippy::needless_lifetimes,
+        reason = "explicit lifetime syntax is the regression"
+    )]
+    fn raw_continue<'r#a한static>(_value: &'r#a한static mut u32) {}
+    let mut first = 0;
+    let mut second = 0;
+    raw_start(&mut first);
+    raw_continue(&mut second);
+
+    for source in [
+        "fn raw_start<'r#한static>(_value: &'r#한static mut u32) {}",
+        "fn raw_continue<'r#a한static>(_value: &'r#a한static mut u32) {}",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source}");
+        assert!(unsafe_counts_allowed("src/windows/new_module.rs", counts));
+    }
+}
+
+#[test]
+fn unicode_labels_and_identifier_continuations_stay_opaque() {
+    fn unicode_labels() {
+        let mut iterations = 0;
+        '한9retry: loop {
+            iterations += 1;
+            if iterations == 1 {
+                continue '한9retry;
+            }
+            break '한9retry;
+        }
+        assert_eq!(iterations, 2);
+    }
+    unicode_labels();
+
+    for source in [
+        "fn labels() { '한9static: loop { break '한9static; } }",
+        "fn labels() { 'a한static: loop { break 'a한static; } }",
+        "fn sample<'ástatic>(_value: &'ástatic mut u32) {}",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source}");
+        assert!(unsafe_counts_allowed("src/windows/new_module.rs", counts));
+    }
+}
+
+#[test]
+fn unicode_lifetimes_do_not_hide_following_unsafe_or_mutable_static() {
+    for source in [
+        "fn sample<'한static>(_value: &'한static mut u32) { unsafe {} }",
+        "fn sample<'a한static>(_value: &'a한static mut u32) { unsafe {} }",
+        "fn sample<'r#한static>(_value: &'r#한static mut u32) { unsafe {} }",
+        "fn sample<'r#a한static>(_value: &'r#a한static mut u32) { unsafe {} }",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0), "{source}");
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+    }
+
+    for source in [
+        "fn sample<'한static>(_value: &'한static mut u32) {} static mut VALUE: u32 = 0;",
+        "fn sample<'a한static>(_value: &'a한static mut u32) {} static mut VALUE: u32 = 0;",
+        "fn sample<'r#한static>(_value: &'r#한static mut u32) {} static mut VALUE: u32 = 0;",
+        "fn sample<'r#a한static>(_value: &'r#a한static mut u32) {} static mut VALUE: u32 = 0;",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(
+            counts,
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+            "{source}"
+        );
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(!unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+    }
+}
+
+#[test]
+fn non_identifier_unicode_separators_end_lifetimes_and_identifiers() {
+    for separator in ['\u{2003}', '\u{2028}', '\u{3002}'] {
+        let source = format!("'한static{separator}unsafe {{}}");
+        let counts = UnsafeCounts::from_source(&source);
+        assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0), "{source}");
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+
+        let source = format!("한static{separator}static mut VALUE: u32 = 0;");
+        let counts = UnsafeCounts::from_source(&source);
+        assert_eq!(
+            counts,
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+            "{source}"
+        );
+        assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+        assert!(!unsafe_counts_allowed(
+            "src/rename/windows_native.rs",
+            counts
+        ));
+    }
+}
+
+#[test]
+fn identifier_table_matches_the_pinned_rust_unicode_version() {
+    assert_eq!(unicode_ident::UNICODE_VERSION, std::char::UNICODE_VERSION);
+}
+
+#[test]
 fn strings_and_nested_comments_still_hide_only_their_own_contents() {
     for source in [
         r#"const ORDINARY: &str = "unsafe { static mut }";"#,
@@ -418,33 +578,54 @@ fn rust_tokens(source: &str) -> Vec<RustToken> {
             continue;
         }
         if bytes[index] == b'\''
-            && bytes
-                .get(index + 1)
-                .is_some_and(|byte| is_identifier_start(*byte))
+            && let Some(end) = lifetime_end(source, index)
         {
-            index += 2;
-            while index < bytes.len() && is_identifier_continue(bytes[index]) {
-                index += 1;
-            }
+            index = end;
             continue;
         }
         if let Some(end) = quoted_literal_end(bytes, index) {
             index = end;
             continue;
         }
-        if is_identifier_start(bytes[index]) {
+        if let Some(end) = identifier_end(source, index) {
             let start = index;
-            index += 1;
-            while index < bytes.len() && is_identifier_continue(bytes[index]) {
-                index += 1;
-            }
+            index = end;
             tokens.push(RustToken::Identifier(source[start..index].to_owned()));
             continue;
         }
         tokens.push(RustToken::Punctuation(bytes[index]));
-        index += 1;
+        let Some(character) = source.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        index += character.len_utf8();
     }
     tokens
+}
+
+fn lifetime_end(source: &str, apostrophe: usize) -> Option<usize> {
+    let start = apostrophe + 1;
+    let name = if source.get(start..)?.starts_with("r#") {
+        start + 2
+    } else {
+        start
+    };
+    identifier_end(source, name)
+}
+
+fn identifier_end(source: &str, start: usize) -> Option<usize> {
+    let mut characters = source.get(start..)?.char_indices();
+    let (_, first) = characters.next()?;
+    if !is_identifier_start(first) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    for (offset, character) in characters {
+        if !is_identifier_continue(character) {
+            break;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    Some(end)
 }
 
 fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
@@ -551,10 +732,10 @@ fn quoted_literal_end(bytes: &[u8], index: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
-const fn is_identifier_start(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphabetic()
+fn is_identifier_start(character: char) -> bool {
+    character == '_' || unicode_ident::is_xid_start(character)
 }
 
-const fn is_identifier_continue(byte: u8) -> bool {
-    is_identifier_start(byte) || byte.is_ascii_digit()
+fn is_identifier_continue(character: char) -> bool {
+    character == '_' || unicode_ident::is_xid_continue(character)
 }
