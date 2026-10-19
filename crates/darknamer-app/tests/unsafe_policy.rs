@@ -221,9 +221,11 @@ fn task_dialog_source_avoids_a_direct_task_dialog_indirect_identifier()
         .find(|(path, _)| *path == "src/windows/dialog.rs")
         .map(|(_, source)| *source)
         .ok_or("dialog source is absent from the reviewed manifest")?;
-    assert!(BUILD_SOURCE_FILES.iter().all(|(_, source)| rust_tokens(source)
-        .iter()
-        .all(|token| !matches!(token, RustToken::Identifier(value) if value == "TaskDialogIndirect"))));
+    assert!(BUILD_SOURCE_FILES.iter().all(|(_, source)| {
+        rust_tokens(source).iter().all(
+            |token| !matches!(token, RustToken::Identifier(value) if value == "TaskDialogIndirect"),
+        )
+    }));
     assert!(dialog.contains("GetProcAddress"));
     assert!(dialog.contains("b\"TaskDialogIndirect\\0\""));
     Ok(())
@@ -257,6 +259,140 @@ fn token_scanner_ignores_literals_and_catches_comment_separated_constructs() {
     );
 }
 
+#[test]
+fn character_literals_do_not_hide_unsafe_blocks_or_prohibited_constructs() {
+    for source in [
+        r#"fn sample() {
+            let _quote = '"';
+            let value = 7_i32;
+            let pointer = &value as *const i32;
+            let _read = unsafe { *pointer };
+        }"#,
+        r#"fn sample() {
+            let _quote = b'"';
+            let value = 7_i32;
+            let pointer = &value as *const i32;
+            let _read = unsafe { *pointer };
+        }"#,
+        r#"fn sample() { let _quote = '\"'; unsafe {} }"#,
+        r#"fn sample() { let _quote = b'\"'; unsafe {} }"#,
+        r#"fn sample() { let _quote = '\''; unsafe {} }"#,
+        r#"fn sample() { let _quote = b'\''; unsafe {} }"#,
+        r#"fn sample() { let _slash = '\\'; unsafe {} }"#,
+        r#"fn sample() { let _slash = b'\\'; unsafe {} }"#,
+        r#"fn sample() { let _letter = b'\x41'; unsafe {} }"#,
+        r#"fn sample() { let _letter = 'a'; let _wide = '界'; unsafe {} }"#,
+        r#"fn sample() { let _wide = '\u{754c}'; unsafe {} }"#,
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0), "{source}");
+        assert!(
+            !unsafe_counts_allowed("src/windows/new_module.rs", counts),
+            "{source}"
+        );
+        assert!(
+            unsafe_counts_allowed("src/rename/windows_native.rs", counts),
+            "{source}"
+        );
+    }
+
+    for (source, path, expected) in [
+        (
+            r#"const QUOTE: char = '"'; unsafe fn callback() {}"#,
+            "src/rename/windows_native.rs",
+            UnsafeCounts::new(0, 1, 0, 0),
+        ),
+        (
+            r#"const QUOTE: u8 = b'"'; unsafe impl Trait for Type {}"#,
+            "src/windows.rs",
+            UnsafeCounts::new(0, 0, 0, 1),
+        ),
+        (
+            r#"const QUOTE: char = '"'; unsafe trait Trait {}"#,
+            "src/windows.rs",
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+        ),
+        (
+            r#"const QUOTE: char = '"'; #[unsafe(no_mangle)] fn export() {}"#,
+            "src/windows.rs",
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+        ),
+        (
+            r#"const QUOTE: char = '"'; static mut VALUE: usize = 0;"#,
+            "src/windows.rs",
+            UnsafeCounts {
+                prohibited: 1,
+                ..UnsafeCounts::new(0, 0, 0, 0)
+            },
+        ),
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, expected, "{source}");
+        assert!(!unsafe_counts_allowed(path, counts), "{source}");
+    }
+
+    for source in [
+        r#"const QUOTE: char = '"';"#,
+        r#"const QUOTE: u8 = b'"';"#,
+        "const LETTER: char = '界';",
+        r#"const ESCAPED: char = '\u{754c}';"#,
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source}");
+        assert!(
+            unsafe_counts_allowed("src/windows/new_module.rs", counts),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn lifetimes_and_labels_do_not_become_unsafe_policy_keywords() {
+    for source in [
+        "fn sample(_value: &'static mut u32) {}",
+        "fn sample<'a>(value: &'a mut u32) { let _ = value; }",
+        "fn sample() { 'retry: loop { break 'retry; } }",
+        "fn sample<'a>(_value: &'a mut u32) { 'retry: loop { break 'retry; } }",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source}");
+        assert!(
+            unsafe_counts_allowed("src/windows/new_module.rs", counts),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn strings_and_nested_comments_still_hide_only_their_own_contents() {
+    for source in [
+        r#"const ORDINARY: &str = "unsafe { static mut }";"#,
+        r#"const BYTE: &[u8] = b"unsafe { static mut }";"#,
+        r#"const C_STRING: &core::ffi::CStr = c"unsafe { static mut }";"#,
+        r####"const RAW: &str = r##"unsafe { static mut }"##;"####,
+        r####"const RAW_BYTE: &[u8] = br##"unsafe { static mut }"##;"####,
+        "/* outer /* unsafe { static mut } */ still a comment */",
+    ] {
+        let counts = UnsafeCounts::from_source(source);
+        assert_eq!(counts, UnsafeCounts::new(0, 0, 0, 0), "{source}");
+        assert!(
+            unsafe_counts_allowed("src/windows/new_module.rs", counts),
+            "{source}"
+        );
+    }
+
+    let source = "/* outer /* unsafe {} */ closed */ unsafe {}";
+    let counts = UnsafeCounts::from_source(source);
+    assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0));
+    assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+}
+
 fn rust_tokens(source: &str) -> Vec<RustToken> {
     let bytes = source.as_bytes();
     let mut tokens = Vec::new();
@@ -275,6 +411,21 @@ fn rust_tokens(source: &str) -> Vec<RustToken> {
         }
         if bytes[index..].starts_with(b"/*") {
             index = skip_block_comment(bytes, index);
+            continue;
+        }
+        if let Some(end) = character_literal_end(source, index) {
+            index = end;
+            continue;
+        }
+        if bytes[index] == b'\''
+            && bytes
+                .get(index + 1)
+                .is_some_and(|byte| is_identifier_start(*byte))
+        {
+            index += 2;
+            while index < bytes.len() && is_identifier_continue(bytes[index]) {
+                index += 1;
+            }
             continue;
         }
         if let Some(end) = quoted_literal_end(bytes, index) {
@@ -313,6 +464,49 @@ fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
         }
     }
     index
+}
+
+fn character_literal_end(source: &str, index: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let quote = if bytes.get(index) == Some(&b'b') {
+        index + 1
+    } else {
+        index
+    };
+    if bytes.get(quote) != Some(&b'\'') {
+        return None;
+    }
+    let character = quote + 1;
+    let end = if bytes.get(character) == Some(&b'\\') {
+        let escape = character + 1;
+        match bytes.get(escape)? {
+            b'0' | b'n' | b'r' | b't' | b'\\' | b'\'' | b'"' => escape + 1,
+            b'x' if bytes.get(escape + 1)?.is_ascii_hexdigit()
+                && bytes.get(escape + 2)?.is_ascii_hexdigit() =>
+            {
+                escape + 3
+            }
+            b'u' if bytes.get(escape + 1) == Some(&b'{') => {
+                let mut digit = escape + 2;
+                let mut has_hex_digit = false;
+                while bytes
+                    .get(digit)
+                    .is_some_and(|byte| byte.is_ascii_hexdigit() || *byte == b'_')
+                {
+                    has_hex_digit |= bytes[digit].is_ascii_hexdigit();
+                    digit += 1;
+                }
+                if !has_hex_digit || bytes.get(digit) != Some(&b'}') {
+                    return None;
+                }
+                digit + 1
+            }
+            _ => return None,
+        }
+    } else {
+        character + source.get(character..)?.chars().next()?.len_utf8()
+    };
+    (bytes.get(end) == Some(&b'\'')).then_some(end + 1)
 }
 
 fn quoted_literal_end(bytes: &[u8], index: usize) -> Option<usize> {
