@@ -431,13 +431,18 @@ impl IconShared {
     }
 }
 
-struct WorkerCom;
+struct WorkerCom {
+    // CoUninitialize must run on the initializing apartment.
+    _apartment: PhantomData<Rc<()>>,
+}
 
 impl WorkerCom {
     fn initialize() -> Option<Self> {
         // SAFETY: a fresh worker initializes its own STA before Shell calls;
         // the null reserved pointer and flags follow CoInitializeEx's ABI.
-        (unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) } >= 0).then_some(Self)
+        (unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) } >= 0).then(|| Self {
+            _apartment: PhantomData,
+        })
     }
 }
 
@@ -683,7 +688,7 @@ impl IconRunGuardian {
     pub(super) fn start_with<F, Q>(ui_thread_id: u32, initialize: F) -> io::Result<Self>
     where
         F: FnOnce() -> Option<Q> + Send + 'static,
-        Q: FnMut(&RequestKey<IconCacheKey>) -> IconResult + Send + 'static,
+        Q: FnMut(&RequestKey<IconCacheKey>) -> IconResult + 'static,
     {
         let session = NEXT_ICON_SESSION
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -770,5 +775,124 @@ impl Drop for IconRunGuardian {
         if self.handle.is_some() {
             self.retire_and_join_responsively();
         }
+    }
+}
+
+#[cfg(test)]
+mod com_guard_tests {
+    use super::*;
+    use windows_sys::Win32::System::Com::{
+        APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA, APTTYPEQUALIFIER_NONE, COINIT_MULTITHREADED,
+        CoGetApartmentType,
+    };
+
+    fn apartment() -> (i32, i32, i32) {
+        let mut kind = -1;
+        let mut qualifier = -1;
+        // SAFETY: both writable outputs live for the synchronous query.
+        let status = unsafe { CoGetApartmentType(&mut kind, &mut qualifier) };
+        (status, kind, qualifier)
+    }
+
+    #[test]
+    fn worker_com_success_balances_fresh_sta() {
+        assert!(
+            thread::spawn(|| {
+                let guard = WorkerCom::initialize();
+                assert!(guard.is_some(), "fresh STA initialization");
+                let (status, kind, qualifier) = apartment();
+                assert_eq!(status, 0);
+                assert!(kind == APTTYPE_STA || kind == APTTYPE_MAINSTA);
+                assert_eq!(qualifier, APTTYPEQUALIFIER_NONE);
+                drop(guard);
+                // A subsequent explicit MTA must succeed when this guard has
+                // balanced the only STA initialization on the fresh thread.
+                // SAFETY: the thread has no live COM interfaces or guard now.
+                let status = unsafe { CoInitializeEx(null(), COINIT_MULTITHREADED as u32) };
+                if status >= 0 {
+                    // SAFETY: balance only this successful explicit initialization.
+                    unsafe { CoUninitialize() };
+                }
+                assert_eq!(status, 0);
+            })
+            .join()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn worker_com_nested_success_balances_s_false() {
+        assert!(
+            thread::spawn(|| {
+                let outer = WorkerCom::initialize();
+                assert!(outer.is_some(), "outer STA initialization");
+                let inner = WorkerCom::initialize();
+                assert!(inner.is_some(), "nested STA initialization");
+                drop(inner);
+                let (status, kind, qualifier) = apartment();
+                assert_eq!(status, 0);
+                assert!(kind == APTTYPE_STA || kind == APTTYPE_MAINSTA);
+                assert_eq!(qualifier, APTTYPEQUALIFIER_NONE);
+                // S_FALSE proves the outer initialization remains after the inner
+                // guard drops; this explicit probe is balanced separately.
+                // SAFETY: this is a same-thread call with matching STA flags.
+                let nested_status =
+                    unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
+                if nested_status >= 0 {
+                    // SAFETY: balance the successful probe only.
+                    unsafe { CoUninitialize() };
+                }
+                assert_eq!(nested_status, 1);
+                drop(outer);
+            })
+            .join()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn worker_com_failed_sta_preserves_explicit_mta() {
+        assert!(
+            thread::spawn(|| {
+                // SAFETY: this fresh thread has no prior explicit COM apartment.
+                let initialized = unsafe { CoInitializeEx(null(), COINIT_MULTITHREADED as u32) };
+                assert!(
+                    initialized >= 0,
+                    "explicit MTA initialization: {initialized:#x}"
+                );
+                let before = apartment();
+                let rejected = WorkerCom::initialize().is_none();
+                let after = apartment();
+                // A broken guard may already have consumed the explicit MTA.
+                // Never issue an additional unmatched CoUninitialize in that case.
+                if after == (0, APTTYPE_MTA, APTTYPEQUALIFIER_NONE) {
+                    // SAFETY: this is the original still-live MTA initialization.
+                    unsafe { CoUninitialize() };
+                }
+                assert_eq!(initialized, 0);
+                assert_eq!(before, (0, APTTYPE_MTA, APTTYPEQUALIFIER_NONE));
+                assert!(rejected);
+                assert_eq!(after, before);
+            })
+            .join()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn worker_com_is_neither_send_nor_sync() {
+        trait AmbiguousIfSend<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        let _ = <WorkerCom as AmbiguousIfSend<_>>::check;
+
+        trait AmbiguousIfSync<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+        let _ = <WorkerCom as AmbiguousIfSync<_>>::check;
     }
 }
