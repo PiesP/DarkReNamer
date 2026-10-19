@@ -62,12 +62,12 @@ use windows_sys::Win32::System::Ole::DROPEFFECT_COPY;
 use super::initialize_safe_runtime_at;
 #[cfg(test)]
 use super::{
-    APPLY_POLL_TIMER_ID, AppState, ReclaimDisposition, create_drop_overlay,
-    finalize_admission_start_failure, wide,
+    APPLY_POLL_TIMER_ID, ReclaimDisposition, create_drop_overlay, finalize_admission_start_failure,
+    wide,
 };
 use super::{
-    AppStateSlot, CallbackState, WM_APP_ADMISSION_STARTED, admit_paths, message,
-    report_admission_start_error, set_drop_overlay_control, try_app_state,
+    AppState, AppStateSlot, CallbackState, CallbackStateLease, WM_APP_ADMISSION_STARTED,
+    admit_paths, message, report_admission_start_error, set_drop_overlay_control, try_app_state,
 };
 use ::windows::Win32::Foundation::{HWND as ComHwnd, POINTL as ComPoint};
 use ::windows::Win32::System::Com::{
@@ -271,16 +271,20 @@ pub(super) fn register_drop_targets(
     list: HWND,
     overlay: HWND,
     state_owner: HWND,
-    state_slot: *mut AppStateSlot,
+    state_lease: &CallbackStateLease<AppState, DropTargetRegistrations>,
 ) -> io::Result<()> {
+    // The live lease retains the slot allocation through both OLE calls. Only
+    // its disjoint retirement sidecar is accessed; no AppState borrow crosses
+    // RegisterDragDrop or a possible reentrant window teardown.
+    let state_slot = state_lease.slot.as_ptr();
     // Install the empty owner before the first OLE call. RegisterDragDrop's
     // documented synchronous target callback is IUnknown::AddRef, and this
     // implementation's AddRef performs no FFI or message dispatch. Every
     // successful individual registration is still transferred into the
     // sidecar before the next OLE call so prior registrations remain revocable
     // if later setup triggers window teardown.
-    // SAFETY: state_slot is the currently leased UI-thread slot and its sidecar
-    // is disjoint from AppState.
+    // SAFETY: the live UI-thread lease retains state_slot, and the sidecar is
+    // disjoint from its AppState value.
     unsafe { CallbackState::install_retirement(state_slot, DropTargetRegistrations::empty()) }
         .map_err(|_registrations| io::Error::other("drop registration sidecar is occupied"))?;
 
@@ -1241,6 +1245,70 @@ mod tests {
         let registration = DropTargetRegistration::register(list, owner)?;
         drop(registration);
         // SAFETY: the exact registration was revoked before destroying owner.
+        unsafe { DestroyWindow(owner) };
+        Ok(())
+    }
+
+    #[test]
+    fn production_registration_installs_both_targets_in_the_retirement_sidecar()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = TestOle::initialize()?;
+        let local = tempfile::tempdir()?;
+        let Some(state) = test_app_state(local.path())? else {
+            return Ok(());
+        };
+        let owner = create_test_owner()?;
+        let list = create_test_list(owner)?;
+        let overlay = create_drop_overlay(owner)?;
+        let state_slot = publish_test_state(owner, state);
+        // SAFETY: this test owns the live UI-thread slot and holds its sole lease.
+        let lease = unsafe { CallbackState::try_lease(state_slot) }
+            .ok_or_else(|| io::Error::other("test state lease unavailable"))?;
+        register_drop_targets(list, overlay, owner, &lease)?;
+        // SAFETY: the retirement sidecar is disjoint from the leased value.
+        let registrations = unsafe { CallbackState::take_retirement(state_slot) }
+            .ok_or_else(|| io::Error::other("production registration was not installed"))?;
+        assert_eq!(
+            registrations
+                .registrations()
+                .map(DropTargetRegistration::registered_hwnd)
+                .collect::<Vec<_>>(),
+            vec![list, overlay]
+        );
+        drop(registrations);
+        // Successful sidecar teardown revokes both exact child HWNDs.
+        let replacement = DropTargetRegistrations::register(list, overlay, owner)?;
+        drop(replacement);
+        drop(lease);
+        unpublish_test_state(owner, state_slot);
+        // SAFETY: all registrations have been revoked before owner destruction.
+        unsafe { DestroyWindow(owner) };
+        Ok(())
+    }
+
+    #[test]
+    fn production_second_registration_failure_revokes_first_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _ole = TestOle::initialize()?;
+        let local = tempfile::tempdir()?;
+        let Some(state) = test_app_state(local.path())? else {
+            return Ok(());
+        };
+        let owner = create_test_owner()?;
+        let list = create_test_list(owner)?;
+        let state_slot = publish_test_state(owner, state);
+        // SAFETY: this test owns the live UI-thread slot and holds its sole lease.
+        let lease = unsafe { CallbackState::try_lease(state_slot) }
+            .ok_or_else(|| io::Error::other("test state lease unavailable"))?;
+        assert!(register_drop_targets(list, null_mut(), owner, &lease).is_err());
+        // SAFETY: failure must have removed the disjoint retirement sidecar.
+        assert!(unsafe { CallbackState::take_retirement(state_slot) }.is_none());
+        // The first HWND can be registered again only after failure revokes it.
+        let replacement = DropTargetRegistration::register(list, owner)?;
+        drop(replacement);
+        drop(lease);
+        unpublish_test_state(owner, state_slot);
+        // SAFETY: the exact list registration has been revoked.
         unsafe { DestroyWindow(owner) };
         Ok(())
     }
