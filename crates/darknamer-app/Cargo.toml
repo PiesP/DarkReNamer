@@ -83,4 +83,6 @@ embed-resource = "3.0.11"
 [dev-dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
+# Rust 1.97.1 uses Unicode 17 identifier tables; keep the policy scanner aligned.
+unicode-ident = "=1.0.24"
 yaml_serde = "0.10.7"
