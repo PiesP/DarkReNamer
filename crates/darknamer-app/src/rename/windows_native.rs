@@ -41,6 +41,8 @@ use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
+use super::private_state::SecurityDescriptor;
+
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
@@ -1013,19 +1015,28 @@ fn normalized_leaf_from_final_path(path: &[u16]) -> io::Result<Vec<u16>> {
     Ok(normalized)
 }
 
-pub(crate) fn open_directory_entry(parent: &NativeParent, leaf: &[u16]) -> io::Result<File> {
-    open_relative(
+/// Owns a directory opened for synchronous, non-alertable I/O. The private
+/// constructor keeps stack-backed NtQueryDirectoryFile outputs live until return.
+#[derive(Debug)]
+pub(crate) struct SynchronousDirectory(File);
+
+pub(crate) fn open_directory_entry(
+    parent: &NativeParent,
+    leaf: &[u16],
+) -> io::Result<SynchronousDirectory> {
+    let file = open_relative(
         parent.file(),
         leaf,
         FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         SHARE_ALL,
         FILE_OPEN,
         FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-    )
+    )?;
+    Ok(SynchronousDirectory(file))
 }
 
 pub(crate) fn query_directory_names(
-    directory: &File,
+    directory: &SynchronousDirectory,
     limit: usize,
     path_prefix_units: usize,
     remaining_path_bytes: usize,
@@ -1226,7 +1237,7 @@ const _: () = {
 };
 
 pub(crate) fn query_directory_names_cancellable(
-    directory: &File,
+    directory: &SynchronousDirectory,
     limit: usize,
     path_prefix_units: usize,
     mut remaining_path_bytes: usize,
@@ -1253,12 +1264,13 @@ pub(crate) fn query_directory_names_cancellable(
             return Err(DirectoryQueryError::Cancelled);
         }
         let mut status_block = IO_STATUS_BLOCK::default();
-        // SAFETY: directory is a retained directory handle; buffer and status
-        // block are writable and correctly sized. Single-entry mode bounds each
-        // result and the call retains no pointers.
+        // SAFETY: SynchronousDirectory owns a FILE_DIRECTORY_FILE handle opened
+        // with SYNCHRONIZE and FILE_SYNCHRONOUS_IO_NONALERT. The I/O manager
+        // completes each request before return, so the writable stack outputs
+        // remain live through completion. Single-entry mode bounds each result.
         let status = unsafe {
             NtQueryDirectoryFile(
-                directory.as_raw_handle(),
+                directory.0.as_raw_handle(),
                 ptr::null_mut(),
                 None,
                 ptr::null(),
@@ -1348,7 +1360,7 @@ pub(super) fn open_relative(
         share_access,
         disposition,
         options,
-        ptr::null(),
+        None,
     )
 }
 
@@ -1359,7 +1371,7 @@ pub(super) fn open_relative_with_security(
     share_access: u32,
     disposition: u32,
     options: u32,
-    security_descriptor: *const std::ffi::c_void,
+    security_descriptor: Option<&SecurityDescriptor>,
 ) -> io::Result<File> {
     if leaf.is_empty() || leaf.contains(&0) {
         return Err(io::Error::new(
@@ -1385,14 +1397,16 @@ pub(super) fn open_relative_with_security(
         RootDirectory: parent.as_raw_handle(),
         ObjectName: ptr::from_ref(&object_name),
         Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: security_descriptor.cast(),
+        SecurityDescriptor: security_descriptor
+            .map_or(ptr::null(), |descriptor| descriptor.as_ptr().cast()),
         SecurityQualityOfService: ptr::null(),
     };
     let mut status_block = IO_STATUS_BLOCK::default();
     let mut handle = ptr::null_mut();
 
     // SAFETY: the retained parent handle, UTF-16 leaf buffer, object name, and
-    // object attributes remain valid and immovable for this synchronous call.
+    // object attributes and optional typed security descriptor remain valid
+    // and immovable for this synchronous call.
     // Output pointers are writable and ownership transfers only on success.
     let status = unsafe {
         NtCreateFile(
