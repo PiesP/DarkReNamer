@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from controller_cleanup_fixture import clean_controller_cleanup
+from controller_cleanup_fixture import clean_controller_cleanup, clean_controller_cleanup_v3_protected
 from darkrenamer_tooling.vm import launcher as vm
 
 
@@ -1193,6 +1193,10 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(
             vm.verify_recovery_inventory(output, manifest, 'ssh', identity)['status'],
             'passed')
+        (output / 'protected-anchor-closure.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'not complete'):
+            vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+        (output / 'protected-anchor-closure.json').unlink()
         transport_path = output / 'transport.json'
         valid_transport = json.loads(transport_path.read_text())
         for version in ('7.3.9', '8', '7.4.malformed', '7.4-preview.1', '', None, 7.4):
@@ -1231,6 +1235,123 @@ class VmRunnerTests(unittest.TestCase):
                 (output / 'recovery-inventory.json').write_text(json.dumps(inventory))
                 with self.assertRaisesRegex(ValueError, 'relative path'):
                     vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+
+    def test_recovery_inventory_requires_valid_v3_protected_anchor_closure(self):
+        manifest, _ = self.candidate_evidence()
+        bundle = self.root / 'bundle.json'
+        bundle.write_text(json.dumps(manifest))
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        profile_sha256 = 'a' * 64
+        cleanup = clean_controller_cleanup_v3_protected(
+            profile_sha256=profile_sha256,
+            source_sha=manifest['harness']['source_sha'],
+            bundle_sha256=vm.sha256(bundle), vm_id=identity)
+        owned = cleanup['owned_resource_evidence']
+        output = self.root / 'v3-recovery-output'
+        session = output / 'recovery-acceptance-fixture'
+        session.mkdir(parents=True)
+        result = {
+            'schema_version': 2, 'lane': 'candidate-gui-only',
+            'product': manifest['product'], 'harness': manifest['harness'],
+            'observer_role': 'recovery',
+            'application': manifest['product']['application'],
+            'runner_sha256': manifest['harness']['runner']['sha256'],
+            'observer': manifest['harness']['observers']['recovery'],
+            'status': 'passed',
+            'process_job_cleanup': owned['process_job_cleanup'],
+            'observer_lifecycle': owned['task_execution']['observer_lifecycle'],
+        }
+        summary = session / 'summary.json'
+        summary.write_text(json.dumps(result))
+        relative = 'recovery-acceptance-fixture/summary.json'
+        (output / 'recovery-inventory.json').write_text(json.dumps({
+            'schema_version': 1, 'task_kind': 'recovery',
+            'observer_role': 'recovery',
+            'bundle_manifest_sha256': vm.sha256(bundle),
+            'observer': manifest['harness']['observers']['recovery'],
+            'summary_file': relative,
+            'files': [{'file': relative, 'bytes': summary.stat().st_size,
+                       'sha256': vm.sha256(summary)}],
+        }))
+        final_anchor = dict(owned['protected_anchor'],
+                            PSComputerName='fixture-host',
+                            RunspaceId='12345678-1234-5678-9abc-1234567890ab',
+                            PSShowComputerName=True)
+        transport = {
+            'kind': 'ssh', 'task_kind': 'recovery', 'host_platform': 'Unix',
+            'status': 'collected', 'guest_cleanup': True,
+            'raw_cleanup': cleanup, 'vm_id': identity,
+            'vm_identity_kind': 'hyper-v-guest-parameters-virtual-machine-id-v1',
+            'vm_identity_sha256': hashlib.sha256(identity.encode()).hexdigest(),
+            'observer_process': {'state': 'exited', 'exit_code': 0},
+            'recovery_engine': {'version': '7.4.0', 'edition': 'Core',
+                                'effective_policy': 'RemoteSigned'},
+            'protected_anchor_final': final_anchor,
+        }
+        (output / 'transport.json').write_text(json.dumps(transport))
+        closure = output / 'protected-anchor-closure.json'
+        closure.write_text(json.dumps(final_anchor))
+        self.assertEqual(vm.verify_recovery_inventory(
+            output, manifest, 'ssh', identity, profile_id=vm.V2_PROFILE_ID,
+            profile_sha256=profile_sha256)['status'], 'passed')
+
+        def verify():
+            return vm.verify_recovery_inventory(
+                output, manifest, 'ssh', identity, profile_id=vm.V2_PROFILE_ID,
+                profile_sha256=profile_sha256)
+
+        closure.unlink()
+        with self.assertRaisesRegex(ValueError, 'not complete'):
+            verify()
+        closure.write_text('{"schema_version":3,"schema_version":3}')
+        with self.assertRaisesRegex(ValueError, 'duplicate field'):
+            verify()
+        closure.write_text('x' * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, 'ordinary bounded file'):
+            verify()
+        closure.write_text(json.dumps(dict(final_anchor, source_sha='f' * 40)))
+        with self.assertRaisesRegex(ValueError, 'trusted final transport'):
+            verify()
+        forged = dict(final_anchor, source_sha='f' * 40)
+        (output / 'transport.json').write_text(json.dumps(dict(
+            transport, protected_anchor_final=forged)))
+        with self.assertRaisesRegex(ValueError, 'trusted final transport'):
+            verify()
+        wrong_source_cleanup = clean_controller_cleanup_v3_protected(
+            profile_sha256=profile_sha256, source_sha='f' * 40,
+            bundle_sha256=vm.sha256(bundle), vm_id=identity)
+        wrong_source_final = dict(wrong_source_cleanup['owned_resource_evidence'][
+            'protected_anchor'], PSComputerName='fixture-host',
+            RunspaceId='12345678-1234-5678-9abc-1234567890ab',
+            PSShowComputerName=True)
+        (output / 'transport.json').write_text(json.dumps(dict(
+            transport, raw_cleanup=wrong_source_cleanup,
+            protected_anchor_final=wrong_source_final)))
+        closure.write_text(json.dumps(wrong_source_final))
+        with self.assertRaisesRegex(ValueError, 'authenticated source'):
+            verify()
+        (output / 'transport.json').write_text(json.dumps(transport))
+        closure.write_text(json.dumps(final_anchor))
+        extra = output / 'unexpected-extra.json'
+        extra.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'not complete'):
+            verify()
+        extra.unlink()
+        inventory_path = output / 'recovery-inventory.json'
+        valid_inventory = json.loads(inventory_path.read_text())
+        with_closure_row = json.loads(json.dumps(valid_inventory))
+        with_closure_row['files'].append({
+            'file': closure.name, 'bytes': closure.stat().st_size,
+            'sha256': vm.sha256(closure),
+        })
+        inventory_path.write_text(json.dumps(with_closure_row))
+        with self.assertRaisesRegex(ValueError, 'controller-owned'):
+            verify()
+        inventory_path.write_text(json.dumps(valid_inventory))
+        closure.unlink()
+        closure.symlink_to(summary)
+        with self.assertRaisesRegex(ValueError, 'linked file'):
+            verify()
 
     def test_recovery_inventory_stops_before_hashing_over_aggregate_limit(self):
         manifest, _ = self.candidate_evidence()
