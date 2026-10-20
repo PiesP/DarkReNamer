@@ -53,7 +53,36 @@ latest designation are distinct; neither changes the supported environment.
 Regular-release status does not require a 1.0.0 version number; the tag must
 still match the chosen Cargo workspace version exactly.
 
-## Prepared 0.1.8 release notes
+## Prepared 0.1.9 release notes
+
+Native prompts retain their callback state until window destruction completes,
+and failed prompt destruction no longer frees state that the window can still
+use. Native initialization and cleanup remain balanced on failure paths.
+Shell icon callbacks and drag-and-drop objects retain their thread and lifetime
+ownership until their work has finished.
+
+Rename execution retains its directory-handle ownership and no-replacement
+behavior. Private-state security checks bound token and ACE SIDs and reject
+invalid owner SIDs or ACLs before using them. Existing preferences remain
+compatible; supported operations and mutation authorization are unchanged.
+
+The native command rail reuses immutable command metadata, and prompts use
+bounded scratch storage. The application icon is packaged as a build asset.
+These changes do not establish measured startup, throughput, memory, or
+binary-size improvements.
+
+Maintenance tooling restores source-bound native and GUI validation, shares
+verified PowerShell bootstraps and fixtures, and rejects incomplete dependency
+audit output. The unsafe-policy scanner recognizes Rust lifetimes and exact
+Rust whitespace without treating lexical counts as a soundness proof.
+
+The executable remains intentionally unsigned (`NotSigned`). Preparation
+requires a fresh immutable candidate, complete same-source VM-Automated v2
+campaign, and hosted verification. It does not authorize publication or extend
+the existing guarantees to human Explorer/IME or comprehensive accessibility
+acceptance, physical-media performance, or power-loss durability.
+
+## Historical 0.1.8 release notes
 
 Confirmation details distinguish exact UTF-16 names, including control code
 units, ambiguous whitespace and unpaired surrogates, so distinct selected names
