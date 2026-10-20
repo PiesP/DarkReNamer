@@ -163,6 +163,38 @@ function Get-HostedGateJobs {
     $rows
 }
 
+function Get-HostedCiGateJobs {
+    param([Parameter(Mandatory)][object] $Document)
+
+    # The classifier is part of the CI run, but the locked host gate hashes only
+    # the four substantive jobs accepted by the independent evidence verifier.
+    $requiredSteps = @{
+        'Classify documentation changes' = @('Classify with protected policy')
+        'pr-gate/quality' = @('Test tooling', 'Check formatting and lints')
+        'pr-gate/security' = @('Refresh and audit Rust dependencies')
+        'pr-gate/unit' = @('Run workspace tests')
+        'pr-gate/windows' = @(
+            'Test tooling', 'Validate Windows tests and lints',
+            'Test optimized workspace artifacts', 'Build the compatibility executable'
+        )
+    }
+    $jobs = @(Get-HostedGateJobs -Document $Document -ExpectedNames @($requiredSteps.Keys))
+    foreach ($job in @($Document.jobs)) {
+        if ($null -eq $job.PSObject.Properties['steps']) {
+            throw 'Authenticated CI job has no step inventory.'
+        }
+        foreach ($name in $requiredSteps[[string]$job.name]) {
+            $matches = @($job.steps | Where-Object { $_.name -ceq $name })
+            if ($matches.Count -ne 1 -or
+                $matches[0].status -cne 'completed' -or
+                $matches[0].conclusion -cne 'success') {
+                throw "Authenticated CI step '$name' did not pass exactly once."
+            }
+        }
+    }
+    $jobs | Where-Object { $_.name -cne 'Classify documentation changes' }
+}
+
 function New-HostedGateMetadata {
     param(
         [Parameter(Mandatory)][object] $RepositoryMetadata,
@@ -391,9 +423,7 @@ try {
         Invoke-HostedGhJson `
             -Endpoint "repos/$Repository/actions/runs/$($ciRun.id)/attempts/$($ciRun.run_attempt)/jobs?per_page=100" `
             -Destination $ciJobsPath
-        $ciJobs = @(Get-HostedGateJobs `
-            -Document (Read-HostedJson $ciJobsPath) `
-            -ExpectedNames @('pr-gate/quality', 'pr-gate/security', 'pr-gate/unit', 'pr-gate/windows'))
+        $ciJobs = @(Get-HostedCiGateJobs -Document (Read-HostedJson $ciJobsPath))
 
         $expectedArtifactName = "DarkReNamer-dry-run-$CandidateRunId-$CandidateRunAttempt-windows"
         if ($candidateArtifact.id -isnot [long] -or
