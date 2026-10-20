@@ -4435,6 +4435,42 @@ public static class DrVmSpotlightNative {
                 $ProtectedAnchorContext.closed) {
                 throw 'Protected-process anchor was closed before the final inventory.'
             }
+            # Diagnostic entries are private, bounded observations. They never relax
+            # an incomplete inventory or expose process command lines or error text.
+            $failureDiagnostics = [pscustomobject]@{
+                entries = [Collections.Generic.List[object]]::new()
+                overflow_count = 0
+            }
+            $addFailure = {
+                param([string] $Code, [int] $Attempt, [AllowNull()][object] $Process,
+                    [AllowNull()][object] $Exception, [AllowNull()][object] $ReturnCode)
+                if ($failureDiagnostics.entries.Count -ge 16) {
+                    $failureDiagnostics.overflow_count = [Math]::Min(
+                        65535, $failureDiagnostics.overflow_count + 1)
+                    return
+                }
+                $exceptionType = $null
+                if ($null -ne $Exception) {
+                    $exceptionType = [string]$Exception.GetType().Name
+                    if ($exceptionType -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,63}$') {
+                        $exceptionType = 'OtherException'
+                    }
+                }
+                $codeValue = $null
+                if ($ReturnCode -is [int] -or $ReturnCode -is [uint32] -or
+                    $ReturnCode -is [int64]) { $codeValue = [int64]$ReturnCode }
+                $processId = $null; $processIdentity = $null
+                if ($null -ne $Process) {
+                    $processId = [int]$Process.ProcessId
+                    $processIdentity = [string]$Process.ProcessId + '|' +
+                        ([datetime]$Process.CreationDate).ToUniversalTime().ToString('o')
+                }
+                $failureDiagnostics.entries.Add([pscustomobject][ordered]@{
+                    code = $Code; attempt = $Attempt; pid = $processId
+                    identity = $processIdentity; exception_type = $exceptionType
+                    return_code = $codeValue
+                })
+            }
             for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $rows = [Collections.Generic.List[object]]::new()
                 $complete = $true
@@ -4445,6 +4481,7 @@ public static class DrVmSpotlightNative {
                 }
                 catch {
                     $complete = $false
+                    & $addFailure 'query_failed' $attempt $null $_.Exception $null
                 }
                 # Open only new canonical targets before any potentially slow owner query.
                 if ($null -ne $CaptureContext) {
@@ -4458,8 +4495,10 @@ public static class DrVmSpotlightNative {
                     $created = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
                     $identity = [string]$process.ProcessId + '|' + $created
                     $owner = $null
+                    $usingHeldOwner = $null -ne $CaptureContext -and
+                        $CaptureContext.lifetimes.ContainsKey($identity)
                     try {
-                        if ($null -ne $CaptureContext -and $CaptureContext.lifetimes.ContainsKey($identity)) {
+                        if ($usingHeldOwner) {
                             $entry = $CaptureContext.lifetimes[$identity]
                             $held = if ($null -ne $entry.PSObject.Properties['owner']) { $entry.owner } else { $entry }
                             if (-not (Test-DrVmSpotlightNativeIdentity -Native $held.Identity -Candidate ([pscustomobject]@{
@@ -4473,6 +4512,8 @@ public static class DrVmSpotlightNative {
                         }
                     }
                     catch {
+                        $code = if ($usingHeldOwner) { 'owner_evidence_failed' } else { 'owner_query_failed' }
+                        & $addFailure $code $attempt $process $_.Exception $null
                         if ($null -ne $ProtectedAnchorContext -and
                             $null -ne $ProtectedAnchorContext.run_name -and
                             $null -eq $process.ExecutablePath -and
@@ -4483,6 +4524,7 @@ public static class DrVmSpotlightNative {
                         continue
                     }
                     if ($owner.ReturnValue -ne 0) {
+                        & $addFailure 'owner_nonzero' $attempt $process $null $owner.ReturnValue
                         if ($null -ne $ProtectedAnchorContext -and
                             $null -ne $ProtectedAnchorContext.run_name -and
                             $null -eq $process.ExecutablePath -and
@@ -4517,13 +4559,20 @@ public static class DrVmSpotlightNative {
                                                 $null -eq $ProtectedAnchorContext.child)
                                     }
                                     catch {
+                                        & $addFailure 'protected_predicate_failed' $attempt $process $_.Exception $null
                                         if ($null -ne $ProtectedAnchorContext.run_name) {
                                             $ProtectedAnchorContext.rejected_opaque_observed = $true
                                         }
                                         $complete = $false; continue
                                     }
                                 }
-                                else { $complete = $false; continue }
+                                else {
+                                    $code = if ($commandLine.Length -gt 4096) {
+                                        'execution_fields_overbound'
+                                    } else { 'execution_fields_opaque' }
+                                    & $addFailure $code $attempt $process $null $null
+                                    $complete = $false; continue
+                                }
                             }
                             else {
                                 $record['kind'] = 'full'
@@ -4547,15 +4596,24 @@ public static class DrVmSpotlightNative {
                     $null -ne $ProtectedAnchorContext.child -and
                     @($rows | Where-Object identity -CEQ $ProtectedAnchorContext.proof.identity).Count -ne 1) {
                     $complete = $false
+                    & $addFailure 'protected_anchor_missing' $attempt $null $null $null
                 }
                 if ($null -ne $ProtectedAnchorContext -and
                     $ProtectedAnchorContext.rejected_opaque_observed) {
                     $complete = $false
+                    & $addFailure 'sticky_opaque' $attempt $null $null $null
                 }
                 $snapshot = [pscustomobject]@{
                     complete = $complete
                     processes = @($rows.ToArray() | Sort-Object identity)
                     attempts = $attempt
+                }
+                if (-not $complete) {
+                    $snapshot | Add-Member -NotePropertyName failure_diagnostics -NotePropertyValue ([pscustomobject][ordered]@{
+                        entries = @($failureDiagnostics.entries.ToArray())
+                        overflow = ($failureDiagnostics.overflow_count -gt 0)
+                        overflow_count = $failureDiagnostics.overflow_count
+                    })
                 }
                 if ($complete) {
                     if ($null -ne $ProtectedAnchorContext -and
@@ -6372,7 +6430,12 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                             function Get-V2ProcessSnapshot {
                                 $snapshot = Get-DrVmRunnerProcesses -UserSid $taskContext.runner_sid `
                                     -SessionId $taskContext.runner_session_id -IncludeExecutionScope
-                                [ordered]@{complete=[bool]$snapshot.complete;processes=@($snapshot.processes)}
+                                $transport = [ordered]@{complete=[bool]$snapshot.complete;processes=@($snapshot.processes)}
+                                if (-not $snapshot.complete) {
+                                    $transport['attempts'] = [int]$snapshot.attempts
+                                    $transport['failure_diagnostics'] = $snapshot.failure_diagnostics
+                                }
+                                $transport
                             }
                             function Get-V2TaskDelta {
                                 param($Current)

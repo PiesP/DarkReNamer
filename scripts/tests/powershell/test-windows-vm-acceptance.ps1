@@ -156,12 +156,182 @@ function Invoke-TestAcceptance {
         $context.accepted_snapshots -ne 1 -or @($snapshot.processes).Count -ne 2) {
         throw "An incomplete retry was counted as a complete protected inventory: complete=$($snapshot.complete), attempts=$($snapshot.attempts), accepted=$($context.accepted_snapshots), rows=$(@($snapshot.processes).Count), owner_calls=$($fixture.owner_calls), protected_calls=$($fixture.protected_calls), rejected=$($context.rejected_opaque_observed), first=$($fixture.fail_owner_once), identities=$(@($snapshot.processes | ForEach-Object identity) -join ',')."
     }
+    if (@($snapshot.PSObject.Properties.Name | Where-Object { $_ -notin @('complete','processes','attempts') }).Count -ne 0) {
+        throw 'A successful protected pre-name inventory gained a field rejected by the independent verifier.'
+    }
     $fixture.reads=0; $fixture.new_opaque=$true
     $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
         -IncludeExecutionScope -ProtectedAnchorContext $context
     if ($snapshot.complete -or $snapshot.attempts -ne 3 -or
         $context.accepted_snapshots -ne 1 -or -not $context.rejected_opaque_observed) {
         throw 'A newly opaque process passed the held pre-name collector.'
+    }
+    if (@($snapshot.failure_diagnostics.entries | Where-Object code -CEQ 'protected_predicate_failed').Count -ne 3 -or
+        @($snapshot.failure_diagnostics.entries | Where-Object code -CEQ 'sticky_opaque').Count -ne 3) {
+        throw 'Protected predicate rejection or sticky opaque state lost its bounded reason.'
+    }
+    $fixture.new_opaque=$false
+    $context.rejected_opaque_observed=$false
+    $context.proof.identity='9999|' + $created.ToString('o')
+    $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
+        -IncludeExecutionScope -ProtectedAnchorContext $context
+    if ($snapshot.complete -or $snapshot.attempts -ne 3 -or
+        @($snapshot.failure_diagnostics.entries | Where-Object code -CEQ 'protected_anchor_missing').Count -ne 3 -or
+        $context.accepted_snapshots -ne 1) {
+        throw 'A missing held anchor passed or lost its diagnostic reason.'
+    }
+}
+
+# Exercise failure categories on the production collector and its V2 transport
+# projection. Successful transport retains its exact independently verified keys.
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerPath, [ref]$null, [ref]$null)
+    foreach ($name in @('global:Get-DrVmRunnerProcesses', 'Get-V2ProcessSnapshot')) {
+        $definitions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        }, $true))
+        if ($definitions.Count -ne 1) { throw "Production inventory function $name is ambiguous." }
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+    $sid = 'S-1-5-21-1-2-3-1001'
+    $taskContext = [pscustomobject]@{runner_sid=$sid;runner_session_id=2}
+    $created = [datetime]::SpecifyKind([datetime]'2026-09-30T01:02:03', 'Utc')
+    $fixture = [pscustomobject]@{mode='success';reads=0}
+    function Get-CimInstance {
+        param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+        if ($ClassName -cne 'Win32_Process' -or $OperationTimeoutSec -ne 5) {
+            throw 'The inventory query bound changed.'
+        }
+        $fixture.reads++
+        if ($fixture.mode -ceq 'query' -or
+            ($fixture.mode -ceq 'empty_transient' -and $fixture.reads -eq 1)) {
+            throw 'private query detail'
+        }
+        $count = if ($fixture.mode -ceq 'overflow') { 20 } elseif ($fixture.mode -ceq 'empty_transient') { 0 } else { 1 }
+        @(for ($i = 0; $i -lt $count; $i++) {
+            $opaque = $fixture.mode -in @('opaque', 'overflow')
+            [pscustomobject]@{ProcessId=7001+$i;SessionId=2;CreationDate=$created
+                ParentProcessId=499
+                ExecutablePath=$(if ($opaque) { $null } else { 'C:\Windows\System32\ordinary.exe' })
+                CommandLine=$(if ($opaque) { $null } elseif ($fixture.mode -ceq 'overbound') {
+                    'x' * 4097
+                } else { 'ordinary.exe' })}
+        })
+    }
+    function Invoke-CimMethod {
+        param($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction)
+        if ($MethodName -cne 'GetOwnerSid' -or $OperationTimeoutSec -ne 5) {
+            throw 'The owner query bound changed.'
+        }
+        if ($fixture.mode -ceq 'owner_exception') { throw 'private owner detail' }
+        [pscustomobject]@{ReturnValue=$(if ($fixture.mode -ceq 'owner_nonzero') { [uint32]5 } else { 0 });Sid=$sid}
+    }
+    foreach ($case in @(
+        @{mode='query';code='query_failed';pid=$null;return_code=$null},
+        @{mode='owner_exception';code='owner_query_failed';pid=7001;return_code=$null},
+        @{mode='owner_nonzero';code='owner_nonzero';pid=7001;return_code=5},
+        @{mode='opaque';code='execution_fields_opaque';pid=7001;return_code=$null},
+        @{mode='overbound';code='execution_fields_overbound';pid=7001;return_code=$null}
+    )) {
+        $fixture.mode = $case.mode; $fixture.reads = 0
+        $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 -IncludeExecutionScope
+        $entries = @($snapshot.failure_diagnostics.entries)
+        if ($snapshot.complete -or $snapshot.attempts -ne 3 -or $fixture.reads -ne 3 -or
+            $entries.Count -ne 3 -or @($entries | Where-Object {
+                $_.code -cne $case.code -or $_.pid -ne $case.pid -or
+                    $_.return_code -ne $case.return_code
+            }).Count -ne 0 -or $snapshot.failure_diagnostics.overflow) {
+            throw "The $($case.mode) collector reason changed acceptance or retry bounds."
+        }
+        $transport = Get-V2ProcessSnapshot
+        if ($transport.complete -or $transport.attempts -ne 3 -or
+            @($transport.failure_diagnostics.entries).Count -ne 3 -or
+            $transport.failure_diagnostics.entries[0].code -cne $case.code -or
+            $transport.Keys.Count -ne 4 -or
+            ($transport | ConvertTo-Json -Depth 8).Contains('private query detail') -or
+            ($transport | ConvertTo-Json -Depth 8).Contains('private owner detail')) {
+            throw "The $($case.mode) reason was lost in V2 transport."
+        }
+    }
+    function Test-DrVmSpotlightNativeIdentity { $false }
+    $previousWinDir = $env:windir
+    try {
+        $env:windir = 'C:\Windows'
+        $fixture.mode='success'; $fixture.reads=0
+        $identity='7001|' + $created.ToString('o')
+        $capture = [pscustomobject]@{
+            lifetimes=@{$identity=[pscustomobject]@{owner=[pscustomobject]@{Identity=@{owner_sid=$sid}}}}
+            baseline=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            initial_rows=@{}
+        }
+        $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
+            -IncludeExecutionScope -CaptureContext $capture
+        if ($snapshot.complete -or $snapshot.attempts -ne 3 -or
+            @($snapshot.failure_diagnostics.entries | Where-Object code -CEQ 'owner_evidence_failed').Count -ne 3) {
+            throw 'Invalid held native owner evidence passed or lost its reason.'
+        }
+    }
+    finally { $env:windir = $previousWinDir }
+    $fixture.mode='overflow'; $fixture.reads=0
+    $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 -IncludeExecutionScope
+    if ($snapshot.complete -or $snapshot.attempts -ne 3 -or
+        $snapshot.failure_diagnostics.entries.Count -ne 16 -or
+        -not $snapshot.failure_diagnostics.overflow -or
+        $snapshot.failure_diagnostics.overflow_count -ne 44) {
+        throw 'Inventory diagnostic overflow was hidden or changed the incomplete verdict.'
+    }
+    $fixture.mode='success'; $fixture.reads=0
+    $transport = Get-V2ProcessSnapshot
+    if (-not $transport.complete -or $transport.Keys.Count -ne 2 -or
+        @($transport.processes).Count -ne 1) {
+        throw 'Successful V2 inventory transport changed its verified shape.'
+    }
+    $fixture.mode='empty_transient'; $fixture.reads=0
+    $preName = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 -IncludeExecutionScope
+    if (-not $preName.complete -or $preName.attempts -ne 2 -or
+        @($preName.processes).Count -ne 0 -or
+        @($preName.PSObject.Properties.Name | Where-Object {
+            $_ -notin @('complete','processes','attempts')
+        }).Count -ne 0) {
+        throw 'A successful pre-name retry changed the strict snapshot contract.'
+    }
+    $python = if ($IsWindows) { 'python' } else { 'python3' }
+    $supportRoot = Join-Path $toolingScriptsRoot 'tests/support'
+    $verifyPreName = @'
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from controller_cleanup_fixture import clean_controller_cleanup_v3
+from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
+from darkrenamer_tooling.evidence.archive import EvidenceError
+snapshot = json.load(sys.stdin)
+for extra in (False, True):
+    cleanup = clean_controller_cleanup_v3()
+    evidence = cleanup["owned_resource_evidence"]
+    current = dict(snapshot)
+    if extra:
+        current["failure_diagnostics"] = {"entries": []}
+    evidence["pre_name_snapshot"] = current
+    evidence["protected_anchor_initial"]["pre_name_snapshot"] = current
+    evidence["protected_anchor"]["pre_name_snapshot"] = current
+    try:
+        verify_controller_cleanup(cleanup, profile_id=cleanup["profile_id"],
+                                  profile_sha256=cleanup["profile_sha256"])
+    except EvidenceError as error:
+        if not extra or "Pre-name process inventory" not in str(error):
+            raise
+    else:
+        if extra:
+            raise AssertionError("Independent verifier accepted an extra pre-name field.")
+'@
+    $preName | ConvertTo-Json -Depth 8 -Compress |
+        & $python -c $verifyPreName $toolingScriptsRoot $supportRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The actual collector pre-name snapshot failed the independent cleanup contract.'
     }
 }
 
