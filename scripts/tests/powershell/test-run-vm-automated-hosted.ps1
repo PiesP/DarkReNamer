@@ -21,6 +21,10 @@ function Assert-Fails {
 $wrapper = Join-Path $toolingScriptsRoot 'run-vm-automated-hosted.ps1'
 . $wrapper -LibraryOnly
 
+foreach ($id in @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
+    Assert-HostedProfile -TrustedRoot $toolingTestPaths.RepositoryRoot -ProfileId $id
+}
+
 Assert-HostedDecimal -Value '1' -Label 'fixture'
 Assert-HostedDecimal -Value ([string][long]::MaxValue) -Label 'fixture'
 foreach ($value in @('0', '01', '-1', '1e2', '9223372036854775808')) {
@@ -222,15 +226,10 @@ function New-HostedInvocationFixture {
     }
     Copy-Item -LiteralPath (Join-Path $toolingScriptsRoot 'download-bounded-github-data.ps1') -Destination (Join-Path $trusted 'scripts')
     [void](New-Item -ItemType Directory -Path (Join-Path $trusted 'config') -Force)
-    foreach ($profile in @(
-        @{ Id = 'vm-automated-v1-win11-ntfs'; Revision = 1 },
-        @{ Id = 'vm-automated-v2-owned-resources'; Revision = 2 }
-    )) {
-        $path = Join-Path $trusted "config/vm-automated-v$($profile.Revision).json"
-        [IO.File]::WriteAllText($path, (
-            @{ schema = "darkrenamer-vm-automated-profile-v$($profile.Revision)";
-               profile_id = $profile.Id; revision = $profile.Revision } |
-                ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    foreach ($version in @(1, 2)) {
+        $fileName = "vm-automated-v$version.json"
+        Copy-Item -LiteralPath (Join-Path $toolingTestPaths.RepositoryRoot "config/$fileName") `
+            -Destination (Join-Path $trusted "config/$fileName")
     }
     $mockPython = Join-Path $Root 'mock-python.ps1'
     [IO.File]::WriteAllText($mockPython, @'
@@ -576,14 +575,32 @@ try {
     Assert-HostedProfile -TrustedRoot $profileFixture.trusted `
         -ProfileId 'vm-automated-v2-owned-resources'
     $profilePath = Join-Path $profileFixture.trusted 'config/vm-automated-v2.json'
-    [IO.File]::WriteAllText($profilePath, (
-        @{ schema = 'darkrenamer-vm-automated-profile-v2';
-           profile_id = 'vm-automated-v2-owned-resources'; revision = '2' } |
-            ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-    Assert-Fails {
-        Assert-HostedProfile -TrustedRoot $profileFixture.trusted `
-            -ProfileId 'vm-automated-v2-owned-resources'
-    } 'schema, ID or revision'
+    foreach ($mutation in @('stale-v2', 'future-v4', 'wrong-schema', 'wrong-id', 'string-revision')) {
+        $profile = [pscustomobject]@{
+            schema = 'darkrenamer-vm-automated-profile-v3'
+            profile_id = 'vm-automated-v2-owned-resources'
+            revision = 3
+        }
+        switch ($mutation) {
+            stale-v2 {
+                $profile.schema = 'darkrenamer-vm-automated-profile-v2'
+                $profile.revision = 2
+            }
+            future-v4 {
+                $profile.schema = 'darkrenamer-vm-automated-profile-v4'
+                $profile.revision = 4
+            }
+            wrong-schema { $profile.schema = 'darkrenamer-vm-automated-profile-v2' }
+            wrong-id { $profile.profile_id = 'vm-automated-v1-win11-ntfs' }
+            string-revision { $profile.revision = '3' }
+        }
+        [IO.File]::WriteAllText($profilePath, ($profile | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false))
+        Assert-Fails {
+            Assert-HostedProfile -TrustedRoot $profileFixture.trusted `
+                -ProfileId 'vm-automated-v2-owned-resources'
+        } 'schema, ID or revision'
+    }
     Assert-Fails {
         Assert-HostedProfile -TrustedRoot $profileFixture.trusted -ProfileId 'unknown'
     } 'Unknown hosted profile'
