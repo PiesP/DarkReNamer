@@ -156,13 +156,8 @@ function Invoke-TestAcceptance {
         $context.accepted_snapshots -ne 1 -or @($snapshot.processes).Count -ne 2) {
         throw "An incomplete retry was counted as a complete protected inventory: complete=$($snapshot.complete), attempts=$($snapshot.attempts), accepted=$($context.accepted_snapshots), rows=$(@($snapshot.processes).Count), owner_calls=$($fixture.owner_calls), protected_calls=$($fixture.protected_calls), rejected=$($context.rejected_opaque_observed), first=$($fixture.fail_owner_once), identities=$(@($snapshot.processes | ForEach-Object identity) -join ',')."
     }
-    if (@($snapshot.failure_diagnostics.entries).Count -ne 1 -or
-        $snapshot.failure_diagnostics.entries[0].code -cne 'owner_query_failed' -or
-        $snapshot.failure_diagnostics.entries[0].attempt -ne 1 -or
-        $snapshot.failure_diagnostics.entries[0].pid -ne 7002 -or
-        $snapshot.failure_diagnostics.entries[0].exception_type -cne 'RuntimeException' -or
-        $snapshot.failure_diagnostics.overflow) {
-        throw 'The actual collector lost the transient owner-query diagnostic.'
+    if (@($snapshot.PSObject.Properties.Name | Where-Object { $_ -notin @('complete','processes','attempts') }).Count -ne 0) {
+        throw 'A successful protected pre-name inventory gained a field rejected by the independent verifier.'
     }
     $fixture.reads=0; $fixture.new_opaque=$true
     $snapshot = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 `
@@ -211,8 +206,11 @@ function Invoke-TestAcceptance {
             throw 'The inventory query bound changed.'
         }
         $fixture.reads++
-        if ($fixture.mode -ceq 'query') { throw 'private query detail' }
-        $count = if ($fixture.mode -ceq 'overflow') { 20 } else { 1 }
+        if ($fixture.mode -ceq 'query' -or
+            ($fixture.mode -ceq 'empty_transient' -and $fixture.reads -eq 1)) {
+            throw 'private query detail'
+        }
+        $count = if ($fixture.mode -ceq 'overflow') { 20 } elseif ($fixture.mode -ceq 'empty_transient') { 0 } else { 1 }
         @(for ($i = 0; $i -lt $count; $i++) {
             $opaque = $fixture.mode -in @('opaque', 'overflow')
             [pscustomobject]@{ProcessId=7001+$i;SessionId=2;CreationDate=$created
@@ -290,6 +288,50 @@ function Invoke-TestAcceptance {
     if (-not $transport.complete -or $transport.Keys.Count -ne 2 -or
         @($transport.processes).Count -ne 1) {
         throw 'Successful V2 inventory transport changed its verified shape.'
+    }
+    $fixture.mode='empty_transient'; $fixture.reads=0
+    $preName = Get-DrVmRunnerProcesses -UserSid $sid -SessionId 2 -IncludeExecutionScope
+    if (-not $preName.complete -or $preName.attempts -ne 2 -or
+        @($preName.processes).Count -ne 0 -or
+        @($preName.PSObject.Properties.Name | Where-Object {
+            $_ -notin @('complete','processes','attempts')
+        }).Count -ne 0) {
+        throw 'A successful pre-name retry changed the strict snapshot contract.'
+    }
+    $python = if ($IsWindows) { 'python' } else { 'python3' }
+    $supportRoot = Join-Path $toolingScriptsRoot 'tests/support'
+    $verifyPreName = @'
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from controller_cleanup_fixture import clean_controller_cleanup_v3
+from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
+from darkrenamer_tooling.evidence.archive import EvidenceError
+snapshot = json.load(sys.stdin)
+for extra in (False, True):
+    cleanup = clean_controller_cleanup_v3()
+    evidence = cleanup["owned_resource_evidence"]
+    current = dict(snapshot)
+    if extra:
+        current["failure_diagnostics"] = {"entries": []}
+    evidence["pre_name_snapshot"] = current
+    evidence["protected_anchor_initial"]["pre_name_snapshot"] = current
+    evidence["protected_anchor"]["pre_name_snapshot"] = current
+    try:
+        verify_controller_cleanup(cleanup, profile_id=cleanup["profile_id"],
+                                  profile_sha256=cleanup["profile_sha256"])
+    except EvidenceError as error:
+        if not extra or "Pre-name process inventory" not in str(error):
+            raise
+    else:
+        if extra:
+            raise AssertionError("Independent verifier accepted an extra pre-name field.")
+'@
+    $preName | ConvertTo-Json -Depth 8 -Compress |
+        & $python -c $verifyPreName $toolingScriptsRoot $supportRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The actual collector pre-name snapshot failed the independent cleanup contract.'
     }
 }
 

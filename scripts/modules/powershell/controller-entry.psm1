@@ -4607,11 +4607,13 @@ public static class DrVmSpotlightNative {
                     complete = $complete
                     processes = @($rows.ToArray() | Sort-Object identity)
                     attempts = $attempt
-                    failure_diagnostics = [pscustomobject][ordered]@{
+                }
+                if (-not $complete) {
+                    $snapshot | Add-Member -NotePropertyName failure_diagnostics -NotePropertyValue ([pscustomobject][ordered]@{
                         entries = @($failureDiagnostics.entries.ToArray())
                         overflow = ($failureDiagnostics.overflow_count -gt 0)
                         overflow_count = $failureDiagnostics.overflow_count
-                    }
+                    })
                 }
                 if ($complete) {
                     if ($null -ne $ProtectedAnchorContext -and
