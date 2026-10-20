@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2114,7 +2115,7 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
     verify_transport_binding(
         transport, expected_transport_kind, expected_vm_id,
         require_identity_proof=True)
-    return True
+    return transport
 
 
 def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_vm_id,
@@ -2187,12 +2188,48 @@ def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_
             if path.is_symlink():
                 raise ValueError('Recovery collection contains a linked file.')
             actual.add(path.relative_to(root).as_posix())
-    expected = set(by_name) | {'recovery-inventory.json', 'transport.json'}
-    if actual != expected:
-        raise ValueError('Recovery collection inventory is not complete.')
-    verify_observer_transport(
+    transport = verify_observer_transport(
         root, 'recovery', expected_transport_kind, expected_vm_id,
         profile_id=profile_id, profile_sha256=profile_sha256, result=result)
+    current_v2 = (profile_id == V2_PROFILE_ID and
+                  transport['raw_cleanup']['schema_version'] == 3)
+    closure_name = 'protected-anchor-closure.json'
+    expected = set(by_name) | {'recovery-inventory.json', 'transport.json'}
+    if current_v2:
+        if closure_name in by_name:
+            raise ValueError('Protected anchor closure is controller-owned, not observer inventory.')
+        expected.add(closure_name)
+    if actual != expected:
+        raise ValueError('Recovery collection inventory is not complete.')
+    if current_v2:
+        closure_path = root / closure_name
+        closure_info = closure_path.lstat()
+        if (not stat.S_ISREG(closure_info.st_mode) or
+                not 0 < closure_info.st_size <= 1024 * 1024):
+            raise ValueError('Protected anchor closure is not an ordinary bounded file.')
+        closure = read_json_strict(closure_path, maximum_bytes=1024 * 1024)
+        held = transport['raw_cleanup']['owned_resource_evidence']['protected_anchor']
+        final = transport.get('protected_anchor_final')
+        remoting_fields = {'PSComputerName', 'RunspaceId', 'PSShowComputerName'}
+        try:
+            exact_anchor = (isinstance(final, dict) and
+                            json.dumps({key: final[key] for key in held}, sort_keys=True,
+                                       allow_nan=False) ==
+                            json.dumps(held, sort_keys=True, allow_nan=False) and
+                            json.dumps(closure, sort_keys=True, allow_nan=False) ==
+                            json.dumps(final, sort_keys=True, allow_nan=False))
+        except (KeyError, TypeError, ValueError):
+            exact_anchor = False
+        if (not isinstance(final, dict) or
+                set(final) != set(held) | remoting_fields or
+                not isinstance(final['PSComputerName'], str) or
+                not 0 < len(final['PSComputerName']) <= 512 or
+                not isinstance(final['RunspaceId'], str) or
+                re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}',
+                             final['RunspaceId']) is None or
+                type(final['PSShowComputerName']) is not bool or
+                not exact_anchor):
+            raise ValueError('Protected anchor closure differs from trusted final transport.')
     return result
 
 
