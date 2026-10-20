@@ -111,10 +111,81 @@ $ciRun.id = [long]37
 $ciRun.run_attempt = [long]1
 $ciRun.path = '.github/workflows/ci.yaml'
 $ciRun.event = 'push'
-$ciJobs = @(
-    'pr-gate/quality', 'pr-gate/security', 'pr-gate/unit', 'pr-gate/windows' |
-        ForEach-Object { [ordered]@{ name = $_; status = 'completed'; conclusion = 'success' } }
-)
+function New-HostedCiFixture {
+    $requiredSteps = [ordered]@{
+        'Classify documentation changes' = @('Classify with protected policy')
+        'pr-gate/quality' = @('Test tooling', 'Check formatting and lints')
+        'pr-gate/security' = @('Refresh and audit Rust dependencies')
+        'pr-gate/unit' = @('Run workspace tests')
+        'pr-gate/windows' = @(
+            'Test tooling', 'Validate Windows tests and lints',
+            'Test optimized workspace artifacts', 'Build the compatibility executable'
+        )
+    }
+    [pscustomobject]@{
+        total_count = [long]5
+        jobs = @($requiredSteps.GetEnumerator() | ForEach-Object {
+            [pscustomobject]@{
+                name = $_.Key; status = 'completed'; conclusion = 'success'
+                steps = @($_.Value | ForEach-Object {
+                    [pscustomobject]@{ name = $_; status = 'completed'; conclusion = 'success' }
+                })
+            }
+        })
+    }
+}
+
+$ciDocument = New-HostedCiFixture
+$ciJobs = @(Get-HostedCiGateJobs -Document $ciDocument)
+if ($ciJobs.Count -ne 4 -or
+    @($ciJobs | ForEach-Object name) -ccontains 'Classify documentation changes') {
+    throw 'Hosted CI gate did not project the four canonical substantive jobs.'
+}
+foreach ($mutation in @(
+    'extra', 'missing', 'duplicate', 'pending', 'skipped', 'failed', 'wrong', 'case',
+    'classifier-skipped', 'step-missing', 'step-duplicate', 'step-pending',
+    'step-skipped', 'step-failed', 'docs-only'
+)) {
+    $fixture = $ciDocument | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $quality = @($fixture.jobs | Where-Object name -CEQ 'pr-gate/quality')[0]
+    switch ($mutation) {
+        extra {
+            $fixture.total_count = [long]6
+            $fixture.jobs += [pscustomobject]@{
+                name = 'pr-gate/untrusted'; status = 'completed'; conclusion = 'success'
+                steps = @()
+            }
+        }
+        missing {
+            $fixture.total_count = [long]4
+            $fixture.jobs = @($fixture.jobs | Where-Object name -CNE 'pr-gate/unit')
+        }
+        duplicate { $quality.name = 'pr-gate/security' }
+        pending { $quality.status = 'in_progress' }
+        skipped { $quality.conclusion = 'skipped' }
+        failed { $quality.conclusion = 'failure' }
+        wrong { $quality.name = 'pr-gate/untrusted' }
+        case { $quality.name = 'Pr-gate/quality' }
+        classifier-skipped {
+            @($fixture.jobs | Where-Object name -CEQ 'Classify documentation changes')[0].conclusion = 'skipped'
+        }
+        step-missing { $quality.steps = @($quality.steps | Where-Object name -CNE 'Test tooling') }
+        step-duplicate { $quality.steps += $quality.steps[0] }
+        step-pending { $quality.steps[0].status = 'in_progress' }
+        step-skipped { $quality.steps[0].conclusion = 'skipped' }
+        step-failed { $quality.steps[0].conclusion = 'failure' }
+        docs-only {
+            foreach ($job in @($fixture.jobs | Where-Object { $_.name -cne 'pr-gate/security' -and
+                        $_.name -cne 'Classify documentation changes' })) {
+                foreach ($step in $job.steps) { $step.conclusion = 'skipped' }
+            }
+        }
+    }
+    Assert-Fails { Get-HostedCiGateJobs -Document $fixture } $(
+        if ($mutation -like 'step-*' -or $mutation -ceq 'docs-only') { 'CI step' }
+        else { 'job' }
+    )
+}
 $gate = New-HostedGateMetadata `
     -RepositoryMetadata $repoFixture `
     -CandidateRun $candidateRun `
@@ -349,12 +420,7 @@ function Invoke-HostedInvocationScenario {
             }) }
         }
         elseif ($endpoint -like '*/actions/runs/37/attempts/1/jobs*') {
-            [ordered]@{ total_count = [long]4; jobs = @(
-                'pr-gate/quality', 'pr-gate/security', 'pr-gate/unit', 'pr-gate/windows' |
-                    ForEach-Object {
-                        [ordered]@{ name = $_; status = 'completed'; conclusion = 'success' }
-                    }
-            ) }
+            New-HostedCiFixture
         }
         elseif ($endpoint -like '*/actions/runs/37/attempts/1') {
             [ordered]@{
