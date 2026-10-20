@@ -77,7 +77,7 @@ function Assert-HostedProfile {
           [Parameter(Mandatory)][string] $ProfileId)
     $selected = switch -CaseSensitive ($ProfileId) {
         'vm-automated-v1-win11-ntfs' { @{ Path = 'config/vm-automated-v1.json'; Revision = 1 } }
-        'vm-automated-v2-owned-resources' { @{ Path = 'config/vm-automated-v2.json'; Revision = 2 } }
+        'vm-automated-v2-owned-resources' { @{ Path = 'config/vm-automated-v2.json'; Revision = 3 } }
         default { throw 'Unknown hosted profile ID.' }
     }
     $profile = Read-HostedJson (Join-Path $TrustedRoot $selected.Path)
