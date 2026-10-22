@@ -167,7 +167,9 @@ fn decode_legacy_text(bytes: &[u8]) -> io::Result<LegacyText> {
             ));
         }
         let units = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         return Ok(LegacyText::from_units(units));

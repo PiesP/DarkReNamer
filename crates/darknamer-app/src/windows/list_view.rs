@@ -6353,8 +6353,10 @@ mod native_tests {
             assert_eq!(before, settled_before, "initial Light raster was unstable");
             assert!(
                 before
-                    .chunks_exact(3)
-                    .filter(|pixel| *pixel != [0xff; 3])
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .filter(|pixel| **pixel != [0xff; 3])
                     .count()
                     > 20,
                 "target-folder text was not rendered"

@@ -839,7 +839,7 @@ mod tests {
         observer.releases.fetch_add(1, Ordering::AcqRel);
         let previous = observer
             .refs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |refs| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |refs| {
                 refs.checked_sub(1)
             })
             .unwrap_or(0);

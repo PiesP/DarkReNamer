@@ -233,10 +233,10 @@ pub trait RenameBackend {
 
 pub(super) fn entry_key_from_parts(parent: EntryIdentity, normalized_leaf: &[u16]) -> PathKey {
     let mut units = Vec::with_capacity(12 + normalized_leaf.len());
-    for bytes in parent.volume().to_le_bytes().chunks_exact(2) {
+    for bytes in parent.volume().to_le_bytes().as_chunks::<2>().0 {
         units.push(u16::from_le_bytes([bytes[0], bytes[1]]));
     }
-    for bytes in parent.file_id().to_le_bytes().chunks_exact(2) {
+    for bytes in parent.file_id().to_le_bytes().as_chunks::<2>().0 {
         units.push(u16::from_le_bytes([bytes[0], bytes[1]]));
     }
     units.extend_from_slice(normalized_leaf);

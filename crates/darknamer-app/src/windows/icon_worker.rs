@@ -202,7 +202,7 @@ impl IconShared {
     fn update_pending(&self, requests: &IconRequests<IconCacheKey, IconResult>) {
         if self
             .status_revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .is_err()
@@ -223,7 +223,7 @@ impl IconShared {
             .store(requests.generation(), Ordering::Release);
         if self
             .status_revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .is_err()
@@ -691,7 +691,7 @@ impl IconRunGuardian {
         Q: FnMut(&RequestKey<IconCacheKey>) -> IconResult + 'static,
     {
         let session = NEXT_ICON_SESSION
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| io::Error::other("icon session identifiers exhausted"))?;
