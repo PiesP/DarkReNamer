@@ -463,7 +463,7 @@ fn read_pixels(
 
 fn distinct_colors(pixels: &[u8]) -> HashSet<u32> {
     let mut colors = HashSet::with_capacity(MINIMUM_DISTINCT_COLORS + 1);
-    for pixel in pixels.chunks_exact(4) {
+    for pixel in pixels.as_chunks::<4>().0 {
         colors.insert(u32::from_le_bytes([pixel[0], pixel[1], pixel[2], 0]));
         if colors.len() > MINIMUM_DISTINCT_COLORS {
             break;
@@ -476,7 +476,7 @@ fn distinct_colors(pixels: &[u8]) -> HashSet<u32> {
 fn solid_color_detector_rejects_single_pixel_vertical_lines() -> io::Result<()> {
     let background = 0x001c_1917_u32;
     let mut pixels = vec![0_u8; 8 * 4 * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[..3].copy_from_slice(&[0x1c, 0x19, 0x17]);
     }
     for y in 0..4_usize {

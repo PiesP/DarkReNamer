@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "platform": "x86_64-pc-windows-msvc",
   "rust": {
-    "version": "1.97.1",
+    "version": "1.99.1",
     "manifest": {
-      "url": "https://static.rust-lang.org/dist/channel-rust-1.97.1.toml",
-      "sha256": "03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf"
+      "url": "https://static.rust-lang.org/dist/channel-rust-1.99.1.toml",
+      "sha256": "fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463"
     },
     "components": [
       {
         "id": "rustc",
         "directory": "rustc",
-        "url": "https://static.rust-lang.org/dist/2026-07-16/rustc-1.97.1-x86_64-pc-windows-msvc.tar.gz",
-        "sha256": "b45f488437194f810076ed26cdcc78bf916d40be8f0a55c183f406c909c1af3c"
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rustc-1.99.1-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "4e211ed2047e7890a8aea79fc8a88922d4c0e87a325349323d56c958d8da5d3a"
       },
       {
         "id": "cargo",
         "directory": "cargo",
-        "url": "https://static.rust-lang.org/dist/2026-07-16/cargo-1.97.1-x86_64-pc-windows-msvc.tar.gz",
-        "sha256": "5c023e6f3d9eb8bec511bfcda889668b1be6981459d1b40be0bf4444ab059563"
+        "url": "https://static.rust-lang.org/dist/2026-10-15/cargo-1.99.1-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "bbf6e9295b69c9de8f2610e3e5bb90217d23826b7f2adac698262663a58ad899"
       },
       {
         "id": "rust-std",
         "directory": "rust-std-x86_64-pc-windows-msvc",
-        "url": "https://static.rust-lang.org/dist/2026-07-16/rust-std-1.97.1-x86_64-pc-windows-msvc.tar.gz",
-        "sha256": "ea544e8d86c9978987a91bad66a0750003840cb995c54972f34fa69343fce74b"
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "e856f160e01c31fe35aa7255579eed0774029882692d694736106f5883a96f22"
       },
       {
         "id": "rustfmt-preview",
         "directory": "rustfmt-preview",
-        "url": "https://static.rust-lang.org/dist/2026-07-16/rustfmt-1.97.1-x86_64-pc-windows-msvc.tar.gz",
-        "sha256": "ed2217b8490b833c4748b29846fd04d8fe25ea9bb826137041d404166abc8ef1"
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rustfmt-1.99.1-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "1af7310f4a462eaaa4b737f0325196f2e3a06e8218b3abf68fad0e0ce0310383"
       },
       {
         "id": "clippy-preview",
         "directory": "clippy-preview",
-        "url": "https://static.rust-lang.org/dist/2026-07-16/clippy-1.97.1-x86_64-pc-windows-msvc.tar.gz",
-        "sha256": "c1d14a9ae79ec35f04b3ae07b383b5902971ea76b54fc8b571d663880b5d9799"
+        "url": "https://static.rust-lang.org/dist/2026-10-15/clippy-1.99.1-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "36b27d3986ad62f7f17199013706ec568fb7349e29ac983f57b6f9af991cdf03"
       }
     ]
   },
