@@ -1152,10 +1152,8 @@ mod tests {
                 .file_drop_handle()
                 .ok_or_else(|| io::Error::other("native drop handle missing"))?;
             // SAFETY: the test-owned medium keeps the complete DROPFILES block live.
-            assert_eq!(
-                unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) } as usize,
-                paths.len()
-            );
+            let reported = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
+            assert_eq!(reported as usize, paths.len());
             let extracted = extract_drop_paths(drop, MAX_ADMITTED_SOURCES, PathBudget::new());
             assert_eq!(extracted.paths, expected_paths);
             assert_eq!(extracted.excluded_paths, expected_excluded);
