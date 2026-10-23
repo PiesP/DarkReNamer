@@ -297,6 +297,8 @@ class ScannerPinMetadataTests(unittest.TestCase):
             "digest": original.replace('"sha256": "0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab"', '"sha256": ""'),
             "schema": original.replace('"schemaVersion": 1,', '"schemaVersion": 2,'),
             "boolean-schema": original.replace('"schemaVersion": 1,', '"schemaVersion": true,'),
+            "nan": original.replace('"version": "1.99.1",', '"version": NaN,'),
+            "infinity": original.replace('"version": "1.99.1",', '"version": Infinity,'),
         }
         for label, content in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="darkrenamer-bad-scanner-pins-") as directory:
@@ -305,11 +307,38 @@ class ScannerPinMetadataTests(unittest.TestCase):
                 record.write_text(content, encoding="utf-8")
                 load_pins = AUDIT.scanner_pins
                 with mock.patch.object(AUDIT, "scanner_pins", side_effect=lambda: load_pins(record)), mock.patch.object(AUDIT, "command") as command:
+                    output = root / "github-output"
+                    with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), redirect_stderr(StringIO()):
+                        self.assertEqual(AUDIT.main(["--emit-pins"]), 1)
+                    self.assertFalse(output.exists())
                     summary = root / "summary.md"
                     with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root)}):
                         self.assertEqual(AUDIT.main([]), 1)
                     self.assertIn("invalid scanner metadata", summary.read_text(encoding="utf-8"))
                     command.assert_not_called()
+
+    def test_new_selected_version_requires_separate_parser_review(self) -> None:
+        original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
+        changed = original.replace('"version": "0.22.2",', '"version": "0.22.3",').replace(
+            'v0.22.2', 'v0.22.3'
+        )
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-unreviewed-scanner-") as directory:
+            root = Path(directory)
+            record = root / "pins.json"
+            record.write_text(changed, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unreviewed cargo-audit report compatibility"):
+                AUDIT.scanner_pins(record)
+            load_pins = AUDIT.scanner_pins
+            with mock.patch.object(AUDIT, "scanner_pins", side_effect=lambda: load_pins(record)), mock.patch.object(AUDIT, "command") as command:
+                output = root / "github-output"
+                with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), redirect_stderr(StringIO()):
+                    self.assertEqual(AUDIT.main(["--emit-pins"]), 1)
+                self.assertFalse(output.exists())
+                summary = root / "summary.md"
+                with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root)}):
+                    self.assertEqual(AUDIT.main([]), 1)
+                self.assertIn("unreviewed cargo-audit report compatibility", summary.read_text(encoding="utf-8"))
+                command.assert_not_called()
 
 
 class VerifiedToolPathsTests(unittest.TestCase):
