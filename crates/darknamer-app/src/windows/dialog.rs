@@ -2158,6 +2158,7 @@ fn configure_single_path_dialog(
                 .SetDefaultExtension(PCWSTR(default_extension.as_ptr()))
                 .map_err(shell_dialog_error)?;
             dialog.SetFileTypes(&filters).map_err(shell_dialog_error)?;
+            dialog.SetFileTypeIndex(1).map_err(shell_dialog_error)?;
         }
     }
     Ok(())
