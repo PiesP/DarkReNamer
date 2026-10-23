@@ -1306,6 +1306,22 @@ fn show_message_now(owner: HWND, text: &str, caption: &str) {
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
 }
 
+pub(super) fn show_startup_error(message: &str) {
+    let text = wide(message);
+    let caption = wide("DarkReNamer - 시작 실패");
+    // SAFETY: startup has no owner window or UI apartment. MessageBoxW accepts
+    // a null owner and borrows both terminated buffers only for this call.
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        )
+    };
+}
+
 fn drain_deferred_messages_with(owner: HWND, mut show: impl FnMut(HWND, &str, &str)) -> bool {
     let Some(_guard) = DeferredMessageDrainGuard::begin(owner) else {
         return false;
