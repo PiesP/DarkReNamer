@@ -78,6 +78,9 @@ if arguments == ["--version"]:
 elif name == "cargo-audit":
     mode = os.environ.get("MOCK_AUDIT", "clean")
     sys.stderr.write(os.environ.get("MOCK_AUDIT_STDERR", ""))
+    if "MOCK_AUDIT_STDOUT" in os.environ:
+        sys.stdout.write(os.environ["MOCK_AUDIT_STDOUT"])
+        sys.exit(int(os.environ.get("MOCK_AUDIT_EXIT", "0")))
     if mode == "unavailable":
         print("advisory network unavailable", file=sys.stderr)
         sys.exit(1)
@@ -274,6 +277,39 @@ class AuditResultTests(unittest.TestCase):
         result = self.result("warning: couldn't open crates.io index: unavailable", count=1)
         self.assertIn("findings (1 vulnerabilities", result)
         self.assertIn("registry-index data unavailable", result)
+
+    def test_ambiguous_json_fields_fail_at_every_depth_regardless_of_order(self) -> None:
+        clean = '"vulnerabilities":{"count":0,"found":false,"list":[]}'
+        for first, second in (('{"unmaintained":[{}]}', '{}'), ('{}', '{"unmaintained":[{}]}')):
+            with self.subTest(first=first):
+                raw = '{' + clean + ',"warnings":' + first + ',"warnings":' + second + '}'
+                result = AUDIT.audit_result(subprocess.CompletedProcess([], 0, raw, ""))
+                self.assertIn("malformed cargo-audit report", result)
+        for first, second in (("1", "0"), ("0", "1")):
+            with self.subTest(first=first):
+                raw = ('{"vulnerabilities":{"count":' + first + ',"count":' + second +
+                       ',"found":false,"list":[]},"warnings":{}}')
+                result = AUDIT.audit_result(subprocess.CompletedProcess([], 0, raw, ""))
+                self.assertIn("malformed cargo-audit report", result)
+        for first, second in (('[{}]', '[]'), ('[]', '[{}]')):
+            with self.subTest(first=first):
+                raw = ('{' + clean + ',"warnings":{"unmaintained":' + first +
+                       ',"unmaintained":' + second + '}}')
+                result = AUDIT.audit_result(subprocess.CompletedProcess([], 0, raw, ""))
+                self.assertIn("malformed cargo-audit report", result)
+
+    def test_non_json_constants_fail_even_outside_verdict_fields(self) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                raw = ('{"vulnerabilities":{"count":0,"found":false,"list":[]},'
+                       '"warnings":{},"metadata":{"ignored":' + constant + '}}')
+                result = AUDIT.audit_result(subprocess.CompletedProcess([], 0, raw, ""))
+                self.assertIn("malformed cargo-audit report", result)
+
+    def test_report_fields_remain_case_sensitive(self) -> None:
+        raw = ('{"vulnerabilities":{"count":0,"found":false,"list":[]},'
+               '"warnings":{},"Warnings":{}}')
+        self.assertEqual(AUDIT.audit_result(subprocess.CompletedProcess([], 0, raw, "")), "clean")
 
 
 class ScannerPinMetadataTests(unittest.TestCase):
@@ -511,6 +547,18 @@ class ScheduledRustAuditTests(unittest.TestCase):
             self.assertEqual(arguments[:2], ["audit", "--db"])
             self.assertEqual(arguments[3:], ["--deny", "warnings", "--file", "Cargo.lock", "--format", "json"])
         self.assertNotEqual(audit_arguments[0][2], audit_arguments[1][2])
+
+    def test_ambiguous_audit_stdout_fails_production_entrypoint(self) -> None:
+        raw = ('{"vulnerabilities":{"count":0,"found":false,"list":[]},'
+               '"warnings":{"unmaintained":[{}]},"warnings":{}}')
+        result, summary, calls = self.run_fixture(MOCK_AUDIT_STDOUT=raw)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cargo-audit: tool or advisory-data failure", summary)
+        self.assertIn("malformed cargo-audit report", summary)
+        self.assertIn("Result: failed or incomplete", summary)
+        self.assertIn(["--format", "json", "--locked", "check"], [
+            call["arguments"] for call in calls if call["name"] == "cargo-deny"
+        ])
 
     def test_wrong_cached_tool_version_stops_before_scanning(self) -> None:
         for mode in ("MOCK_VERSION", "MOCK_MISSING"):

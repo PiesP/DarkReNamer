@@ -91,9 +91,26 @@ def command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(arguments, 127, "", str(error))
 
 
+def load_report_json(output: str) -> object:
+    """Reject ambiguous scanner fields without applying metadata's case-folded key rule."""
+
+    def unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        fields = {}
+        for name, value in pairs:
+            if name in fields:
+                raise ValueError("duplicate JSON field")
+            fields[name] = value
+        return fields
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-JSON numeric constant: {value}")
+
+    return json.loads(output, object_pairs_hook=unique_fields, parse_constant=reject_constant)
+
+
 def audit_result(process: subprocess.CompletedProcess[str]) -> str:
     try:
-        report = json.loads(process.stdout)
+        report = load_report_json(process.stdout)
         vulnerabilities = report["vulnerabilities"]
         count = vulnerabilities["count"]
         vulnerability_list = vulnerabilities["list"]
@@ -170,23 +187,12 @@ def deny_result(process: subprocess.CompletedProcess[str]) -> str:
     summary_errors = 0
     summaries: list[dict] = []
 
-    def reject_constant(value: str) -> None:
-        raise ValueError("non-JSON numeric constant")
-
-    def unique_fields(pairs: list[tuple[str, object]]) -> dict:
-        fields = {}
-        for name, value in pairs:
-            if name in fields:
-                raise ValueError("duplicate JSON field")
-            fields[name] = value
-        return fields
-
     for stream, output in (("stdout", process.stdout), ("stderr", process.stderr)):
         for number, line in enumerate(output.splitlines(), 1):
             if not line.strip():
                 continue
             try:
-                item = json.loads(line, parse_constant=reject_constant, object_pairs_hook=unique_fields)
+                item = load_report_json(line)
                 reason = deny_record_error(item)
             except ValueError:
                 reason = "invalid JSON"
