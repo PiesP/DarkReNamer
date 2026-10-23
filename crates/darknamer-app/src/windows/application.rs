@@ -2926,6 +2926,11 @@ mod tests {
             assert_eq!(state.active_prompt, Some(5));
             assert!(state.mutation_locked);
         })?;
+        let second = initialize_safe_runtime_at(app._directory.path());
+        let error = second
+            .err()
+            .ok_or_else(|| io::Error::other("close-pending import released the runtime lock"))?;
+        assert!(error.to_string().contains("runtime lock"));
         release_sender.send(())?;
         app.drain_import()?;
         app.with_state(|state| {
