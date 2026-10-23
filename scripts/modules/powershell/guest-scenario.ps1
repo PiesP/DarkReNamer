@@ -480,7 +480,8 @@ function Invoke-OwnedPickerAction {
         [Parameter(Mandatory)][string] $Title,
         [Parameter(Mandatory)][ValidateSet('cancel', 'file', 'folder')][string] $Action,
         [string] $Selection,
-        [switch] $TextFilters
+        [switch] $TextFilters,
+        [switch] $UseDefaultExtension
     )
 
     Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
@@ -553,7 +554,7 @@ function Invoke-OwnedPickerAction {
         Invoke-AutomationControl -Element $cancel -Label 'picker Cancel'
     }
     else {
-        if ($Action -ceq 'folder') {
+        if ($Action -ceq 'folder' -or $UseDefaultExtension) {
             # Match the maintained destination-folder observer: navigate the
             # address first, then select that directory instead of merely
             # navigating on the first Select Folder invocation.
@@ -567,18 +568,20 @@ function Invoke-OwnedPickerAction {
             if ($edit.Current.ControlType -ne [Windows.Automation.ControlType]::Edit) {
                 throw 'Folder address shortcut did not focus an Edit.'
             }
-            Set-AutomationControlValue -Element $edit -Value $Selection -Label 'folder address'
+            $directory = if ($Action -ceq 'folder') { $Selection } else { [IO.Path]::GetDirectoryName($Selection) }
+            Set-AutomationControlValue -Element $edit -Value $directory -Label 'folder address'
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
                 throw 'Folder picker lost foreground before address navigation.'
             }
             [Windows.Forms.SendKeys]::SendWait('{ENTER}')
             Start-Sleep -Milliseconds 300
         }
-        else {
+        if ($Action -ceq 'file') {
             $edit = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
                 -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) `
                 -TimeoutSeconds $TimeoutSeconds -Label 'picker selection field'
-            Set-AutomationControlValue -Element $edit -Value $Selection -Label 'picker selection field'
+            $filename = if ($UseDefaultExtension) { [IO.Path]::GetFileNameWithoutExtension($Selection) } else { $Selection }
+            Set-AutomationControlValue -Element $edit -Value $filename -Label 'picker selection field'
         }
         $accept = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
             -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
@@ -639,7 +642,7 @@ function Invoke-ProductionPickerChecks {
     $Record['actions'] = $actions
     $specs = @(
         @{ command = 0x801D; title = '파일에서 경로목록 읽어 추가하기'; selection = $paths; folder = $false },
-        @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = [IO.Path]::ChangeExtension($names, $null); folder = $false },
+        @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = $names; folder = $false },
         @{ command = 0x8013; title = '모든 파일을 이동할 대상 폴더 선택'; selection = $destination; folder = $true }
     )
     foreach ($spec in $specs) {
@@ -659,7 +662,7 @@ function Invoke-ProductionPickerChecks {
         $accept = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
             -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
             -Action $(if ($spec.folder) { 'folder' } else { 'file' }) -Selection $spec.selection `
-            -TextFilters:(-not $spec.folder)
+            -TextFilters:(-not $spec.folder) -UseDefaultExtension:($spec.command -eq 0x801C)
         $expected = @('선택-😀.txt', $(if ($spec.command -eq 0x801D) { '선택-😀.txt' } else { '변경-😀.txt' }),
             $(if ($spec.folder) { $destination } else { $root }))
         $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))

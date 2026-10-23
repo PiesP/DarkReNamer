@@ -537,7 +537,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "dd5119f889c990badac93fe169005500ec344f2810e5a5b2da7e2b338c5a24f9",
+      "sha256": "8b0c900095bb573aad4975101835ea57988e7db80667252c6607c1814a7d8f98",
       "dependencies": []
     },
     {
