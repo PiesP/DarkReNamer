@@ -15,7 +15,7 @@ from pathlib import Path
 import stat
 import types
 
-TOOLING_MANIFEST_SHA256 = "37ac892f3afdc367c8af7a2da6fa2c44c60094c152fbd3685c5e75cce7fb543f"
+TOOLING_MANIFEST_SHA256 = "e7eddb309eb1f8f50120cf97f9230b4d524a5afae48a58f418755967a51b9b85"
 TOOLING_LOADER_SHA256 = "fd227a8ae9c678185a6b674a5ea44c3bf1ccbe5239212bfd9d2c29755f10f223"
 IMPLEMENTATION_ROLE = "vm-runtimebroker-diagnostic"
 

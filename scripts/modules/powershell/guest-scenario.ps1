@@ -499,19 +499,46 @@ function Invoke-OwnedPickerAction {
     }
     $filterNames = @()
     if ($TextFilters) {
-        $combo = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
-            -AutomationId '1143' -ControlType ([Windows.Automation.ControlType]::ComboBox) `
-            -TimeoutSeconds $TimeoutSeconds -Label 'text picker file types'
+        # Shell versions expose different control IDs. Bind the actual selected
+        # filter through its UIA value/selection rather than a classic-dialog ID.
+        $combos = $dialog.FindAll([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.PropertyCondition]::new(
+                [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [Windows.Automation.ControlType]::ComboBox))
+        if ($combos.Count -gt 8) { throw 'Picker ComboBox inventory exceeds its bound.' }
+        $candidates = @()
+        $comboObservations = @()
+        foreach ($candidate in $combos) {
+            Assert-AutomationBinding -Element $candidate -Process $Process -ExpectedSession $Session -Label 'picker ComboBox'
+            $values = @($candidate.Current.Name)
+            $pattern = $null
+            if ($candidate.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+                $values += ([Windows.Automation.ValuePattern]$pattern).Current.Value
+            }
+            $pattern = $null
+            if ($candidate.TryGetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern, [ref]$pattern)) {
+                $values += @(([Windows.Automation.SelectionPattern]$pattern).GetCurrentSelection() | ForEach-Object { $_.Current.Name })
+            }
+            $comboObservations += @{ id=$candidate.Current.AutomationId; values=$values }
+            if ($values -ccontains 'Text Files (*.txt)') { $candidates += $candidate }
+        }
+        if ($candidates.Count -ne 1) {
+            throw "Picker has no unique selected Text Files filter: $($comboObservations | ConvertTo-Json -Depth 4 -Compress)"
+        }
+        $combo = $candidates[0]
         $expand = [Windows.Automation.ExpandCollapsePattern]$combo.GetCurrentPattern(
             [Windows.Automation.ExpandCollapsePattern]::Pattern)
         $expand.Expand()
         try {
-            $items = $combo.FindAll([Windows.Automation.TreeScope]::Descendants,
+            $items = $dialog.FindAll([Windows.Automation.TreeScope]::Descendants,
                 [Windows.Automation.PropertyCondition]::new(
                     [Windows.Automation.AutomationElement]::ControlTypeProperty,
                     [Windows.Automation.ControlType]::ListItem))
-            if ($items.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
-            $filterNames = @($items | ForEach-Object { $_.Current.Name })
+            if ($items.Count -gt 512) { throw 'Picker ListItem inventory exceeds its bound.' }
+            $filterNames = @($items | ForEach-Object { $_.Current.Name } | Where-Object {
+                $_ -cin @('Text Files (*.txt)', 'All Files (*.*)')
+            })
+            if ($filterNames.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
             if ($filterNames[0] -cne 'Text Files (*.txt)' -or $filterNames[1] -cne 'All Files (*.*)') {
                 throw "Text picker filters changed: $($filterNames -join ', ')."
             }
