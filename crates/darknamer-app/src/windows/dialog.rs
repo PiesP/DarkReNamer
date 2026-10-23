@@ -2139,10 +2139,11 @@ fn configure_single_path_dialog(
             .SetTitle(PCWSTR(title.as_ptr()))
             .map_err(shell_dialog_error)?;
         if matches!(policy, SinglePathDialog::ImportFile) {
+            let default_extension = wide("txt");
             let text_label = wide("Text Files");
             let text_pattern = wide("*.txt");
             let all_label = wide("All Files");
-            let all_pattern = wide("*");
+            let all_pattern = wide("*.*");
             let filters = [
                 COMDLG_FILTERSPEC {
                     pszName: PCWSTR(text_label.as_ptr()),
@@ -2153,6 +2154,9 @@ fn configure_single_path_dialog(
                     pszSpec: PCWSTR(all_pattern.as_ptr()),
                 },
             ];
+            dialog
+                .SetDefaultExtension(PCWSTR(default_extension.as_ptr()))
+                .map_err(shell_dialog_error)?;
             dialog.SetFileTypes(&filters).map_err(shell_dialog_error)?;
         }
     }
@@ -3955,6 +3959,10 @@ mod tests {
                 SinglePathDialog::ImportFile => {
                     assert!(options.contains(FOS_FILEMUSTEXIST));
                     assert!(!options.contains(FOS_PICKFOLDERS));
+                    // SAFETY: the configured dialog remains on this test STA.
+                    let selected_filter =
+                        unsafe { dialog.GetFileTypeIndex() }.map_err(shell_dialog_error)?;
+                    assert_eq!(selected_filter, 1);
                 }
                 SinglePathDialog::DestinationFolder => {
                     assert!(options.contains(FOS_PICKFOLDERS));
