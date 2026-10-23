@@ -2532,14 +2532,43 @@ $sendKeys = @($fromFile.FindAll({
     $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
         $node.Member.Value -ceq 'SendWait'
 }, $true))
-if ($sendKeys.Count -ne 2) { throw 'Recovery input sites changed without an ownership audit.' }
+$auditedInputSites = @{
+    'Dismiss-AcceptanceMessage' = 1
+    'Invoke-AcceptanceImportAndPrefix' = 1
+    'Invoke-OwnedPickerAction' = 2
+}
+$observedInputSites = @{}
+if ($sendKeys.Count -ne 4) { throw 'Recovery input sites changed without an ownership audit.' }
 foreach ($inputCall in $sendKeys) {
     $owner = $inputCall.Parent
     while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
-    if ($null -eq $owner -or $owner.Name -cnotin @(
-            'Dismiss-AcceptanceMessage', 'Invoke-AcceptanceImportAndPrefix'
-        ) -or $owner.Extent.Text.IndexOf('GetForegroundWindow', [StringComparison]::Ordinal) -lt 0) {
+    if ($null -eq $owner -or $owner.Name -cnotin $auditedInputSites.Keys -or
+        $owner.Extent.Text.IndexOf('GetForegroundWindow', [StringComparison]::Ordinal) -lt 0) {
         throw 'Recovery input bypasses the audited exact-foreground helpers.'
+    }
+    if (-not $observedInputSites.ContainsKey($owner.Name)) { $observedInputSites[$owner.Name] = 0 }
+    $observedInputSites[$owner.Name]++
+    if ($owner.Name -ceq 'Invoke-OwnedPickerAction') {
+        foreach ($fragment in @(
+            'Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session',
+            '-MainWindowHandle $MainHandle -MainWindow $MainWindow',
+            '$_.Handle -eq $handle.ToInt64() -and $_.Owner -eq $MainHandle.ToInt64()',
+            'Assert-AutomationBinding -Element $edit -Process $Process -ExpectedSession $Session',
+            '[DarkReNamerVmNative]::GetForegroundWindow() -ne $handle'
+        )) {
+            if ($owner.Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+                throw "Picker keyboard input lost its native owner, session or foreground binding: $fragment"
+            }
+        }
+        if ($inputCall.Extent.Text -cnotin @(
+            "[Windows.Forms.SendKeys]::SendWait('^l')",
+            "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
+        )) { throw 'Picker keyboard input exceeds the reviewed address navigation.' }
+    }
+}
+foreach ($name in $auditedInputSites.Keys) {
+    if ($observedInputSites[$name] -ne $auditedInputSites[$name]) {
+        throw "Audited input site count changed for $name."
     }
 }
 $nativeInitializer = @($fromFile.FindAll({
