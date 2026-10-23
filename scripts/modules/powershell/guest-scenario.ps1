@@ -553,16 +553,39 @@ function Invoke-OwnedPickerAction {
         Invoke-AutomationControl -Element $cancel -Label 'picker Cancel'
     }
     else {
-        $edit = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
-            -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) `
-            -TimeoutSeconds $TimeoutSeconds -Label 'picker selection field'
-        Set-AutomationControlValue -Element $edit -Value $Selection -Label 'picker selection field'
+        if ($Action -ceq 'folder') {
+            # Match the maintained destination-folder observer: navigate the
+            # address first, then select that directory instead of merely
+            # navigating on the first Select Folder invocation.
+            Add-Type -AssemblyName System.Windows.Forms
+            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                throw 'Folder picker is not the bound foreground window.'
+            }
+            [Windows.Forms.SendKeys]::SendWait('^l')
+            $edit = [Windows.Automation.AutomationElement]::FocusedElement
+            Assert-AutomationBinding -Element $edit -Process $Process -ExpectedSession $Session -Label 'folder address'
+            if ($edit.Current.ControlType -ne [Windows.Automation.ControlType]::Edit) {
+                throw 'Folder address shortcut did not focus an Edit.'
+            }
+            Set-AutomationControlValue -Element $edit -Value $Selection -Label 'folder address'
+            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                throw 'Folder picker lost foreground before address navigation.'
+            }
+            [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            Start-Sleep -Milliseconds 300
+        }
+        else {
+            $edit = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
+                -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) `
+                -TimeoutSeconds $TimeoutSeconds -Label 'picker selection field'
+            Set-AutomationControlValue -Element $edit -Value $Selection -Label 'picker selection field'
+        }
         $accept = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
             -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
             -TimeoutSeconds $TimeoutSeconds -Label 'picker acceptance' -RequireEnabled -RequireWindowHandle
         Invoke-AutomationControl -Element $accept -Label 'picker acceptance'
     }
-    Wait-WindowClosed -Handle $handle -TimeoutSeconds $TimeoutSeconds -Label 'owned picker'
+    Wait-WindowClosed -Handle $handle -TimeoutSeconds $TimeoutSeconds -Label "$Title ($Action)"
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
         $enabled = [DarkReNamerVmNative]::IsWindowEnabled($MainHandle)
@@ -592,7 +615,8 @@ function Invoke-ProductionPickerChecks {
         [Parameter(Mandatory)][IntPtr] $MainHandle,
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $Session,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Record
     )
 
     $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'picker-fixtures'
@@ -612,6 +636,7 @@ function Invoke-ProductionPickerChecks {
     $grid = [Windows.Automation.GridPattern]$list.GetCurrentPattern([Windows.Automation.GridPattern]::Pattern)
     if ($grid.Current.RowCount -ne 0) { throw 'Picker checks require an initially empty model.' }
     $actions = [Collections.Generic.List[object]]::new()
+    $Record['actions'] = $actions
     $specs = @(
         @{ command = 0x801D; title = '파일에서 경로목록 읽어 추가하기'; selection = $paths; folder = $false },
         @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = [IO.Path]::ChangeExtension($names, $null); folder = $false },
@@ -619,6 +644,7 @@ function Invoke-ProductionPickerChecks {
     )
     foreach ($spec in $specs) {
         $before = Get-PickerModelSnapshot -Grid $grid
+        $Record['active_action'] = [ordered]@{ command=$spec.command; title=$spec.title; action='cancel' }
         $cancel = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
             -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
             -Action cancel -TextFilters:(-not $spec.folder)
@@ -629,6 +655,7 @@ function Invoke-ProductionPickerChecks {
         $cancel['model_before'] = $before
         $cancel['model_after'] = $after
         $actions.Add($cancel)
+        $Record['active_action'] = [ordered]@{ command=$spec.command; title=$spec.title; action='accept' }
         $accept = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
             -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
             -Action $(if ($spec.folder) { 'folder' } else { 'file' }) -Selection $spec.selection `
@@ -669,8 +696,10 @@ function Invoke-ProductionPickerChecks {
         Start-Sleep -Milliseconds 100
     }
     if ($grid.Current.RowCount -ne 0) { throw 'Picker model did not return to its empty starting state.' }
-    [ordered]@{ schema_version = 1; status = 'passed'; actions = $actions.ToArray()
-        filesystem_unchanged = $true; model_restored_empty = $true }
+    $Record['status'] = 'passed'
+    $Record['filesystem_unchanged'] = $true
+    $Record['model_restored_empty'] = $true
+    [void]$Record.Remove('active_action')
 }
 
 function Invoke-GuiSmoke {
@@ -894,10 +923,11 @@ function Invoke-GuiSmoke {
                     -Label 'production main window'
                 if (-not $RawEvidence) {
                     $row.failure_reason = 'production_picker_checks_failed'
-                    $row.dialog_picker_checks = Invoke-ProductionPickerChecks `
+                    $row.dialog_picker_checks = [ordered]@{ schema_version=1; status='failed' }
+                    Invoke-ProductionPickerChecks `
                         -Process $processState.process.process -MainWindow $mainAutomationWindow `
                         -MainHandle $handle -RuntimeRoot $caseRoot -Session $ExpectedSession `
-                        -TimeoutSeconds $TimeoutSeconds
+                        -TimeoutSeconds $TimeoutSeconds -Record $row.dialog_picker_checks
                 }
                 $row.flow = Invoke-ProductionRenameFlow `
                     -OwnedProcess $processState.process `
