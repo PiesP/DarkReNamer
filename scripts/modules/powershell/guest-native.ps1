@@ -192,6 +192,12 @@ public static class DarkReNamerVmNative {
         }
     }
 
+    public static void RequestMenuCommand(IntPtr window, ushort command) {
+        if (!PostMessageW(window, 0x0111, new IntPtr(command), IntPtr.Zero)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+
     public static string[] GetFullFileIdentity(string path) {
         IntPtr file = CreateFile(path, 0x80, 1 | 2 | 4, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
         if (file == new IntPtr(-1)) {
