@@ -1128,6 +1128,12 @@ fn selection_command_state_changed(changed: u32, old_state: u32, new_state: u32)
 )]
 mod windows;
 
+/// Displays a startup failure before the application's UI apartment exists.
+#[cfg(windows)]
+pub fn show_startup_error(message: &str) {
+    windows::show_startup_error(message);
+}
+
 /// Runs the native application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]

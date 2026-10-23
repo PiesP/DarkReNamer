@@ -499,6 +499,19 @@ and IMarshal support removes the unsupported free-threaded contract; it does
 not forbid every correctly marshaled COM use. It grants no permission to move
 raw interfaces or access UI selection state across threads.
 
+The ordinary import-file and destination-folder pickers also use the initialized
+UI apartment and typed `IFileOpenDialog` bindings. Their shared mechanics own
+one dialog through configuration, modal `Show`, result extraction, and release;
+only the Shell cancellation HRESULT becomes cancellation. Other creation,
+configuration, `Show`, and result failures retain the native error; invalid
+path data retains its validation error. All leave the prepared command session
+without a selection. The returned
+`IShellItem` is live while its `SIGDN_FILESYSPATH` string is copied into exact
+`OsString` UTF-16 units; the owned Shell string is freed once. This does not
+grant import files destination or export authority: import locations may include
+network/provider paths, while the destination is validated after selection,
+and secure exports retain their own identity and handle-bound event sinks.
+
 `WinRtGuard` is created only after successful `RoInitialize` and carries a
 private `PhantomData<Rc<()>>` marker, preventing safe transfer or sharing across
 threads. Its resource-specific destructor balances initialization on the UI
