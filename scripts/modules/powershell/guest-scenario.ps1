@@ -512,7 +512,7 @@ function Invoke-OwnedPickerAction {
                     [Windows.Automation.ControlType]::ListItem))
             if ($items.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
             $filterNames = @($items | ForEach-Object { $_.Current.Name })
-            if ($filterNames[0] -cne 'Text Files (*.txt)' -or $filterNames[1] -cne 'All Files (*)') {
+            if ($filterNames[0] -cne 'Text Files (*.txt)' -or $filterNames[1] -cne 'All Files (*.*)') {
                 throw "Text picker filters changed: $($filterNames -join ', ')."
             }
         }
@@ -575,8 +575,10 @@ function Invoke-ProductionPickerChecks {
     [IO.File]::WriteAllText($source, 'owned picker fixture', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($names, "변경-😀.txt`r`n", [Text.UnicodeEncoding]::new($false, $true))
     [IO.File]::WriteAllText($paths, "$source`r`n", [Text.UnicodeEncoding]::new($false, $true))
-    $beforeBytes = Get-LowerSha256 -Path $source
-    $beforeIdentity = [DarkReNamerVmNative]::GetFileIdentity($source)
+    $initialFiles = @($source, $names, $paths | ForEach-Object {
+        [pscustomobject]@{ path = $_; sha256 = (Get-LowerSha256 -Path $_)
+            identity = [DarkReNamerVmNative]::GetFileIdentity($_) }
+    })
     $list = Find-UniqueAutomationElement -Root $MainWindow -Process $Process -ExpectedSession $Session `
         -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds -Label 'picker model list' -RequireWindowHandle
     $grid = [Windows.Automation.GridPattern]$list.GetCurrentPattern([Windows.Automation.GridPattern]::Pattern)
@@ -584,17 +586,20 @@ function Invoke-ProductionPickerChecks {
     $actions = [Collections.Generic.List[object]]::new()
     $specs = @(
         @{ command = 0x801D; title = '파일에서 경로목록 읽어 추가하기'; selection = $paths; folder = $false },
-        @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = $names; folder = $false },
+        @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = [IO.Path]::ChangeExtension($names, $null); folder = $false },
         @{ command = 0x8013; title = '모든 파일을 이동할 대상 폴더 선택'; selection = $destination; folder = $true }
     )
     foreach ($spec in $specs) {
-        $before = Get-PickerModelSnapshot -Grid $grid | ConvertTo-Json -Depth 4 -Compress
+        $before = Get-PickerModelSnapshot -Grid $grid
         $cancel = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
             -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
             -Action cancel -TextFilters:(-not $spec.folder)
-        $after = Get-PickerModelSnapshot -Grid $grid | ConvertTo-Json -Depth 4 -Compress
-        if ($after -cne $before) { throw 'Cancel changed the picker model snapshot.' }
+        $after = Get-PickerModelSnapshot -Grid $grid
+        if (($after | ConvertTo-Json -Depth 4 -Compress) -cne
+            ($before | ConvertTo-Json -Depth 4 -Compress)) { throw 'Cancel changed the picker model snapshot.' }
         $cancel['model_unchanged'] = $true
+        $cancel['model_before'] = $before
+        $cancel['model_after'] = $after
         $actions.Add($cancel)
         $accept = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
             -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
@@ -612,17 +617,29 @@ function Invoke-ProductionPickerChecks {
         if ($snapshot.rows -ne 1 -or ($snapshot.cells | ConvertTo-Json -Compress) -cne
             ($expected | ConvertTo-Json -Compress)) { throw 'Picker did not apply the expected exact model result.' }
         $accept['expected_model_observed'] = $true
+        $accept['default_extension_exercised'] = $spec.command -eq 0x801C
+        $accept['expected_model'] = [ordered]@{ rows = 1; cells = $expected }
+        $accept['observed_model'] = $snapshot
         $actions.Add($accept)
     }
-    if ((Get-LowerSha256 -Path $source) -cne $beforeBytes -or
-        [DarkReNamerVmNative]::GetFileIdentity($source) -cne $beforeIdentity -or
-        @(Get-ChildItem -LiteralPath $destination -Force).Count -ne 0) {
+    foreach ($file in $initialFiles) {
+        if ((Get-LowerSha256 -Path $file.path) -cne $file.sha256 -or
+            [DarkReNamerVmNative]::GetFileIdentity($file.path) -cne $file.identity) {
+            throw 'Picker selection changed owned source or import-input bytes/identity.'
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath $destination -Force).Count -ne 0 -or
+        @(Get-ChildItem -LiteralPath $root -Force).Count -ne 4) {
         throw 'Picker selection mutated the fixture filesystem.'
     }
     $clear = Find-UniqueAutomationElement -Root $MainWindow -Process $Process -ExpectedSession $Session `
         -AutomationId '32782' -ControlType ([Windows.Automation.ControlType]::Button) `
         -TimeoutSeconds $TimeoutSeconds -Label 'clear picker model' -RequireEnabled -RequireWindowHandle
     Invoke-AutomationControl -Element $clear -Label 'clear picker model'
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    while ($grid.Current.RowCount -ne 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
     if ($grid.Current.RowCount -ne 0) { throw 'Picker model did not return to its empty starting state.' }
     [ordered]@{ schema_version = 1; status = 'passed'; actions = $actions.ToArray()
         filesystem_unchanged = $true; model_restored_empty = $true }

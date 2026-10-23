@@ -1125,8 +1125,27 @@ def verify_picker_checks(checks, gui):
                          'model_unchanged' if action == 'cancel' else 'expected_model_observed'):
                 if row.get(flag) is not True:
                     raise ValueError('VM production picker modality, focus, or model observation is incomplete.')
-            if row.get('filters') != ([] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*)']):
+            if row.get('filters') != ([] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*.*)']):
                 raise ValueError('VM production picker filters differ from the maintained policy.')
+            if action == 'cancel':
+                before, after = row.get('model_before'), row.get('model_after')
+                if (not isinstance(before, dict) or before != after or
+                        before.get('rows') != (0 if index == 0 else 1) or
+                        not isinstance(before.get('cells'), list) or
+                        len(before['cells']) != (0 if index == 0 else 3)):
+                    raise ValueError('VM production picker Cancel snapshots are incomplete or changed.')
+            else:
+                expected_model, observed_model = row.get('expected_model'), row.get('observed_model')
+                if row.get('default_extension_exercised') is not (index == 1):
+                    raise ValueError('VM production picker default-extension observation is incomplete.')
+                if (not isinstance(expected_model, dict) or expected_model != observed_model or
+                        expected_model.get('rows') != 1 or
+                        not isinstance(expected_model.get('cells'), list) or
+                        len(expected_model['cells']) != 3 or
+                        expected_model['cells'][0] != '선택-😀.txt' or
+                        expected_model['cells'][1] != ('선택-😀.txt' if index == 0 else '변경-😀.txt') or
+                        not isinstance(expected_model['cells'][2], str) or not expected_model['cells'][2]):
+                    raise ValueError('VM production picker observed model differs from its expected result.')
 
 
 def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None):

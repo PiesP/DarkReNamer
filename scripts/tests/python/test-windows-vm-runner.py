@@ -75,12 +75,15 @@ class VmRunnerTests(unittest.TestCase):
                 (0x801C, '바꿀 파일 이름 불러오기', 'file'),
                 (0x8013, '모든 파일을 이동할 대상 폴더 선택', 'folder')):
             for action in ('cancel', acceptance):
+                model = dict(rows=0, cells=[]) if command == 0x801D else dict(rows=1, cells=['선택-😀.txt', '선택-😀.txt', 'C:\\fixture'])
+                selected = dict(rows=1, cells=['선택-😀.txt', '선택-😀.txt' if command == 0x801D else '변경-😀.txt', 'C:\\fixture'])
                 actions.append(dict(command=command, title=title, action=action,
                                     process_id=123, session_id=2, owner_handle=456, dialog_handle=789,
                                     native_owner_disabled=True, owner_enabled_after=True,
                                     foreground_restored=True, focus_process_bound=True,
-                                    filters=[] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*)'],
-                                    **{'model_unchanged' if action == 'cancel' else 'expected_model_observed': True}))
+                                    filters=[] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*.*)'],
+                                    **({'model_unchanged': True, 'model_before': model, 'model_after': model}
+                                       if action == 'cancel' else {'expected_model_observed': True, 'default_extension_exercised': command == 0x801C, 'expected_model': selected, 'observed_model': selected})))
         return dict(schema_version=1, status='passed', actions=actions,
                     filesystem_unchanged=True, model_restored_empty=True)
 
@@ -104,7 +107,8 @@ class VmRunnerTests(unittest.TestCase):
     def test_picker_checks_reject_wrong_binding_filter_and_acceptance(self):
         gui = self.result['gui']
         for key, value in (('process_id', 124), ('session_id', 3), ('owner_handle', 789),
-                           ('dialog_handle', 456), ('filters', []), ('expected_model_observed', False)):
+                           ('dialog_handle', 456), ('filters', []), ('expected_model_observed', False),
+                           ('observed_model', {'rows': 0, 'cells': []}), ('expected_model', None)):
             with self.subTest(key=key):
                 checks = self.picker_checks()
                 checks['actions'][1][key] = value
