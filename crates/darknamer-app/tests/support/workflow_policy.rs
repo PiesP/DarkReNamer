@@ -770,7 +770,8 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
     const PATH: &str = ".github/workflows/ci.yaml";
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
-    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2";
+    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ steps.scanner-pins.outputs.audit-version }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
+    const PIN_COMMAND: &str = "python3 scripts/run-scheduled-rust-audit.py --emit-pins";
 
     let workflow = parse(PATH, source)?;
     let security = workflow
@@ -802,6 +803,25 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         ),
     )?;
 
+    let pin_steps = security
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.id.as_deref() == Some("scanner-pins"))
+        .collect::<Vec<_>>();
+    require(
+        pin_steps.len() == 1,
+        format!("{PATH} must contain one reviewed scanner pin step"),
+    )?;
+    let (pin_index, pins) = pin_steps[0];
+    require(
+        pins.run.as_deref() == Some(PIN_COMMAND)
+            && pins.condition.is_none()
+            && pins.continue_on_error.is_none()
+            && pins.env.is_empty(),
+        format!("{PATH} must read reviewed scanner pins without conditions or overrides"),
+    )?;
+
     let install_steps = security
         .steps
         .iter()
@@ -822,20 +842,36 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         install.condition.as_ref().map(Scalar::text).as_deref()
             == Some("steps.security-tools-cache.outputs.cache-hit != 'true'")
             && install.continue_on_error.is_none()
-            && install.env.get("SECURITY_TOOLS_ROOT").map(Scalar::text).as_deref()
+            && install.env.len() == 3
+            && install
+                .env
+                .get("SECURITY_TOOLS_ROOT")
+                .map(Scalar::text)
+                .as_deref()
                 == Some(TOOLS_ROOT)
-            && install_script.contains(
-                "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-audit --version 0.22.2",
-            )
-            && install_script.contains(
-                "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny --version 0.20.2",
-            ),
+            && install
+                .env
+                .get("AUDIT_VERSION")
+                .map(Scalar::text)
+                .as_deref()
+                == Some("${{ steps.scanner-pins.outputs.audit-version }}")
+            && install.env.get("DENY_VERSION").map(Scalar::text).as_deref()
+                == Some("${{ steps.scanner-pins.outputs.deny-version }}")
+            && install_script
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                == [
+                    "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-audit --version \"$AUDIT_VERSION\"",
+                    "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny --version \"$DENY_VERSION\"",
+                ],
         format!(
             "{PATH} must install the exact locked security tools into the isolated root only on an exact cache miss"
         ),
     )?;
 
-    let audit_steps = security
+    let scanner_script_steps = security
         .steps
         .iter()
         .enumerate()
@@ -846,10 +882,13 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         })
         .collect::<Vec<_>>();
     require(
-        audit_steps.len() == 1,
-        format!("{PATH} must contain one security audit execution step"),
+        scanner_script_steps.len() == 2,
+        format!("{PATH} must contain one pin reader and one security audit execution step"),
     )?;
-    let (audit_index, audit) = audit_steps[0];
+    let (audit_index, audit) = scanner_script_steps
+        .into_iter()
+        .find(|(index, _)| *index != pin_index)
+        .ok_or_else(|| format!("{PATH} is missing the security audit execution step"))?;
     let audit_commands = audit
         .run
         .as_deref()
@@ -877,9 +916,9 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         .position(|step| step.id.as_deref() == Some("security-tools-cache"))
         .ok_or_else(|| format!("{PATH} is missing the security tools cache step"))?;
     require(
-        cache_index < install_index && install_index < audit_index,
+        pin_index < cache_index && cache_index < install_index && install_index < audit_index,
         format!(
-            "{PATH} must restore, conditionally install, then validate and execute the security tools"
+            "{PATH} must select reviewed pins, restore, conditionally install, then validate and execute the security tools"
         ),
     )
 }
