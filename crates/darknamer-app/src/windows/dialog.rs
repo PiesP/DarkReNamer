@@ -2802,8 +2802,9 @@ fn dialog_path_at(results: &IShellItemArray, index: u32) -> io::Result<PathBuf> 
 }
 
 fn dialog_path_for_item(item: &IShellItem) -> io::Result<PathBuf> {
-    // SAFETY: item is a live shell item from a dialog configured to return only
-    // filesystem objects; the returned CoTaskMem string is owned below.
+    // SAFETY: item is a live Shell interface on this initialized apartment.
+    // SIGDN_FILESYSPATH errors are propagated when no filesystem path exists;
+    // on success, the returned CoTaskMem string is owned below.
     let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(shell_dialog_error)?;
     if name.0.is_null() {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
