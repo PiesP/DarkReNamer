@@ -5,18 +5,71 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
 
 DENY_CHECKS = ("advisories", "bans", "licenses", "sources")
+SCANNER_RECORD = Path(__file__).resolve().parent.parent / "config" / "release-tool-integrity.json"
+SCANNER_IDS = ("cargo-audit", "cargo-deny")
 # cargo-audit 0.22.2 auditor.rs logs these failures outside its JSON report.
 AUDIT_INDEX_FAILURES = (
     "warning: couldn't update crates.io index:",
     "warning: couldn't open crates.io index:",
     "error: couldn't check if the package is yanked:",
 )
+
+
+def scanner_pins(record_path: Path = SCANNER_RECORD) -> dict[str, str]:
+    """Read reviewed scanner selections as data, without executable workflow text."""
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        folded = set()
+        for key, value in pairs:
+            if key.casefold() in folded:
+                raise ValueError(f"duplicate metadata key: {key}")
+            folded.add(key.casefold())
+            result[key] = value
+        return result
+
+    record = json.loads(record_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    if (
+        not isinstance(record, dict)
+        or type(record.get("schemaVersion")) is not int
+        or record["schemaVersion"] != 1
+        or record.get("platform") != "x86_64-pc-windows-msvc"
+    ):
+        raise ValueError("unsupported scanner metadata schema or platform")
+    tools = record.get("tools")
+    expected_tools = ["cargo-audit", "cargo-deny", "cargo-about", "cargo-cyclonedx"]
+    if (
+        not isinstance(tools, list)
+        or len(tools) != len(expected_tools)
+        or [tool.get("id") if isinstance(tool, dict) else None for tool in tools] != expected_tools
+    ):
+        raise ValueError("missing or ambiguous scanner metadata")
+    pins = {}
+    for tool in tools[:2]:
+        name = tool["id"]
+        version = tool.get("version")
+        if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+            raise ValueError(f"invalid {name} version")
+        if name == "cargo-audit":
+            expected_url = f"https://github.com/rustsec/rustsec/releases/download/cargo-audit/v{version}/cargo-audit-x86_64-pc-windows-msvc-v{version}.zip"
+            expected_path = f"cargo-audit-x86_64-pc-windows-msvc-v{version}/cargo-audit.exe"
+        else:
+            expected_url = f"https://github.com/EmbarkStudios/cargo-deny/releases/download/{version}/cargo-deny-{version}-x86_64-pc-windows-msvc.tar.gz"
+            expected_path = f"cargo-deny-{version}-x86_64-pc-windows-msvc/cargo-deny.exe"
+        if tool.get("url") != expected_url or tool.get("archivePath") != expected_path:
+            raise ValueError(f"unsupported {name} artifact identity")
+        digest = tool.get("sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"missing or invalid {name} artifact digest")
+        pins[name] = version
+    return pins
 
 
 def command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -165,7 +218,19 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cargo-audit", type=Path, help="Verified absolute cargo-audit executable path")
     parser.add_argument("--cargo-deny", type=Path, help="Verified absolute cargo-deny executable path")
+    parser.add_argument("--emit-pins", action="store_true", help="Write reviewed scanner versions to GITHUB_OUTPUT")
     options = parser.parse_args(arguments)
+    if options.emit_pins:
+        if options.cargo_audit is not None or options.cargo_deny is not None:
+            parser.error("--emit-pins cannot be combined with scanner paths")
+        try:
+            pins = scanner_pins()
+            with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+                output.write(f"audit-version={pins['cargo-audit']}\ndeny-version={pins['cargo-deny']}\n")
+        except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError) as error:
+            print(f"Scanner pin setup failed: {error}", file=sys.stderr)
+            return 1
+        return 0
     summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
     source_sha = os.environ["GITHUB_SHA"]
     runner_temp = Path(os.environ["RUNNER_TEMP"])
@@ -184,6 +249,11 @@ def main(arguments: list[str] | None = None) -> int:
     if len(source_sha) != 40 or any(character not in "0123456789abcdef" for character in source_sha):
         results.append(("Setup", "tool or source failure (invalid full source SHA)"))
         return finish()
+    try:
+        pins = scanner_pins()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        results.append(("Setup", f"tool or source failure (invalid scanner metadata: {error})"))
+        return finish()
     if (options.cargo_audit is None) != (options.cargo_deny is None):
         results.append(("Setup", "tool failure (both verified scanner paths are required)"))
         return finish()
@@ -195,7 +265,8 @@ def main(arguments: list[str] | None = None) -> int:
             results.append(("Setup", "tool failure (verified scanner root is missing)"))
             return finish()
         scanners = {binary: Path(tools_root) / "bin" / binary for binary in ("cargo-audit", "cargo-deny")}
-    for binary, expected in (("cargo-audit", "cargo-audit 0.22.2"), ("cargo-deny", "cargo-deny 0.20.2")):
+    for binary in SCANNER_IDS:
+        expected = f"{binary} {pins[binary]}"
         path = scanners[binary]
         if path is None or not path.is_absolute():
             results.append(("Setup", f"tool failure ({binary} path must be absolute)"))

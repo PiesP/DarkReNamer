@@ -166,10 +166,19 @@ try {
     $originalAuditVersion = $record.tools[0].version
     $record.tools[0].version = '0.0.0'
     Write-Record $recordPath $record
-    Assert-InstallerFails -Fragment 'stale against security.yaml' `
+    Assert-InstallerFails -Fragment 'Unsupported archive layout for cargo-audit' `
         -Destination (Join-Path $testRoot 'stale-scanner') -RecordPath $recordPath `
         -ArchiveRoot $archiveRoot -Marker $marker
     $record.tools[0].version = $originalAuditVersion
+    Write-Record $recordPath $record
+
+    $ambiguous = (Get-Content -LiteralPath $recordPath -Raw).Replace(
+        '"schemaVersion": 1,', '"schemaVersion": 1, "schemaVersion": 1,')
+    [IO.File]::WriteAllText($recordPath, $ambiguous, [Text.UTF8Encoding]::new($false))
+    Assert-InstallerFails -Fragment 'Ambiguous release-tool metadata property' `
+        -Destination (Join-Path $testRoot 'ambiguous-scanner') -RecordPath $recordPath `
+        -ArchiveRoot $archiveRoot -Marker $marker
+    Write-Record $recordPath $record
 
     $originalAboutPath = $record.tools[2].archivePath
     $record.tools[2].archivePath = '../cargo-about.exe'
@@ -199,17 +208,14 @@ try {
     $fixtureRepo = Join-Path $testRoot 'production-fixture'
     $fixtureScripts = Join-Path $fixtureRepo 'scripts'
     $fixtureConfig = Join-Path $fixtureRepo 'config'
-    $fixtureWorkflow = Join-Path $fixtureRepo '.github/workflows'
     $fixtureArchives = Join-Path $testRoot 'production-archives'
-    foreach ($directory in @($fixtureScripts, $fixtureConfig, $fixtureWorkflow, $fixtureArchives)) {
+    foreach ($directory in @($fixtureScripts, $fixtureConfig, $fixtureArchives)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     $fixtureInstaller = Join-Path $fixtureScripts 'install-verified-release-tools.ps1'
     Copy-Item -LiteralPath $installer -Destination $fixtureInstaller
     Copy-Item -LiteralPath (Join-Path $repoRoot 'rust-toolchain.toml') `
         -Destination (Join-Path $fixtureRepo 'rust-toolchain.toml')
-    Copy-Item -LiteralPath (Join-Path $repoRoot '.github/workflows/security.yaml') `
-        -Destination (Join-Path $fixtureWorkflow 'security.yaml')
     $productionRecord = Get-Content -LiteralPath $sourceRecord -Raw | ConvertFrom-Json
     $downloadMap = @{}
 
