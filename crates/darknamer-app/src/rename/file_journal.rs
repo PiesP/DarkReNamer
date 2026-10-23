@@ -2225,6 +2225,9 @@ const fn metadata_is_reparse(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    use std::fs;
+
     fn refresh_test_frame_checksum(frame: &mut [u8]) {
         let checksum = crc32_parts(&[&frame[4..20], &frame[HEADER_BYTES..]]);
         frame[20..24].copy_from_slice(&checksum.to_le_bytes());
@@ -2252,6 +2255,91 @@ mod tests {
             EntryIdentity::new(1, 1),
             TemporaryPhase::None,
         )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn denied_native_write_poisons_journal_and_preserves_both_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = JournalRoot::open(directory.path())?;
+        let mut healthy = FileJournal::create_new(&root, "healthy.drj")?;
+        healthy.begin(PlanId::from_fingerprint(1), &[test_step()])?;
+        healthy.prepared(0, JournalDirection::Forward)?;
+        assert_eq!(healthy.records().len(), 2);
+
+        let path = directory.path().join("active.drj");
+        let mut journal = FileJournal::create_new(&root, "active.drj")?;
+        journal.begin(PlanId::from_fingerprint(2), &[test_step()])?;
+        let original_records = journal.records().to_vec();
+        let original_length = journal.byte_len();
+        let sink = directory.path().join("read-only-sink.bin");
+        let sink_bytes = b"owned sink sentinel";
+        fs::write(&sink, sink_bytes)?;
+        // Test-only substitution: the production append still calls File::write_all.
+        journal.file = File::open(&sink)?;
+        let original_bytes = fs::read(&path)?;
+
+        let first = journal
+            .prepared(0, JournalDirection::Forward)
+            .err()
+            .ok_or_else(|| io::Error::other("read-only sink accepted a journal frame"))?;
+        assert_eq!(
+            first.certainty,
+            super::super::AppendCertainty::MayHaveAppended
+        );
+        assert_eq!(first.code, 5); // ERROR_ACCESS_DENIED from native WriteFile.
+        assert_eq!(
+            journal.completed(0, JournalDirection::Forward),
+            Err(JournalError::may_have_appended(8))
+        );
+        assert_eq!(journal.records(), original_records);
+        assert_eq!(journal.byte_len(), original_length);
+        assert!(matches!(
+            journal.mark_delete_if_safe(),
+            Err(FileJournalError {
+                kind: FileJournalErrorKind::UnsafeCleanupState,
+                ..
+            })
+        ));
+        assert_eq!(fs::read(path)?, original_bytes);
+        assert_eq!(fs::read(sink)?, sink_bytes);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn denied_retained_export_write_reports_partial_and_preserves_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = JournalRoot::open(directory.path())?;
+        let path = directory.path().join("active.drj");
+        let mut journal = FileJournal::create_new(&root, "active.drj")?;
+        journal.begin(PlanId::from_fingerprint(3), &[test_step()])?;
+        let expected = encode_journal_records(journal.records())?;
+        assert!(!expected.is_empty());
+        let healthy_destination = directory.path().join("healthy-export.bin");
+        assert_eq!(
+            journal.copy_exact_to_new(&healthy_destination)?,
+            expected.len() as u64
+        );
+        assert_eq!(fs::read(healthy_destination)?, expected);
+        let destination = directory.path().join("denied-export.bin");
+        fs::write(&destination, [])?;
+        let mut output = File::open(&destination)?;
+
+        let error = journal
+            .copy_exact_to_file(&mut output)
+            .err()
+            .ok_or_else(|| io::Error::other("read-only export handle accepted journal bytes"))?;
+        let message = error.to_string();
+        assert!(message.contains("os error 5"), "{message}");
+        assert!(message.contains("destination may be empty or partial and was retained"));
+        assert_eq!(fs::read(&destination)?, b"");
+        drop(output);
+        drop(journal);
+        assert_eq!(fs::read(path)?, expected);
+        Ok(())
     }
 
     #[test]
