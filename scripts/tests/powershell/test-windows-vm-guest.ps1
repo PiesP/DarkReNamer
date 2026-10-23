@@ -1111,13 +1111,17 @@ foreach ($rawEvidence in @($true, $false)) {
     $pickerHandle = [IntPtr]42
     $focusSamples = @(
         [pscustomobject]@{ Current = [pscustomobject]@{
-            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = '1148' } },
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = '1148'; RootHandle = [IntPtr]42 } },
         [pscustomobject]@{ Current = [pscustomobject]@{
-            ProcessId = $pickerProcess.Id; ControlType = 'Button'; AutomationId = 'other' } },
+            ProcessId = $pickerProcess.Id; ControlType = 'Button'; AutomationId = 'other'; RootHandle = [IntPtr]42 } },
         [pscustomobject]@{ Current = [pscustomobject]@{
-            ProcessId = $pickerProcess.Id + 1; ControlType = 'Edit'; AutomationId = 'address' } },
+            ProcessId = $pickerProcess.Id + 1; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]42 } },
         [pscustomobject]@{ Current = [pscustomobject]@{
-            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address' } }
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]7 } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]::Zero } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]42 } }
     )
     $focusState = [pscustomobject]@{ calls = 0; samples = $focusSamples }
     $focusProbe = {
@@ -1126,13 +1130,14 @@ foreach ($rawEvidence in @($true, $false)) {
         $sample
     }.GetNewClosure()
     $foregroundProbe = { [IntPtr]42 }
+    $rootProbe = { param($element, $processId) $element.Current.RootHandle }
     $address = Wait-FocusedPickerAddressEdit -Process $pickerProcess `
         -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 2 `
-        -EditControlType 'Edit' -ReadFocus $focusProbe -ReadForeground $foregroundProbe
-    if ($address.Current.AutomationId -cne 'address' -or $focusState.calls -ne 4) {
-        throw 'Folder address readiness accepted an early filename, non-Edit, or foreign focus.'
+        -EditControlType 'Edit' -ReadFocus $focusProbe -ReadForeground $foregroundProbe -ReadRoot $rootProbe
+    if ($address.Current.AutomationId -cne 'address' -or $focusState.calls -ne 6) {
+        throw 'Folder address readiness accepted a filename, non-Edit, foreign focus, or wrong dialog root.'
     }
-    Assert-Fails -Expected 'bounded deadline' -Action {
+    Assert-Fails -Expected 'type=Edit, automation_id=1148' -Action {
         Wait-FocusedPickerAddressEdit -Process $pickerProcess `
             -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 0 `
             -EditControlType 'Edit' -ReadFocus { $focusSamples[0] } -ReadForeground $foregroundProbe

@@ -477,10 +477,28 @@ function Wait-FocusedPickerAddressEdit {
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [Parameter(Mandatory)][object] $EditControlType,
         [scriptblock] $ReadFocus = { [Windows.Automation.AutomationElement]::FocusedElement },
-        [scriptblock] $ReadForeground = { [DarkReNamerVmNative]::GetForegroundWindow() }
+        [scriptblock] $ReadForeground = { [DarkReNamerVmNative]::GetForegroundWindow() },
+        [scriptblock] $ReadRoot = {
+            param($element, $processId)
+            $ancestor = $element
+            for ($depth = 0; $depth -lt 32 -and $null -ne $ancestor; $depth++) {
+                if ($ancestor.Current.ProcessId -ne $processId) { break }
+                $nativeHandle = [IntPtr]$ancestor.Current.NativeWindowHandle
+                if ($nativeHandle -ne [IntPtr]::Zero) {
+                    if ([DarkReNamerVmNative]::IsWindow($nativeHandle)) {
+                        return [DarkReNamerVmNative]::GetAncestor($nativeHandle, [uint32]2)
+                    }
+                    break
+                }
+                $ancestor = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
+            }
+            [IntPtr]::Zero
+        }
     )
 
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $lastType = '<none>'
+    $lastAutomationId = '<none>'
     do {
         $Process.Refresh()
         if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
@@ -490,14 +508,22 @@ function Wait-FocusedPickerAddressEdit {
             throw 'Folder picker lost foreground while waiting for its address Edit.'
         }
         $candidate = & $ReadFocus
-        if ($null -ne $candidate -and $candidate.Current.ProcessId -eq $Process.Id -and
-            $candidate.Current.ControlType -eq $EditControlType -and
-            $candidate.Current.AutomationId -cne '1148') {
-            return $candidate
+        if ($null -ne $candidate) {
+            $controlType = $candidate.Current.ControlType
+            $lastType = if ($null -ne $controlType.PSObject.Properties['ProgrammaticName']) {
+                [string]$controlType.ProgrammaticName
+            } else { [string]$controlType }
+            $lastAutomationId = [string]$candidate.Current.AutomationId
+            if ($lastAutomationId.Length -gt 128) { $lastAutomationId = $lastAutomationId.Substring(0, 128) }
+            if ($candidate.Current.ProcessId -eq $Process.Id -and
+                $controlType -eq $EditControlType -and $lastAutomationId -cne '1148' -and
+                (& $ReadRoot $candidate $Process.Id) -eq $DialogHandle) {
+                return $candidate
+            }
         }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
-    throw 'Folder address shortcut did not focus its address Edit before the bounded deadline.'
+    throw "Folder address shortcut did not focus its address Edit before the bounded deadline (type=$lastType, automation_id=$lastAutomationId)."
 }
 
 function Invoke-OwnedPickerAction {
