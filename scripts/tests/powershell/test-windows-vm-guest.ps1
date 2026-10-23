@@ -1107,6 +1107,53 @@ foreach ($rawEvidence in @($true, $false)) {
         $primaryCleanupFailure.cleanup_failure_reason) {
         throw 'Cleanup failures must preserve an earlier process failure reason and retain cleanup failure separately.'
     }
+    $pickerProcess = [Diagnostics.Process]::GetCurrentProcess()
+    $pickerHandle = [IntPtr]42
+    $focusSamples = @(
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = '1148'; RootHandle = [IntPtr]42 } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Button'; AutomationId = 'other'; RootHandle = [IntPtr]42 } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id + 1; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]42 } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]7 } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]::Zero } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address'; RootHandle = [IntPtr]42 } }
+    )
+    $focusState = [pscustomobject]@{ calls = 0; samples = $focusSamples }
+    $focusProbe = {
+        $sample = $focusState.samples[[Math]::Min($focusState.calls, $focusState.samples.Count - 1)]
+        $focusState.calls++
+        $sample
+    }.GetNewClosure()
+    $foregroundProbe = { [IntPtr]42 }
+    $rootProbe = { param($element, $processId) $element.Current.RootHandle }
+    $address = Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+        -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 2 `
+        -EditControlType 'Edit' -ReadFocus $focusProbe -ReadForeground $foregroundProbe -ReadRoot $rootProbe
+    if ($address.Current.AutomationId -cne 'address' -or $focusState.calls -ne 6) {
+        throw 'Folder address readiness accepted a filename, non-Edit, foreign focus, or wrong dialog root.'
+    }
+    Assert-Fails -Expected 'type=Edit, automation_id=1148' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 0 `
+            -EditControlType 'Edit' -ReadFocus { $focusSamples[0] } -ReadForeground $foregroundProbe
+    }
+    Assert-Fails -Expected 'lost foreground' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 1 `
+            -EditControlType 'Edit' -ReadFocus { throw 'Focus must not be sampled after foreground loss.' } `
+            -ReadForeground { [IntPtr]7 }
+    }
+    Assert-Fails -Expected 'expected process or desktop session' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession ($pickerProcess.SessionId + 1) -DialogHandle $pickerHandle -TimeoutSeconds 1 `
+            -EditControlType 'Edit' -ReadFocus { throw 'Focus must not be sampled after session loss.' } `
+            -ReadForeground $foregroundProbe
+    }
     $guiFailureDetail = [ordered]@{ error_detail = $null }
     try { throw [ComponentModel.Win32Exception]::new(5) }
     catch {
@@ -3354,6 +3401,32 @@ if ($waitProbeResult.natural_status -cne 'natural-exit' -or
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         Initialize-NativeCapture
+        $initialDpiContext = [DarkReNamerVmNative]::GetThreadDpiAwarenessContext()
+        $perMonitorV2 = [IntPtr](-4)
+        $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter($perMonitorV2)
+        try {
+            if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($perMonitorV2)) {
+                throw 'The observer thread did not enter PerMonitorV2 DPI awareness.'
+            }
+        }
+        finally { $dpiScope.Dispose() }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'The observer thread did not restore DPI awareness after success.'
+        }
+        Assert-Fails -Expected 'intentional DPI scope failure' -Action {
+            $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter($perMonitorV2)
+            try { throw 'intentional DPI scope failure' }
+            finally { $dpiScope.Dispose() }
+        }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'The observer thread did not restore DPI awareness after failure.'
+        }
+        Assert-Win32Failure -NativeErrorCode 87 -Label 'Invalid observer DPI context' -Action {
+            [void][DarkReNamerVmNative+DpiAwarenessScope]::Enter([IntPtr]::Zero)
+        }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'A rejected DPI context changed the observer thread.'
+        }
         if ($null -eq [Windows.Automation.AutomationElement]::RootElement) {
             throw 'In-process PowerShell Core UI Automation initialization returned no root element.'
         }

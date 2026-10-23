@@ -52,7 +52,62 @@ public static class DarkReNamerVmNative {
     }
 
     [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    public static bool IsCurrentThreadDpiAwarenessContext(IntPtr expected) {
+        return AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), expected);
+    }
+
+    public sealed class DpiAwarenessScope : IDisposable {
+        private readonly IntPtr previous;
+        private readonly IntPtr requested;
+        private readonly uint threadId;
+        private bool disposed;
+
+        private DpiAwarenessScope(IntPtr previous, IntPtr requested) {
+            this.previous = previous;
+            this.requested = requested;
+            threadId = GetCurrentThreadId();
+        }
+
+        public static DpiAwarenessScope Enter(IntPtr requested) {
+            IntPtr previous = SetThreadDpiAwarenessContext(requested);
+            if (previous == IntPtr.Zero) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            DpiAwarenessScope scope = new DpiAwarenessScope(previous, requested);
+            if (!IsCurrentThreadDpiAwarenessContext(requested)) {
+                scope.Dispose();
+                throw new InvalidOperationException("The observer thread did not enter the requested DPI context.");
+            }
+            return scope;
+        }
+
+        public void Dispose() {
+            if (disposed) return;
+            if (GetCurrentThreadId() != threadId) {
+                throw new InvalidOperationException("The observer DPI context must be restored on its owning thread.");
+            }
+            bool remainedRequested = IsCurrentThreadDpiAwarenessContext(requested);
+            IntPtr replaced = SetThreadDpiAwarenessContext(previous);
+            if (replaced == IntPtr.Zero) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if (!IsCurrentThreadDpiAwarenessContext(previous)) {
+                throw new InvalidOperationException("The observer thread did not restore its previous DPI context.");
+            }
+            disposed = true;
+            if (!remainedRequested || !AreDpiAwarenessContextsEqual(replaced, requested)) {
+                throw new InvalidOperationException("The observer thread DPI context changed inside its scope.");
+            }
+        }
+    }
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")]

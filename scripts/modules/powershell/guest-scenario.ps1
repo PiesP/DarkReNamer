@@ -469,6 +469,63 @@ function Get-PickerModelSnapshot {
     $snapshot
 }
 
+function Wait-FocusedPickerAddressEdit {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $DialogHandle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][object] $EditControlType,
+        [scriptblock] $ReadFocus = { [Windows.Automation.AutomationElement]::FocusedElement },
+        [scriptblock] $ReadForeground = { [DarkReNamerVmNative]::GetForegroundWindow() },
+        [scriptblock] $ReadRoot = {
+            param($element, $processId)
+            $ancestor = $element
+            for ($depth = 0; $depth -lt 32 -and $null -ne $ancestor; $depth++) {
+                if ($ancestor.Current.ProcessId -ne $processId) { break }
+                $nativeHandle = [IntPtr]$ancestor.Current.NativeWindowHandle
+                if ($nativeHandle -ne [IntPtr]::Zero) {
+                    if ([DarkReNamerVmNative]::IsWindow($nativeHandle)) {
+                        return [DarkReNamerVmNative]::GetAncestor($nativeHandle, [uint32]2)
+                    }
+                    break
+                }
+                $ancestor = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
+            }
+            [IntPtr]::Zero
+        }
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $lastType = '<none>'
+    $lastAutomationId = '<none>'
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw 'Folder address focus left the expected process or desktop session.'
+        }
+        if ((& $ReadForeground) -ne $DialogHandle) {
+            throw 'Folder picker lost foreground while waiting for its address Edit.'
+        }
+        $candidate = & $ReadFocus
+        if ($null -ne $candidate) {
+            $controlType = $candidate.Current.ControlType
+            $lastType = if ($null -ne $controlType.PSObject.Properties['ProgrammaticName']) {
+                [string]$controlType.ProgrammaticName
+            } else { [string]$controlType }
+            $lastAutomationId = [string]$candidate.Current.AutomationId
+            if ($lastAutomationId.Length -gt 128) { $lastAutomationId = $lastAutomationId.Substring(0, 128) }
+            if ($candidate.Current.ProcessId -eq $Process.Id -and
+                $controlType -eq $EditControlType -and $lastAutomationId -cne '1148' -and
+                (& $ReadRoot $candidate $Process.Id) -eq $DialogHandle) {
+                return $candidate
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw "Folder address shortcut did not focus its address Edit before the bounded deadline (type=$lastType, automation_id=$lastAutomationId)."
+}
+
 function Invoke-OwnedPickerAction {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -563,11 +620,10 @@ function Invoke-OwnedPickerAction {
                 throw 'Folder picker is not the bound foreground window.'
             }
             [Windows.Forms.SendKeys]::SendWait('^l')
-            $edit = [Windows.Automation.AutomationElement]::FocusedElement
+            $edit = Wait-FocusedPickerAddressEdit -Process $Process -ExpectedSession $Session `
+                -DialogHandle $handle -TimeoutSeconds $TimeoutSeconds `
+                -EditControlType ([Windows.Automation.ControlType]::Edit)
             Assert-AutomationBinding -Element $edit -Process $Process -ExpectedSession $Session -Label 'folder address'
-            if ($edit.Current.ControlType -ne [Windows.Automation.ControlType]::Edit) {
-                throw 'Folder address shortcut did not focus an Edit.'
-            }
             $directory = if ($Action -ceq 'folder') { $Selection } else { [IO.Path]::GetDirectoryName($Selection) }
             Set-AutomationControlValue -Element $edit -Value $directory -Label 'folder address'
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
@@ -746,6 +802,7 @@ function Invoke-GuiSmoke {
     }
     $processState = [pscustomobject]@{ process = $null }
     $captureState = [pscustomobject]@{ bitmap = $null; graphics = $null }
+    $dpiScope = $null
     $flowFixtureRoot = $null
     $screenshotLeaf = 'main-workbench.png'
     $screenshotPath = Join-Path $OutputRoot $screenshotLeaf
@@ -758,8 +815,12 @@ function Invoke-GuiSmoke {
                 break
             }
             Initialize-NativeCapture
-            if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
+            try {
+                $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter([IntPtr](-4))
+            }
+            catch {
                 $row.failure_reason = 'dpi_awareness_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
                 break
             }
             $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
@@ -1003,6 +1064,14 @@ function Invoke-GuiSmoke {
         Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
     }
     finally {
+        if ($null -ne $dpiScope) {
+            try { $dpiScope.Dispose() }
+            catch {
+                $row.status = 'failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'dpi_restore_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
+            }
+        }
         if ($null -ne $captureState.graphics) { $captureState.graphics.Dispose() }
         if ($null -ne $captureState.bitmap) { $captureState.bitmap.Dispose() }
         if ($null -ne $processState.process) {
