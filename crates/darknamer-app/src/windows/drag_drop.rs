@@ -494,6 +494,19 @@ impl IDropTarget_Impl for DropTarget_Impl {
             if drop_locked(self.state_owner) != Some(false) {
                 return Some(S_OK);
             }
+            if extracted.excluded_paths > 0 {
+                message(
+                    self.state_owner,
+                    &format!(
+                        "드롭한 항목 중 {}개의 경로를 읽지 못해 제외했습니다. 정상적으로 읽은 경로만 추가 대상으로 검사합니다.",
+                        extracted.excluded_paths
+                    ),
+                    "DarkReNamer - 경로 읽기 실패",
+                );
+            }
+            if drop_locked(self.state_owner) != Some(false) {
+                return Some(S_OK);
+            }
             if extracted.paths.is_empty() {
                 return Some(S_OK);
             }
@@ -622,6 +635,7 @@ struct DropPathExtraction {
     paths: Vec<PathBuf>,
     count_truncated: bool,
     path_budget_exhausted: bool,
+    excluded_paths: usize,
 }
 
 fn reserve_drop_path_allocation(path_budget: &mut PathBudget, utf16_units: usize) -> bool {
@@ -638,14 +652,17 @@ fn extract_drop_paths(
     let bounded = bounded_selection(reported, remaining);
     let mut paths = Vec::with_capacity(bounded.take);
     let mut path_budget_exhausted = false;
+    let mut excluded_paths = 0;
     for index in 0..bounded.take {
         let native_index = u32::try_from(index).unwrap_or(u32::MAX);
         // SAFETY: drop remains live and this length query writes no buffer.
         let length = unsafe { DragQueryFileW(drop, native_index, null_mut(), 0) };
         let Ok(length) = usize::try_from(length) else {
+            excluded_paths += 1;
             continue;
         };
         if length == 0 || length > MAX_PATH_UNITS {
+            excluded_paths += 1;
             continue;
         }
         if !reserve_drop_path_allocation(&mut path_budget, length) {
@@ -653,6 +670,7 @@ fn extract_drop_paths(
             break;
         }
         let Some(capacity) = length.checked_add(1) else {
+            excluded_paths += 1;
             continue;
         };
         let mut buffer = vec![0; capacity];
@@ -667,6 +685,7 @@ fn extract_drop_paths(
             )
         };
         if usize::try_from(copied).ok() != Some(length) {
+            excluded_paths += 1;
             continue;
         }
         buffer.truncate(length);
@@ -676,6 +695,7 @@ fn extract_drop_paths(
         paths,
         count_truncated: bounded.truncated,
         path_budget_exhausted,
+        excluded_paths,
     }
 }
 
@@ -1108,6 +1128,41 @@ mod tests {
 
         assert_eq!(allocations, 1);
         assert_eq!(path_budget.remaining_bytes(), 0);
+    }
+
+    #[test]
+    fn mixed_overlong_native_drop_reports_exclusions_without_losing_valid_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid = PathBuf::from(r"C:\drop\sample.txt");
+        let overlong = PathBuf::from(std::ffi::OsString::from_wide(&vec![
+            b'x' as u16;
+            MAX_PATH_UNITS + 1
+        ]));
+        for (paths, expected_paths) in [
+            (vec![valid.clone(), overlong.clone()], vec![valid.clone()]),
+            (vec![overlong], vec![]),
+            (vec![valid.clone()], vec![valid]),
+        ] {
+            let expected_excluded = paths.len() - expected_paths.len();
+            let mut fake = FakeDataObject::new(S_OK, S_OK);
+            fake.global = create_drop_global(&paths)?;
+            let medium = get_file_drop_medium(&fake.owned_interface())
+                .ok_or_else(|| io::Error::other("fake GetData did not return a medium"))?;
+            let drop = medium
+                .file_drop_handle()
+                .ok_or_else(|| io::Error::other("native drop handle missing"))?;
+            // SAFETY: the test-owned medium keeps the complete DROPFILES block live.
+            assert_eq!(
+                unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) } as usize,
+                paths.len()
+            );
+            let extracted = extract_drop_paths(drop, MAX_ADMITTED_SOURCES, PathBudget::new());
+            assert_eq!(extracted.paths, expected_paths);
+            assert_eq!(extracted.excluded_paths, expected_excluded);
+            assert!(!extracted.count_truncated);
+            assert!(!extracted.path_budget_exhausted);
+        }
+        Ok(())
     }
 
     #[test]
