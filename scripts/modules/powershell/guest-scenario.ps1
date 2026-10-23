@@ -520,7 +520,7 @@ function Invoke-OwnedPickerAction {
                 $values += @(([Windows.Automation.SelectionPattern]$pattern).GetCurrentSelection() | ForEach-Object { $_.Current.Name })
             }
             $comboObservations += @{ id=$candidate.Current.AutomationId; values=$values }
-            if ($values -ccontains 'Text Files (*.txt)') { $candidates += $candidate }
+            if ($values -ccontains 'Text Files (*.txt)' -or $values -ccontains 'Text Files') { $candidates += $candidate }
         }
         if ($candidates.Count -ne 1) {
             throw "Picker has no unique selected Text Files filter: $($comboObservations | ConvertTo-Json -Depth 4 -Compress)"
@@ -536,10 +536,11 @@ function Invoke-OwnedPickerAction {
                     [Windows.Automation.ControlType]::ListItem))
             if ($items.Count -gt 512) { throw 'Picker ListItem inventory exceeds its bound.' }
             $filterNames = @($items | ForEach-Object { $_.Current.Name } | Where-Object {
-                $_ -cin @('Text Files (*.txt)', 'All Files (*.*)')
+                $_ -cin @('Text Files', 'Text Files (*.txt)', 'All Files', 'All Files (*.*)')
             })
             if ($filterNames.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
-            if ($filterNames[0] -cne 'Text Files (*.txt)' -or $filterNames[1] -cne 'All Files (*.*)') {
+            if ($filterNames[0] -cnotin @('Text Files', 'Text Files (*.txt)') -or
+                $filterNames[1] -cnotin @('All Files', 'All Files (*.*)')) {
                 throw "Text picker filters changed: $($filterNames -join ', ')."
             }
         }

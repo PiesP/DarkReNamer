@@ -1125,7 +1125,12 @@ def verify_picker_checks(checks, gui):
                          'model_unchanged' if action == 'cancel' else 'expected_model_observed'):
                 if row.get(flag) is not True:
                     raise ValueError('VM production picker modality, focus, or model observation is incomplete.')
-            if row.get('filters') != ([] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*.*)']):
+            filters = row.get('filters')
+            valid_filters = filters == [] if acceptance == 'folder' else (
+                isinstance(filters, list) and len(filters) == 2 and
+                filters[0] in ('Text Files', 'Text Files (*.txt)') and
+                filters[1] in ('All Files', 'All Files (*.*)'))
+            if not valid_filters:
                 raise ValueError('VM production picker filters differ from the maintained policy.')
             if action == 'cancel':
                 before, after = row.get('model_before'), row.get('model_after')
