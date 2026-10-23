@@ -184,12 +184,20 @@ try {
     Write-Record $recordPath $record
 
     $validRecordText = Get-Content -LiteralPath $recordPath -Raw
+    $manifest = $record.rust.manifest
+    $component = $record.rust.components[0]
     $tool = $record.tools[0]
     $kindMutations = @(
         @{ label = 'schema-bool'; before = '"schemaVersion": 1'; after = '"schemaVersion": true'; field = 'schemaVersion' }
         @{ label = 'schema-string'; before = '"schemaVersion": 1'; after = '"schemaVersion": "1"'; field = 'schemaVersion' }
         @{ label = 'platform-array'; before = '"platform": "x86_64-pc-windows-msvc"'; after = '"platform": ["x86_64-pc-windows-msvc"]'; field = 'platform' }
         @{ label = 'rust-version-array'; before = '"version": "1.99.1"'; after = '"version": ["1.99.1"]'; field = 'version' }
+        @{ label = 'manifest-url-array'; before = "`"url`": `"$($manifest.url)`""; after = "`"url`": [`"$($manifest.url)`"]"; field = 'url' }
+        @{ label = 'manifest-digest-array'; before = "`"sha256`": `"$($manifest.sha256)`""; after = "`"sha256`": [`"$($manifest.sha256)`"]"; field = 'sha256' }
+        @{ label = 'component-id-array'; before = "`"id`": `"$($component.id)`""; after = "`"id`": [`"$($component.id)`"]"; field = 'id' }
+        @{ label = 'component-directory-array'; before = "`"directory`": `"$($component.directory)`""; after = "`"directory`": [`"$($component.directory)`"]"; field = 'directory' }
+        @{ label = 'component-url-array'; before = "`"url`": `"$($component.url)`""; after = "`"url`": [`"$($component.url)`"]"; field = 'url' }
+        @{ label = 'component-digest-array'; before = "`"sha256`": `"$($component.sha256)`""; after = "`"sha256`": [`"$($component.sha256)`"]"; field = 'sha256' }
         @{ label = 'tool-id-array'; before = '"id": "cargo-audit"'; after = '"id": ["cargo-audit"]'; field = 'id' }
         @{ label = 'tool-version-array'; before = '"version": "0.22.2"'; after = '"version": ["0.22.2"]'; field = 'version' }
         @{ label = 'tool-path-array'; before = "`"archivePath`": `"$($tool.archivePath)`""; after = "`"archivePath`": [`"$($tool.archivePath)`"]"; field = 'archivePath' }
