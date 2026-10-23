@@ -3354,6 +3354,32 @@ if ($waitProbeResult.natural_status -cne 'natural-exit' -or
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         Initialize-NativeCapture
+        $initialDpiContext = [DarkReNamerVmNative]::GetThreadDpiAwarenessContext()
+        $perMonitorV2 = [IntPtr](-4)
+        $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter($perMonitorV2)
+        try {
+            if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($perMonitorV2)) {
+                throw 'The observer thread did not enter PerMonitorV2 DPI awareness.'
+            }
+        }
+        finally { $dpiScope.Dispose() }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'The observer thread did not restore DPI awareness after success.'
+        }
+        Assert-Fails -Expected 'intentional DPI scope failure' -Action {
+            $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter($perMonitorV2)
+            try { throw 'intentional DPI scope failure' }
+            finally { $dpiScope.Dispose() }
+        }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'The observer thread did not restore DPI awareness after failure.'
+        }
+        Assert-Win32Failure -NativeErrorCode 87 -Label 'Invalid observer DPI context' -Action {
+            [void][DarkReNamerVmNative+DpiAwarenessScope]::Enter([IntPtr]::Zero)
+        }
+        if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
+            throw 'A rejected DPI context changed the observer thread.'
+        }
         if ($null -eq [Windows.Automation.AutomationElement]::RootElement) {
             throw 'In-process PowerShell Core UI Automation initialization returned no root element.'
         }

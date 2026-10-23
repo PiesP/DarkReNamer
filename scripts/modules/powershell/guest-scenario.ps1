@@ -746,6 +746,7 @@ function Invoke-GuiSmoke {
     }
     $processState = [pscustomobject]@{ process = $null }
     $captureState = [pscustomobject]@{ bitmap = $null; graphics = $null }
+    $dpiScope = $null
     $flowFixtureRoot = $null
     $screenshotLeaf = 'main-workbench.png'
     $screenshotPath = Join-Path $OutputRoot $screenshotLeaf
@@ -758,8 +759,12 @@ function Invoke-GuiSmoke {
                 break
             }
             Initialize-NativeCapture
-            if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
+            try {
+                $dpiScope = [DarkReNamerVmNative+DpiAwarenessScope]::Enter([IntPtr](-4))
+            }
+            catch {
                 $row.failure_reason = 'dpi_awareness_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
                 break
             }
             $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
@@ -1053,6 +1058,14 @@ function Invoke-GuiSmoke {
             catch {
                 $row.status = 'failed'
                 Set-ProcessCleanupFailureReason -Row $row -Reason 'flow_fixture_cleanup_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
+            }
+        }
+        if ($null -ne $dpiScope) {
+            try { $dpiScope.Dispose() }
+            catch {
+                $row.status = 'failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'dpi_restore_failed'
                 Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
             }
         }

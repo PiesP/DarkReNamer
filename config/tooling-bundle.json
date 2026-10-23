@@ -501,7 +501,7 @@
       "bundle": "guest-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "4b0426e8542c1c5e1bff89afda46b93351fa39f35189f96df718ec90f70dc23c",
+      "sha256": "f0a84eb697ae6559f3b57abf3bafdf4008f9898004d2fc0f1ed56df4ec7cd25f",
       "dependencies": []
     },
     {
@@ -537,7 +537,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "0af31d88f92734984a0c93e7940cc4ad13ddd4208b6660e13c44534b0e8d961a",
+      "sha256": "894b06c1239371e442ca9107fab6781d967ab1fc4cc91cbbcdaf5804c0fa4b15",
       "dependencies": []
     },
     {
