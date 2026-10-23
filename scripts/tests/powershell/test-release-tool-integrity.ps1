@@ -17,7 +17,7 @@ function Write-Record {
 }
 function Assert-InstallerFails {
     param([string] $Fragment, [string] $Destination, [string] $RecordPath,
-        [string] $ArchiveRoot, [string] $Marker)
+        [string] $ArchiveRoot, [string] $Marker, [switch] $BeforeDestination)
     try {
         & $installer -DestinationRoot $Destination -VerifyOnly `
             -IntegrityRecordPath $RecordPath -ArchiveSourceRoot $ArchiveRoot
@@ -29,6 +29,9 @@ function Assert-InstallerFails {
         }
         if (Test-Path -LiteralPath $Marker) {
             throw 'Execution marker appeared after an integrity failure.'
+        }
+        if ($BeforeDestination -and (Test-Path -LiteralPath $Destination)) {
+            throw "Invalid metadata created a destination before rejection: $Destination"
         }
         return
     }
@@ -166,10 +169,56 @@ try {
     $originalAuditVersion = $record.tools[0].version
     $record.tools[0].version = '0.0.0'
     Write-Record $recordPath $record
-    Assert-InstallerFails -Fragment 'stale against security.yaml' `
+    Assert-InstallerFails -Fragment 'Unsupported archive layout for cargo-audit' `
         -Destination (Join-Path $testRoot 'stale-scanner') -RecordPath $recordPath `
         -ArchiveRoot $archiveRoot -Marker $marker
     $record.tools[0].version = $originalAuditVersion
+    Write-Record $recordPath $record
+
+    $ambiguous = (Get-Content -LiteralPath $recordPath -Raw).Replace(
+        '"schemaVersion": 1,', '"schemaVersion": 1, "schemaVersion": 1,')
+    [IO.File]::WriteAllText($recordPath, $ambiguous, [Text.UTF8Encoding]::new($false))
+    Assert-InstallerFails -Fragment 'Ambiguous release-tool metadata property' `
+        -Destination (Join-Path $testRoot 'ambiguous-scanner') -RecordPath $recordPath `
+        -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
+    Write-Record $recordPath $record
+
+    $validRecordText = Get-Content -LiteralPath $recordPath -Raw
+    $manifest = $record.rust.manifest
+    $component = $record.rust.components[0]
+    $tool = $record.tools[0]
+    $kindMutations = @(
+        @{ label = 'schema-bool'; before = '"schemaVersion": 1'; after = '"schemaVersion": true'; field = 'schemaVersion' }
+        @{ label = 'schema-string'; before = '"schemaVersion": 1'; after = '"schemaVersion": "1"'; field = 'schemaVersion' }
+        @{ label = 'platform-array'; before = '"platform": "x86_64-pc-windows-msvc"'; after = '"platform": ["x86_64-pc-windows-msvc"]'; field = 'platform' }
+        @{ label = 'rust-version-array'; before = '"version": "1.99.1"'; after = '"version": ["1.99.1"]'; field = 'version' }
+        @{ label = 'manifest-url-array'; before = "`"url`": `"$($manifest.url)`""; after = "`"url`": [`"$($manifest.url)`"]"; field = 'url' }
+        @{ label = 'manifest-digest-array'; before = "`"sha256`": `"$($manifest.sha256)`""; after = "`"sha256`": [`"$($manifest.sha256)`"]"; field = 'sha256' }
+        @{ label = 'component-id-array'; before = "`"id`": `"$($component.id)`""; after = "`"id`": [`"$($component.id)`"]"; field = 'id' }
+        @{ label = 'component-directory-array'; before = "`"directory`": `"$($component.directory)`""; after = "`"directory`": [`"$($component.directory)`"]"; field = 'directory' }
+        @{ label = 'component-url-array'; before = "`"url`": `"$($component.url)`""; after = "`"url`": [`"$($component.url)`"]"; field = 'url' }
+        @{ label = 'component-digest-array'; before = "`"sha256`": `"$($component.sha256)`""; after = "`"sha256`": [`"$($component.sha256)`"]"; field = 'sha256' }
+        @{ label = 'tool-id-array'; before = '"id": "cargo-audit"'; after = '"id": ["cargo-audit"]'; field = 'id' }
+        @{ label = 'tool-version-array'; before = '"version": "0.22.2"'; after = '"version": ["0.22.2"]'; field = 'version' }
+        @{ label = 'tool-path-array'; before = "`"archivePath`": `"$($tool.archivePath)`""; after = "`"archivePath`": [`"$($tool.archivePath)`"]"; field = 'archivePath' }
+        @{ label = 'tool-url-array'; before = "`"url`": `"$($tool.url)`""; after = "`"url`": [`"$($tool.url)`"]"; field = 'url' }
+        @{ label = 'tool-digest-array'; before = "`"sha256`": `"$($tool.sha256)`""; after = "`"sha256`": [`"$($tool.sha256)`"]"; field = 'sha256' }
+    )
+    foreach ($mutation in $kindMutations) {
+        $invalid = $validRecordText.Replace($mutation.before, $mutation.after)
+        if ($invalid -ceq $validRecordText) { throw "Metadata kind fixture did not change: $($mutation.label)" }
+        [IO.File]::WriteAllText($recordPath, $invalid, [Text.UTF8Encoding]::new($false))
+        Assert-InstallerFails -Fragment "Invalid JSON kind for release-tool metadata field: $($mutation.field)" `
+            -Destination (Join-Path $testRoot "kind-$($mutation.label)") -RecordPath $recordPath `
+            -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
+    }
+    $nonIntegerSchema = $validRecordText.Replace('"schemaVersion": 1', '"schemaVersion": 1.0')
+    if ($nonIntegerSchema -ceq $validRecordText) { throw 'Non-integer schema fixture did not change.' }
+    [IO.File]::WriteAllText($recordPath, $nonIntegerSchema, [Text.UTF8Encoding]::new($false))
+    Assert-InstallerFails -Fragment 'Unsupported release-tool integrity record schema or platform' `
+        -Destination (Join-Path $testRoot 'schema-float') -RecordPath $recordPath `
+        -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
+    [IO.File]::WriteAllText($recordPath, $validRecordText, [Text.UTF8Encoding]::new($false))
 
     $originalAboutPath = $record.tools[2].archivePath
     $record.tools[2].archivePath = '../cargo-about.exe'
@@ -199,17 +248,14 @@ try {
     $fixtureRepo = Join-Path $testRoot 'production-fixture'
     $fixtureScripts = Join-Path $fixtureRepo 'scripts'
     $fixtureConfig = Join-Path $fixtureRepo 'config'
-    $fixtureWorkflow = Join-Path $fixtureRepo '.github/workflows'
     $fixtureArchives = Join-Path $testRoot 'production-archives'
-    foreach ($directory in @($fixtureScripts, $fixtureConfig, $fixtureWorkflow, $fixtureArchives)) {
+    foreach ($directory in @($fixtureScripts, $fixtureConfig, $fixtureArchives)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     $fixtureInstaller = Join-Path $fixtureScripts 'install-verified-release-tools.ps1'
     Copy-Item -LiteralPath $installer -Destination $fixtureInstaller
     Copy-Item -LiteralPath (Join-Path $repoRoot 'rust-toolchain.toml') `
         -Destination (Join-Path $fixtureRepo 'rust-toolchain.toml')
-    Copy-Item -LiteralPath (Join-Path $repoRoot '.github/workflows/security.yaml') `
-        -Destination (Join-Path $fixtureWorkflow 'security.yaml')
     $productionRecord = Get-Content -LiteralPath $sourceRecord -Raw | ConvertFrom-Json
     $downloadMap = @{}
 

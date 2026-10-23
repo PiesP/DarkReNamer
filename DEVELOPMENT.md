@@ -181,8 +181,13 @@ The [completed #94 scanner investigation](https://github.com/PiesP/DarkReNamer/i
 retains both cargo-audit and cargo-deny. Its complete controls and failure
 receipts remain in that closeout and in the
 [immutable investigation-era source](https://github.com/PiesP/DarkReNamer/blob/599947b878da65ae0a750e8582e6f96f107ff195/DEVELOPMENT.md#L71).
-The pins in CI, the scheduled audit, and the verified release-tool manifest
-define the supported versions. Audit inspected the complete, unpruned lockfile;
+The scanner entries in `config/release-tool-integrity.json` own selected versions
+and reviewed Windows artifact identities. CI and the scheduled audit read those
+values through `run-scheduled-rust-audit.py --emit-pins`; workflows still own
+cache restoration, pinned `cargo install --locked`, permissions and setup failure
+reporting. The same runner checks exact executable versions, while the Windows
+installer validates the reviewed archives independently of workflow syntax.
+Audit inspected the complete, unpruned lockfile;
 deny inspected a selected dependency graph. Their target, advisory, and yank
 results therefore differ. A clean product scan does not prove equivalent scope.
 Keep the scheduled adapter's fresh-data and registry-failure checks above:
@@ -195,6 +200,15 @@ repeat the installed-tool controls, preserve precise advisory severities and
 registry-failure reporting, and verify CI, scheduled/manual, and release callers
 together. Until then, keep both tools, their immutable installation checks,
 fresh-data execution, and the scheduled adapter's two-result completion rule.
+
+Reusing the reviewed record keeps scanner version and Windows artifact changes
+atomic without creating a second registry or generated workflow declarations.
+A separate record would split that update, while workflow scraping would couple
+data validation to executable syntax. A wrong reviewed value remains a shared
+failure source. Fixed scanner/source/layout allowlists, Windows archive digests,
+executable probes and independent parser-semantic fixtures therefore remain
+required. Changing a version does not establish compatibility with the runner's
+supported report formats or registry-failure detection.
 
 ## Tooling tests
 
@@ -1292,8 +1306,8 @@ source-bound Windows or release validation.
 ## Dependency policy
 
 `Cargo.lock` and `--locked` define reproducible application resolution. Exact
-manifest pins are reserved for UI/native-boundary dependencies (`rfd`,
-`windows`, and `raw-window-handle`), whose updates require focused Windows
+manifest pins are reserved for the typed `windows` native-boundary dependency,
+whose updates require focused Windows
 validation. Other external dependencies use compatible requirements and remain
 fixed by the lockfile. Review changes with the Windows target graph before
 altering this policy:
@@ -1305,6 +1319,25 @@ cargo tree --locked --target x86_64-pc-windows-msvc -d
 
 Lockfile package counts include target-specific, build, and development
 packages. They are not counts of crates linked into `DarkReNamer.exe`.
+
+Import Names, Import Paths and destination-folder selection use a small typed
+COM adapter in `windows/dialog.rs`. It shares creation, error classification and
+owned exact UTF-16 extraction, while input selection and destination validation
+remain separate from retained export authority. The pinned `rfd` backend erased
+native failures into cancellation and converted Shell paths through `String`.
+Retaining it with those gaps repaired would require maintaining a backend fork;
+the native adapter reuses the existing STA, modal owner guard and Shell memory
+owner instead. Shared COM errors can affect these three selections together;
+operation policies and save/recovery event-sink ownership remain independent.
+This dependency change makes no binary-size, speed or memory claim.
+
+Ordinary source-built `scripts/test-windows-vm.py` runs exercise acceptance and
+Cancel for these three pickers before the existing rename flow. The separate
+`dialog_picker_checks` record binds each dialog to its process/session/owner,
+checks titles and text filters, owner restoration and focus, exact multilingual
+model results and unchanged cancellation/filesystem state. The host rejects
+missing or incomplete observations. Candidate acceptance keeps its existing
+separate contract; this focused development check is not a release verdict.
 
 ## Release tooling
 

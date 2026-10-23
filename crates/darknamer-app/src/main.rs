@@ -9,14 +9,7 @@ fn main() {
 
 #[cfg(windows)]
 fn show_fatal_error(message: &str) {
-    use rfd::{MessageButtons, MessageDialog, MessageLevel};
-
-    let _result = MessageDialog::new()
-        .set_level(MessageLevel::Error)
-        .set_title("DarkReNamer - 시작 실패")
-        .set_description(message)
-        .set_buttons(MessageButtons::Ok)
-        .show();
+    darknamer_app::show_startup_error(message);
 }
 
 #[cfg(not(windows))]

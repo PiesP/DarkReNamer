@@ -24,13 +24,6 @@ use crate::scale_dip;
 use crate::semantic_palette;
 use crate::validate_combo_result;
 use darknamer_core::LegacyText;
-use raw_window_handle::DisplayHandle;
-use raw_window_handle::HandleError;
-use raw_window_handle::HasDisplayHandle;
-use raw_window_handle::HasWindowHandle;
-use raw_window_handle::RawWindowHandle;
-use raw_window_handle::Win32WindowHandle;
-use raw_window_handle::WindowHandle;
 #[cfg(test)]
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -38,7 +31,6 @@ use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use std::mem::size_of;
-use std::num::NonZeroIsize;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -708,30 +700,6 @@ impl Drop for OwnerEnableGuard {
             }
         }
     }
-}
-
-struct NativeDialogParent {
-    hwnd: HWND,
-}
-
-impl HasWindowHandle for NativeDialogParent {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let hwnd = NonZeroIsize::new(self.hwnd as isize).ok_or(HandleError::Unavailable)?;
-        let raw = RawWindowHandle::Win32(Win32WindowHandle::new(hwnd));
-        // SAFETY: this wrapper is borrowed only while the live owner HWND is synchronously used.
-        Ok(unsafe { WindowHandle::borrow_raw(raw) })
-    }
-}
-
-impl HasDisplayHandle for NativeDialogParent {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(DisplayHandle::windows())
-    }
-}
-
-pub(super) fn native_file_dialog(owner: HWND) -> rfd::FileDialog {
-    let parent = NativeDialogParent { hwnd: owner };
-    rfd::FileDialog::new().set_parent(&parent)
 }
 
 pub(super) fn prompt_input(
@@ -2004,14 +1972,24 @@ pub(super) fn select_prepared_file_dialog(
                 PreparedFileDialogSelection::Cancelled
             }
         },
-        PreparedFileDialogKind::UnifyDestinationParent => modal_native_dialog(owner, || {
-            native_file_dialog(owner)
-                .set_title("모든 파일을 이동할 대상 폴더 선택")
-                .pick_folder()
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
-            PreparedFileDialogSelection::UnifyDestinationParent(path)
-        }),
+        PreparedFileDialogKind::UnifyDestinationParent => match modal_native_dialog(owner, || {
+            show_single_path_dialog(
+                owner,
+                "모든 파일을 이동할 대상 폴더 선택",
+                SinglePathDialog::DestinationFolder,
+            )
+        }) {
+            Ok(Some(path)) => PreparedFileDialogSelection::UnifyDestinationParent(path),
+            Ok(None) => PreparedFileDialogSelection::Cancelled,
+            Err(error) => {
+                message(
+                    owner,
+                    &format!("대상 폴더를 선택하지 못했습니다: {error}"),
+                    "DarkReNamer - 대상 폴더 선택 실패",
+                );
+                PreparedFileDialogSelection::Cancelled
+            }
+        },
         PreparedFileDialogKind::SaveText { text, names } => {
             let title = if names {
                 "파일명 저장"
@@ -2034,26 +2012,16 @@ pub(super) fn select_prepared_file_dialog(
                 }
             }
         }
-        PreparedFileDialogKind::ImportNames => modal_native_dialog(owner, || {
-            native_file_dialog(owner)
-                .set_title("바꿀 파일 이름 불러오기")
-                .add_filter("Text Files", &["txt"])
-                .add_filter("All Files", &["*"])
-                .pick_file()
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
-            PreparedFileDialogSelection::ImportNames(path)
-        }),
-        PreparedFileDialogKind::ImportPaths => modal_native_dialog(owner, || {
-            native_file_dialog(owner)
-                .set_title("파일에서 경로목록 읽어 추가하기")
-                .add_filter("Text Files", &["txt"])
-                .add_filter("All Files", &["*"])
-                .pick_file()
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
-            PreparedFileDialogSelection::ImportPaths(path)
-        }),
+        PreparedFileDialogKind::ImportNames => select_import_path(
+            owner,
+            "바꿀 파일 이름 불러오기",
+            PreparedFileDialogSelection::ImportNames,
+        ),
+        PreparedFileDialogKind::ImportPaths => select_import_path(
+            owner,
+            "파일에서 경로목록 읽어 추가하기",
+            PreparedFileDialogSelection::ImportPaths,
+        ),
         PreparedFileDialogKind::ExportRecoveryJournal => {
             match modal_native_dialog(owner, || show_secure_recovery_export_folder_dialog(owner)) {
                 Ok(Some(directory)) => {
@@ -2071,6 +2039,129 @@ pub(super) fn select_prepared_file_dialog(
             }
         }
     }
+}
+
+fn select_import_path(
+    owner: HWND,
+    title: &str,
+    selected: impl FnOnce(PathBuf) -> PreparedFileDialogSelection,
+) -> PreparedFileDialogSelection {
+    match modal_native_dialog(owner, || {
+        show_single_path_dialog(owner, title, SinglePathDialog::ImportFile)
+    }) {
+        Ok(Some(path)) => selected(path),
+        Ok(None) => PreparedFileDialogSelection::Cancelled,
+        Err(error) => {
+            message(
+                owner,
+                &format!("불러올 파일을 선택하지 못했습니다: {error}"),
+                "DarkReNamer - 불러오기 실패",
+            );
+            PreparedFileDialogSelection::Cancelled
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SinglePathDialog {
+    ImportFile,
+    DestinationFolder,
+}
+
+fn show_single_path_dialog(
+    owner: HWND,
+    title: &str,
+    policy: SinglePathDialog,
+) -> io::Result<Option<PathBuf>> {
+    let dialog = build_single_path_dialog(title, policy, || {
+        // SAFETY: the native UI thread owns a live STA apartment initialized
+        // by OleInitialize; this interface stays on that thread.
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+    })?;
+    // SAFETY: the dialog and its owner are live on the initialized UI thread;
+    // the modal Show completes before GetResult and before COM release.
+    let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
+    finish_single_path_dialog(
+        shown,
+        || {
+            // SAFETY: the dialog remains live on its UI thread after Show succeeds.
+            unsafe { dialog.GetResult() }
+        },
+        dialog_path_for_item,
+    )
+}
+
+fn build_single_path_dialog(
+    title: &str,
+    policy: SinglePathDialog,
+    create: impl FnOnce() -> ::windows::core::Result<IFileOpenDialog>,
+) -> io::Result<IFileOpenDialog> {
+    let dialog = create().map_err(shell_dialog_error)?;
+    configure_single_path_dialog(&dialog, title, policy)?;
+    Ok(dialog)
+}
+
+fn finish_single_path_dialog<T>(
+    shown: ::windows::core::Result<()>,
+    get_result: impl FnOnce() -> ::windows::core::Result<T>,
+    path_for_item: impl FnOnce(&T) -> io::Result<PathBuf>,
+) -> io::Result<Option<PathBuf>> {
+    let Some(item) = complete_bounded_file_dialog(shown, get_result)? else {
+        return Ok(None);
+    };
+    path_for_item(&item).map(Some)
+}
+
+fn configure_single_path_dialog(
+    dialog: &IFileOpenDialog,
+    title: &str,
+    policy: SinglePathDialog,
+) -> io::Result<()> {
+    let title = wide(title);
+    // Keep defaults (including the Shell's file mode) and the independent
+    // import/destination policies. Provider or network text files remain valid.
+    // SAFETY: the dialog is live on the UI apartment; each buffer is retained
+    // through its synchronous COM call.
+    unsafe {
+        let defaults = dialog.GetOptions().map_err(shell_dialog_error)?;
+        let single_path =
+            defaults & !(FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT | FOS_PICKFOLDERS);
+        let options = match policy {
+            SinglePathDialog::ImportFile => {
+                single_path | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
+            }
+            SinglePathDialog::DestinationFolder => {
+                single_path | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
+            }
+        };
+        dialog.SetOptions(options).map_err(shell_dialog_error)?;
+        dialog
+            .SetTitle(PCWSTR(title.as_ptr()))
+            .map_err(shell_dialog_error)?;
+        if matches!(policy, SinglePathDialog::ImportFile) {
+            let default_extension = wide("txt");
+            let text_label = wide("Text Files");
+            let text_pattern = wide("*.txt");
+            let all_label = wide("All Files");
+            let all_pattern = wide("*.*");
+            let filters = [
+                COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(text_label.as_ptr()),
+                    pszSpec: PCWSTR(text_pattern.as_ptr()),
+                },
+                COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(all_label.as_ptr()),
+                    pszSpec: PCWSTR(all_pattern.as_ptr()),
+                },
+            ];
+            dialog
+                .SetDefaultExtension(PCWSTR(default_extension.as_ptr()))
+                .map_err(shell_dialog_error)?;
+            dialog.SetFileTypes(&filters).map_err(shell_dialog_error)?;
+            dialog.SetFileTypeIndex(1).map_err(shell_dialog_error)?;
+        }
+    }
+    Ok(())
 }
 
 // The callbacks use UI-apartment HWND and Rc state. Disabling automatic
@@ -2728,11 +2819,18 @@ fn dialog_path_for_item(item: &IShellItem) -> io::Result<PathBuf> {
     // SAFETY: lstrlenW measured the NUL-terminated allocation returned by
     // GetDisplayName, and the checked length excludes the terminator.
     let units = unsafe { std::slice::from_raw_parts(name.0.0, length) };
+    path_from_shell_units(units)
+}
+
+fn path_from_shell_units(units: &[u16]) -> io::Result<PathBuf> {
+    if units.is_empty() || units.len() > MAX_PATH_UNITS {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
     Ok(PathBuf::from(std::ffi::OsString::from_wide(units)))
 }
 
 fn shell_dialog_error(error: ::windows::core::Error) -> io::Error {
-    io::Error::other(format!("native file picker failed: {error}"))
+    io::Error::other(error)
 }
 
 pub(super) fn set_status(status: HWND, text: &str) {
@@ -3721,6 +3819,247 @@ mod tests {
             }),
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied
         ));
+    }
+
+    #[test]
+    fn single_path_picker_preserves_exact_utf16_and_length_limits() -> io::Result<()> {
+        for units in [
+            r"C:\선택\file.txt".encode_utf16().collect::<Vec<_>>(),
+            r"C:\선택\😀.txt".encode_utf16().collect::<Vec<_>>(),
+            [
+                r"C:\selected\".encode_utf16().collect::<Vec<_>>(),
+                vec![0xD800, b'.' as u16],
+            ]
+            .concat(),
+            vec![b'x' as u16; MAX_PATH_UNITS],
+        ] {
+            let path = path_from_shell_units(&units)?;
+            assert_eq!(path.as_os_str().encode_wide().collect::<Vec<_>>(), units);
+        }
+        for units in [&[][..], &vec![b'x' as u16; MAX_PATH_UNITS + 1]] {
+            assert_eq!(
+                path_from_shell_units(units).err().map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidData)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shell_item_fixture_reports_unpaired_utf16_reachability() -> io::Result<()> {
+        let _ole = TestOle::initialize()?;
+        let directory = tempfile::tempdir()?;
+        crate::rename::WindowsRenameBackend
+            .validate_destination_parent(&crate::windows::text_io::legacy_path(directory.path()))
+            .map_err(|error| {
+                io::Error::other(format!("fixture parent must be supported NTFS: {error}"))
+            })?;
+
+        let ordinary = directory.path().join("ordinary-선택-😀.txt");
+        std::fs::write(&ordinary, b"owned fixture")?;
+        let ordinary_units = ordinary.as_os_str().encode_wide().collect::<Vec<_>>();
+        let ordinary_terminated = ordinary_units
+            .iter()
+            .copied()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the file exists on the owned NTFS fixture and the terminated
+        // exact path buffer remains live through Shell item creation.
+        let ordinary_item: IShellItem = unsafe {
+            ::windows::Win32::UI::Shell::SHCreateItemFromParsingName(
+                PCWSTR(ordinary_terminated.as_ptr()),
+                None,
+            )
+        }
+        .map_err(shell_dialog_error)?;
+        let ordinary_result = dialog_path_for_item(&ordinary_item)?;
+        assert_eq!(ordinary_result.file_name(), ordinary.file_name());
+        assert!(ordinary_result.is_file());
+
+        let leaf_units = [
+            b'u' as u16,
+            0xD800,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16,
+        ];
+        let leaf = std::ffi::OsString::from_wide(&leaf_units);
+        let unusual = directory.path().join(leaf);
+        std::fs::write(&unusual, b"owned fixture")?;
+        let unusual_units = unusual.as_os_str().encode_wide().collect::<Vec<_>>();
+        let unusual_terminated = unusual_units
+            .iter()
+            .copied()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the exact unpaired-unit filename exists on the validated
+        // owned NTFS fixture; no pointer is fabricated or outlives this call.
+        let unusual_item: IShellItem = match unsafe {
+            ::windows::Win32::UI::Shell::SHCreateItemFromParsingName(
+                PCWSTR(unusual_terminated.as_ptr()),
+                None,
+            )
+        } {
+            Ok(item) => item,
+            Err(error) => {
+                eprintln!(
+                    "unpaired UTF-16 Shell item unreachable: SHCreateItemFromParsingName HRESULT=0x{:08X}",
+                    error.code().0 as u32
+                );
+                return Ok(());
+            }
+        };
+        match dialog_path_for_item(&unusual_item) {
+            Ok(path) => {
+                assert_eq!(
+                    path.file_name()
+                        .map(|name| name.encode_wide().collect::<Vec<_>>()),
+                    Some(leaf_units.to_vec())
+                );
+                assert!(path.is_file());
+                eprintln!("unpaired UTF-16 Shell item reachable; exact path units retained");
+            }
+            Err(error) => {
+                let code = error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<WindowsError>())
+                    .map(|native| native.code().0 as u32);
+                if let Some(code) = code {
+                    eprintln!(
+                        "unpaired UTF-16 Shell item path unreachable: GetDisplayName HRESULT=0x{code:08X}"
+                    );
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn single_path_picker_configures_distinct_native_policies() -> io::Result<()> {
+        let _ole = TestOle::initialize()?;
+        for (policy, title) in [
+            (SinglePathDialog::ImportFile, "바꿀 파일 이름 불러오기"),
+            (
+                SinglePathDialog::DestinationFolder,
+                "모든 파일을 이동할 대상 폴더 선택",
+            ),
+        ] {
+            // SAFETY: this owned interface stays on the initialized test STA.
+            let dialog: IFileOpenDialog =
+                unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+                    .map_err(shell_dialog_error)?;
+            configure_single_path_dialog(&dialog, title, policy)?;
+            // SAFETY: the configured dialog is still live on this STA.
+            let options = unsafe { dialog.GetOptions() }.map_err(shell_dialog_error)?;
+            assert!(options.contains(FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST));
+            assert!(!options.contains(FOS_FORCEFILESYSTEM));
+            match policy {
+                SinglePathDialog::ImportFile => {
+                    assert!(options.contains(FOS_FILEMUSTEXIST));
+                    assert!(!options.contains(FOS_PICKFOLDERS));
+                    // SAFETY: the configured dialog remains on this test STA.
+                    let selected_filter =
+                        unsafe { dialog.GetFileTypeIndex() }.map_err(shell_dialog_error)?;
+                    assert_eq!(selected_filter, 1);
+                }
+                SinglePathDialog::DestinationFolder => {
+                    assert!(options.contains(FOS_PICKFOLDERS));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn single_path_picker_separates_cancel_show_result_and_path_errors() -> io::Result<()> {
+        let cancelled =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8007_04C7_u32 as i32));
+        let failure = || {
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32))
+        };
+        assert!(
+            finish_single_path_dialog(Err(cancelled), || Ok(()), |_| Ok(PathBuf::new()))?.is_none()
+        );
+        for error in [
+            finish_single_path_dialog(Err(failure()), || Ok(()), |_| Ok(PathBuf::new())),
+            finish_single_path_dialog(Ok(()), || Err::<(), _>(failure()), |_| Ok(PathBuf::new())),
+        ] {
+            let error = error
+                .err()
+                .ok_or_else(|| io::Error::other("expected native failure"))?;
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(
+                error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<WindowsError>())
+                    .map(WindowsError::code),
+                Some(::windows::core::HRESULT(0x8000_4005_u32 as i32))
+            );
+        }
+        assert_eq!(
+            finish_single_path_dialog(
+                Ok(()),
+                || Ok(()),
+                |_| Err(io::Error::from(io::ErrorKind::InvalidData))
+            )
+            .err()
+            .map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        let path = PathBuf::from(r"C:\selected\valid.txt");
+        assert_eq!(
+            finish_single_path_dialog(Ok(()), || Ok(()), |_| Ok(path.clone()))?,
+            Some(path)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_path_picker_drops_the_result_once_on_success_and_path_error() -> io::Result<()> {
+        struct CountingItem(Rc<Cell<usize>>);
+        impl Drop for CountingItem {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        for path_fails in [false, true] {
+            let drops = Rc::new(Cell::new(0));
+            let held = Rc::clone(&drops);
+            let result = finish_single_path_dialog(
+                Ok(()),
+                || Ok(CountingItem(held)),
+                |_| {
+                    if path_fails {
+                        Err(io::Error::from(io::ErrorKind::InvalidData))
+                    } else {
+                        Ok(PathBuf::from(r"C:\selected\valid.txt"))
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), path_fails);
+            assert_eq!(drops.get(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn single_path_picker_retains_native_creation_error() {
+        let native = ::windows::core::HRESULT(0x8004_0154_u32 as i32);
+        let error = build_single_path_dialog("test", SinglePathDialog::ImportFile, || {
+            Err(::windows::core::Error::from_hresult(native))
+        })
+        .err();
+        assert_eq!(
+            error
+                .as_ref()
+                .and_then(io::Error::get_ref)
+                .and_then(|source| source.downcast_ref::<WindowsError>())
+                .map(WindowsError::code),
+            Some(native)
+        );
     }
 
     #[test]

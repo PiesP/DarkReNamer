@@ -456,6 +456,256 @@ function Set-GuiSmokeFailureDetail {
         $Row['additional_error_details'] += $detail
     }
 }
+function Get-PickerModelSnapshot {
+    param([Parameter(Mandatory)][Windows.Automation.GridPattern] $Grid)
+
+    $rows = $Grid.Current.RowCount
+    if ($rows -lt 0 -or $rows -gt 1) { throw 'Picker checks require at most one owned row.' }
+    $snapshot = [ordered]@{ rows = $rows; cells = @() }
+    if ($rows -eq 1) {
+        if ($Grid.Current.ColumnCount -lt 3) { throw 'Picker checks require three primary columns.' }
+        $snapshot.cells = @(0..2 | ForEach-Object { $Grid.GetItem(0, $_).Current.Name })
+    }
+    $snapshot
+}
+
+function Invoke-OwnedPickerAction {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainHandle,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][uint16] $Command,
+        [Parameter(Mandatory)][string] $Title,
+        [Parameter(Mandatory)][ValidateSet('cancel', 'file', 'folder')][string] $Action,
+        [string] $Selection,
+        [switch] $TextFilters,
+        [switch] $UseDefaultExtension
+    )
+
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $MainHandle -MainWindow $MainWindow `
+        -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' -Label 'picker command owner'
+    [DarkReNamerVmNative]::RequestMenuCommand($MainHandle, $Command)
+    $dialog = Wait-UniqueAutomationWindow -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $MainHandle -Name $Title -TimeoutSeconds $TimeoutSeconds -Label 'owned picker'
+    $handle = [IntPtr]$dialog.Current.NativeWindowHandle
+    $native = @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id) | Where-Object {
+        $_.Handle -eq $handle.ToInt64() -and $_.Owner -eq $MainHandle.ToInt64() -and
+        $_.ClassName -ceq '#32770' -and $_.Title -ceq $Title -and $_.Visible
+    })
+    if ($native.Count -ne 1 -or [DarkReNamerVmNative]::IsWindowEnabled($MainHandle)) {
+        throw 'Picker did not retain its exact disabled native owner.'
+    }
+    $filterNames = @()
+    if ($TextFilters) {
+        # Shell versions expose different control IDs. Bind the actual selected
+        # filter through its UIA value/selection rather than a classic-dialog ID.
+        $combos = $dialog.FindAll([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.PropertyCondition]::new(
+                [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [Windows.Automation.ControlType]::ComboBox))
+        if ($combos.Count -gt 8) { throw 'Picker ComboBox inventory exceeds its bound.' }
+        $candidates = @()
+        $comboObservations = @()
+        foreach ($candidate in $combos) {
+            Assert-AutomationBinding -Element $candidate -Process $Process -ExpectedSession $Session -Label 'picker ComboBox'
+            $values = @($candidate.Current.Name)
+            $pattern = $null
+            if ($candidate.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+                $values += ([Windows.Automation.ValuePattern]$pattern).Current.Value
+            }
+            $pattern = $null
+            if ($candidate.TryGetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern, [ref]$pattern)) {
+                $values += @(([Windows.Automation.SelectionPattern]$pattern).Current.GetSelection() | ForEach-Object { $_.Current.Name })
+            }
+            $comboObservations += @{ id=$candidate.Current.AutomationId; values=$values }
+            if ($values -ccontains 'Text Files (*.txt)' -or $values -ccontains 'Text Files') { $candidates += $candidate }
+        }
+        if ($candidates.Count -ne 1) {
+            throw "Picker has no unique selected Text Files filter: $($comboObservations | ConvertTo-Json -Depth 4 -Compress)"
+        }
+        $combo = $candidates[0]
+        $expand = [Windows.Automation.ExpandCollapsePattern]$combo.GetCurrentPattern(
+            [Windows.Automation.ExpandCollapsePattern]::Pattern)
+        $expand.Expand()
+        try {
+            $items = $dialog.FindAll([Windows.Automation.TreeScope]::Descendants,
+                [Windows.Automation.PropertyCondition]::new(
+                    [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [Windows.Automation.ControlType]::ListItem))
+            if ($items.Count -gt 512) { throw 'Picker ListItem inventory exceeds its bound.' }
+            $filterNames = @($items | ForEach-Object { $_.Current.Name } | Where-Object {
+                $_ -cin @('Text Files', 'Text Files (*.txt)', 'All Files', 'All Files (*.*)')
+            })
+            if ($filterNames.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
+            if ($filterNames[0] -cnotin @('Text Files', 'Text Files (*.txt)') -or
+                $filterNames[1] -cnotin @('All Files', 'All Files (*.*)')) {
+                throw "Text picker filters changed: $($filterNames -join ', ')."
+            }
+        }
+        finally { $expand.Collapse() }
+    }
+    if ($Action -ceq 'cancel') {
+        $cancel = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
+            -AutomationId '2' -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label 'picker Cancel' -RequireEnabled -RequireWindowHandle
+        Invoke-AutomationControl -Element $cancel -Label 'picker Cancel'
+    }
+    else {
+        if ($Action -ceq 'folder' -or $UseDefaultExtension) {
+            # Match the maintained destination-folder observer: navigate the
+            # address first, then select that directory instead of merely
+            # navigating on the first Select Folder invocation.
+            Add-Type -AssemblyName System.Windows.Forms
+            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                throw 'Folder picker is not the bound foreground window.'
+            }
+            [Windows.Forms.SendKeys]::SendWait('^l')
+            $edit = [Windows.Automation.AutomationElement]::FocusedElement
+            Assert-AutomationBinding -Element $edit -Process $Process -ExpectedSession $Session -Label 'folder address'
+            if ($edit.Current.ControlType -ne [Windows.Automation.ControlType]::Edit) {
+                throw 'Folder address shortcut did not focus an Edit.'
+            }
+            $directory = if ($Action -ceq 'folder') { $Selection } else { [IO.Path]::GetDirectoryName($Selection) }
+            Set-AutomationControlValue -Element $edit -Value $directory -Label 'folder address'
+            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                throw 'Folder picker lost foreground before address navigation.'
+            }
+            [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            Start-Sleep -Milliseconds 300
+        }
+        if ($Action -ceq 'file') {
+            $edit = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
+                -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) `
+                -TimeoutSeconds $TimeoutSeconds -Label 'picker selection field'
+            $filename = if ($UseDefaultExtension) { [IO.Path]::GetFileNameWithoutExtension($Selection) } else { $Selection }
+            Set-AutomationControlValue -Element $edit -Value $filename -Label 'picker selection field'
+        }
+        $accept = Find-UniqueAutomationElement -Root $dialog -Process $Process -ExpectedSession $Session `
+            -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label 'picker acceptance' -RequireEnabled -RequireWindowHandle
+        Invoke-AutomationControl -Element $accept -Label 'picker acceptance'
+    }
+    Wait-WindowClosed -Handle $handle -TimeoutSeconds $TimeoutSeconds -Label "$Title ($Action)"
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $enabled = [DarkReNamerVmNative]::IsWindowEnabled($MainHandle)
+        $foreground = [DarkReNamerVmNative]::GetForegroundWindow() -eq $MainHandle
+        $focused = [Windows.Automation.AutomationElement]::FocusedElement
+        $focusBound = $null -ne $focused -and $focused.Current.ProcessId -eq $Process.Id
+        if ($enabled -and $foreground -and $focusBound) { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if (-not ($enabled -and $foreground -and $focusBound)) {
+        throw 'Picker did not restore its enabled owner, foreground, and process-bound focus.'
+    }
+    [ordered]@{
+        command = [int]$Command; action = $Action; title = $Title
+        process_id = $Process.Id; session_id = $Session
+        dialog_handle = $handle.ToInt64(); owner_handle = $MainHandle.ToInt64()
+        native_owner_disabled = $true; owner_enabled_after = $enabled
+        foreground_restored = $foreground; focus_process_bound = $focusBound
+        filters = $filterNames
+    }
+}
+
+function Invoke-ProductionPickerChecks {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainHandle,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Record
+    )
+
+    $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'picker-fixtures'
+    $destination = New-PrivateDirectory -Parent $root -Leaf 'destination'
+    $source = Join-Path $root '선택-😀.txt'
+    $names = Join-Path $root '이름-😀.txt'
+    $paths = Join-Path $root '경로-😀.txt'
+    [IO.File]::WriteAllText($source, 'owned picker fixture', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($names, "변경-😀.txt`r`n", [Text.UnicodeEncoding]::new($false, $true))
+    [IO.File]::WriteAllText($paths, "$source`r`n", [Text.UnicodeEncoding]::new($false, $true))
+    $initialFiles = @($source, $names, $paths | ForEach-Object {
+        [pscustomobject]@{ path = $_; sha256 = (Get-LowerSha256 -Path $_)
+            identity = [DarkReNamerVmNative]::GetFileIdentity($_) }
+    })
+    $list = Find-UniqueAutomationElement -Root $MainWindow -Process $Process -ExpectedSession $Session `
+        -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds -Label 'picker model list' -RequireWindowHandle
+    $grid = [Windows.Automation.GridPattern]$list.GetCurrentPattern([Windows.Automation.GridPattern]::Pattern)
+    if ($grid.Current.RowCount -ne 0) { throw 'Picker checks require an initially empty model.' }
+    $actions = [Collections.Generic.List[object]]::new()
+    $Record['actions'] = $actions
+    $specs = @(
+        @{ command = 0x801D; title = '파일에서 경로목록 읽어 추가하기'; selection = $paths; folder = $false },
+        @{ command = 0x801C; title = '바꿀 파일 이름 불러오기'; selection = $names; folder = $false },
+        @{ command = 0x8013; title = '모든 파일을 이동할 대상 폴더 선택'; selection = $destination; folder = $true }
+    )
+    foreach ($spec in $specs) {
+        $before = Get-PickerModelSnapshot -Grid $grid
+        $Record['active_action'] = [ordered]@{ command=$spec.command; title=$spec.title; action='cancel' }
+        $cancel = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
+            -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
+            -Action cancel -TextFilters:(-not $spec.folder)
+        $after = Get-PickerModelSnapshot -Grid $grid
+        if (($after | ConvertTo-Json -Depth 4 -Compress) -cne
+            ($before | ConvertTo-Json -Depth 4 -Compress)) { throw 'Cancel changed the picker model snapshot.' }
+        $cancel['model_unchanged'] = $true
+        $cancel['model_before'] = $before
+        $cancel['model_after'] = $after
+        $actions.Add($cancel)
+        $Record['active_action'] = [ordered]@{ command=$spec.command; title=$spec.title; action='accept' }
+        $accept = Invoke-OwnedPickerAction -Process $Process -MainWindow $MainWindow -MainHandle $MainHandle `
+            -Session $Session -TimeoutSeconds $TimeoutSeconds -Command $spec.command -Title $spec.title `
+            -Action $(if ($spec.folder) { 'folder' } else { 'file' }) -Selection $spec.selection `
+            -TextFilters:(-not $spec.folder) -UseDefaultExtension:($spec.command -eq 0x801C)
+        $expected = @('선택-😀.txt', $(if ($spec.command -eq 0x801D) { '선택-😀.txt' } else { '변경-😀.txt' }),
+            $(if ($spec.folder) { $destination } else { $root }))
+        $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+        do {
+            $snapshot = Get-PickerModelSnapshot -Grid $grid
+            if ($snapshot.rows -eq 1 -and ($snapshot.cells | ConvertTo-Json -Compress) -ceq
+                ($expected | ConvertTo-Json -Compress)) { break }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $deadline)
+        if ($snapshot.rows -ne 1 -or ($snapshot.cells | ConvertTo-Json -Compress) -cne
+            ($expected | ConvertTo-Json -Compress)) { throw 'Picker did not apply the expected exact model result.' }
+        $accept['expected_model_observed'] = $true
+        $accept['default_extension_exercised'] = $spec.command -eq 0x801C
+        $accept['expected_model'] = [ordered]@{ rows = 1; cells = $expected }
+        $accept['observed_model'] = $snapshot
+        $actions.Add($accept)
+    }
+    foreach ($file in $initialFiles) {
+        if ((Get-LowerSha256 -Path $file.path) -cne $file.sha256 -or
+            [DarkReNamerVmNative]::GetFileIdentity($file.path) -cne $file.identity) {
+            throw 'Picker selection changed owned source or import-input bytes/identity.'
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath $destination -Force).Count -ne 0 -or
+        @(Get-ChildItem -LiteralPath $root -Force).Count -ne 4) {
+        throw 'Picker selection mutated the fixture filesystem.'
+    }
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $MainHandle -MainWindow $MainWindow `
+        -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' -Label 'picker model reset owner'
+    # CLEAR_LIST is menu-only in the command catalog, with no rail Button.
+    [DarkReNamerVmNative]::RequestMenuCommand($MainHandle, [uint16]0x800E)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    while ($grid.Current.RowCount -ne 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if ($grid.Current.RowCount -ne 0) { throw 'Picker model did not return to its empty starting state.' }
+    $Record['status'] = 'passed'
+    $Record['filesystem_unchanged'] = $true
+    $Record['model_restored_empty'] = $true
+    [void]$Record.Remove('active_action')
+}
+
 function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -490,6 +740,7 @@ function Invoke-GuiSmoke {
         }
         screenshot = $null
         flow = $null
+        dialog_picker_checks = $null
         error_detail = $null
         failure_reason = 'process_start_failed'
     }
@@ -674,6 +925,14 @@ function Invoke-GuiSmoke {
                     -ExpectedClassName 'DarkReNamerWindow' `
                     -ExpectedTitle 'DarkReNamer' `
                     -Label 'production main window'
+                if (-not $RawEvidence) {
+                    $row.failure_reason = 'production_picker_checks_failed'
+                    $row.dialog_picker_checks = [ordered]@{ schema_version=1; status='failed' }
+                    Invoke-ProductionPickerChecks `
+                        -Process $processState.process.process -MainWindow $mainAutomationWindow `
+                        -MainHandle $handle -RuntimeRoot $caseRoot -Session $ExpectedSession `
+                        -TimeoutSeconds $TimeoutSeconds -Record $row.dialog_picker_checks
+                }
                 $row.flow = Invoke-ProductionRenameFlow `
                     -OwnedProcess $processState.process `
                     -InitialFixture $initialFlowFixture `

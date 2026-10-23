@@ -1096,6 +1096,63 @@ def verify_flow_foreground_observation(observation, gui, expected_label, expecte
         raise ValueError('VM candidate flow foreground changed during capture.')
 
 
+def verify_picker_checks(checks, gui):
+    if (not isinstance(checks, dict) or checks.get('schema_version') != 1 or
+            checks.get('status') != 'passed' or checks.get('filesystem_unchanged') is not True or
+            checks.get('model_restored_empty') is not True):
+        raise ValueError('VM production picker checks are missing or incomplete.')
+    expected = (
+        (0x801D, '파일에서 경로목록 읽어 추가하기', 'file'),
+        (0x801C, '바꿀 파일 이름 불러오기', 'file'),
+        (0x8013, '모든 파일을 이동할 대상 폴더 선택', 'folder'),
+    )
+    actions = checks.get('actions')
+    if not isinstance(actions, list) or len(actions) != 6:
+        raise ValueError('VM production picker action inventory is incomplete.')
+    for index, (command, title, acceptance) in enumerate(expected):
+        for offset, action in enumerate(('cancel', acceptance)):
+            row = actions[index * 2 + offset]
+            if not isinstance(row, dict) or (row.get('command'), row.get('title'), row.get('action')) != (command, title, action):
+                raise ValueError('VM production picker operation or action is invalid.')
+            for key, binding in (('process_id', 'process_id'), ('session_id', 'session_id'),
+                                 ('owner_handle', 'window_handle')):
+                value = row.get(key)
+                if type(value) is not int or value <= 0 or value != gui.get(binding):
+                    raise ValueError('VM production picker process/session/owner binding is invalid.')
+            if type(row.get('dialog_handle')) is not int or row['dialog_handle'] <= 0 or row['dialog_handle'] == row['owner_handle']:
+                raise ValueError('VM production picker dialog handle is invalid.')
+            for flag in ('native_owner_disabled', 'owner_enabled_after', 'foreground_restored', 'focus_process_bound',
+                         'model_unchanged' if action == 'cancel' else 'expected_model_observed'):
+                if row.get(flag) is not True:
+                    raise ValueError('VM production picker modality, focus, or model observation is incomplete.')
+            filters = row.get('filters')
+            valid_filters = filters == [] if acceptance == 'folder' else (
+                isinstance(filters, list) and len(filters) == 2 and
+                filters[0] in ('Text Files', 'Text Files (*.txt)') and
+                filters[1] in ('All Files', 'All Files (*.*)'))
+            if not valid_filters:
+                raise ValueError('VM production picker filters differ from the maintained policy.')
+            if action == 'cancel':
+                before, after = row.get('model_before'), row.get('model_after')
+                if (not isinstance(before, dict) or before != after or
+                        before.get('rows') != (0 if index == 0 else 1) or
+                        not isinstance(before.get('cells'), list) or
+                        len(before['cells']) != (0 if index == 0 else 3)):
+                    raise ValueError('VM production picker Cancel snapshots are incomplete or changed.')
+            else:
+                expected_model, observed_model = row.get('expected_model'), row.get('observed_model')
+                if row.get('default_extension_exercised') is not (index == 1):
+                    raise ValueError('VM production picker default-extension observation is incomplete.')
+                if (not isinstance(expected_model, dict) or expected_model != observed_model or
+                        expected_model.get('rows') != 1 or
+                        not isinstance(expected_model.get('cells'), list) or
+                        len(expected_model['cells']) != 3 or
+                        expected_model['cells'][0] != '선택-😀.txt' or
+                        expected_model['cells'][1] != ('선택-😀.txt' if index == 0 else '변경-😀.txt') or
+                        not isinstance(expected_model['cells'][2], str) or not expected_model['cells'][2]):
+                    raise ValueError('VM production picker observed model differs from its expected result.')
+
+
 def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None):
     if not isinstance(flow, dict):
         raise ValueError('VM production GUI flow is missing or invalid.')
@@ -1299,6 +1356,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
                 raise ValueError('GUI screenshot is not a PNG.')
         if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui):
             passed = False
+        if not candidate:
+            verify_picker_checks(gui.get('dialog_picker_checks'), gui)
         if candidate:
             if type(gui.get('exit_code')) is not int or gui['exit_code'] != 0:
                 raise ValueError('VM candidate GUI process exit code is invalid.')

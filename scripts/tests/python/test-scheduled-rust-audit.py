@@ -276,6 +276,71 @@ class AuditResultTests(unittest.TestCase):
         self.assertIn("registry-index data unavailable", result)
 
 
+class ScannerPinMetadataTests(unittest.TestCase):
+    def test_reviewed_record_selects_versions_for_workflow_and_runner(self) -> None:
+        pins = AUDIT.scanner_pins()
+        self.assertEqual(pins, {"cargo-audit": "0.22.2", "cargo-deny": "0.20.2"})
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-scanner-pins-") as directory:
+            output = Path(directory) / "github-output"
+            with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+                self.assertEqual(AUDIT.main(["--emit-pins"]), 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "audit-version=0.22.2\ndeny-version=0.20.2\n")
+
+    def test_invalid_metadata_stops_before_scanner_execution(self) -> None:
+        original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
+        cases = {
+            "duplicate": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "schemaVersion": 1,'),
+            "case-ambiguous": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "SchemaVersion": 1,'),
+            "missing": original.replace('"id": "cargo-audit",', '"id": "missing-audit",'),
+            "version": original.replace('"version": "0.22.2",', '"version": "0.22.2\nversion-injection",'),
+            "url": original.replace('https://github.com/rustsec/rustsec/releases/', 'https://example.invalid/releases/'),
+            "digest": original.replace('"sha256": "0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab"', '"sha256": ""'),
+            "schema": original.replace('"schemaVersion": 1,', '"schemaVersion": 2,'),
+            "boolean-schema": original.replace('"schemaVersion": 1,', '"schemaVersion": true,'),
+            "nan": original.replace('"version": "1.99.1",', '"version": NaN,'),
+            "infinity": original.replace('"version": "1.99.1",', '"version": Infinity,'),
+        }
+        for label, content in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="darkrenamer-bad-scanner-pins-") as directory:
+                root = Path(directory)
+                record = root / "pins.json"
+                record.write_text(content, encoding="utf-8")
+                load_pins = AUDIT.scanner_pins
+                with mock.patch.object(AUDIT, "scanner_pins", side_effect=lambda: load_pins(record)), mock.patch.object(AUDIT, "command") as command:
+                    output = root / "github-output"
+                    with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), redirect_stderr(StringIO()):
+                        self.assertEqual(AUDIT.main(["--emit-pins"]), 1)
+                    self.assertFalse(output.exists())
+                    summary = root / "summary.md"
+                    with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root)}):
+                        self.assertEqual(AUDIT.main([]), 1)
+                    self.assertIn("invalid scanner metadata", summary.read_text(encoding="utf-8"))
+                    command.assert_not_called()
+
+    def test_new_selected_version_requires_separate_parser_review(self) -> None:
+        original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
+        changed = original.replace('"version": "0.22.2",', '"version": "0.22.3",').replace(
+            'v0.22.2', 'v0.22.3'
+        )
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-unreviewed-scanner-") as directory:
+            root = Path(directory)
+            record = root / "pins.json"
+            record.write_text(changed, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unreviewed cargo-audit report compatibility"):
+                AUDIT.scanner_pins(record)
+            load_pins = AUDIT.scanner_pins
+            with mock.patch.object(AUDIT, "scanner_pins", side_effect=lambda: load_pins(record)), mock.patch.object(AUDIT, "command") as command:
+                output = root / "github-output"
+                with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), redirect_stderr(StringIO()):
+                    self.assertEqual(AUDIT.main(["--emit-pins"]), 1)
+                self.assertFalse(output.exists())
+                summary = root / "summary.md"
+                with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root)}):
+                    self.assertEqual(AUDIT.main([]), 1)
+                self.assertIn("unreviewed cargo-audit report compatibility", summary.read_text(encoding="utf-8"))
+                command.assert_not_called()
+
+
 class VerifiedToolPathsTests(unittest.TestCase):
     def run_fixture(self, mode: str = "clean", *, paths: str = "absolute") -> tuple[int, str, list[list[str]]]:
         with tempfile.TemporaryDirectory(prefix="darkrenamer-verified-audit-test-") as directory:
@@ -353,6 +418,14 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertIn("failed or incomplete", summary)
                 self.assertNotIn("Result: clean", summary)
+
+    def test_changed_reviewed_version_rejects_old_verified_executable(self) -> None:
+        with mock.patch.object(AUDIT, "scanner_pins", return_value={"cargo-audit": "0.22.3", "cargo-deny": "0.20.2"}):
+            result, summary, calls = self.run_fixture("version")
+        self.assertEqual(result, 1)
+        self.assertIn("cargo-audit version mismatch", summary)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:], ["--version"])
 
     def test_explicit_paths_cannot_fall_back_to_ambient_binaries(self) -> None:
         for paths in ("relative", "incomplete"):
@@ -564,13 +637,17 @@ class ScheduledRustAuditTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 30", job)
         self.assertIn("    permissions:\n      contents: read\n", job)
         self.assertIn("persist-credentials: false", job)
+        self.assertIn("id: scanner-pins\n        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins", job)
         self.assertIn("path: ${{ runner.temp }}/darkrenamer-security-tools", job)
-        self.assertIn("darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2", job)
-        self.assertIn("darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-0.22.2-deny-0.20.2", ci)
+        cache_identity = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ steps.scanner-pins.outputs.audit-version }}-deny-${{ steps.scanner-pins.outputs.deny-version }}"
+        self.assertIn(cache_identity, job)
+        self.assertIn(cache_identity, ci)
         self.assertNotIn("restore-keys:", job)
         self.assertIn("if: steps.security-tools-cache.outputs.cache-hit != 'true'", job)
-        self.assertIn('cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version 0.22.2', job)
-        self.assertIn('cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version 0.20.2', job)
+        self.assertIn('cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version "$AUDIT_VERSION"', job)
+        self.assertIn('cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version "$DENY_VERSION"', job)
+        self.assertIn('AUDIT_VERSION: ${{ steps.scanner-pins.outputs.audit-version }}', job)
+        self.assertIn('DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}', job)
         scan_step = job.split("      - name: Refresh and audit Rust dependencies\n", 1)[1].split(
             "\n      - name:", 1
         )[0]
@@ -581,6 +658,7 @@ class ScheduledRustAuditTests(unittest.TestCase):
         self.assertNotIn("deep-success", job)
         self.assertIn("name: pr-gate/security", ci)
         ci_security = ci.split("  security:\n", 1)[1].split("  windows:\n", 1)[0]
+        self.assertIn("id: scanner-pins\n        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins", ci_security)
         self.assertIn('run: python3 scripts/run-scheduled-rust-audit.py', ci_security)
         self.assertIn('SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools', ci_security)
         self.assertNotIn('continue-on-error', ci_security)

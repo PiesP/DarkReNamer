@@ -28,7 +28,74 @@ if (-not $IntegrityRecordPath) { $IntegrityRecordPath = $defaultRecordPath }
 if (-not (Test-Path -LiteralPath $IntegrityRecordPath -PathType Leaf)) {
     throw "Release-tool integrity record is missing: $IntegrityRecordPath"
 }
-$record = Get-Content -LiteralPath $IntegrityRecordPath -Raw | ConvertFrom-Json
+$recordText = Get-Content -LiteralPath $IntegrityRecordPath -Raw
+function Assert-UniqueJsonProperties {
+    param([Text.Json.JsonElement] $Element)
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw "Ambiguous release-tool metadata property: $($property.Name)"
+            }
+            Assert-UniqueJsonProperties $property.Value
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        foreach ($item in $Element.EnumerateArray()) { Assert-UniqueJsonProperties $item }
+    }
+}
+function Assert-JsonPropertyKind {
+    param([Text.Json.JsonElement] $Object, [string] $Name,
+        [Text.Json.JsonValueKind] $Kind)
+    if ($Object.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+        throw 'Release-tool metadata must contain JSON objects.'
+    }
+    try { $property = $Object.GetProperty($Name) }
+    catch { throw "Missing release-tool metadata field: $Name" }
+    if ($property.ValueKind -ne $Kind) {
+        throw "Invalid JSON kind for release-tool metadata field: $Name"
+    }
+    return $property
+}
+$parsedRecord = [Text.Json.JsonDocument]::Parse($recordText)
+try {
+    $root = $parsedRecord.RootElement
+    Assert-UniqueJsonProperties $root
+    $schema = Assert-JsonPropertyKind $root 'schemaVersion' ([Text.Json.JsonValueKind]::Number)
+    if ($schema.GetRawText() -cne '1') {
+        throw 'Unsupported release-tool integrity record schema or platform.'
+    }
+    $platform = Assert-JsonPropertyKind $root 'platform' ([Text.Json.JsonValueKind]::String)
+    if ($platform.GetString() -cne 'x86_64-pc-windows-msvc') {
+        throw 'Unsupported release-tool integrity record schema or platform.'
+    }
+    $rust = Assert-JsonPropertyKind $root 'rust' ([Text.Json.JsonValueKind]::Object)
+    $null = Assert-JsonPropertyKind $rust 'version' ([Text.Json.JsonValueKind]::String)
+    $manifest = Assert-JsonPropertyKind $rust 'manifest' ([Text.Json.JsonValueKind]::Object)
+    foreach ($field in @('url', 'sha256')) {
+        $null = Assert-JsonPropertyKind $manifest $field ([Text.Json.JsonValueKind]::String)
+    }
+    $components = Assert-JsonPropertyKind $rust 'components' ([Text.Json.JsonValueKind]::Array)
+    foreach ($component in $components.EnumerateArray()) {
+        if ($component.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw 'Release-tool metadata must contain JSON component objects.'
+        }
+        foreach ($field in @('id', 'directory', 'url', 'sha256')) {
+            $null = Assert-JsonPropertyKind $component $field ([Text.Json.JsonValueKind]::String)
+        }
+    }
+    $tools = Assert-JsonPropertyKind $root 'tools' ([Text.Json.JsonValueKind]::Array)
+    foreach ($tool in $tools.EnumerateArray()) {
+        if ($tool.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw 'Release-tool metadata must contain JSON tool objects.'
+        }
+        foreach ($field in @('id', 'version', 'archivePath', 'url', 'sha256')) {
+            $null = Assert-JsonPropertyKind $tool $field ([Text.Json.JsonValueKind]::String)
+        }
+    }
+}
+finally { $parsedRecord.Dispose() }
+$record = $recordText | ConvertFrom-Json
 if ($record.schemaVersion -ne 1 -or $record.platform -cne 'x86_64-pc-windows-msvc') {
     throw 'Unsupported release-tool integrity record schema or platform.'
 }
@@ -93,7 +160,6 @@ for ($i = 0; $i -lt $expectedRust.Count; $i++) {
     $archiveName = [regex]::Escape($rustArchiveNames[$id])
     Assert-Artifact $id $component.url (Get-ReviewedDigest $component $id) "^https://static\.rust-lang\.org/dist/[0-9]{4}-[0-9]{2}-[0-9]{2}/$archiveName-$rustVersion-x86_64-pc-windows-msvc\.tar\.gz$"
 }
-$securityText = Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/security.yaml') -Raw
 $expectedTools = @('cargo-audit', 'cargo-deny', 'cargo-about', 'cargo-cyclonedx')
 if (@($record.tools).Count -ne $expectedTools.Count) {
     throw 'Release-tool integrity record is incomplete.'
@@ -111,12 +177,6 @@ for ($i = 0; $i -lt $expectedTools.Count; $i++) {
         throw "Unsupported or missing release tool at index $i."
     }
     $version = [regex]::Escape([string]$tool.version)
-    if ($id -in @('cargo-audit', 'cargo-deny')) {
-        $matches = [regex]::Matches($securityText, "cargo install --locked[^`r`n]*?\b$([regex]::Escape($id)) --version ([0-9.]+)")
-        if ($matches.Count -ne 1 -or $matches[0].Groups[1].Value -cne $tool.version) {
-            throw "$id integrity pin is stale against security.yaml."
-        }
-    }
     switch ($id) {
         'cargo-audit' {
             $pattern = "^https://github\.com/rustsec/rustsec/releases/download/cargo-audit/v$version/cargo-audit-x86_64-pc-windows-msvc-v$version\.zip$"

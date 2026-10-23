@@ -60,8 +60,60 @@ class VmRunnerTests(unittest.TestCase):
             scope='launch-window-screenshot-normal-close',
             screenshot=screenshot,
             flow=flow,
+            process_id=123,
+            session_id=2,
+            window_handle=456,
         )
+        gui['dialog_picker_checks'] = self.picker_checks()
         self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True, 'raw_cleanup': clean_controller_cleanup()})
+
+    @staticmethod
+    def picker_checks():
+        actions = []
+        for command, title, acceptance in (
+                (0x801D, '파일에서 경로목록 읽어 추가하기', 'file'),
+                (0x801C, '바꿀 파일 이름 불러오기', 'file'),
+                (0x8013, '모든 파일을 이동할 대상 폴더 선택', 'folder')):
+            for action in ('cancel', acceptance):
+                model = dict(rows=0, cells=[]) if command == 0x801D else dict(rows=1, cells=['선택-😀.txt', '선택-😀.txt', 'C:\\fixture'])
+                selected = dict(rows=1, cells=['선택-😀.txt', '선택-😀.txt' if command == 0x801D else '변경-😀.txt', 'C:\\fixture'])
+                actions.append(dict(command=command, title=title, action=action,
+                                    process_id=123, session_id=2, owner_handle=456, dialog_handle=789,
+                                    native_owner_disabled=True, owner_enabled_after=True,
+                                    foreground_restored=True, focus_process_bound=True,
+                                    filters=[] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*.*)'],
+                                    **({'model_unchanged': True, 'model_before': model, 'model_after': model}
+                                       if action == 'cancel' else {'expected_model_observed': True, 'default_extension_exercised': command == 0x801C, 'expected_model': selected, 'observed_model': selected})))
+        return dict(schema_version=1, status='passed', actions=actions,
+                    filesystem_unchanged=True, model_restored_empty=True)
+
+    def test_picker_checks_reject_missing_actions_and_incomplete_observations(self):
+        gui = self.result['gui']
+        for key in ('native_owner_disabled', 'owner_enabled_after', 'foreground_restored',
+                    'focus_process_bound', 'model_unchanged'):
+            with self.subTest(key=key):
+                checks = self.picker_checks()
+                checks['actions'][0][key] = False
+                with self.assertRaises(ValueError):
+                    vm.verify_picker_checks(checks, gui)
+        checks = self.picker_checks()
+        checks['actions'].pop()
+        with self.assertRaises(ValueError):
+            vm.verify_picker_checks(checks, gui)
+        gui.pop('dialog_picker_checks')
+        with self.assertRaisesRegex(ValueError, 'picker checks'):
+            self.verify()
+
+    def test_picker_checks_reject_wrong_binding_filter_and_acceptance(self):
+        gui = self.result['gui']
+        for key, value in (('process_id', 124), ('session_id', 3), ('owner_handle', 789),
+                           ('dialog_handle', 456), ('filters', []), ('expected_model_observed', False),
+                           ('observed_model', {'rows': 0, 'cells': []}), ('expected_model', None)):
+            with self.subTest(key=key):
+                checks = self.picker_checks()
+                checks['actions'][1][key] = value
+                with self.assertRaises(ValueError):
+                    vm.verify_picker_checks(checks, gui)
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
