@@ -1008,6 +1008,14 @@ function Invoke-GuiSmoke {
         Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
     }
     finally {
+        if ($null -ne $dpiScope) {
+            try { $dpiScope.Dispose() }
+            catch {
+                $row.status = 'failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'dpi_restore_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
+            }
+        }
         if ($null -ne $captureState.graphics) { $captureState.graphics.Dispose() }
         if ($null -ne $captureState.bitmap) { $captureState.bitmap.Dispose() }
         if ($null -ne $processState.process) {
@@ -1058,14 +1066,6 @@ function Invoke-GuiSmoke {
             catch {
                 $row.status = 'failed'
                 Set-ProcessCleanupFailureReason -Row $row -Reason 'flow_fixture_cleanup_failed'
-                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
-            }
-        }
-        if ($null -ne $dpiScope) {
-            try { $dpiScope.Dispose() }
-            catch {
-                $row.status = 'failed'
-                Set-ProcessCleanupFailureReason -Row $row -Reason 'dpi_restore_failed'
                 Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
             }
         }

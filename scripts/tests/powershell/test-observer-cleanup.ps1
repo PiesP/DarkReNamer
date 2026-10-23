@@ -1636,6 +1636,60 @@ try {
         -not $gui.job_cleanup) {
         throw 'A rejected GUI launch lost its final cleanup evidence.'
     }
+    & {
+        $source = Join-Path $PSScriptRoot '../../modules/powershell/guest-scenario.ps1'
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
+        $guiDefinition = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-GuiSmoke'
+        }, $true))
+        if ($errors.Count -or $guiDefinition.Count -ne 1) {
+            throw 'The production GUI cleanup function is missing or invalid.'
+        }
+        $cleanupBlocks = @($guiDefinition[0].Body.FindAll({ param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and $null -ne $node.Finally
+        }, $true))
+        if ($cleanupBlocks.Count -ne 1) { throw 'The production GUI finalizer is missing or ambiguous.' }
+        $cleanupText = $cleanupBlocks[0].Finally.Extent.Text
+        $cleanup = [scriptblock]::Create($cleanupText.Substring(1, $cleanupText.Length - 2))
+
+        foreach ($fault in @('capture disposal', 'fixture predicate')) {
+            $dpiScope = [pscustomobject]@{ restores = 0 }
+            $dpiScope | Add-Member ScriptMethod Dispose { $this.restores++ }
+            $captureState = [pscustomobject]@{ graphics = $null; bitmap = $null }
+            $flowFixtureRoot = $null
+            if ($fault -ceq 'capture disposal') {
+                $captureState.graphics = [pscustomobject]@{}
+                $captureState.graphics | Add-Member ScriptMethod Dispose { throw 'capture disposal failed' }
+                $expected = 'capture disposal failed'
+            }
+            else {
+                $flowFixtureRoot = 'fixture'
+                function Test-Path { throw 'fixture predicate failed' }
+                $expected = 'fixture predicate failed'
+            }
+            $processState = [pscustomobject]@{ process = $null }
+            $row = [ordered]@{ status = 'failed'; job_cleanup = $false; failure_reason = 'gui_error' }
+            $RawEvidence = $false
+            Assert-Fails { & $cleanup } $expected
+            if ($dpiScope.restores -ne 1) {
+                throw "Observer DPI was not restored before $fault failed."
+            }
+        }
+
+        $dpiScope = [pscustomobject]@{}
+        $dpiScope | Add-Member ScriptMethod Dispose { throw 'DPI restoration failed' }
+        $captureState = [pscustomobject]@{ graphics = $null; bitmap = $null }
+        $processState = [pscustomobject]@{ process = $null }
+        $flowFixtureRoot = $null
+        $row = [ordered]@{ status = 'passed'; job_cleanup = $false; failure_reason = $null; error_detail = $null }
+        & $cleanup
+        if ($row.status -cne 'failed' -or $row.failure_reason -cne 'dpi_restore_failed' -or
+            $row.error_detail.message -notlike '*DPI restoration failed*') {
+            throw 'A failed observer DPI restoration was not recorded as a GUI failure.'
+        }
+    }
     $details = [ordered]@{ error_detail = $null }
     foreach ($message in @('original GUI failure', 'process cleanup failed', 'fixture retained')) {
         try { throw $message }
