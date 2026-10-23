@@ -469,6 +469,37 @@ function Get-PickerModelSnapshot {
     $snapshot
 }
 
+function Wait-FocusedPickerAddressEdit {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $DialogHandle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][object] $EditControlType,
+        [scriptblock] $ReadFocus = { [Windows.Automation.AutomationElement]::FocusedElement },
+        [scriptblock] $ReadForeground = { [DarkReNamerVmNative]::GetForegroundWindow() }
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw 'Folder address focus left the expected process or desktop session.'
+        }
+        if ((& $ReadForeground) -ne $DialogHandle) {
+            throw 'Folder picker lost foreground while waiting for its address Edit.'
+        }
+        $candidate = & $ReadFocus
+        if ($null -ne $candidate -and $candidate.Current.ProcessId -eq $Process.Id -and
+            $candidate.Current.ControlType -eq $EditControlType -and
+            $candidate.Current.AutomationId -cne '1148') {
+            return $candidate
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'Folder address shortcut did not focus its address Edit before the bounded deadline.'
+}
+
 function Invoke-OwnedPickerAction {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -563,11 +594,10 @@ function Invoke-OwnedPickerAction {
                 throw 'Folder picker is not the bound foreground window.'
             }
             [Windows.Forms.SendKeys]::SendWait('^l')
-            $edit = [Windows.Automation.AutomationElement]::FocusedElement
+            $edit = Wait-FocusedPickerAddressEdit -Process $Process -ExpectedSession $Session `
+                -DialogHandle $handle -TimeoutSeconds $TimeoutSeconds `
+                -EditControlType ([Windows.Automation.ControlType]::Edit)
             Assert-AutomationBinding -Element $edit -Process $Process -ExpectedSession $Session -Label 'folder address'
-            if ($edit.Current.ControlType -ne [Windows.Automation.ControlType]::Edit) {
-                throw 'Folder address shortcut did not focus an Edit.'
-            }
             $directory = if ($Action -ceq 'folder') { $Selection } else { [IO.Path]::GetDirectoryName($Selection) }
             Set-AutomationControlValue -Element $edit -Value $directory -Label 'folder address'
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {

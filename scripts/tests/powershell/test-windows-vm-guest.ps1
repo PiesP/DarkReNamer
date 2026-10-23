@@ -1107,6 +1107,48 @@ foreach ($rawEvidence in @($true, $false)) {
         $primaryCleanupFailure.cleanup_failure_reason) {
         throw 'Cleanup failures must preserve an earlier process failure reason and retain cleanup failure separately.'
     }
+    $pickerProcess = [Diagnostics.Process]::GetCurrentProcess()
+    $pickerHandle = [IntPtr]42
+    $focusSamples = @(
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = '1148' } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Button'; AutomationId = 'other' } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id + 1; ControlType = 'Edit'; AutomationId = 'address' } },
+        [pscustomobject]@{ Current = [pscustomobject]@{
+            ProcessId = $pickerProcess.Id; ControlType = 'Edit'; AutomationId = 'address' } }
+    )
+    $focusState = [pscustomobject]@{ calls = 0; samples = $focusSamples }
+    $focusProbe = {
+        $sample = $focusState.samples[[Math]::Min($focusState.calls, $focusState.samples.Count - 1)]
+        $focusState.calls++
+        $sample
+    }.GetNewClosure()
+    $foregroundProbe = { [IntPtr]42 }
+    $address = Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+        -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 2 `
+        -EditControlType 'Edit' -ReadFocus $focusProbe -ReadForeground $foregroundProbe
+    if ($address.Current.AutomationId -cne 'address' -or $focusState.calls -ne 4) {
+        throw 'Folder address readiness accepted an early filename, non-Edit, or foreign focus.'
+    }
+    Assert-Fails -Expected 'bounded deadline' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 0 `
+            -EditControlType 'Edit' -ReadFocus { $focusSamples[0] } -ReadForeground $foregroundProbe
+    }
+    Assert-Fails -Expected 'lost foreground' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession $pickerProcess.SessionId -DialogHandle $pickerHandle -TimeoutSeconds 1 `
+            -EditControlType 'Edit' -ReadFocus { throw 'Focus must not be sampled after foreground loss.' } `
+            -ReadForeground { [IntPtr]7 }
+    }
+    Assert-Fails -Expected 'expected process or desktop session' -Action {
+        Wait-FocusedPickerAddressEdit -Process $pickerProcess `
+            -ExpectedSession ($pickerProcess.SessionId + 1) -DialogHandle $pickerHandle -TimeoutSeconds 1 `
+            -EditControlType 'Edit' -ReadFocus { throw 'Focus must not be sampled after session loss.' } `
+            -ReadForeground $foregroundProbe
+    }
     $guiFailureDetail = [ordered]@{ error_detail = $null }
     try { throw [ComponentModel.Win32Exception]::new(5) }
     catch {
