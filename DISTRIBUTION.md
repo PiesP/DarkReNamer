@@ -247,8 +247,10 @@ Existing metadata/digest, complete handoff and attestation checks remain require
 Candidate builds use `config/release-tool-integrity.json` to approve the official
 Windows Rust components and Cargo utility archives by SHA-256 before extraction,
 installation or version probes. Rust's version and component owners remain
-`rust-toolchain.toml`; scanner versions remain bound to the maintained security
-workflow. The installer assembles the verified components as data and links the
+`rust-toolchain.toml`; the reviewed record owns scanner versions and Windows
+artifact identities, as described in the
+[dependency-scanner policy](DEVELOPMENT.md#why-both-rust-dependency-scanners-remain).
+The installer assembles the verified components as data and links the
 release-only `darkrenamer-release` toolchain using the hosted image's rustup.
 Product registry source packages retain the reviewed `Cargo.lock` checksums.
 No Cargo utility is compiled from an externally resolved source closure here.
