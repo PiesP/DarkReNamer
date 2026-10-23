@@ -690,10 +690,11 @@ function Invoke-ProductionPickerChecks {
         @(Get-ChildItem -LiteralPath $root -Force).Count -ne 4) {
         throw 'Picker selection mutated the fixture filesystem.'
     }
-    $clear = Find-UniqueAutomationElement -Root $MainWindow -Process $Process -ExpectedSession $Session `
-        -AutomationId '32782' -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $TimeoutSeconds -Label 'clear picker model' -RequireEnabled -RequireWindowHandle
-    Invoke-AutomationControl -Element $clear -Label 'clear picker model'
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $MainHandle -MainWindow $MainWindow `
+        -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' -Label 'picker model reset owner'
+    # CLEAR_LIST is menu-only in the command catalog, with no rail Button.
+    [DarkReNamerVmNative]::RequestMenuCommand($MainHandle, [uint16]0x800E)
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     while ($grid.Current.RowCount -ne 0 -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 100
