@@ -71,6 +71,19 @@ try {
     }
     $rust = Assert-JsonPropertyKind $root 'rust' ([Text.Json.JsonValueKind]::Object)
     $null = Assert-JsonPropertyKind $rust 'version' ([Text.Json.JsonValueKind]::String)
+    $manifest = Assert-JsonPropertyKind $rust 'manifest' ([Text.Json.JsonValueKind]::Object)
+    foreach ($field in @('url', 'sha256')) {
+        $null = Assert-JsonPropertyKind $manifest $field ([Text.Json.JsonValueKind]::String)
+    }
+    $components = Assert-JsonPropertyKind $rust 'components' ([Text.Json.JsonValueKind]::Array)
+    foreach ($component in $components.EnumerateArray()) {
+        if ($component.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw 'Release-tool metadata must contain JSON component objects.'
+        }
+        foreach ($field in @('id', 'directory', 'url', 'sha256')) {
+            $null = Assert-JsonPropertyKind $component $field ([Text.Json.JsonValueKind]::String)
+        }
+    }
     $tools = Assert-JsonPropertyKind $root 'tools' ([Text.Json.JsonValueKind]::Array)
     foreach ($tool in $tools.EnumerateArray()) {
         if ($tool.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
