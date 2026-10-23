@@ -2118,14 +2118,14 @@ fn configure_single_path_dialog(
     policy: SinglePathDialog,
 ) -> io::Result<()> {
     let title = wide(title);
-    // Keep defaults (including the Shell's file mode) and the independent
-    // import/destination policies. Provider or network text files remain valid.
+    // Completion requires SIGDN_FILESYSPATH. Require filesystem results while
+    // retaining UNC/provider-backed paths and the independent consumer policies.
     // SAFETY: the dialog is live on the UI apartment; each buffer is retained
     // through its synchronous COM call.
     unsafe {
         let defaults = dialog.GetOptions().map_err(shell_dialog_error)?;
         let single_path =
-            defaults & !(FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT | FOS_PICKFOLDERS);
+            (defaults & !(FOS_ALLOWMULTISELECT | FOS_PICKFOLDERS)) | FOS_FORCEFILESYSTEM;
         let options = match policy {
             SinglePathDialog::ImportFile => {
                 single_path | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
@@ -3956,7 +3956,7 @@ mod tests {
             // SAFETY: the configured dialog is still live on this STA.
             let options = unsafe { dialog.GetOptions() }.map_err(shell_dialog_error)?;
             assert!(options.contains(FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST));
-            assert!(!options.contains(FOS_FORCEFILESYSTEM));
+            assert!(options.contains(FOS_FORCEFILESYSTEM));
             match policy {
                 SinglePathDialog::ImportFile => {
                     assert!(options.contains(FOS_FILEMUSTEXIST));

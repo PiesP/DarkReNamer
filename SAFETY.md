@@ -123,8 +123,15 @@ UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 Text imports use one bounded result handoff and perform open, opened-handle
 regular-file metadata validation, bounded read, and decode on a worker thread.
-The selected import location remains unrestricted, including network/provider
-paths, so a provider can leave synchronous I/O pending for an unbounded time.
+The single-path import and destination pickers require filesystem Shell results
+because completion consumes `SIGDN_FILESYSPATH`. UNC and provider-backed
+filesystem paths remain selectable, including filesystem copies that the Shell
+materializes from stream-backed items. Items without a returned filesystem path
+cannot be consumed. Browsing a virtual container does not authorize a
+non-filesystem result. Destination validation and rename authority remain
+separate from selection. The selected import location remains unrestricted
+within that path contract, so a network/provider can leave synchronous I/O pending
+for an unbounded time.
 Cancel and close request `CancelSynchronousIo` through the tracked
 `JoinHandle`'s native thread handle, created by Rust's Windows `CreateThread`
 path with cancellation access. Both requests mark the result discard-only.
