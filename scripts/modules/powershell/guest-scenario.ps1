@@ -517,7 +517,7 @@ function Invoke-OwnedPickerAction {
             }
             $pattern = $null
             if ($candidate.TryGetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern, [ref]$pattern)) {
-                $values += @(([Windows.Automation.SelectionPattern]$pattern).GetCurrentSelection() | ForEach-Object { $_.Current.Name })
+                $values += @(([Windows.Automation.SelectionPattern]$pattern).Current.GetSelection() | ForEach-Object { $_.Current.Name })
             }
             $comboObservations += @{ id=$candidate.Current.AutomationId; values=$values }
             if ($values -ccontains 'Text Files (*.txt)' -or $values -ccontains 'Text Files') { $candidates += $candidate }
