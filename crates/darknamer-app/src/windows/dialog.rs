@@ -2808,6 +2808,9 @@ fn dialog_path_for_item(item: &IShellItem) -> io::Result<PathBuf> {
     // allocated for this live CoTaskMemPath guard.
     let length = usize::try_from(unsafe { lstrlenW(name.0.0) })
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    if length == 0 || length > MAX_PATH_UNITS {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
     // SAFETY: lstrlenW measured the NUL-terminated allocation returned by
     // GetDisplayName, and the checked length excludes the terminator.
     let units = unsafe { std::slice::from_raw_parts(name.0.0, length) };
@@ -3838,6 +3841,98 @@ mod tests {
     }
 
     #[test]
+    fn shell_item_fixture_reports_unpaired_utf16_reachability() -> io::Result<()> {
+        let _ole = TestOle::initialize()?;
+        let directory = tempfile::tempdir()?;
+        crate::rename::WindowsRenameBackend
+            .validate_destination_parent(&crate::windows::text_io::legacy_path(directory.path()))
+            .map_err(|error| {
+                io::Error::other(format!("fixture parent must be supported NTFS: {error}"))
+            })?;
+
+        let ordinary = directory.path().join("ordinary-선택-😀.txt");
+        std::fs::write(&ordinary, b"owned fixture")?;
+        let ordinary_units = ordinary.as_os_str().encode_wide().collect::<Vec<_>>();
+        let ordinary_terminated = ordinary_units
+            .iter()
+            .copied()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the file exists on the owned NTFS fixture and the terminated
+        // exact path buffer remains live through Shell item creation.
+        let ordinary_item: IShellItem = unsafe {
+            ::windows::Win32::UI::Shell::SHCreateItemFromParsingName(
+                PCWSTR(ordinary_terminated.as_ptr()),
+                None,
+            )
+        }
+        .map_err(shell_dialog_error)?;
+        let ordinary_result = dialog_path_for_item(&ordinary_item)?;
+        assert_eq!(ordinary_result.file_name(), ordinary.file_name());
+        assert!(ordinary_result.is_file());
+
+        let leaf_units = [
+            b'u' as u16,
+            0xD800,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16,
+        ];
+        let leaf = std::ffi::OsString::from_wide(&leaf_units);
+        let unusual = directory.path().join(leaf);
+        std::fs::write(&unusual, b"owned fixture")?;
+        let unusual_units = unusual.as_os_str().encode_wide().collect::<Vec<_>>();
+        let unusual_terminated = unusual_units
+            .iter()
+            .copied()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the exact unpaired-unit filename exists on the validated
+        // owned NTFS fixture; no pointer is fabricated or outlives this call.
+        let unusual_item: IShellItem = match unsafe {
+            ::windows::Win32::UI::Shell::SHCreateItemFromParsingName(
+                PCWSTR(unusual_terminated.as_ptr()),
+                None,
+            )
+        } {
+            Ok(item) => item,
+            Err(error) => {
+                eprintln!(
+                    "unpaired UTF-16 Shell item unreachable: SHCreateItemFromParsingName HRESULT=0x{:08X}",
+                    error.code().0 as u32
+                );
+                return Ok(());
+            }
+        };
+        match dialog_path_for_item(&unusual_item) {
+            Ok(path) => {
+                assert_eq!(
+                    path.file_name()
+                        .map(|name| name.encode_wide().collect::<Vec<_>>()),
+                    Some(leaf_units.to_vec())
+                );
+                assert!(path.is_file());
+                eprintln!("unpaired UTF-16 Shell item reachable; exact path units retained");
+            }
+            Err(error) => {
+                let code = error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<WindowsError>())
+                    .map(|native| native.code().0 as u32);
+                if let Some(code) = code {
+                    eprintln!(
+                        "unpaired UTF-16 Shell item path unreachable: GetDisplayName HRESULT=0x{code:08X}"
+                    );
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn single_path_picker_configures_distinct_native_policies() -> io::Result<()> {
         let _ole = TestOle::initialize()?;
         for (policy, title) in [
@@ -3879,18 +3974,22 @@ mod tests {
         assert!(
             finish_single_path_dialog(Err(cancelled), || Ok(()), |_| Ok(PathBuf::new()))?.is_none()
         );
-        assert_eq!(
-            finish_single_path_dialog(Err(failure()), || Ok(()), |_| Ok(PathBuf::new()))
+        for error in [
+            finish_single_path_dialog(Err(failure()), || Ok(()), |_| Ok(PathBuf::new())),
+            finish_single_path_dialog(Ok(()), || Err::<(), _>(failure()), |_| Ok(PathBuf::new())),
+        ] {
+            let error = error
                 .err()
-                .map(|error| error.kind()),
-            Some(io::ErrorKind::Other)
-        );
-        assert_eq!(
-            finish_single_path_dialog(Ok(()), || Err::<(), _>(failure()), |_| Ok(PathBuf::new()))
-                .err()
-                .map(|error| error.kind()),
-            Some(io::ErrorKind::Other)
-        );
+                .ok_or_else(|| io::Error::other("expected native failure"))?;
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(
+                error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<WindowsError>())
+                    .map(WindowsError::code),
+                Some(::windows::core::HRESULT(0x8000_4005_u32 as i32))
+            );
+        }
         assert_eq!(
             finish_single_path_dialog(
                 Ok(()),
@@ -3906,6 +4005,34 @@ mod tests {
             finish_single_path_dialog(Ok(()), || Ok(()), |_| Ok(path.clone()))?,
             Some(path)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn single_path_picker_drops_the_result_once_on_success_and_path_error() -> io::Result<()> {
+        struct CountingItem(Rc<Cell<usize>>);
+        impl Drop for CountingItem {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        for path_fails in [false, true] {
+            let drops = Rc::new(Cell::new(0));
+            let held = Rc::clone(&drops);
+            let result = finish_single_path_dialog(
+                Ok(()),
+                || Ok(CountingItem(held)),
+                |_| {
+                    if path_fails {
+                        Err(io::Error::from(io::ErrorKind::InvalidData))
+                    } else {
+                        Ok(PathBuf::from(r"C:\selected\valid.txt"))
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), path_fails);
+            assert_eq!(drops.get(), 1);
+        }
         Ok(())
     }
 
