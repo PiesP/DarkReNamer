@@ -17,7 +17,7 @@ function Write-Record {
 }
 function Assert-InstallerFails {
     param([string] $Fragment, [string] $Destination, [string] $RecordPath,
-        [string] $ArchiveRoot, [string] $Marker)
+        [string] $ArchiveRoot, [string] $Marker, [switch] $BeforeDestination)
     try {
         & $installer -DestinationRoot $Destination -VerifyOnly `
             -IntegrityRecordPath $RecordPath -ArchiveSourceRoot $ArchiveRoot
@@ -29,6 +29,9 @@ function Assert-InstallerFails {
         }
         if (Test-Path -LiteralPath $Marker) {
             throw 'Execution marker appeared after an integrity failure.'
+        }
+        if ($BeforeDestination -and (Test-Path -LiteralPath $Destination)) {
+            throw "Invalid metadata created a destination before rejection: $Destination"
         }
         return
     }
@@ -177,8 +180,37 @@ try {
     [IO.File]::WriteAllText($recordPath, $ambiguous, [Text.UTF8Encoding]::new($false))
     Assert-InstallerFails -Fragment 'Ambiguous release-tool metadata property' `
         -Destination (Join-Path $testRoot 'ambiguous-scanner') -RecordPath $recordPath `
-        -ArchiveRoot $archiveRoot -Marker $marker
+        -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
     Write-Record $recordPath $record
+
+    $validRecordText = Get-Content -LiteralPath $recordPath -Raw
+    $tool = $record.tools[0]
+    $kindMutations = @(
+        @{ label = 'schema-bool'; before = '"schemaVersion": 1'; after = '"schemaVersion": true'; field = 'schemaVersion' }
+        @{ label = 'schema-string'; before = '"schemaVersion": 1'; after = '"schemaVersion": "1"'; field = 'schemaVersion' }
+        @{ label = 'platform-array'; before = '"platform": "x86_64-pc-windows-msvc"'; after = '"platform": ["x86_64-pc-windows-msvc"]'; field = 'platform' }
+        @{ label = 'rust-version-array'; before = '"version": "1.99.1"'; after = '"version": ["1.99.1"]'; field = 'version' }
+        @{ label = 'tool-id-array'; before = '"id": "cargo-audit"'; after = '"id": ["cargo-audit"]'; field = 'id' }
+        @{ label = 'tool-version-array'; before = '"version": "0.22.2"'; after = '"version": ["0.22.2"]'; field = 'version' }
+        @{ label = 'tool-path-array'; before = "`"archivePath`": `"$($tool.archivePath)`""; after = "`"archivePath`": [`"$($tool.archivePath)`"]"; field = 'archivePath' }
+        @{ label = 'tool-url-array'; before = "`"url`": `"$($tool.url)`""; after = "`"url`": [`"$($tool.url)`"]"; field = 'url' }
+        @{ label = 'tool-digest-array'; before = "`"sha256`": `"$($tool.sha256)`""; after = "`"sha256`": [`"$($tool.sha256)`"]"; field = 'sha256' }
+    )
+    foreach ($mutation in $kindMutations) {
+        $invalid = $validRecordText.Replace($mutation.before, $mutation.after)
+        if ($invalid -ceq $validRecordText) { throw "Metadata kind fixture did not change: $($mutation.label)" }
+        [IO.File]::WriteAllText($recordPath, $invalid, [Text.UTF8Encoding]::new($false))
+        Assert-InstallerFails -Fragment "Invalid JSON kind for release-tool metadata field: $($mutation.field)" `
+            -Destination (Join-Path $testRoot "kind-$($mutation.label)") -RecordPath $recordPath `
+            -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
+    }
+    $nonIntegerSchema = $validRecordText.Replace('"schemaVersion": 1', '"schemaVersion": 1.0')
+    if ($nonIntegerSchema -ceq $validRecordText) { throw 'Non-integer schema fixture did not change.' }
+    [IO.File]::WriteAllText($recordPath, $nonIntegerSchema, [Text.UTF8Encoding]::new($false))
+    Assert-InstallerFails -Fragment 'Unsupported release-tool integrity record schema or platform' `
+        -Destination (Join-Path $testRoot 'schema-float') -RecordPath $recordPath `
+        -ArchiveRoot $archiveRoot -Marker $marker -BeforeDestination
+    [IO.File]::WriteAllText($recordPath, $validRecordText, [Text.UTF8Encoding]::new($false))
 
     $originalAboutPath = $record.tools[2].archivePath
     $record.tools[2].archivePath = '../cargo-about.exe'
