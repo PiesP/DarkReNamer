@@ -38,6 +38,7 @@ use crate::NATIVE_STATUS_COLUMN_WIDTH_DIP;
 use crate::PARENT_PREFIX;
 use crate::PARENT_SUFFIX;
 use crate::PREVIEW_DETAILS;
+use crate::REDO;
 use crate::RESET;
 use crate::RESET_PATH;
 use crate::RIGHT_RAIL;
@@ -54,6 +55,7 @@ use crate::StatusLayoutInput;
 use crate::THEME_DARK;
 use crate::THEME_LIGHT;
 use crate::THEME_SYSTEM;
+use crate::UNDO;
 use crate::UNIFY_PATH;
 use crate::VERSION;
 use crate::advanced_appearance_available;
@@ -983,6 +985,10 @@ pub(super) fn update_controls(state: &mut AppState) {
             has_name_changes
         } else if id == RESET_PATH {
             has_path_changes
+        } else if id == UNDO {
+            state.proposal_history.can_undo(&state.model)
+        } else if id == REDO {
+            state.proposal_history.can_redo(&state.model)
         } else {
             command_enabled(id, state.model.len(), selected_count)
         };
@@ -1936,6 +1942,8 @@ fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
         DELETE_SELECTED_COMMAND,
         &command_menu_label(&DELETE_SELECTED_UI_SPEC),
     )?;
+    edit.item(UNDO, &catalog_menu_label(UNDO)?)?;
+    edit.item(REDO, &catalog_menu_label(REDO)?)?;
     edit.separator()?;
     edit.item(MOVE_UP, &catalog_menu_label(MOVE_UP)?)?;
     edit.item(MOVE_DOWN, &catalog_menu_label(MOVE_DOWN)?)?;

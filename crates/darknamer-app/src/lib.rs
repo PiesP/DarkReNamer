@@ -23,11 +23,11 @@ pub use command_catalog::{
     EXT_REPLACE, IMPORT_NAMES, IMPORT_PATHS, KEEP_DIGITS, LAST_COMMAND, LEFT_RAIL,
     LEGACY_AUXILIARY_SHORTCUTS, LegacyCommandShortcut, LegacyShortcut, LegacyShortcutModifiers,
     LegacyVirtualKey, MANUAL_CHANGE, MOVE_DOWN, MOVE_UP, MenuGroup, MenuPlacement, PAD_DIGITS,
-    PARENT_PREFIX, PARENT_SUFFIX, PREFIX, REPLACE, RESET, RESET_PATH, RIGHT_RAIL, RailPlacement,
-    RailSide, SAVE_NAMES, SAVE_PATHS, SEQUENCE, SHOW_CREATED, SHOW_FULL_PATH, SHOW_MODIFIED,
-    SHOW_SIZE, SORT, SUFFIX, ToolSpec, UNIFY_PATH, VERSION, command_enabled, command_menu_label,
-    command_ui_policy, command_ui_spec, legacy_command_shortcut, legacy_command_shortcuts,
-    rail_tool_spec, rail_tool_specs,
+    PARENT_PREFIX, PARENT_SUFFIX, PREFIX, REDO, REPLACE, RESET, RESET_PATH, RIGHT_RAIL,
+    RailPlacement, RailSide, SAVE_NAMES, SAVE_PATHS, SEQUENCE, SHOW_CREATED, SHOW_FULL_PATH,
+    SHOW_MODIFIED, SHOW_SIZE, SORT, SUFFIX, ToolSpec, UNDO, UNIFY_PATH, VERSION, command_enabled,
+    command_menu_label, command_ui_policy, command_ui_spec, legacy_command_shortcut,
+    legacy_command_shortcuts, rail_tool_spec, rail_tool_specs,
 };
 #[allow(unused_imports, reason = "preserve pre-extraction crate-root paths")]
 pub(crate) use command_catalog::{DELETE_SELECTED_COMMAND, EXIT_COMMAND};
@@ -1213,6 +1213,8 @@ mod tests {
             SHOW_CREATED,
             VERSION,
             RESET_PATH,
+            UNDO,
+            REDO,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
     }
@@ -1400,8 +1402,33 @@ mod tests {
             EXT_REPLACE,
             IMPORT_NAMES,
             RESET_PATH,
+            UNDO,
+            REDO,
         ] {
             assert_eq!(command_ui_policy(command), CommandUiPolicy::AllRows);
+        }
+    }
+
+    #[test]
+    fn proposal_history_commands_have_distinct_native_shortcuts() {
+        assert_eq!(
+            legacy_command_shortcut(UNDO).map(|entry| entry.display),
+            Some("Ctrl+Z")
+        );
+        assert_eq!(
+            legacy_command_shortcut(REDO).map(|entry| entry.display),
+            Some("Ctrl+Y")
+        );
+        assert_eq!(legacy_command_shortcut(RESET), None);
+        for command in [UNDO, REDO] {
+            assert!(command_effect_fits_policy(
+                command,
+                &CommandOutcome::ui(UiEffect::ProposalRowsChanged(vec![0].into_boxed_slice()))
+            ));
+            assert!(command_effect_fits_policy(
+                command,
+                &CommandOutcome::ui(UiEffect::AllRowsChanged)
+            ));
         }
     }
 

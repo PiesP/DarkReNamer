@@ -69,6 +69,22 @@ the **제안명 초기화** command-rail button reset proposed names while keepi
 destination parents. Both reset commands change the proposal only. Neither
 reverses a filesystem operation that has already completed.
 
+## Undo and Redo proposal edits
+
+Use **편집 > 제안 편집 실행 취소** (`Ctrl+Z`) and **제안 편집 다시 실행**
+(`Ctrl+Y`) to step through name and destination-folder proposals before Apply.
+Manual edits, transformations, name imports, and both proposal-reset commands
+create a step only when a proposal actually changes. A new edit after Undo
+discards the Redo branch. Cancelled dialogs and rejected edits create no step.
+
+History retains at most 16 edits and 8 MiB of proposal values. Successful
+edits retire the oldest steps when needed. If a proposal cannot be recorded
+within the budget, the edit is rejected and the current proposal and history
+remain available. Adding or removing rows, clearing, sorting, moving rows, and
+starting an approved Apply execution clear history because the old row order or
+filesystem state cannot be restored by a proposal edit. Undo and Redo never
+rename files or reverse a completed Apply.
+
 ## Apply a proposal
 
 Choose **변경 적용** (Apply) after reviewing every row. DarkReNamer reopens and

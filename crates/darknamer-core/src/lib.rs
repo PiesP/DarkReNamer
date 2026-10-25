@@ -836,6 +836,18 @@ impl ProposalHistory {
         self.reserved_bytes = 0;
     }
 
+    /// Releases histories after add, delete, reorder, or source replacement.
+    pub fn discard_if_stale(&mut self, list: &LegacyList) {
+        if self
+            .undo
+            .last()
+            .or_else(|| self.redo.last())
+            .is_some_and(|entry| !entry.matches(list))
+        {
+            self.clear();
+        }
+    }
+
     /// Whether a source-valid proposal edit can be undone.
     #[must_use]
     pub fn can_undo(&self, list: &LegacyList) -> bool {

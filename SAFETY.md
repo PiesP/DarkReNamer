@@ -235,6 +235,19 @@ The canonical values and error variants live in
 `crates/darknamer-core/src/lib.rs`; Windows command error mapping lives in
 `proposal_mutation_error_korean`.
 
+Proposal Undo and Redo retain only exact UTF-16 proposed names and destination
+parents. Their history is limited to 16 steps and 8 MiB of conservatively
+charged values. A before-state and stack capacity are prepared before an edit;
+an after-state that exceeds the record budget is rolled back from the prepared
+snapshot before the UI commits a model revision. Undo and Redo stage changed
+row indexes before swapping proposal values and cached size totals. Source-set
+or row-order changes invalidate their identity binding. A new proposal edit
+retires Redo, and the oldest step is retired only after a successful edit when
+the retained budget requires it. Beginning a confirmed Apply worker clears the
+history; no snapshot contains plans, journals, frozen source identities, or
+filesystem mutation authority. Every later Apply still requires a fresh plan
+and confirmation under the normal safety contract.
+
 ## Transaction states
 
 ```text

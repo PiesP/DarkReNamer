@@ -26,6 +26,7 @@ use crate::PARENT_PREFIX;
 use crate::PARENT_SUFFIX;
 use crate::PREFIX;
 use crate::PREVIEW_DETAILS;
+use crate::REDO;
 use crate::REPLACE;
 use crate::RESET;
 use crate::RESET_PATH;
@@ -41,6 +42,7 @@ use crate::SUFFIX;
 use crate::THEME_DARK;
 use crate::THEME_LIGHT;
 use crate::THEME_SYSTEM;
+use crate::UNDO;
 use crate::UNIFY_PATH;
 use crate::UiEffect;
 use crate::VERSION;
@@ -57,13 +59,14 @@ use crate::legacy_command_shortcuts;
 use crate::preview_item_details;
 use crate::rename::ModelRevision;
 use crate::rename::WindowsRenameBackend;
-use darknamer_core::LegacyInputError;
 use darknamer_core::LegacyList;
 use darknamer_core::LegacyListItem;
 use darknamer_core::LegacySequenceMode;
 use darknamer_core::LegacySortMode;
 use darknamer_core::LegacyText;
 use darknamer_core::ProposalMutationError;
+use darknamer_core::ProposalSnapshot;
+use darknamer_core::ProposalSnapshotError;
 use darknamer_core::SortSemantics;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -807,21 +810,55 @@ pub(super) fn dispatch_command(
             CommandOutcome::ui(UiEffect::None)
         }
         RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
-        RESET_PATH => match state.model.reset_destination_parents() {
-            Ok(changed) => model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged),
-            Err(error) => {
-                state.set_transient_status(destination_parent_mutation_error_korean(error));
-                CommandOutcome::ui(UiEffect::None)
+        RESET_PATH => {
+            let Some(before) = prepare_proposal_history(state) else {
+                return None;
+            };
+            match state.model.reset_destination_parents() {
+                Ok(changed) => finish_proposal_edit(state, before, changed, true),
+                Err(error) => {
+                    state.set_transient_status(destination_parent_mutation_error_korean(error));
+                    CommandOutcome::ui(UiEffect::None)
+                }
             }
-        },
+        }
+        UNDO | REDO => {
+            let result = if command == UNDO {
+                state.proposal_history.undo(&mut state.model)
+            } else {
+                state.proposal_history.redo(&mut state.model)
+            };
+            match result {
+                Ok(Some((rows, parent_changed))) => model_outcome(
+                    state,
+                    !rows.is_empty(),
+                    if parent_changed {
+                        UiEffect::AllRowsChanged
+                    } else {
+                        UiEffect::ProposalRowsChanged(rows)
+                    },
+                ),
+                Ok(None) => CommandOutcome::ui(UiEffect::None),
+                Err(error) => {
+                    state.set_transient_status(proposal_history_error_korean(error));
+                    CommandOutcome::ui(UiEffect::None)
+                }
+            }
+        }
         CLEAR_LIST => {
             let changed = state.model.clear();
+            if changed {
+                state.proposal_history.clear();
+            }
             model_outcome(state, changed, UiEffect::AllRowsChanged)
         }
         DELETE_SELECTED_COMMAND => {
             let selected = selected_indices(state.list_window);
             selection_restore = Some(SelectionRestore::default());
             let changed = state.model.remove_rows(&selected) != 0;
+            if changed {
+                state.proposal_history.clear();
+            }
             model_outcome(state, changed, UiEffect::AllRowsChanged)
         }
         MOVE_UP => {
@@ -830,6 +867,9 @@ pub(super) fn dispatch_command(
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
             let movement = state.model.move_rows_earlier_changed(&selected);
             let changed = movement.changed();
+            if changed {
+                state.proposal_history.clear();
+            }
             let moved = movement.into_rows();
             let outcome = model_outcome(
                 state,
@@ -849,6 +889,9 @@ pub(super) fn dispatch_command(
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
             let movement = state.model.move_rows_later_changed(&selected);
             let changed = movement.changed();
+            if changed {
+                state.proposal_history.clear();
+            }
             let moved = movement.into_rows();
             let outcome = model_outcome(
                 state,
@@ -927,17 +970,67 @@ fn model_outcome(state: &mut AppState, changed: bool, effect: UiEffect) -> Comma
     CommandOutcome::model(changed, effect)
 }
 
-fn proposal_outcome(state: &mut AppState, changed: Box<[usize]>) -> CommandOutcome {
-    let did_change = !changed.is_empty();
-    model_outcome(state, did_change, UiEffect::ProposalRowsChanged(changed))
+fn proposal_history_error_korean(error: ProposalSnapshotError) -> &'static str {
+    match error {
+        ProposalSnapshotError::AllocationFailed => {
+            "제안 편집 이력을 준비할 메모리가 부족합니다. 목록과 기존 이력은 유지되었습니다."
+        }
+        ProposalSnapshotError::BudgetExceeded => {
+            "제안 편집 이력의 8 MiB 한도를 초과합니다. 목록과 기존 이력은 유지되었습니다."
+        }
+        ProposalSnapshotError::StaleSources => {
+            "목록의 항목이나 순서가 바뀌어 이전 제안 편집 이력을 사용할 수 없습니다."
+        }
+    }
+}
+
+fn prepare_proposal_history(state: &mut AppState) -> Option<ProposalSnapshot> {
+    match state.proposal_history.prepare_edit(&state.model) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            state.set_transient_status(proposal_history_error_korean(error));
+            None
+        }
+    }
+}
+
+fn finish_proposal_edit(
+    state: &mut AppState,
+    mut before: ProposalSnapshot,
+    changed: Box<[usize]>,
+    parent_changed: bool,
+) -> CommandOutcome {
+    if changed.is_empty() {
+        return CommandOutcome::ui(UiEffect::None);
+    }
+    if let Err(error) = state.model.reserve_proposals_after_mutation(&mut before) {
+        // The model's mutation has no external side effects; this preallocated
+        // snapshot restores its exact UTF-16 proposals without another allocation.
+        state
+            .model
+            .swap_proposals_without_allocation(&mut before)
+            .expect("synchronous proposal edit did not change source identity");
+        state.set_transient_status(proposal_history_error_korean(error));
+        return CommandOutcome::ui(UiEffect::None);
+    }
+    state.proposal_history.record_edit(&state.model, before);
+    let effect = if parent_changed {
+        UiEffect::AllRowsChanged
+    } else {
+        UiEffect::ProposalRowsChanged(changed)
+    };
+    model_outcome(state, true, effect)
 }
 
 fn proposal_mutation(
     state: &mut AppState,
     mutation: impl FnOnce(&mut LegacyList) -> Result<Box<[usize]>, ProposalMutationError>,
 ) -> CommandOutcome {
+    let Some(before) = prepare_proposal_history(state) else {
+        return CommandOutcome::ui(UiEffect::None);
+    };
     match mutation(&mut state.model) {
-        Ok(changed) => proposal_outcome(state, changed),
+        Ok(changed) => finish_proposal_edit(state, before, changed, false),
         Err(error) => {
             state.set_transient_status(proposal_mutation_error_korean(error));
             CommandOutcome::ui(UiEffect::None)
@@ -1433,17 +1526,23 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 session,
                 FileDialogCompletion::Accept,
                 |state| {
-                    state
+                    let Some(before) = prepare_proposal_history(state) else {
+                        return None;
+                    };
+                    match state
                         .model
                         .unify_destination_parent_changed(&destination_parent)
-                        .map(|changed| {
-                            let outcome =
-                                model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged);
+                    {
+                        Ok(changed) => {
+                            let outcome = finish_proposal_edit(state, before, changed, true);
                             apply_command_outcome(window, state, outcome, None);
-                        })
+                            None
+                        }
+                        Err(error) => Some(error),
+                    }
                 },
             );
-            if let Some(Err(error)) = result {
+            if let Some(Some(error)) = result {
                 report_error(
                     window,
                     destination_parent_mutation_error_korean(error),
@@ -1569,17 +1668,22 @@ pub(super) fn finish_import_worker_result(
         }
     };
     match kind {
-        ImportKind::Names => match state.model.import_names_changed(&text) {
-            Ok(changed) => {
-                let outcome = proposal_outcome(state, changed);
-                apply_command_outcome(window, state, outcome, None);
+        ImportKind::Names => {
+            let Some(before) = prepare_proposal_history(state) else {
+                return;
+            };
+            match state.model.import_names_changed(&text) {
+                Ok(changed) => {
+                    let outcome = finish_proposal_edit(state, before, changed, false);
+                    apply_command_outcome(window, state, outcome, None);
+                }
+                Err(error) => message(
+                    window,
+                    proposal_mutation_error_korean(error),
+                    "DarkReNamer - 이름 가져오기",
+                ),
             }
-            Err(error) => message(
-                window,
-                proposal_mutation_error_korean(error),
-                "DarkReNamer - 이름 가져오기",
-            ),
-        },
+        }
         ImportKind::Paths => {
             let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
             let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
@@ -1775,19 +1879,17 @@ fn finish_prompt_command(
     result: PromptResult,
 ) -> (CommandOutcome, Option<SelectionRestore>) {
     let outcome = match continuation {
-        PromptContinuation::ManualChange { row } => {
-            match state.model.manual_change_changed(row, result.value_one) {
-                Ok(changed) => model_outcome(
-                    state,
-                    changed,
-                    UiEffect::ProposalRowsChanged(vec![row].into_boxed_slice()),
-                ),
-                Err(error) => {
-                    state.set_transient_status(proposal_mutation_error_korean(error));
-                    CommandOutcome::ui(UiEffect::None)
-                }
-            }
-        }
+        PromptContinuation::ManualChange { row } => proposal_mutation(state, |model| {
+            model
+                .manual_change_changed(row, result.value_one)
+                .map(|changed| {
+                    if changed {
+                        vec![row].into_boxed_slice()
+                    } else {
+                        Box::default()
+                    }
+                })
+        }),
         PromptContinuation::Replace => proposal_mutation(state, |model| {
             model.replace_complete_changed(&result.value_one, &result.value_two)
         }),
@@ -1880,17 +1982,15 @@ fn finish_delete_position_command(
         state.set_transient_status("맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
-    let changed = {
-        if result.choice == 0 {
-            state
-                .model
+    proposal_mutation(state, |model| {
+        Ok(if result.choice == 0 {
+            model
                 .delete_front_range_changed(start as usize, end as usize)
                 .unwrap_or_default()
         } else {
-            state.model.delete_last_changed(end as usize)
-        }
-    };
-    proposal_outcome(state, changed)
+            model.delete_last_changed(end as usize)
+        })
+    })
 }
 
 fn finish_delete_delimited_command(
@@ -1898,18 +1998,15 @@ fn finish_delete_delimited_command(
     state: &mut AppState,
     result: &PromptResult,
 ) -> CommandOutcome {
-    let changed = match state
-        .model
-        .delete_first_delimited_changed(&result.value_one, &result.value_two)
-    {
-        Ok(changed) => changed,
-        Err(LegacyInputError::EmptyDelimiter) => {
-            state.set_transient_status("시작/끝 문자가 정확하게 지정되지 않았습니다.");
-            Box::default()
-        }
-        Err(_) => Box::default(),
-    };
-    proposal_outcome(state, changed)
+    if result.value_one.units().is_empty() || result.value_two.units().is_empty() {
+        state.set_transient_status("시작/끝 문자가 정확하게 지정되지 않았습니다.");
+        return CommandOutcome::ui(UiEffect::None);
+    }
+    proposal_mutation(state, |model| {
+        Ok(model
+            .delete_first_delimited_changed(&result.value_one, &result.value_two)
+            .unwrap_or_default())
+    })
 }
 
 fn finish_sort_command(
@@ -1939,6 +2036,9 @@ fn finish_sort_command(
             SortSemantics::SafeActualSize,
             compare_windows,
         );
+        if changed {
+            state.proposal_history.clear();
+        }
         let outcome = model_outcome(state, changed, UiEffect::AllRowsChanged);
         let row_index = SelectionRowIndex::build(&state.model);
         let moved = row_index.rows(&tokens);

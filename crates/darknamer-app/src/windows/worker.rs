@@ -1126,6 +1126,9 @@ pub(super) fn start_apply_worker(
             return;
         }
     };
+    // An execution worker may create a journal or mutate files immediately.
+    // Proposal history has no authority across Apply, including rollback.
+    state.proposal_history.clear();
     state.mutation_locked = true;
     state.apply_worker = Some(ApplyWorker {
         cancellation,

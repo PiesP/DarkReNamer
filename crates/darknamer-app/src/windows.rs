@@ -42,6 +42,7 @@ use crate::rename::{
 use crate::rename::{FileJournal, JournalRoot, ModelRevision, next_model_revision};
 #[cfg(test)]
 use darknamer_core::LegacyListItem;
+use darknamer_core::ProposalHistory;
 use darknamer_core::{
     DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList, LegacyText,
     ProposalMutationError,
@@ -743,6 +744,7 @@ struct AppState {
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
     model: LegacyList,
+    proposal_history: ProposalHistory,
     append_index: LegacyAppendIndex<fn(&LegacyText, &LegacyText) -> std::cmp::Ordering>,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
@@ -866,6 +868,7 @@ impl AppState {
             left_rail: None,
             right_rail: None,
             model: LegacyList::new(),
+            proposal_history: ProposalHistory::new(),
             append_index: LegacyAppendIndex::new(
                 compare_windows as fn(&LegacyText, &LegacyText) -> std::cmp::Ordering,
             ),
@@ -998,6 +1001,9 @@ impl AppState {
 
     fn commit_known_model_change(&mut self, changed: bool) {
         self.model_revision = next_model_revision(self.model_revision, changed);
+        if changed {
+            self.proposal_history.discard_if_stale(&self.model);
+        }
     }
 
     const fn apply_locked(&self) -> bool {

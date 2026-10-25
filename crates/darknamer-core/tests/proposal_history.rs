@@ -125,7 +125,8 @@ fn source_change_and_reordering_invalidate_old_rows() {
     record_name_change(&mut model, &mut history, 0, LegacyText::from("new.txt"));
     assert!(model.move_rows_later_changed(&[0]).changed());
     assert!(!history.can_undo(&model));
-    history.clear();
+    history.discard_if_stale(&model);
+    assert_eq!(history.reserved_bytes(), 0);
     record_name_change(&mut model, &mut history, 0, LegacyText::from("newer.txt"));
     assert_eq!(model.remove_rows(&[0]), 1);
     assert!(!history.can_undo(&model));
@@ -152,4 +153,81 @@ fn bounded_count_and_bytes_retire_oldest_edits() {
         model.items()[0].proposed_name(),
         &LegacyText::from("03.txt")
     );
+}
+
+#[test]
+fn byte_budget_retires_oldest_large_proposal_snapshots() {
+    let mut model = LegacyList::new();
+    let long = "x".repeat(170);
+    let rows = (0..4_000)
+        .map(|row| LegacyListItem::new(format!(r"C:\s\{row:04}_{long}.txt"), false, 0, 0, 0));
+    assert_eq!(model.append_batch(rows), Ok(4_000));
+    let mut history = ProposalHistory::new();
+    for step in 0..6 {
+        record_name_change(
+            &mut model,
+            &mut history,
+            0,
+            LegacyText::from(format!("edited_{step:02}.txt")),
+        );
+        assert!(history.reserved_bytes() <= MAX_PROPOSAL_HISTORY_BYTES);
+    }
+    let mut steps = 0;
+    while history.undo(&mut model).unwrap().is_some() {
+        steps += 1;
+    }
+    assert!(
+        steps > 0 && steps < 6,
+        "byte budget must retire some old edits"
+    );
+}
+
+#[test]
+fn sequence_batch_restores_ordered_names_and_cached_path_totals() {
+    let mut model = list(&[r"C:\src\a.txt", r"C:\src\b.txt", r"C:\src\c.txt"]);
+    let originals = model
+        .items()
+        .iter()
+        .map(|item| item.proposed_name().clone())
+        .collect::<Vec<_>>();
+    let original_planned = model.planned_path_utf16_units();
+    let mut history = ProposalHistory::new();
+    let mut before = history.prepare_edit(&model).unwrap();
+    assert_eq!(
+        model
+            .add_sequence_changed(3, 7, darknamer_core::LegacySequenceMode::Append)
+            .unwrap()
+            .len(),
+        3
+    );
+    model.reserve_proposals_after_mutation(&mut before).unwrap();
+    history.record_edit(&model, before);
+    let numbered = model
+        .items()
+        .iter()
+        .map(|item| item.proposed_name().clone())
+        .collect::<Vec<_>>();
+    let numbered_planned = model.planned_path_utf16_units();
+    assert_ne!(numbered, originals);
+    assert_ne!(numbered[0], numbered[1]);
+    assert_eq!(history.undo(&mut model).unwrap().unwrap().0.len(), 3);
+    assert_eq!(
+        model
+            .items()
+            .iter()
+            .map(|item| item.proposed_name().clone())
+            .collect::<Vec<_>>(),
+        originals
+    );
+    assert_eq!(model.planned_path_utf16_units(), original_planned);
+    assert_eq!(history.redo(&mut model).unwrap().unwrap().0.len(), 3);
+    assert_eq!(
+        model
+            .items()
+            .iter()
+            .map(|item| item.proposed_name().clone())
+            .collect::<Vec<_>>(),
+        numbered
+    );
+    assert_eq!(model.planned_path_utf16_units(), numbered_planned);
 }

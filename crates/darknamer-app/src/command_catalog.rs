@@ -95,7 +95,9 @@ pub const SHOW_CREATED: CommandId = 0x8023;
 pub const VERSION: CommandId = 0x8024;
 /// Restores proposed destination parents without changing proposed names.
 pub const RESET_PATH: CommandId = 0x8025;
-pub const LAST_COMMAND: CommandId = RESET_PATH;
+pub const UNDO: CommandId = 0x8026;
+pub const REDO: CommandId = 0x8027;
+pub const LAST_COMMAND: CommandId = REDO;
 pub(crate) const EXIT_COMMAND: CommandId = 2;
 pub(crate) const DELETE_SELECTED_COMMAND: CommandId = 0xFFFF;
 
@@ -247,7 +249,7 @@ macro_rules! command_ui_spec {
 }
 
 /// Complete native UI command catalog in stable resource-ID order.
-pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
+pub const COMMAND_UI_SPECS: [CommandUiSpec; 37] = [
     command_ui_spec!(
         APPLY,
         rail(RailSide::Left, 0, 0),
@@ -692,6 +694,38 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         "대상 폴더 미리보기 초기화",
         "각 파일의 대상 폴더를 현재 폴더로 되돌립니다. 제안 이름은 유지되며, 완료된 파일 작업은 취소하지 않습니다.",
         None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        UNDO,
+        None,
+        "제안 실행 취소",
+        menu(MenuGroup::Edit, 0, 2),
+        "제안 편집 실행 취소",
+        "마지막 제안 편집을 되돌립니다. 완료된 파일 작업은 되돌리지 않습니다.",
+        legacy(
+            LegacyVirtualKey::Character(b'Z' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+Z"
+        ),
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        REDO,
+        None,
+        "제안 다시 실행",
+        menu(MenuGroup::Edit, 0, 3),
+        "제안 편집 다시 실행",
+        "실행 취소한 제안 편집을 다시 적용합니다. 완료된 파일 작업은 다루지 않습니다.",
+        legacy(
+            LegacyVirtualKey::Character(b'Y' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+Y"
+        ),
         Rows,
         Model,
         AllRows
