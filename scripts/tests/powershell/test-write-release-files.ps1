@@ -67,20 +67,24 @@ $temporaryRoot = Join-Path $testRoot 'temporary'
 $runId = '33257061299'
 $runAttempt = '2'
 $measurementPath = Join-Path $temporaryRoot "darkrenamer-release-binary-$runId-$runAttempt.json"
+$detailPath = Join-Path $temporaryRoot 'darkrenamer-footprint-detail.json'
 $rustcFails = $false
 $global:DarkReNamerTestRustcCalls = 0
 
 function rustc {
-    param([string] $Option)
+    param([string] $Option, [string] $VerboseOption)
     $global:DarkReNamerTestRustcCalls++
-    if ($Option -cne '--version') { throw 'Unexpected rustc fixture argument.' }
+    if ($Option -cne '--version' -or ($VerboseOption -and $VerboseOption -cne '--verbose')) {
+        throw 'Unexpected rustc fixture argument.'
+    }
     if ($rustcFails) {
         $global:LASTEXITCODE = 1
         'rustc fixture failed'
     }
     else {
         $global:LASTEXITCODE = 0
-        'rustc 1.97.1 (fixture 2026-08-01)'
+        if (-not $VerboseOption) { 'rustc 1.97.1 (fixture 2026-08-01)' }
+        else { 'rustc 1.97.1 (fixture 2026-08-01)', 'host: x86_64-pc-windows-msvc', 'LLVM version: 20.1.0' }
     }
 }
 
@@ -92,6 +96,8 @@ try {
     }
     Write-TestText -Path (Join-Path $sourceRoot 'rust-toolchain.toml') `
         -Content "[toolchain]`nchannel = `"1.97.1`"`n"
+    Write-TestText -Path (Join-Path $sourceRoot 'Cargo.toml') `
+        -Content "[workspace]`n`n[profile.release]`nopt-level = `"s`"`n"
     $cargoLock = Join-Path $sourceRoot 'Cargo.lock'
     $lockText = "version = 4`n`n[[package]]`nname = `"fixture-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"fixture-b`"`nversion = `"0.2.0`"`n"
     Write-TestText -Path $cargoLock -Content $lockText
@@ -100,7 +106,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize release source fixture.' }
     & git -C $sourceRoot config user.name 'DarkReNamer test'
     & git -C $sourceRoot config user.email 'darkrenamer-test@example.invalid'
-    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock
+    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock Cargo.toml
     & git -C $sourceRoot commit --quiet -m 'test: initialize release source fixture'
     if ($LASTEXITCODE -ne 0) { throw 'Failed to commit release source fixture.' }
     $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
@@ -130,7 +136,16 @@ try {
         RunId = $runId
         RunAttempt = $runAttempt
         TemporaryRoot = $temporaryRoot
+        DetailOutputPath = $detailPath
     }
+    $wrongSource = $arguments.Clone()
+    $wrongSource.SourceSha = '0000000000000000000000000000000000000000'
+    Assert-WriterFails -ExpectedFragment 'source SHA does not match' -Arguments $wrongSource -MeasurementPath $measurementPath
+    Assert-NoGeneratedFiles -HandoffRoot $handoffRoot
+    $insideHandoff = $arguments.Clone()
+    $insideHandoff.DetailOutputPath = Join-Path $handoffRoot 'detail.json'
+    Assert-WriterFails -ExpectedFragment 'outside the authenticated handoff' -Arguments $insideHandoff -MeasurementPath $measurementPath
+    Assert-NoGeneratedFiles -HandoffRoot $handoffRoot
     & $writer @arguments
     if (Test-Path -LiteralPath $measurementPath) {
         throw 'Temporary binary measurement survived successful release file generation.'
@@ -140,6 +155,25 @@ try {
     $checksumsPath = Join-Path $handoffRoot 'SHA256SUMS.txt'
     foreach ($path in $metricsPath, $handoffPath, $checksumsPath) {
         Assert-Utf8NoBomNewline -Path $path
+    }
+    Assert-Utf8NoBomNewline -Path $detailPath
+    $detail = Get-Content -LiteralPath $detailPath -Raw | ConvertFrom-Json
+    if ($detail.source_sha -cne $sourceSha -or $detail.workflow_run -cne $runId -or
+        $detail.workflow_attempt -cne $runAttempt -or
+        $detail.executable.sha256 -cne (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $detail.executable.bytes -ne (Get-Item -LiteralPath $executablePath).Length -or
+        $detail.pe.text_raw_bytes -ne 0x200 -or
+        $detail.pe.sections.Count -lt 1 -or
+        $detail.debug_symbols.pdb_bytes -ne (Get-Item -LiteralPath $pdbPath).Length -or
+        $detail.cargo_lock_sha256 -cne (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $detail.release_profile.'profile.release'.'opt-level' -cne '"s"' -or
+        $detail.llvm_version -cne '20.1.0') {
+        throw 'Footprint detail did not retain verified source, artifact, profile and PE identity.'
+    }
+    $previousDetailHash = (Get-FileHash -LiteralPath $detailPath -Algorithm SHA256).Hash
+    Assert-WriterFails -ExpectedFragment 'output already exists' -Arguments $arguments -MeasurementPath $measurementPath
+    if ((Get-FileHash -LiteralPath $detailPath -Algorithm SHA256).Hash -cne $previousDetailHash) {
+        throw 'Existing footprint detail changed after a rejected run.'
     }
     $metrics = Get-Content -LiteralPath $metricsPath -Raw | ConvertFrom-Json
     $handoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
@@ -184,11 +218,13 @@ try {
 
     $originalChecksums = Get-Content -LiteralPath $checksumsPath -Raw
     Write-TestText -Path $checksumsPath -Content "stale checksum file`n"
+    Remove-Item -LiteralPath $detailPath
     & $writer @arguments
     if ((Get-Content -LiteralPath $checksumsPath -Raw) -cne $originalChecksums) {
         throw 'Rerunning the writer changed checksum subjects or generated bytes.'
     }
     Remove-Item -LiteralPath $metricsPath, $handoffPath, $checksumsPath
+    Remove-Item -LiteralPath $detailPath
 
     $fakeWriterRoot = Join-Path $testRoot 'missing-measurement-writer'
     $null = New-Item -ItemType Directory -Path $fakeWriterRoot

@@ -133,7 +133,8 @@ jobs:
             -SourceSha '${{ steps.source.outputs.source_commit }}' `
             -RunId $env:GITHUB_RUN_ID `
             -RunAttempt $env:GITHUB_RUN_ATTEMPT `
-            -TemporaryRoot $env:RUNNER_TEMP
+            -TemporaryRoot $env:RUNNER_TEMP `
+            -DetailOutputPath (Join-Path $env:RUNNER_TEMP 'darkrenamer-footprint-detail.json')
 
       - name: Validate complete release handoff
         shell: pwsh
@@ -171,6 +172,23 @@ jobs:
             "| ``$($entry.Key)`` | ``$value`` |" |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
+          $detail = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'darkrenamer-footprint-detail.json') -Raw | ConvertFrom-Json
+          @(
+            ''
+            '### PE sections (raw file bytes versus mapped virtual bytes)'
+            ''
+            '| Section | Raw bytes | Virtual bytes |'
+            '| --- | ---: | ---: |'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          foreach ($section in $detail.pe.sections) {
+            "| ``$($section.name)`` | $($section.raw_bytes) | $($section.virtual_bytes) |" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+          @(
+            ''
+            "EXE SHA-256: ``$($detail.executable.sha256)``; run/attempt: ``$($detail.workflow_run)/$($detail.workflow_attempt)``."
+            'These file and section sizes are not runtime memory measurements.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Retain immutable release candidate handoff
         id: candidate_artifact
@@ -178,6 +196,14 @@ jobs:
         with:
           name: ${{ steps.source.outputs.handoff_name }}
           path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retain information-only footprint detail
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: DarkReNamer-footprint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/darkrenamer-footprint-detail.json
           if-no-files-found: error
           retention-days: 90
 
