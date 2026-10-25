@@ -472,6 +472,28 @@ Assert-Fails {
     Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $leftTooltip `
         -ListViewBounds ([pscustomobject]@{ Left=550; Top=0; Right=1008; Bottom=650 })
 } 'No neutral cursor point inside the application and outside the ListView and infotip'
+$scenarioPath = Join-Path $toolingScriptsRoot 'modules/powershell/ui-context-scenarios.ps1'
+$tokens = $null; $errors = $null
+$scenarioAst = [Management.Automation.Language.Parser]::ParseFile(
+    $scenarioPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Tooltip context scenario source did not parse.' }
+$contextFunctions = @($scenarioAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ObserverContextConfirmation'
+}, $true))
+if ($contextFunctions.Count -ne 1) { throw 'Tooltip context scenario is not uniquely defined.' }
+$neutralMoves = @($contextFunctions[0].FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Move-ObserverTooltipNeutralCursor'
+}, $true))
+$contextText = $contextFunctions[0].Body.Extent.Text
+$initialRead = $contextText.IndexOf('$initialTooltipWindows = @(', [StringComparison]::Ordinal)
+$initialMove = $contextText.IndexOf('$neutralPoint = Move-ObserverTooltipNeutralCursor', [StringComparison]::Ordinal)
+$initialHover = $contextText.IndexOf('$hoverColumn = 0', [StringComparison]::Ordinal)
+if ($neutralMoves.Count -ne 2 -or $initialRead -lt 0 -or
+    $initialMove -le $initialRead -or $initialHover -le $initialMove) {
+    throw 'Both tooltip neutral transitions must use a fresh bound-window snapshot and the owned-root move helper.'
+}
 
 function Get-Sha256([string] $Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

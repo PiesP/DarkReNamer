@@ -24,6 +24,27 @@
     throw 'No neutral cursor point inside the application and outside the ListView and infotip.'
 }
 
+function Move-ObserverTooltipNeutralCursor {
+    param(
+        [Parameter(Mandatory)][object] $MainBounds,
+        [Parameter(Mandatory)][object] $TooltipRect,
+        [Parameter(Mandatory)][object] $ListViewBounds,
+        [Parameter(Mandatory)][IntPtr] $MainHandle,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $neutral = Resolve-ObserverTooltipNeutralPoint `
+        -MainBounds $MainBounds -TooltipRect $TooltipRect -ListViewBounds $ListViewBounds
+    $point = [DarkReNamerVmAcceptanceNative+Point]::new()
+    $point.X = $neutral.x; $point.Y = $neutral.y
+    [DarkReNamerVmAcceptanceNative]::MoveCursor($point.X, $point.Y)
+    $hit = [DarkReNamerVmAcceptanceNative]::WindowFromPoint($point)
+    if ([DarkReNamerVmAcceptanceNative]::GetAncestor($hit, [uint32]2) -ne $MainHandle) {
+        throw "$Label neutral point did not hit the exact application root."
+    }
+    $neutral
+}
+
 function Get-ObserverContextConfirmationReachability {
     param(
         [Parameter(Mandatory)][object] $Confirmation,
@@ -87,11 +108,17 @@ function Invoke-ObserverContextConfirmation {
         if ($listViewHandle -eq [IntPtr]::Zero) { throw 'Context ListView has no native HWND for tooltip identity.' }
         $tooltipHandle = [DarkReNamerVmAcceptanceNative]::ReadListViewTooltip($listViewHandle)
         if ($tooltipHandle -eq 0) { throw 'LVM_GETTOOLTIPS returned no ListView infotip HWND.' }
-        $mainBounds = $Application.main.Current.BoundingRectangle
-        $neutralPoint = [DarkReNamerVmAcceptanceNative+Point]::new()
-        $neutralPoint.X = [int][Math]::Floor($mainBounds.Left + ($mainBounds.Width / 2.0))
-        $neutralPoint.Y = [int][Math]::Floor($mainBounds.Top + [Math]::Min(10.0, $mainBounds.Height / 2.0))
-        [DarkReNamerVmAcceptanceNative]::MoveCursor($neutralPoint.X, $neutralPoint.Y)
+        $initialTooltipWindows = @(Get-ObserverProcessWindows -Process $Application.process |
+            Where-Object { $_.hwnd -eq $tooltipHandle })
+        if ($initialTooltipWindows.Count -ne 1) {
+            throw 'Initial ListView infotip was not one bound process window.'
+        }
+        $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+        $neutralPoint = Move-ObserverTooltipNeutralCursor `
+            -MainBounds $Application.main.Current.BoundingRectangle `
+            -TooltipRect $initialTooltipWindows[0].rect `
+            -ListViewBounds $gridForTooltip.element.Current.BoundingRectangle `
+            -MainHandle $mainHandle -Label 'Initial'
         Start-Sleep -Milliseconds 600
         $neutralWindows = Get-ObserverProcessWindows -Process $Application.process
         if (@($neutralWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible }).Count -ne 0) {
@@ -119,7 +146,7 @@ function Invoke-ObserverContextConfirmation {
         if ($visibleTooltip.Count -ne 1) { throw 'Ordinary current-name hover did not expose the bound multiline ListView infotip HWND.' }
         $preModalTooltip = [ordered]@{
             input = 'physical-mouse-hover-without-click'
-            neutral_point = [ordered]@{ x = $neutralPoint.X; y = $neutralPoint.Y }
+            neutral_point = $neutralPoint
             point = [ordered]@{ x = $point.X; y = $point.Y; hit_window = $hit.ToInt64(); root_window = $mainRoot.ToInt64() }
             listview_hwnd = $listViewHandle.ToInt64()
             listview_tooltip_hwnd = $tooltipHandle
@@ -356,18 +383,11 @@ function Invoke-ObserverContextConfirmation {
             throw 'Ordinary current-name hover did not restore the bound multiline ListView infotip after Cancel.'
         }
         [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-after-cancel-infotip.png') -Label 'context ListView infotip restored after Cancel'))
-        $postNeutralPoint = Resolve-ObserverTooltipNeutralPoint `
+        $postNeutralPoint = Move-ObserverTooltipNeutralCursor `
             -MainBounds $Application.main.Current.BoundingRectangle `
             -TooltipRect $postVisibleTooltip[0].rect `
-            -ListViewBounds $gridAfterCancel.element.Current.BoundingRectangle
-        [DarkReNamerVmAcceptanceNative]::MoveCursor($postNeutralPoint.x, $postNeutralPoint.y)
-        $neutralHitPoint = [DarkReNamerVmAcceptanceNative+Point]::new()
-        $neutralHitPoint.X = $postNeutralPoint.x; $neutralHitPoint.Y = $postNeutralPoint.y
-        $neutralHit = [DarkReNamerVmAcceptanceNative]::WindowFromPoint($neutralHitPoint)
-        if ([DarkReNamerVmAcceptanceNative]::GetAncestor($neutralHit, [uint32]2) -ne
-            [IntPtr]$Application.main.Current.NativeWindowHandle) {
-            throw 'Post-cancel neutral point did not hit the exact application root.'
-        }
+            -ListViewBounds $gridAfterCancel.element.Current.BoundingRectangle `
+            -MainHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) -Label 'Post-cancel'
         Start-Sleep -Milliseconds 600
         $postNeutralWindows = Get-ObserverProcessWindows -Process $Application.process
         $postNeutralTooltip = @($postNeutralWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })

@@ -637,7 +637,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "fff376d0b7acc8e6d26104f782c427bead6ffb7a60f94c46461b4466d268b107",
+      "sha256": "8ebb9fe4b4d6ced8132bf840e68e1a1dc99aa0ab6c4c87db14cc618fdecae861",
       "dependencies": []
     },
     {
