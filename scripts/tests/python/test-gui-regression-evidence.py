@@ -62,6 +62,12 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
             evidence.validate_standard_proposal_history(record, "standard")
         record = scenario("standard")
+        collision = record["blocking"]["collision"]["history"]
+        self.assertNotEqual(collision["selected_name"], collision["current_name"])
+        collision["selected_name"] = collision["current_name"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_standard_proposal_history(record, "standard")
+        record = scenario("standard")
         record["proposal_history"]["new_edit"]["proposed_name"] = "changed-1.md"
         with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
             evidence.validate_standard_proposal_history(record, "standard")

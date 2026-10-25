@@ -208,11 +208,11 @@ def physical_menu_apply_entry() -> dict:
 
 def proposal_history_state(label: str, row: int, count: int, current: str,
                            proposed: str, undo: bool, redo: bool, apply: bool,
-                           selected: int = 1) -> dict:
+                           selected: int = 1, selected_name: str | None = None) -> dict:
     return {"label": label, "row": row, "row_count": count, "current_name": current,
             "proposed_name": proposed, "undo_enabled": undo, "redo_enabled": redo,
             "apply_enabled": apply, "selected_count": selected,
-            "selected_name": current if selected else None,
+            "selected_name": (current if selected_name is None else selected_name) if selected else None,
             "focus_control_id": "1000", "status": "변경 가능" if apply else "변경 없음"}
 
 
@@ -403,7 +403,8 @@ def scenario(mode: str) -> dict:
                         "second_redone": source_names[1]}},
                 "collision": {"blocked": True, "history": proposal_history_state(
                     "blocked collision history", 0, 3, source_names[0],
-                    "충돌-😀-같은-대상.txt", True, False, False)},
+                    "충돌-😀-같은-대상.txt", True, False, False,
+                    selected_name=source_names[1])},
                 "invalid_name": {"blocked": True, "history": proposal_history_state(
                     "blocked invalid-name history", 0, 3, source_names[0],
                     "bad:name.txt", True, False, False)}}

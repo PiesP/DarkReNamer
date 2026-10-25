@@ -324,7 +324,8 @@ def int_equals(value: object, expected: int) -> bool:
 
 def validate_proposal_history_state(value: object, *, label: str, row: int, count: int,
                                     current: str, proposed: str, undo: bool, redo: bool,
-                                    apply: bool, selected: int | None = None) -> None:
+                                    apply: bool, selected: int | None = None,
+                                    selected_name: str | None = None) -> None:
     state = exact_keys(value, {"label", "row", "row_count", "current_name", "proposed_name",
                                "undo_enabled", "redo_enabled", "apply_enabled", "selected_count",
                                "selected_name", "focus_control_id", "status"}, label)
@@ -335,7 +336,7 @@ def validate_proposal_history_state(value: object, *, label: str, row: int, coun
             type(state["selected_count"]) is int and 0 <= state["selected_count"] <= 1 and
             (selected is None or state["selected_count"] == selected) and
             (state["selected_name"] is None if state["selected_count"] == 0 else
-             state["selected_name"] == current) and
+             state["selected_name"] == (current if selected_name is None else selected_name)) and
             isinstance(state["focus_control_id"], str) and bool(state["focus_control_id"]) and
             isinstance(state["status"], str), f"{label} has an invalid proposal or UI state.")
 
@@ -407,7 +408,9 @@ def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
             ("invalid_name", "blocked invalid-name history", "bad:name.txt", True)):
             validate_proposal_history_state(nested(blocked, key, "history"), label=label,
                 row=0, count=3, current=sources[0], proposed=proposed, undo=undo,
-                redo=False, apply=False)
+                redo=False, apply=False,
+                selected=1 if key == "collision" else None,
+                selected_name=sources[1] if key == "collision" else None)
     complete = exact_keys(history["successful_apply"],
                           {"undo_enabled", "redo_enabled", "apply_enabled", "journal_residue_count"},
                           "history after successful Apply")
