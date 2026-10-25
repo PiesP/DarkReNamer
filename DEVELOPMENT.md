@@ -182,11 +182,18 @@ retains both cargo-audit and cargo-deny. Its complete controls and failure
 receipts remain in that closeout and in the
 [immutable investigation-era source](https://github.com/PiesP/DarkReNamer/blob/599947b878da65ae0a750e8582e6f96f107ff195/DEVELOPMENT.md#L71).
 The scanner entries in `config/release-tool-integrity.json` own selected versions
-and reviewed Windows artifact identities. CI and the scheduled audit read those
-values through `run-scheduled-rust-audit.py --emit-pins`; workflows still own
-cache restoration, pinned `cargo install --locked`, permissions and setup failure
-reporting. The same runner checks exact executable versions, while the Windows
-installer validates the reviewed archives independently of workflow syntax.
+and reviewed source or Windows artifact identities. `cargo-audit` 0.22.2 is
+built from its SHA-256-pinned published crate with
+`config/cargo-audit-0.22.2-patched.lock`; that lock updates the affected
+`rustls`, `rustls-webpki`, and active `h2` closure while preserving the reviewed CLI and
+report version. `scripts/build-patched-cargo-audit.py` verifies both inputs
+before extraction or execution and uses `cargo build --locked` with isolated
+Cargo state. CI, the scheduled audit, and the Windows candidate installer use
+that same builder. CI and the scheduled audit read scanner selections through
+`run-scheduled-rust-audit.py --emit-pins`; workflows still own cache restoration,
+the pinned `cargo-deny` install, permissions and setup failure reporting. The
+same runner checks exact executable versions, while the Windows installer
+validates reviewed source and archive bytes independently of workflow syntax.
 Audit inspected the complete, unpruned lockfile;
 deny inspected a selected dependency graph. Their target, advisory, and yank
 results therefore differ. A clean product scan does not prove equivalent scope.
@@ -201,7 +208,7 @@ registry-failure reporting, and verify CI, scheduled/manual, and release callers
 together. Until then, keep both tools, their immutable installation checks,
 fresh-data execution, and the scheduled adapter's two-result completion rule.
 
-Reusing the reviewed record keeps scanner version and Windows artifact changes
+Reusing the reviewed record keeps scanner version and build identity changes
 atomic without creating a second registry or generated workflow declarations.
 A separate record would split that update, while workflow scraping would couple
 data validation to executable syntax. A wrong reviewed value remains a shared
@@ -297,6 +304,7 @@ second command or asset registry.
 | `run-gui-regression.py`, `diagnose-runtimebroker.py` / Python `vm.gui` and diagnostic modules | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produce bounded GUI or RuntimeBroker diagnostic evidence. GUI/RuntimeBroker diagnostic tests are opt-in; neither command publishes acceptance by itself. |
 | `validate-gui-regression-evidence.py`, `validate-vm-automated-evidence.py`, `validate-vm-automated-authority.py` / Python `evidence`, `campaign`, `contracts` | Isolated Python, source identity and private evidence or authenticated hosted facts | Independent verdict/JSON or failure; evidence, binding, authority and GUI fixture tests cover malformed and successful input. Workflow callers retain artifact and GitHub authority. |
 | `run-scheduled-rust-audit.py` / Python | Python 3.11+ on Ubuntu CI/security runners and hosted Windows candidate validation; checked-out lockfile, pinned scanners, fresh advisory data | Uses `SECURITY_TOOLS_ROOT/bin` on Ubuntu or explicit verified absolute `.exe` paths on Windows; validates versions, runs both scanners and rejects incomplete/data-failure results. `scheduled-rust-audit` tests and the three workflow callers own its invocation. |
+| `build-patched-cargo-audit.py` / Python | Python 3.11+, the selected Rust toolchain and native linker; reviewed release-tool metadata and patched scanner lock | Requires a fresh `--work` directory and explicit `--destination`; verifies source/lock hashes before extraction/build, uses isolated Cargo state, then copies the exact-version binary. `--archive` accepts already downloaded verified bytes; `--verify-only` checks inputs without building. `scheduled-rust-audit` fixtures cover tampering and the locked build boundary; actual platform builds remain separate evidence. |
 | `run-windows-vm-tests.ps1`, `windows-vm-guest.ps1`, `windows-vm-acceptance.ps1`, `windows-vm-recovery-acceptance.ps1` / PowerShell modules | PowerShell 7.4+; verified checkout or bundle role closure, host transport or guest session | Launch/control bounded native, UI and recovery work, transfer private evidence, and clean owned resources; registered VM/observer tests cover contracts. Windows runtime acceptance still requires the prepared VM. |
 | `run-vm-automated-hosted.ps1` / PowerShell | Hosted Windows validation runner, authenticated candidate metadata and trusted source | Acquires/verifies handoff, invokes campaign and records gate outputs; `run-vm-automated-hosted` tests and `vm-acceptance.yaml` own this path. |
 | `prepare-release-cyclonedx.ps1`, `measure-windows-binary.ps1`, `validate-release-candidate-metadata.ps1`, `validate-release-handoff.ps1` / PowerShell | PowerShell 7.4+; candidate files, exact Git revision or workflow metadata | Write only requested new output, emit digest/measurement/verdict, or fail; release category tests and release workflows cover their callers. Candidate validation does not promote a release. |
@@ -1356,7 +1364,8 @@ development validation.
 
 Candidate tool installation uses `config/release-tool-integrity.json` and
 `scripts/install-verified-release-tools.ps1`. Update the canonical version owner
-and review the official archive URL, full-byte SHA-256 and layout together.
+and review the official source or archive URL, full-byte SHA-256, patched lock
+and extraction layout together.
 The release-tool integrity fixtures cover wrong bytes before execution, stale
 pins, unsupported assets and corrupt retained inputs. Complete the registered
 release category and a non-publishing hosted candidate after pin changes;

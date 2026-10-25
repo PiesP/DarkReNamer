@@ -89,8 +89,20 @@ try {
         if ($tool.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
             throw 'Release-tool metadata must contain JSON tool objects.'
         }
-        foreach ($field in @('id', 'version', 'archivePath', 'url', 'sha256')) {
-            $null = Assert-JsonPropertyKind $tool $field ([Text.Json.JsonValueKind]::String)
+        $fields = if ((Assert-JsonPropertyKind $tool 'id' ([Text.Json.JsonValueKind]::String)).GetString() -ceq 'cargo-audit') {
+            @('id', 'version', 'source', 'lock')
+        } else { @('id', 'version', 'archivePath', 'url', 'sha256') }
+        foreach ($field in $fields) {
+            $kind = if ($field -in @('source', 'lock')) { [Text.Json.JsonValueKind]::Object } else { [Text.Json.JsonValueKind]::String }
+            $null = Assert-JsonPropertyKind $tool $field $kind
+        }
+        if ($fields -contains 'source') {
+            foreach ($name in @('source', 'lock')) {
+                $nested = Assert-JsonPropertyKind $tool $name ([Text.Json.JsonValueKind]::Object)
+                foreach ($field in $(if ($name -eq 'source') { @('url', 'sha256') } else { @('path', 'sha256') })) {
+                    $null = Assert-JsonPropertyKind $nested $field ([Text.Json.JsonValueKind]::String)
+                }
+            }
         }
     }
 }
@@ -179,8 +191,17 @@ for ($i = 0; $i -lt $expectedTools.Count; $i++) {
     $version = [regex]::Escape([string]$tool.version)
     switch ($id) {
         'cargo-audit' {
-            $pattern = "^https://github\.com/rustsec/rustsec/releases/download/cargo-audit/v$version/cargo-audit-x86_64-pc-windows-msvc-v$version\.zip$"
-            $archivePath = "cargo-audit-x86_64-pc-windows-msvc-v$($tool.version)/cargo-audit.exe"
+            if ($tool.source.url -cne "https://static.crates.io/crates/cargo-audit/cargo-audit-$($tool.version).crate" -or
+                $tool.lock.path -cne "config/cargo-audit-$($tool.version)-patched.lock") {
+                throw 'Unsupported cargo-audit source or lock identity.'
+            }
+            Assert-Digest 'cargo-audit source' (Get-ReviewedDigest $tool.source 'cargo-audit source')
+            Assert-Digest 'cargo-audit lock' (Get-ReviewedDigest $tool.lock 'cargo-audit lock')
+            $lockPath = Join-Path $repoRoot $tool.lock.path
+            if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $tool.lock.sha256) {
+                throw 'SHA-256 mismatch for cargo-audit patched lockfile.'
+            }
         }
         'cargo-deny' {
             $pattern = "^https://github\.com/EmbarkStudios/cargo-deny/releases/download/$version/cargo-deny-$version-x86_64-pc-windows-msvc\.tar\.gz$"
@@ -195,6 +216,7 @@ for ($i = 0; $i -lt $expectedTools.Count; $i++) {
             $archivePath = 'cargo-cyclonedx.exe'
         }
     }
+    if ($id -ceq 'cargo-audit') { continue }
     if ($tool.archivePath -cne $archivePath) {
         throw "Unsupported archive layout for $id."
     }
@@ -214,8 +236,12 @@ foreach ($component in $record.rust.components) {
     $artifacts += [pscustomobject]@{ id = $component.id; source = $component; file = "$($component.id).tar.gz" }
 }
 foreach ($tool in $record.tools) {
-    $extension = if ($tool.url.EndsWith('.zip', [StringComparison]::Ordinal)) { '.zip' } else { '.tar.gz' }
-    $artifacts += [pscustomobject]@{ id = $tool.id; source = $tool; file = "$($tool.id)$extension" }
+    if ($tool.id -ceq 'cargo-audit') {
+        $artifacts += [pscustomobject]@{ id = $tool.id; source = $tool.source; file = 'cargo-audit.crate' }
+    } else {
+        $extension = if ($tool.url.EndsWith('.zip', [StringComparison]::Ordinal)) { '.zip' } else { '.tar.gz' }
+        $artifacts += [pscustomobject]@{ id = $tool.id; source = $tool; file = "$($tool.id)$extension" }
+    }
 }
 foreach ($artifact in $artifacts) {
     $path = Join-Path $downloads $artifact.file
@@ -348,6 +374,7 @@ foreach ($required in @('bin/rustc.exe', 'bin/cargo.exe', 'bin/rustfmt.exe', 'bi
     }
 }
 foreach ($tool in $record.tools) {
+    if ($tool.id -ceq 'cargo-audit') { continue }
     $toolArchiveName = if ($tool.url.EndsWith('.zip', [StringComparison]::Ordinal)) {
         "$($tool.id).zip"
     } else { "$($tool.id).tar.gz" }
@@ -366,6 +393,15 @@ $alias = 'darkrenamer-release'
 if ($LASTEXITCODE -ne 0) { throw 'rustup could not link the verified Rust toolchain.' }
 $env:RUSTUP_TOOLCHAIN = $alias
 $env:PATH = "$toolsRoot;$env:PATH"
+if ($null -eq (Get-Command python -CommandType Application -ErrorAction SilentlyContinue)) {
+    throw 'Hosted Python 3.11 or newer is required to build the reviewed cargo-audit source.'
+}
+& python -I -c 'import sys; assert sys.version_info >= (3, 11)'
+if ($LASTEXITCODE -ne 0) { throw 'Hosted Python 3.11 or newer is required to build the reviewed cargo-audit source.' }
+& python -I (Join-Path $repoRoot 'scripts/build-patched-cargo-audit.py') `
+    --destination $toolsRoot --work (Join-Path $destination 'cargo-audit-build') `
+    --archive (Join-Path $downloads 'cargo-audit.crate')
+if ($LASTEXITCODE -ne 0) { throw 'Reviewed cargo-audit source build failed.' }
 foreach ($required in @('rustc', 'cargo')) {
     $output = & $required --version
     if ($LASTEXITCODE -ne 0 -or $output -cnotmatch "\b$([regex]::Escape($record.rust.version))\b") {

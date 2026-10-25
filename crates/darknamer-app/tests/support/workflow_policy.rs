@@ -770,7 +770,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
     const PATH: &str = ".github/workflows/ci.yaml";
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
-    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ steps.scanner-pins.outputs.audit-version }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
+    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
     const PIN_COMMAND: &str = "python3 scripts/run-scheduled-rust-audit.py --emit-pins";
 
     let workflow = parse(PATH, source)?;
@@ -799,7 +799,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
             && with_is(cache, "key", CACHE_KEY)
             && !cache.with.contains_key("restore-keys"),
         format!(
-            "{PATH} security tools cache must use the pinned action, exact tools root, and toolchain-file-bound key without restore prefixes"
+            "{PATH} security tools cache must use the pinned action, exact tools root, and source/lock/builder-and-toolchain-bound key without restore prefixes"
         ),
     )?;
 
@@ -842,19 +842,13 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         install.condition.as_ref().map(Scalar::text).as_deref()
             == Some("steps.security-tools-cache.outputs.cache-hit != 'true'")
             && install.continue_on_error.is_none()
-            && install.env.len() == 3
+            && install.env.len() == 2
             && install
                 .env
                 .get("SECURITY_TOOLS_ROOT")
                 .map(Scalar::text)
                 .as_deref()
                 == Some(TOOLS_ROOT)
-            && install
-                .env
-                .get("AUDIT_VERSION")
-                .map(Scalar::text)
-                .as_deref()
-                == Some("${{ steps.scanner-pins.outputs.audit-version }}")
             && install.env.get("DENY_VERSION").map(Scalar::text).as_deref()
                 == Some("${{ steps.scanner-pins.outputs.deny-version }}")
             && install_script
@@ -863,11 +857,11 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
                 == [
-                    "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-audit --version \"$AUDIT_VERSION\"",
+                    "python3 scripts/build-patched-cargo-audit.py --destination \"$SECURITY_TOOLS_ROOT/bin\" --work \"$RUNNER_TEMP/darkrenamer-cargo-audit-build\"",
                     "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny --version \"$DENY_VERSION\"",
                 ],
         format!(
-            "{PATH} must install the exact locked security tools into the isolated root only on an exact cache miss"
+            "{PATH} must build the reviewed cargo-audit closure and install locked cargo-deny into the isolated root only on an exact cache miss"
         ),
     )?;
 
