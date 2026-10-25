@@ -388,6 +388,9 @@ class ScannerPinMetadataTests(unittest.TestCase):
 
     def test_invalid_metadata_stops_before_scanner_execution(self) -> None:
         original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
+        invalid_lock_digest = json.loads(original)
+        audit_tool = next(tool for tool in invalid_lock_digest["tools"] if tool["id"] == "cargo-audit")
+        audit_tool["lock"]["sha256"] = "0" * 64
         cases = {
             "duplicate": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "schemaVersion": 1,'),
             "case-ambiguous": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "SchemaVersion": 1,'),
@@ -395,7 +398,7 @@ class ScannerPinMetadataTests(unittest.TestCase):
             "version": original.replace('"version": "0.22.2",', '"version": "0.22.2\nversion-injection",'),
             "url": original.replace('https://static.crates.io/crates/cargo-audit/', 'https://example.invalid/crates/cargo-audit/'),
             "digest": original.replace('"sha256": "700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a"', '"sha256": ""'),
-            "lock digest": original.replace('"sha256": "403b0eca06586b8a9161c5c1befd0609d6c3ea55564a903700b3f13a19c43fdd"', '"sha256": "' + '0' * 64 + '"'),
+            "lock digest": json.dumps(invalid_lock_digest),
             "schema": original.replace('"schemaVersion": 1,', '"schemaVersion": 2,'),
             "boolean-schema": original.replace('"schemaVersion": 1,', '"schemaVersion": true,'),
             "nan": original.replace('"version": "1.99.1",', '"version": NaN,'),
@@ -403,6 +406,7 @@ class ScannerPinMetadataTests(unittest.TestCase):
         }
         for label, content in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="darkrenamer-bad-scanner-pins-") as directory:
+                self.assertNotEqual(content, original)
                 root = Path(directory)
                 record = root / "pins.json"
                 record.write_text(content, encoding="utf-8")
