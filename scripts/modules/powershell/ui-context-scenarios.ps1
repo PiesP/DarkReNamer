@@ -947,10 +947,15 @@ function Invoke-ObserverStandardScenario {
         $history['cancelled_edit'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
             -Row 1 -ExpectedName $fixture.source_names[1] -UndoEnabled:$true -RedoEnabled:$true `
             -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history canceled edit'
-        Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $branchName = 'history-branch-01.md'
+        Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $branchName -SessionId $SessionId -WaitSeconds $WaitSeconds
         $history['new_edit'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
-            -Row 1 -ExpectedName $fixture.destination_names[1] -UndoEnabled:$true -RedoEnabled:$false `
+            -Row 1 -ExpectedName $branchName -UndoEnabled:$true -RedoEnabled:$false `
             -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history new edit'
+        Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $history['restored_apply_name'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.destination_names[1] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history restored Apply name'
         $selection = Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId
         if ($grid.pattern.GetItem(0, 1).Current.Name -cne $fixture.destination_names[0] -or
             $grid.pattern.GetItem(1, 1).Current.Name -cne $fixture.destination_names[1] -or
@@ -2460,6 +2465,8 @@ function Invoke-ObserverAppearanceHistoryStep {
         -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
         -WaitSeconds $WaitSeconds -Label 'appearance history menu Undo'
     $reset = $null
+    $resetUndo = $null
+    $resetRedo = $null
     if ($ResetAfter) {
         Send-ObserverProposalHistoryMenuCommand -Application $Application -SessionId $SessionId -CommandId 32807
         Reset-ObserverAppearanceProposals -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -2467,10 +2474,23 @@ function Invoke-ObserverAppearanceHistoryStep {
             -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$false `
             -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
             -WaitSeconds $WaitSeconds -Label 'appearance history reset'
+        $Grid.element.SetFocus()
+        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+            -VirtualKey 0x5A -Label 'appearance Reset Ctrl+Z'
+        $resetUndo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+            -Row 0 -ExpectedName $EditedName -UndoEnabled:$true -RedoEnabled:$true `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds -Label 'appearance Reset Undo' -ExpectedStatusContains '미리보기'
+        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+            -VirtualKey 0x59 -Label 'appearance Reset Ctrl+Y'
+        $resetRedo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+            -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds -Label 'appearance Reset Redo'
     }
     [ordered]@{ baseline_name = $BaselineName; edited_name = $EditedName; initial = $initial
         edited = $edited; shortcut_undo = $shortcutUndo; shortcut_redo = $shortcutRedo
-        menu_undo = $menuUndo; reset = $reset }
+        menu_undo = $menuUndo; reset = $reset; reset_undo = $resetUndo; reset_redo = $resetRedo }
 }
 function Invoke-ObserverAppearanceHistoryClear {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid)

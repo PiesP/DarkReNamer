@@ -351,10 +351,12 @@ def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
     history = exact_keys(nested(scenario, "proposal_history"),
                          {"initial", "edited", "shortcut_undo", "shortcut_redo",
                           "menu_undo", "menu_redo", "before_branch", "cancelled_edit", "new_edit",
+                          "restored_apply_name",
                           "apply_cancel", "reset_after_blocked", "successful_apply"}
                          if mode == "standard" else
                          {"initial", "edited", "shortcut_undo", "shortcut_redo",
                           "menu_undo", "menu_redo", "before_branch", "cancelled_edit", "new_edit",
+                          "restored_apply_name",
                           "apply_cancel", "successful_apply"}, "standard proposal history")
     stages = (
         ("initial", 0, sources[0], False, False, False, None),
@@ -365,7 +367,8 @@ def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
         ("menu_redo", 1, destinations[1], True, False, True, 1),
         ("before_branch", 1, sources[1], True, True, True, 1),
         ("cancelled_edit", 1, sources[1], True, True, True, 1),
-        ("new_edit", 1, destinations[1], True, False, True, 1),
+        ("new_edit", 1, "history-branch-01.md", True, False, True, 1),
+        ("restored_apply_name", 1, destinations[1], True, False, True, 1),
         ("apply_cancel", 0, destinations[0], True, False, True, None),
     )
     for key, row, proposed, undo, redo, apply, selected in stages:
@@ -375,6 +378,7 @@ def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
             "menu_undo": "history menu Undo", "menu_redo": "history menu Redo",
             "before_branch": "history before branch", "new_edit": "history new edit",
             "cancelled_edit": "history canceled edit",
+            "restored_apply_name": "history restored Apply name",
             "apply_cancel": "history canceled Apply"}[key], row=row, count=3,
             current=sources[row], proposed=proposed, undo=undo, redo=redo,
             apply=apply, selected=selected)
@@ -383,6 +387,20 @@ def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
             label="history reset after blocked", row=0, count=3, current=sources[0],
             proposed=sources[0], undo=True, redo=False, apply=False)
         blocked = nested(scenario, "blocking")
+        roundtrip = exact_keys(nested(blocked, "no_change", "reset_roundtrip"),
+                               {"undo", "second_undone", "redo", "second_redone"},
+                               "blocked Reset roundtrip")
+        validate_proposal_history_state(roundtrip["undo"], label="blocked Reset Undo",
+            row=0, count=3, current=sources[0], proposed=destinations[0],
+            undo=True, redo=True, apply=True, selected=1)
+        require("미리보기" in roundtrip["undo"]["status"] and
+                roundtrip["second_undone"] == destinations[1],
+                "Undo after Reset did not restore both proposals and preview diagnostics.")
+        validate_proposal_history_state(roundtrip["redo"], label="blocked Reset Redo",
+            row=0, count=3, current=sources[0], proposed=sources[0],
+            undo=True, redo=False, apply=False, selected=1)
+        require(roundtrip["second_redone"] == sources[1],
+                "Redo after Reset did not restore both original names.")
         for key, label, proposed, undo in (
             ("no_change", "blocked reset history", sources[0], True),
             ("collision", "blocked collision history", "충돌-😀-같은-대상.txt", True),
@@ -2366,7 +2384,8 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
 def validate_pair_proposal_history(value: object, *, current: str, baseline: str,
                                    edited: str, baseline_apply: bool, reset: bool) -> None:
     history = exact_keys(value, {"baseline_name", "edited_name", "initial", "edited",
-                                 "shortcut_undo", "shortcut_redo", "menu_undo", "reset"},
+                                 "shortcut_undo", "shortcut_redo", "menu_undo", "reset",
+                                 "reset_undo", "reset_redo"},
                          "appearance proposal history")
     require(history["baseline_name"] == baseline and history["edited_name"] == edited and
             isinstance(current, str) and bool(current),
@@ -2384,8 +2403,17 @@ def validate_pair_proposal_history(value: object, *, current: str, baseline: str
         validate_proposal_history_state(history["reset"], label="appearance history reset",
             row=0, count=60, current=current, proposed=baseline, undo=True, redo=False,
             apply=baseline_apply, selected=1)
+        validate_proposal_history_state(history["reset_undo"], label="appearance Reset Undo",
+            row=0, count=60, current=current, proposed=edited, undo=True, redo=True,
+            apply=True, selected=1)
+        require("미리보기" in history["reset_undo"]["status"],
+                "Undo after appearance Reset did not expose preview diagnostics.")
+        validate_proposal_history_state(history["reset_redo"], label="appearance Reset Redo",
+            row=0, count=60, current=current, proposed=baseline, undo=True, redo=False,
+            apply=baseline_apply, selected=1)
     else:
-        require(history["reset"] is None, "Forced Colors history reset unexpectedly.")
+        require(all(history[key] is None for key in ("reset", "reset_undo", "reset_redo")),
+                "Forced Colors history reset unexpectedly.")
 
 
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],

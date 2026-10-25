@@ -61,6 +61,14 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         record["blocking"]["collision"]["history"]["apply_enabled"] = True
         with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
             evidence.validate_standard_proposal_history(record, "standard")
+        record = scenario("standard")
+        record["proposal_history"]["new_edit"]["proposed_name"] = "changed-1.md"
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_standard_proposal_history(record, "standard")
+        record = scenario("standard")
+        record["blocking"]["no_change"]["reset_roundtrip"]["undo"]["proposed_name"] = "source-0.txt"
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_standard_proposal_history(record, "standard")
 
     @staticmethod
     def bind_v2_fixture_vm(run: Path, manifest: dict, transport: dict) -> None:
@@ -822,6 +830,13 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
             baseline="00-한국어-日本語.txt", edited="paired-history-00.txt",
             baseline_apply=False, reset=True)
         record["reset"]["redo_enabled"] = True
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_pair_proposal_history(record, current="00-한국어-日本語.txt",
+                baseline="00-한국어-日本語.txt", edited="paired-history-00.txt",
+                baseline_apply=False, reset=True)
+        record = pair_proposal_history("00-한국어-日本語.txt", "00-한국어-日本語.txt",
+                                       "paired-history-00.txt", False, True)
+        record["reset_undo"]["proposed_name"] = "00-한국어-日本語.txt"
         with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
             evidence.validate_pair_proposal_history(record, current="00-한국어-日本語.txt",
                 baseline="00-한국어-日本語.txt", edited="paired-history-00.txt",

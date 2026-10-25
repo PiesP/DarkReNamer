@@ -229,7 +229,9 @@ def standard_proposal_history(mode: str, sources: list[str], destinations: list[
         "menu_redo": state("history menu Redo", 1, 3, second, changed_second, True, False, True),
         "before_branch": state("history before branch", 1, 3, second, second, True, True, True),
         "cancelled_edit": state("history canceled edit", 1, 3, second, second, True, True, True),
-        "new_edit": state("history new edit", 1, 3, second, changed_second, True, False, True),
+        "new_edit": state("history new edit", 1, 3, second, "history-branch-01.md", True, False, True),
+        "restored_apply_name": state("history restored Apply name", 1, 3,
+                                     second, changed_second, True, False, True),
         "apply_cancel": state("history canceled Apply", 0, 3, first, changed_first, True, False, True),
         "successful_apply": {"undo_enabled": False, "redo_enabled": False,
                              "apply_enabled": False, "journal_residue_count": 0},
@@ -243,6 +245,10 @@ def standard_proposal_history(mode: str, sources: list[str], destinations: list[
 def pair_proposal_history(current: str, baseline: str, edited: str,
                           baseline_apply: bool, reset: bool) -> dict:
     state = proposal_history_state
+    reset_undo = state("appearance Reset Undo", 0, 60, current, edited,
+                       True, True, True) if reset else None
+    if reset_undo is not None:
+        reset_undo["status"] = "미리보기 · ‘변경 적용’ 전에는 파일을 수정하지 않습니다."
     return {"baseline_name": baseline, "edited_name": edited,
             "initial": state("appearance history initial", 0, 60, current, baseline,
                              True, False, baseline_apply),
@@ -255,7 +261,10 @@ def pair_proposal_history(current: str, baseline: str, edited: str,
             "menu_undo": state("appearance history menu Undo", 0, 60, current, baseline,
                                True, True, baseline_apply),
             "reset": state("appearance history reset", 0, 60, current, baseline,
-                           True, False, baseline_apply) if reset else None}
+                           True, False, baseline_apply) if reset else None,
+            "reset_undo": reset_undo,
+            "reset_redo": state("appearance Reset Redo", 0, 60, current, baseline,
+                                True, False, baseline_apply) if reset else None}
 
 
 def scenario(mode: str) -> dict:
@@ -381,9 +390,17 @@ def scenario(mode: str) -> dict:
             result["limitations"] = ["native-taskdialog-text-scale-not-observed"]
             result["blocking"] = {"status": "not-run", "reason": "covered-by-paired-text100-standard-run"}
         else:
+            reset_undo = proposal_history_state("blocked Reset Undo", 0, 3,
+                source_names[0], destination_names[0], True, True, True)
+            reset_undo["status"] = "미리보기 · ‘변경 적용’ 전에는 파일을 수정하지 않습니다."
             result["blocking"] = {
                 "no_change": {"blocked": True, "history": proposal_history_state(
-                    "blocked reset history", 0, 3, source_names[0], source_names[0], True, False, False)},
+                    "blocked reset history", 0, 3, source_names[0], source_names[0], True, False, False),
+                    "reset_roundtrip": {"undo": reset_undo,
+                        "second_undone": destination_names[1],
+                        "redo": proposal_history_state("blocked Reset Redo", 0, 3,
+                            source_names[0], source_names[0], True, False, False),
+                        "second_redone": source_names[1]}},
                 "collision": {"blocked": True, "history": proposal_history_state(
                     "blocked collision history", 0, 3, source_names[0],
                     "충돌-😀-같은-대상.txt", True, False, False)},

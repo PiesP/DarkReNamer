@@ -1502,7 +1502,8 @@ function Wait-ObserverProposalHistoryState {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][string] $Label,
-        [AllowNull()][object] $ExpectedSelectedCount
+        [AllowNull()][object] $ExpectedSelectedCount,
+        [string] $ExpectedStatusContains
     )
     $window = [IntPtr]$Application.main_handle
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -1531,6 +1532,15 @@ function Wait-ObserverProposalHistoryState {
     $status = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
         -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) `
         -TimeoutSeconds $WaitSeconds -Label "$Label status" -RequireWindowHandle
+    if ($ExpectedStatusContains) {
+        do {
+            if ($status.Current.Name.IndexOf($ExpectedStatusContains, [StringComparison]::Ordinal) -ge 0) { break }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $deadline)
+        if ($status.Current.Name.IndexOf($ExpectedStatusContains, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Label status did not expose $ExpectedStatusContains."
+        }
+    }
     [ordered]@{
         label = $Label; row = $Row; row_count = [int]$Grid.pattern.Current.RowCount
         current_name = [string]$Grid.pattern.GetItem($Row, 0).Current.Name
@@ -1569,11 +1579,37 @@ function Invoke-ObserverBlockedChecks {
     Start-Sleep -Milliseconds 200
     $applyState = Get-ObserverPublicApplyState -Application $Application -SessionId $SessionId -Label 'blocked-check no-change Apply command'
     if ($applyState.enabled) { throw 'Apply stayed enabled with no changes.' }
+    [void](Set-ObserverSelectedRow -Application $Application -Grid $Grid -Row 0 -SessionId $SessionId)
     $noChangeHistory = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
         -Row 0 -ExpectedName $Fixture.source_names[0] -UndoEnabled:$true -RedoEnabled:$false `
-        -ApplyEnabled:$false -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'blocked reset history'
+        -ApplyEnabled:$false -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds `
+        -Label 'blocked reset history'
+    $Grid.element.SetFocus()
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+        -VirtualKey 0x5A -Label 'blocked Reset Ctrl+Z'
+    $resetUndo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $Fixture.destination_names[0] -UndoEnabled:$true -RedoEnabled:$true `
+        -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds `
+        -Label 'blocked Reset Undo' -ExpectedStatusContains '미리보기'
+    $secondUndone = [string]$Grid.pattern.GetItem(1, 1).Current.Name
+    if ($secondUndone -cne $Fixture.destination_names[1]) {
+        throw 'Undo after Reset did not restore the second proposal.'
+    }
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+        -VirtualKey 0x59 -Label 'blocked Reset Ctrl+Y'
+    $resetRedo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $Fixture.source_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$false -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds `
+        -Label 'blocked Reset Redo'
+    $secondRedone = [string]$Grid.pattern.GetItem(1, 1).Current.Name
+    if ($secondRedone -cne $Fixture.source_names[1]) {
+        throw 'Redo after Reset did not restore the unchanged second proposal.'
+    }
+    $resetRoundtrip = [ordered]@{ undo = $resetUndo; second_undone = $secondUndone
+        redo = $resetRedo; second_redone = $secondRedone }
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-no-change.png') -Label 'no-change blocked state'))
-    $noChange = [ordered]@{ apply = $applyState; status = $status.Current.Name; blocked = $true; history = $noChangeHistory }
+    $noChange = [ordered]@{ apply = $applyState; status = $status.Current.Name; blocked = $true
+        history = $noChangeHistory; reset_roundtrip = $resetRoundtrip }
 
     $collisionName = '충돌-😀-같은-대상.txt'
     Set-ObserverManualName -Application $Application -Grid $Grid -Row 0 -Name $collisionName -SessionId $SessionId -WaitSeconds $WaitSeconds
