@@ -2996,6 +2996,14 @@ mod tests {
             ))
         })??;
 
+        let (unused_sender, unused_receiver) = channel();
+        drop(unused_receiver);
+        drop(ControlledImportRelease {
+            app: &app,
+            sender: Some(unused_sender),
+            joined: false,
+        });
+
         for (hold, close, session_id) in [
             (std::time::Duration::from_secs(2), false, 1),
             (std::time::Duration::from_secs(5), true, 2),
