@@ -169,16 +169,15 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/darkrenamer-security-tools
-          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ steps.scanner-pins.outputs.audit-version }}-deny-${{ steps.scanner-pins.outputs.deny-version }}
+          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}
 
       - name: Install pinned Rust security tools
         if: steps.security-tools-cache.outputs.cache-hit != 'true'
         env:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
-          AUDIT_VERSION: ${{ steps.scanner-pins.outputs.audit-version }}
           DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}
         run: |
-          cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version "$AUDIT_VERSION"
+          python3 scripts/build-patched-cargo-audit.py --destination "$SECURITY_TOOLS_ROOT/bin" --work "$RUNNER_TEMP/darkrenamer-cargo-audit-build"
           cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version "$DENY_VERSION"
 
       - name: Refresh and audit Rust dependencies

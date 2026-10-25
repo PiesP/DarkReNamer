@@ -2,6 +2,7 @@
 """Run fresh Rust dependency checks and summarize their actual outcomes."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -70,8 +71,21 @@ def scanner_pins(record_path: Path = SCANNER_RECORD) -> dict[str, str]:
         if version != SCANNER_REPORT_COMPATIBILITY[name]:
             raise ValueError(f"unreviewed {name} report compatibility for {version}")
         if name == "cargo-audit":
-            expected_url = f"https://github.com/rustsec/rustsec/releases/download/cargo-audit/v{version}/cargo-audit-x86_64-pc-windows-msvc-v{version}.zip"
-            expected_path = f"cargo-audit-x86_64-pc-windows-msvc-v{version}/cargo-audit.exe"
+            source = tool.get("source")
+            lock = tool.get("lock")
+            if (
+                not isinstance(source, dict)
+                or not isinstance(lock, dict)
+                or source.get("url") != f"https://static.crates.io/crates/cargo-audit/cargo-audit-{version}.crate"
+                or lock.get("path") != f"config/cargo-audit-{version}-patched.lock"
+                or any(not isinstance(item.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None for item in (source, lock))
+            ):
+                raise ValueError(f"unsupported {name} source identity")
+            lock_path = Path(__file__).resolve().parent.parent / lock["path"]
+            if hashlib.sha256(lock_path.read_bytes()).hexdigest() != lock["sha256"]:
+                raise ValueError("cargo-audit patched lockfile digest mismatch")
+            pins[name] = version
+            continue
         else:
             expected_url = f"https://github.com/EmbarkStudios/cargo-deny/releases/download/{version}/cargo-deny-{version}-x86_64-pc-windows-msvc.tar.gz"
             expected_path = f"cargo-deny-{version}-x86_64-pc-windows-msvc/cargo-deny.exe"

@@ -122,6 +122,10 @@ try {
         $artifacts += [pscustomobject]@{ source = $component; file = "$($component.id).tar.gz" }
     }
     foreach ($tool in $record.tools) {
+        if ($tool.id -ceq 'cargo-audit') {
+            $artifacts += [pscustomobject]@{ source = $tool.source; file = 'cargo-audit.crate' }
+            continue
+        }
         $extension = if ($tool.url.EndsWith('.zip', [StringComparison]::Ordinal)) { '.zip' } else { '.tar.gz' }
         $artifacts += [pscustomobject]@{ source = $tool; file = "$($tool.id)$extension" }
     }
@@ -144,12 +148,12 @@ try {
     & $installer -DestinationRoot (Join-Path $testRoot 'valid') -VerifyOnly `
         -IntegrityRecordPath $recordPath -ArchiveSourceRoot $archiveRoot
 
-    [IO.File]::AppendAllText((Join-Path $archiveRoot 'cargo-audit.zip'), 'different bytes')
+    [IO.File]::AppendAllText((Join-Path $archiveRoot 'cargo-audit.crate'), 'different bytes')
     Assert-InstallerFails -Fragment 'SHA-256 mismatch for cargo-audit' `
         -Destination (Join-Path $testRoot 'wrong-bytes') -RecordPath $recordPath `
         -ArchiveRoot $archiveRoot -Marker $marker
-    [IO.File]::WriteAllText((Join-Path $archiveRoot 'cargo-audit.zip'),
-        'approved fixture bytes: cargo-audit.zip', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $archiveRoot 'cargo-audit.crate'),
+        'approved fixture bytes: cargo-audit.crate', [Text.UTF8Encoding]::new($false))
 
     Remove-Item -LiteralPath (Join-Path $archiveRoot 'rust-std.tar.gz')
     Assert-InstallerFails -Fragment 'Required pinned artifact is missing' `
@@ -169,7 +173,7 @@ try {
     $originalAuditVersion = $record.tools[0].version
     $record.tools[0].version = '0.0.0'
     Write-Record $recordPath $record
-    Assert-InstallerFails -Fragment 'Unsupported archive layout for cargo-audit' `
+    Assert-InstallerFails -Fragment 'Unsupported cargo-audit source or lock identity' `
         -Destination (Join-Path $testRoot 'stale-scanner') -RecordPath $recordPath `
         -ArchiveRoot $archiveRoot -Marker $marker
     $record.tools[0].version = $originalAuditVersion
@@ -200,9 +204,10 @@ try {
         @{ label = 'component-digest-array'; before = "`"sha256`": `"$($component.sha256)`""; after = "`"sha256`": [`"$($component.sha256)`"]"; field = 'sha256' }
         @{ label = 'tool-id-array'; before = '"id": "cargo-audit"'; after = '"id": ["cargo-audit"]'; field = 'id' }
         @{ label = 'tool-version-array'; before = '"version": "0.22.2"'; after = '"version": ["0.22.2"]'; field = 'version' }
-        @{ label = 'tool-path-array'; before = "`"archivePath`": `"$($tool.archivePath)`""; after = "`"archivePath`": [`"$($tool.archivePath)`"]"; field = 'archivePath' }
-        @{ label = 'tool-url-array'; before = "`"url`": `"$($tool.url)`""; after = "`"url`": [`"$($tool.url)`"]"; field = 'url' }
-        @{ label = 'tool-digest-array'; before = "`"sha256`": `"$($tool.sha256)`""; after = "`"sha256`": [`"$($tool.sha256)`"]"; field = 'sha256' }
+        @{ label = 'tool-source-array'; before = '"source": {'; after = '"source": [], "unused": {'; field = 'source' }
+        @{ label = 'tool-lock-array'; before = '"lock": {'; after = '"lock": [], "unused": {'; field = 'lock' }
+        @{ label = 'tool-url-array'; before = "`"url`": `"$($tool.source.url)`""; after = "`"url`": [`"$($tool.source.url)`"]"; field = 'url' }
+        @{ label = 'tool-digest-array'; before = "`"sha256`": `"$($tool.source.sha256)`""; after = "`"sha256`": [`"$($tool.source.sha256)`"]"; field = 'sha256' }
     )
     foreach ($mutation in $kindMutations) {
         $invalid = $validRecordText.Replace($mutation.before, $mutation.after)
@@ -256,6 +261,8 @@ try {
     Copy-Item -LiteralPath $installer -Destination $fixtureInstaller
     Copy-Item -LiteralPath (Join-Path $repoRoot 'rust-toolchain.toml') `
         -Destination (Join-Path $fixtureRepo 'rust-toolchain.toml')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'config/cargo-audit-0.22.2-patched.lock') `
+        -Destination (Join-Path $fixtureConfig 'cargo-audit-0.22.2-patched.lock')
     $productionRecord = Get-Content -LiteralPath $sourceRecord -Raw | ConvertFrom-Json
     $downloadMap = @{}
 
@@ -275,6 +282,13 @@ try {
         $downloadMap[$component.url] = $archive
     }
     foreach ($tool in $productionRecord.tools) {
+        if ($tool.id -ceq 'cargo-audit') {
+            $archive = Join-Path $fixtureArchives 'cargo-audit.crate'
+            [IO.File]::WriteAllText($archive, 'approved fixture bytes: cargo-audit.crate', [Text.UTF8Encoding]::new($false))
+            $tool.source.sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $downloadMap[$tool.source.url] = $archive
+            continue
+        }
         $isZip = $tool.url.EndsWith('.zip', [StringComparison]::Ordinal)
         $archive = Join-Path $fixtureArchives "$($tool.id)$(if ($isZip) { '.zip' } else { '.tar.gz' })"
         $entries = [ordered]@{ $tool.archivePath = 'fixture executable data' }
@@ -314,17 +328,18 @@ try {
         }
     }
     foreach ($tool in $productionRecord.tools) {
+        if ($tool.id -ceq 'cargo-audit') { continue }
         if (-not (Test-Path -LiteralPath (Join-Path $validStage "tools/$($tool.id).exe") -PathType Leaf)) {
             throw "Production fixture did not stage expected tool: $($tool.id)"
         }
     }
 
     $auditTool = $productionRecord.tools[0]
-    $approvedAuditArchive = $downloadMap[$auditTool.url]
-    $wrongBytes = Join-Path $fixtureArchives 'cargo-audit-wrong-bytes.zip'
+    $approvedAuditArchive = $downloadMap[$auditTool.source.url]
+    $wrongBytes = Join-Path $fixtureArchives 'cargo-audit-wrong-bytes.crate'
     Copy-Item -LiteralPath $approvedAuditArchive -Destination $wrongBytes
     [IO.File]::AppendAllText($wrongBytes, 'same version, different bytes')
-    $downloadMap[$auditTool.url] = $wrongBytes
+    $downloadMap[$auditTool.source.url] = $wrongBytes
     $wrongBytesStage = Join-Path $testRoot 'production-wrong-bytes'
     Assert-ProductionFixture -FixtureInstaller $fixtureInstaller -Destination $wrongBytesStage `
         -DownloadMap $downloadMap -Marker $rustupMarker `
@@ -332,7 +347,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $wrongBytesStage 'toolchain')) {
         throw 'Wrong bytes reached release-tool extraction before integrity validation.'
     }
-    $downloadMap[$auditTool.url] = $approvedAuditArchive
+    $downloadMap[$auditTool.source.url] = $approvedAuditArchive
 
     foreach ($corruption in @(
             [pscustomobject]@{ id = 'rust-manifest'; url = $productionRecord.rust.manifest.url },
@@ -353,19 +368,20 @@ try {
         $downloadMap[$corruption.url] = $approved
     }
 
-    $badLayout = Join-Path $fixtureArchives 'cargo-audit-wrong-layout.zip'
-    New-ZipFixture -Path $badLayout -Entries ([ordered]@{ 'unexpected.exe' = 'wrong layout' })
-    $approvedAuditDigest = $auditTool.sha256
-    $auditTool.sha256 = (Get-FileHash -LiteralPath $badLayout -Algorithm SHA256).Hash.ToLowerInvariant()
+    $denyTool = $productionRecord.tools[1]
+    $badLayout = Join-Path $fixtureArchives 'cargo-deny-wrong-layout.tar.gz'
+    New-TarFixture -Path $badLayout -Entries ([ordered]@{ 'unexpected.exe' = 'wrong layout' })
+    $approvedDenyDigest = $denyTool.sha256
+    $denyTool.sha256 = (Get-FileHash -LiteralPath $badLayout -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Record $fixtureRecordPath $productionRecord
-    $downloadMap[$auditTool.url] = $badLayout
+    $downloadMap[$denyTool.url] = $badLayout
     Assert-ProductionFixture -FixtureInstaller $fixtureInstaller `
         -Destination (Join-Path $testRoot 'production-wrong-layout') `
         -DownloadMap $downloadMap -Marker $rustupMarker `
-        -ExpectedFailure 'Expected executable is missing from verified archive' -ExpectRustup $false
-    $auditTool.sha256 = $approvedAuditDigest
+        -ExpectedFailure 'Expected content is missing from verified archive' -ExpectRustup $false
+    $denyTool.sha256 = $approvedDenyDigest
     Write-Record $fixtureRecordPath $productionRecord
-    $downloadMap[$auditTool.url] = $approvedAuditArchive
+    $downloadMap[$denyTool.url] = Join-Path $fixtureArchives 'cargo-deny.tar.gz'
     if ($IsWindows -ne $testPlatformIsWindows) {
         throw 'Production fixture changed the PowerShell platform flag outside its call.'
     }

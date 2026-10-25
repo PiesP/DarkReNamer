@@ -82,28 +82,29 @@ fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(
             "      - name: Duplicate scanner selection\n        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins\n\n      - name: Restore pinned Rust security tools\n",
         ),
         original.replace(
-            "audit-${{ steps.scanner-pins.outputs.audit-version }}",
-            "audit-${{ github.event.inputs.audit_version }}",
+            "hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py')",
+            "steps.scanner-pins.outputs.audit-version",
         ),
-        original.replace(
-            "AUDIT_VERSION: ${{ steps.scanner-pins.outputs.audit-version }}",
-            "AUDIT_VERSION: 0.22.2",
-        ),
+        original.replace("'config/cargo-audit-0.22.2-patched.lock', ", ""),
         original.replace(
             "DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}",
             "DENY_VERSION: ${{ github.event.inputs.deny_version }}",
         ),
         original.replace(
-            "cargo-audit --version \"$AUDIT_VERSION\"",
-            "cargo-audit --version 0.22.2",
+            "python3 scripts/build-patched-cargo-audit.py --destination",
+            "python3 scripts/build-patched-cargo-audit.py --verify-only --destination",
+        ),
+        original.replace(
+            "--destination \"$SECURITY_TOOLS_ROOT/bin\"",
+            "--destination \"$GITHUB_WORKSPACE/bin\"",
         ),
         original.replace(
             "cargo-deny --version \"$DENY_VERSION\"",
             "cargo-deny --version \"$DENY_VERSION\" || true",
         ),
         original.replace(
-            "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-audit",
-            "cargo install --root \"$SECURITY_TOOLS_ROOT\" cargo-audit",
+            "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny",
+            "cargo install --root \"$SECURITY_TOOLS_ROOT\" cargo-deny",
         ),
     ] {
         assert_ne!(mutation, original, "security-pin fixture did not change CI");
