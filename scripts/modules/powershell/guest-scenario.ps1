@@ -762,6 +762,74 @@ function Invoke-ProductionPickerChecks {
     [void]$Record.Remove('active_action')
 }
 
+function Assert-GuiObserverProcessDpiResult {
+    param([AllowNull()][Nullable[int]] $NativeError)
+
+    if ($null -ne $NativeError) {
+        throw [ComponentModel.Win32Exception]::new(
+            $NativeError,
+            "GUI observer could not establish PerMonitorV2 process DPI awareness (Win32 $NativeError)."
+        )
+    }
+}
+
+function Initialize-GuiObserverProcessDpi {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw [PlatformNotSupportedException]::new('GUI observer process DPI initialization requires Windows.')
+    }
+    if (-not ('DarkReNamerVmGuiObserverDpi' -as [type])) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerVmGuiObserverDpi {
+    private static bool configured;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDpiAwarenessContextForProcess(IntPtr process);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+
+    public static int? Configure() {
+        if (configured) return null;
+        IntPtr perMonitorV2 = new IntPtr(-4);
+        bool set;
+        try {
+            set = SetProcessDpiAwarenessContext(perMonitorV2);
+        }
+        catch (EntryPointNotFoundException error) {
+            throw new PlatformNotSupportedException("GUI observer requires SetProcessDpiAwarenessContext.", error);
+        }
+        int lastError = Marshal.GetLastWin32Error();
+        if (!set) return lastError;
+        IntPtr processContext = IntPtr.Zero;
+        bool processReadbackSupported = true;
+        try {
+            processContext = GetDpiAwarenessContextForProcess(IntPtr.Zero);
+        }
+        catch (EntryPointNotFoundException) {
+            // Process-context readback was added after process-context setting.
+            processReadbackSupported = false;
+        }
+        if (processReadbackSupported && !AreDpiAwarenessContextsEqual(processContext, perMonitorV2)) {
+            throw new InvalidOperationException("GUI observer process did not enter PerMonitorV2 DPI awareness.");
+        }
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), perMonitorV2)) {
+            throw new InvalidOperationException("GUI observer thread did not inherit PerMonitorV2 DPI awareness.");
+        }
+        configured = true;
+        return null;
+    }
+}
+'@
+    }
+    Assert-GuiObserverProcessDpiResult -NativeError ([DarkReNamerVmGuiObserverDpi]::Configure())
+}
+
 function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -812,6 +880,14 @@ function Invoke-GuiSmoke {
             Assert-OrdinaryFile -Path $applicationPath -Label 'application'
             if ((Get-LowerSha256 -Path $applicationPath) -cne $Application.sha256) {
                 $row.failure_reason = 'artifact_changed_after_preflight'
+                break
+            }
+            try {
+                Initialize-GuiObserverProcessDpi
+            }
+            catch {
+                $row.failure_reason = 'dpi_awareness_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
                 break
             }
             Initialize-NativeCapture

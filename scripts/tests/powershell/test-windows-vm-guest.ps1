@@ -3455,7 +3455,11 @@ for ($index = 0; $index -lt $fileStrings.Count; $index++) {
     if ($fileStrings[$index] -cne $utf8Strings[$index]) { throw 'Guest script string decoding differs from UTF-8.' }
 }
 . $moduleLoaderPath
-Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCapture }
+Invoke-DrTestPowerShellModuleScope -Kind guest -Action {
+    Initialize-GuiObserverProcessDpi
+    Initialize-GuiObserverProcessDpi
+    Initialize-NativeCapture
+}
 '@
         $moduleLoaderPath = Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1'
         $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace(
