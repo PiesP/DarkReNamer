@@ -811,9 +811,7 @@ pub(super) fn dispatch_command(
         }
         RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
         RESET_PATH => {
-            let Some(before) = prepare_proposal_history(state) else {
-                return None;
-            };
+            let before = prepare_proposal_history(state)?;
             match state.model.reset_destination_parents() {
                 Ok(changed) => finish_proposal_edit(state, before, changed, true),
                 Err(error) => {
@@ -1006,10 +1004,16 @@ fn finish_proposal_edit(
     if let Err(error) = state.model.reserve_proposals_after_mutation(&mut before) {
         // The model's mutation has no external side effects; this preallocated
         // snapshot restores its exact UTF-16 proposals without another allocation.
-        state
+        if state
             .model
             .swap_proposals_without_allocation(&mut before)
-            .expect("synchronous proposal edit did not change source identity");
+            .is_err()
+        {
+            // This handler runs one synchronous proposal-only mutation. If a
+            // future caller also changes source identity, the model cannot be
+            // restored or safely exposed with an uncommitted revision.
+            std::process::abort();
+        }
         state.set_transient_status(proposal_history_error_korean(error));
         return CommandOutcome::ui(UiEffect::None);
     }
@@ -1526,9 +1530,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 session,
                 FileDialogCompletion::Accept,
                 |state| {
-                    let Some(before) = prepare_proposal_history(state) else {
-                        return None;
-                    };
+                    let before = prepare_proposal_history(state)?;
                     match state
                         .model
                         .unify_destination_parent_changed(&destination_parent)

@@ -807,6 +807,21 @@ pub enum ProposalSnapshotError {
     StaleSources,
 }
 
+impl fmt::Display for ProposalSnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed => formatter.write_str("proposal history allocation failed"),
+            Self::BudgetExceeded => formatter.write_str("proposal history byte budget exceeded"),
+            Self::StaleSources => formatter.write_str("proposal history source identity is stale"),
+        }
+    }
+}
+
+impl std::error::Error for ProposalSnapshotError {}
+
+/// Changed row indexes and whether any destination parent changed.
+pub type ProposalSwapResult = (Box<[usize]>, bool);
+
 /// Bounded proposal-only Undo and Redo; structural source changes invalidate it.
 #[derive(Default)]
 pub struct ProposalHistory {
@@ -896,7 +911,7 @@ impl ProposalHistory {
         &mut self,
         list: &mut LegacyList,
         toward_undo: bool,
-    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+    ) -> Result<Option<ProposalSwapResult>, ProposalSnapshotError> {
         let (source, target) = if toward_undo {
             (&mut self.undo, &mut self.redo)
         } else {
@@ -912,17 +927,26 @@ impl ProposalHistory {
         target
             .try_reserve(1)
             .map_err(|_| ProposalSnapshotError::AllocationFailed)?;
-        let result = list.swap_proposals(entry)?;
-        let entry = source.pop().expect("checked snapshot exists");
-        target.push(entry);
-        Ok(Some(result))
+        let Some(mut entry) = source.pop() else {
+            return Ok(None);
+        };
+        match list.swap_proposals(&mut entry) {
+            Ok(result) => {
+                target.push(entry);
+                Ok(Some(result))
+            }
+            Err(error) => {
+                source.push(entry);
+                Err(error)
+            }
+        }
     }
 
     /// Restores the previous proposals without touching filesystem state.
     pub fn undo(
         &mut self,
         list: &mut LegacyList,
-    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+    ) -> Result<Option<ProposalSwapResult>, ProposalSnapshotError> {
         self.move_snapshot(list, true)
     }
 
@@ -930,7 +954,7 @@ impl ProposalHistory {
     pub fn redo(
         &mut self,
         list: &mut LegacyList,
-    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+    ) -> Result<Option<ProposalSwapResult>, ProposalSnapshotError> {
         self.move_snapshot(list, false)
     }
 
@@ -1150,7 +1174,7 @@ impl LegacyList {
     pub fn swap_proposals(
         &mut self,
         snapshot: &mut ProposalSnapshot,
-    ) -> Result<(Box<[usize]>, bool), ProposalSnapshotError> {
+    ) -> Result<ProposalSwapResult, ProposalSnapshotError> {
         if !snapshot.matches(self) {
             return Err(ProposalSnapshotError::StaleSources);
         }
@@ -1518,7 +1542,7 @@ impl LegacyList {
         MoveRowsOutcome { rows, changed }
     }
 
-    /// Resets every proposed name to its current/original name (`Ctrl+Z`).
+    /// Resets every proposed name to its current/original name.
     pub fn reset_proposals(&mut self) -> Result<(), ProposalMutationError> {
         self.reset_proposals_changed().map(drop)
     }
