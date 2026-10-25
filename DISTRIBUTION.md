@@ -198,6 +198,18 @@ dependencies included and development-only dependencies excluded. The metrics
 are information only; the workflow does not apply release size or
 dependency-count thresholds.
 
+The candidate workflow also uploads a separate information-only footprint detail
+for 90 days. It records the measured PE section raw and virtual bytes, EXE/PDB/
+symbols ZIP hashes and lengths, source SHA, run/attempt, Rust/LLVM identity,
+release-profile source and flag-override digests. Available Windows tool and
+runner versions are recorded; unavailable identities are `null`. This detail is
+not part of the authenticated handoff or the public release asset list. The
+candidate job summary retains the section table and EXE identity. For a size
+comparison, select one preceding candidate by its run/attempt and verify its
+source, executable hash, target, toolchain, profile and inputs before calculating
+a delta. If an older artifact lacks the detail or build conditions differ, record
+the missing fields and treat the interval as descriptive, not a causal saving.
+
 Verify the checksum before running the executable. Verify candidate provenance
 against the repository, signer workflow, pinned master ref, and exact source
 digest recorded in `release-handoff.json`:

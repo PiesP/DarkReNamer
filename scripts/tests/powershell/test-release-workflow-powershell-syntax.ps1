@@ -918,6 +918,7 @@ $candidateReleaseFiles = Assert-OneCommand `
         '-RunId' = '$env:GITHUB_RUN_ID'
         '-RunAttempt' = '$env:GITHUB_RUN_ATTEMPT'
         '-TemporaryRoot' = '$env:RUNNER_TEMP'
+        '-DetailOutputPath' = '(Join-Path $env:RUNNER_TEMP ''darkrenamer-footprint-detail.json'')'
     }) `
     -Message 'Candidate workflow must write source-bound release files.'
 Assert-InOrder `
@@ -950,7 +951,7 @@ $candidateCheckoutLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/
 $candidateAttestLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/attest')
 $candidateUploadLines = @(Get-ActionLines -Path $candidatePath -Name 'actions/upload-artifact')
 if ($candidateCheckoutLines.Count -ne 2 -or $candidateAttestLines.Count -ne 2 -or
-    $candidateUploadLines.Count -ne 1) {
+    $candidateUploadLines.Count -ne 2) {
     throw 'Candidate action line mapping must match the YAML action policy.'
 }
 $candidateYamlLines = @(Get-Content -LiteralPath $candidatePath)
@@ -971,6 +972,7 @@ Assert-LineOrder `
         $candidateReleaseFiles.line,
         $candidateHandoff.line,
         $candidateUploadLines[0],
+        $candidateUploadLines[1],
         $candidateCheckoutLines[1],
         $candidateAttestLines[0],
         $candidateAttestLines[1]

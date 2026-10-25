@@ -1190,11 +1190,28 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
                 with_is(step, "subject-path", "dist/DarkReNamer.exe")
                     && with_is(step, "sbom-path", "dist/DarkReNamer.cdx.json")
             })
-            && uploads.len() == 1
+            && uploads.len() == 2
             && uploads[0].id.as_deref() == Some("candidate_artifact")
             && with_is(uploads[0], "path", "dist/")
             && with_is(uploads[0], "if-no-files-found", "error")
-            && action_sequence(candidate_job) == ["actions/checkout", "actions/upload-artifact"],
+            && uploads[1].id.is_none()
+            && with_is(
+                uploads[1],
+                "name",
+                "DarkReNamer-footprint-${{ github.run_id }}-${{ github.run_attempt }}",
+            )
+            && with_is(
+                uploads[1],
+                "path",
+                "${{ runner.temp }}/darkrenamer-footprint-detail.json",
+            )
+            && with_is(uploads[1], "if-no-files-found", "error")
+            && action_sequence(candidate_job)
+                == [
+                    "actions/checkout",
+                    "actions/upload-artifact",
+                    "actions/upload-artifact",
+                ],
         "candidate must attest and retain an addressable immutable handoff",
     )?;
     script_contract(candidate_path, &script(candidate_job), &[], &["gh release"])?;
