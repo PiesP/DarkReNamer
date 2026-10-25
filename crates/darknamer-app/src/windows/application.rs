@@ -2552,14 +2552,22 @@ mod tests {
     struct ControlledImportRelease<'a> {
         app: &'a PublishedFileDialogTestApp,
         sender: Option<Sender<()>>,
+        joined: bool,
     }
 
     impl ControlledImportRelease<'_> {
         fn release_and_join(&mut self) -> io::Result<()> {
+            if self.joined {
+                return Ok(());
+            }
             if let Some(sender) = self.sender.take() {
                 let _sent = sender.send(());
             }
-            self.app.drain_import()
+            if self.app.with_state(|state| state.import_worker.is_some())? {
+                self.app.drain_import()?;
+            }
+            self.joined = true;
+            Ok(())
         }
     }
 
@@ -2997,6 +3005,7 @@ mod tests {
             let mut release = ControlledImportRelease {
                 app: &app,
                 sender: Some(release_sender),
+                joined: false,
             };
             app.with_state(|state| {
                 state.active_prompt = Some(session_id);
@@ -3060,6 +3069,7 @@ mod tests {
             let released_at = std::time::Instant::now();
             release.release_and_join()?;
             let retired_after_release = released_at.elapsed();
+            release.release_and_join()?;
             app.with_state(|state| {
                 assert!(state.import_worker.is_none());
                 assert_eq!(state.active_prompt, None);
