@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -220,6 +221,7 @@ FULL_CONTEXT_SEMANTICS = {
     "normal_exit",
 }
 STANDARD_SEMANTICS = {
+    "proposal_history_exact",
     "scope_exact",
     "total_3_selected_1_changed_2",
     "application_confirmed",
@@ -318,6 +320,84 @@ def typed_equal(left: object, right: object) -> bool:
 
 def int_equals(value: object, expected: int) -> bool:
     return type(value) is int and value == expected
+
+
+def validate_proposal_history_state(value: object, *, label: str, row: int, count: int,
+                                    current: str, proposed: str, undo: bool, redo: bool,
+                                    apply: bool, selected: int | None = None) -> None:
+    state = exact_keys(value, {"label", "row", "row_count", "current_name", "proposed_name",
+                               "undo_enabled", "redo_enabled", "apply_enabled", "selected_count",
+                               "selected_name", "focus_control_id", "status"}, label)
+    require(state["label"] == label and int_equals(state["row"], row) and
+            int_equals(state["row_count"], count) and state["current_name"] == current and
+            state["proposed_name"] == proposed and state["undo_enabled"] is undo and
+            state["redo_enabled"] is redo and state["apply_enabled"] is apply and
+            type(state["selected_count"]) is int and 0 <= state["selected_count"] <= 1 and
+            (selected is None or state["selected_count"] == selected) and
+            (state["selected_name"] is None if state["selected_count"] == 0 else
+             state["selected_name"] == current) and
+            isinstance(state["focus_control_id"], str) and bool(state["focus_control_id"]) and
+            isinstance(state["status"], str), f"{label} has an invalid proposal or UI state.")
+
+
+def validate_standard_proposal_history(scenario: dict, mode: str) -> bool:
+    fixture = nested(scenario, "fixture")
+    require(isinstance(fixture, dict) and type(fixture.get("sources")) is list and
+            type(fixture.get("destinations")) is list and
+            len(fixture["sources"]) == len(fixture["destinations"]) == 3,
+            "Proposal history fixture is incomplete.")
+    sources = [ntpath.basename(path) for path in fixture["sources"]]
+    destinations = [ntpath.basename(path) for path in fixture["destinations"]]
+    history = exact_keys(nested(scenario, "proposal_history"),
+                         {"initial", "edited", "shortcut_undo", "shortcut_redo",
+                          "menu_undo", "menu_redo", "before_branch", "cancelled_edit", "new_edit",
+                          "apply_cancel", "reset_after_blocked", "successful_apply"}
+                         if mode == "standard" else
+                         {"initial", "edited", "shortcut_undo", "shortcut_redo",
+                          "menu_undo", "menu_redo", "before_branch", "cancelled_edit", "new_edit",
+                          "apply_cancel", "successful_apply"}, "standard proposal history")
+    stages = (
+        ("initial", 0, sources[0], False, False, False, None),
+        ("edited", 0, destinations[0], True, False, True, 1),
+        ("shortcut_undo", 0, sources[0], False, True, False, 1),
+        ("shortcut_redo", 0, destinations[0], True, False, True, 1),
+        ("menu_undo", 1, sources[1], True, True, True, 1),
+        ("menu_redo", 1, destinations[1], True, False, True, 1),
+        ("before_branch", 1, sources[1], True, True, True, 1),
+        ("cancelled_edit", 1, sources[1], True, True, True, 1),
+        ("new_edit", 1, destinations[1], True, False, True, 1),
+        ("apply_cancel", 0, destinations[0], True, False, True, None),
+    )
+    for key, row, proposed, undo, redo, apply, selected in stages:
+        validate_proposal_history_state(history[key], label={
+            "initial": "history initial", "edited": "history edited",
+            "shortcut_undo": "history shortcut Undo", "shortcut_redo": "history shortcut Redo",
+            "menu_undo": "history menu Undo", "menu_redo": "history menu Redo",
+            "before_branch": "history before branch", "new_edit": "history new edit",
+            "cancelled_edit": "history canceled edit",
+            "apply_cancel": "history canceled Apply"}[key], row=row, count=3,
+            current=sources[row], proposed=proposed, undo=undo, redo=redo,
+            apply=apply, selected=selected)
+    if mode == "standard":
+        validate_proposal_history_state(history["reset_after_blocked"],
+            label="history reset after blocked", row=0, count=3, current=sources[0],
+            proposed=sources[0], undo=True, redo=False, apply=False)
+        blocked = nested(scenario, "blocking")
+        for key, label, proposed, undo in (
+            ("no_change", "blocked reset history", sources[0], True),
+            ("collision", "blocked collision history", "충돌-😀-같은-대상.txt", True),
+            ("invalid_name", "blocked invalid-name history", "bad:name.txt", True)):
+            validate_proposal_history_state(nested(blocked, key, "history"), label=label,
+                row=0, count=3, current=sources[0], proposed=proposed, undo=undo,
+                redo=False, apply=False)
+    complete = exact_keys(history["successful_apply"],
+                          {"undo_enabled", "redo_enabled", "apply_enabled", "journal_residue_count"},
+                          "history after successful Apply")
+    require(complete["undo_enabled"] is False and complete["redo_enabled"] is False and
+            complete["apply_enabled"] is False and
+            int_equals(complete["journal_residue_count"], 0),
+            "Successful Apply retained proposal history or journal residue.")
+    return True
 
 
 def validate_rectangle(value: object, label: str) -> dict:
@@ -1134,6 +1214,7 @@ def derive_raw_semantics(raw: dict, mode: str, cleanup: dict, result: dict) -> d
         full_details = nested(confirmation, "full_details")
         cancellation = nested(confirmation, "cancellation")
         derived = {
+            "proposal_history_exact": validate_standard_proposal_history(scenario, mode),
             "scope_exact": nested(confirmation, "scope_3_1_2") is True and default_cancel(nested(confirmation, "default_focus")) and nested(apply, "scope") == "3/1/2",
             "total_3_selected_1_changed_2": int_equals(nested(fixture, "count"), 3) and int_equals(nested(fixture, "selected"), 1) and int_equals(nested(fixture, "changed"), 2) and int_equals(nested(scenario, "selection", "selected_count"), 1),
             "application_confirmed": isinstance(apply, dict) and valid_apply_entry(nested(apply, "apply_entry")) and nested(apply, "scope") == "3/1/2" and returned_to_preview(cancellation),
@@ -2282,6 +2363,31 @@ def validate_pair_default_columns(run_root: Path, raw: dict, collection_files: d
     return {"status": "passed", "settings_absent_before_launch": True, "phases": results}
 
 
+def validate_pair_proposal_history(value: object, *, current: str, baseline: str,
+                                   edited: str, baseline_apply: bool, reset: bool) -> None:
+    history = exact_keys(value, {"baseline_name", "edited_name", "initial", "edited",
+                                 "shortcut_undo", "shortcut_redo", "menu_undo", "reset"},
+                         "appearance proposal history")
+    require(history["baseline_name"] == baseline and history["edited_name"] == edited and
+            isinstance(current, str) and bool(current),
+            "Appearance history names differ from the fixed scene.")
+    for key, label, proposed, undo, redo, apply in (
+        ("initial", "appearance history initial", baseline, True, False, baseline_apply),
+        ("edited", "appearance history edited", edited, True, False, True),
+        ("shortcut_undo", "appearance history Ctrl+Z", baseline, True, True, baseline_apply),
+        ("shortcut_redo", "appearance history Ctrl+Y", edited, True, False, True),
+        ("menu_undo", "appearance history menu Undo", baseline, True, True, baseline_apply),
+    ):
+        validate_proposal_history_state(history[key], label=label, row=0, count=60,
+            current=current, proposed=proposed, undo=undo, redo=redo, apply=apply, selected=1)
+    if reset:
+        validate_proposal_history_state(history["reset"], label="appearance history reset",
+            row=0, count=60, current=current, proposed=baseline, undo=True, redo=False,
+            apply=baseline_apply, selected=1)
+    else:
+        require(history["reset"] is None, "Forced Colors history reset unexpectedly.")
+
+
 def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, dict],
                          actual: dict, high_contrast: bool = False) -> dict:
     scenario = nested(raw, "assertions", "scenario")
@@ -2915,6 +3021,22 @@ def validate_pair_scenes(run_root: Path, raw: dict, collection_files: dict[str, 
                     "phase": phase, "axis": axis, "stage": stage, "components": bar,
                     "scroll": scroll, "palette_pixels": palette_pixels, "bar_luma": pair_region_luma(rgba, width, height, rect, f"{axis}-{stage}")})
         diagnostics.setdefault("interactions", []).append({"phase": phase, "buttons": list(buttons)})
+    first_source = nested(scenes, "unchanged")
+    require(isinstance(first_source, list) and isinstance(first_source[0], dict),
+            "Appearance history source scene is absent.")
+    source_name = nested(first_source[0], "state", "current_names")
+    require(isinstance(source_name, list) and len(source_name) == 1 and
+            isinstance(source_name[0], str), "Appearance history source name is absent.")
+    validate_pair_proposal_history(scenario.get("proposal_history"), current=source_name[0],
+        baseline=source_name[0], edited="paired-history-00.txt", baseline_apply=False,
+        reset=True)
+    cleared = exact_keys(scenario.get("proposal_history_clear"),
+                         {"row_count", "undo_enabled", "redo_enabled", "apply_enabled"},
+                         "appearance structural history clear")
+    require(int_equals(cleared["row_count"], 0) and
+            all(cleared[key] is False for key in
+                ("undo_enabled", "redo_enabled", "apply_enabled")),
+            "Appearance structural Clear retained proposal history or rows.")
     if high_contrast:
         diagnostics["system_and_forced_colors"] = validate_pair_high_contrast(run_root, raw, collection_files, actual, capture_pixels)
     else:
@@ -2944,7 +3066,7 @@ def validate_pair_high_contrast(run_root: Path, raw: dict, files: dict, actual: 
                                 capture_pixels) -> list[dict]:
     scenario = raw["assertions"]["scenario"]
     contrast = exact_keys(scenario.get("high_contrast"),
-        {"snapshot", "restoration_verified", "original_enabled", "acceptance_enabled", "before", "active", "after"},
+        {"snapshot", "restoration_verified", "original_enabled", "acceptance_enabled", "before", "active", "after", "proposal_history"},
         "appearance High Contrast probe")
     require(contrast["restoration_verified"] is True and contrast["original_enabled"] is False and
             contrast["acceptance_enabled"] is True and
@@ -2952,6 +3074,11 @@ def validate_pair_high_contrast(run_root: Path, raw: dict, files: dict, actual: 
             nested(raw, "high_contrast", "restoration") == "verified" and
             typed_equal(nested(raw, "high_contrast", "snapshot"), contrast["snapshot"]),
             "Appearance High Contrast activation or restoration is missing.")
+    source_names = nested(contrast, "active", "current_names")
+    require(isinstance(source_names, list) and len(source_names) == 60,
+            "Forced Colors history source names are absent.")
+    validate_pair_proposal_history(contrast["proposal_history"], current=source_names[0],
+        baseline=".txt", edited="forced-history-00.txt", baseline_apply=True, reset=False)
     document = validate_pair_restoration(run_root, raw, files, contrast["snapshot"], "high-contrast-restore.json", 2)
     require(document["restoration_required"] is False, "Appearance High Contrast rescue is still pending.")
     original = exact_keys(document["original"], {"flags", "scheme", "colors", "visual_style"}, "High Contrast original")

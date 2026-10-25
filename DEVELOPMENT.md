@@ -916,6 +916,16 @@ all candidate lifetimes and their closed Jobs, complete owned-resource and
 required-environment observations, and successful settings restoration. Ambient
 process residency alone does not change the existing v2 contract.
 
+The standard and Text150 cells exercise proposal Undo and Redo through Ctrl+Z,
+Ctrl+Y, and the native Edit commands. The observer checks selected row values,
+menu enablement, Apply readiness, a canceled manual edit preserving Redo,
+a new edit retiring Redo, canceled Apply
+retaining history, blocked collision and invalid-name proposals, reset
+remaining undoable, structural Clear invalidation, and successful Apply
+invalidation. The independent GUI verifier
+requires the exact transition record; the existing screenshot inventory and
+owned-resource cleanup contract remain fixed.
+
 Omitting the selector retains historical v1 behavior and its original run IDs;
 explicit v1 remains available. Preserved v1 failures cannot be reclassified as
 v2 success. Fixed GUI diagnostics do not replace the complete source-bound
@@ -1049,6 +1059,10 @@ System state and client pixels. Source/script-bound restoration receipts precede
 setting mutations. Producer `finally` and existing controller terminal/timeout
 rescue paths restore the original settings, and collected receipts must verify
 restoration. Normal OS Light/Dark setting transitions are not exercised.
+Each of the five focused appearance configurations also checks a proposal
+Undo/Redo transition against the native ListView and menu state. The Forced
+Colors configuration repeats it while native fallback is active, before the
+original settings are restored. These steps add no captures or fixture files.
 
 The independent verifier checks source/EXE/environment bindings, exact capture
 inventory, state invariance, proposed-name semantic pixels without current-name

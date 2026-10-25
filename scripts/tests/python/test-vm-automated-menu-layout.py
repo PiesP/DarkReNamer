@@ -40,7 +40,7 @@ class NativeMenuLayoutTests(unittest.TestCase):
                 opener = next(event for event in events if event["input"] == "alt-e")
                 opener["highlighted"].update(position=1, command_id=65535)
             else:
-                position = 1 if mutation == "skipped-disabled-row" else 5
+                position = 1 if mutation == "skipped-disabled-row" else 7
                 events[:] = [event for event in events if not (
                     event["input"] == "down" and event["highlighted"]["menu_path"] == [1]
                     and event["highlighted"]["position"] == position)]
@@ -56,6 +56,10 @@ class NativeMenuLayoutTests(unittest.TestCase):
             "hidden-foreign-parent": lambda row: row["native_menu_only"]["hidden_rail_controls"][0].update(parent_hwnd=99),
             "hidden-control-id": lambda row: row["native_menu_only"]["hidden_rail_controls"][0].update(control_id=1),
             "wrong-command-path": lambda row: row["native_menu_only"]["menu_tree"][8].update(command_id=32772),
+            "history-enabled": lambda row: next(item for item in row["native_menu_only"]["menu_tree"]
+                if item["command_id"] == 32806).update(enabled=True, state_flags=0),
+            "history-path": lambda row: next(item for item in row["native_menu_only"]["menu_tree"]
+                if item["command_id"] == 32807).update(command_id=32809),
             "flags-lie": lambda row: row["native_menu_only"]["menu_tree"][8].update(enabled=True),
             "foreign-popup": lambda row: row["native_menu_only"]["events"][0]["popups"][0].update(pid=99),
             "clipped-highlight": lambda row: row["native_menu_only"]["events"][4]["highlighted"]["item_rect"].update(right=700),

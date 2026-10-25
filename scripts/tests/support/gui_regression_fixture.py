@@ -56,6 +56,7 @@ FIXTURE_MODE_SEMANTICS = {
         'repeated_scope_exact',
     }),
     'standard': frozenset({
+        'proposal_history_exact',
         'application_confirmed',
         'content_preserved',
         'destination_reached',
@@ -68,6 +69,7 @@ FIXTURE_MODE_SEMANTICS = {
         'total_3_selected_1_changed_2',
     }),
     'text-scale': frozenset({
+        'proposal_history_exact',
         'application_confirmed',
         'content_preserved',
         'destination_reached',
@@ -204,6 +206,58 @@ def physical_menu_apply_entry() -> dict:
     }
 
 
+def proposal_history_state(label: str, row: int, count: int, current: str,
+                           proposed: str, undo: bool, redo: bool, apply: bool,
+                           selected: int = 1) -> dict:
+    return {"label": label, "row": row, "row_count": count, "current_name": current,
+            "proposed_name": proposed, "undo_enabled": undo, "redo_enabled": redo,
+            "apply_enabled": apply, "selected_count": selected,
+            "selected_name": current if selected else None,
+            "focus_control_id": "1000", "status": "변경 가능" if apply else "변경 없음"}
+
+
+def standard_proposal_history(mode: str, sources: list[str], destinations: list[str]) -> dict:
+    state = proposal_history_state
+    first, second = sources[:2]
+    changed_first, changed_second = destinations[:2]
+    result = {
+        "initial": state("history initial", 0, 3, first, first, False, False, False, 0),
+        "edited": state("history edited", 0, 3, first, changed_first, True, False, True),
+        "shortcut_undo": state("history shortcut Undo", 0, 3, first, first, False, True, False),
+        "shortcut_redo": state("history shortcut Redo", 0, 3, first, changed_first, True, False, True),
+        "menu_undo": state("history menu Undo", 1, 3, second, second, True, True, True),
+        "menu_redo": state("history menu Redo", 1, 3, second, changed_second, True, False, True),
+        "before_branch": state("history before branch", 1, 3, second, second, True, True, True),
+        "cancelled_edit": state("history canceled edit", 1, 3, second, second, True, True, True),
+        "new_edit": state("history new edit", 1, 3, second, changed_second, True, False, True),
+        "apply_cancel": state("history canceled Apply", 0, 3, first, changed_first, True, False, True),
+        "successful_apply": {"undo_enabled": False, "redo_enabled": False,
+                             "apply_enabled": False, "journal_residue_count": 0},
+    }
+    if mode == "standard":
+        result["reset_after_blocked"] = state("history reset after blocked", 0, 3,
+                                                first, first, True, False, False)
+    return result
+
+
+def pair_proposal_history(current: str, baseline: str, edited: str,
+                          baseline_apply: bool, reset: bool) -> dict:
+    state = proposal_history_state
+    return {"baseline_name": baseline, "edited_name": edited,
+            "initial": state("appearance history initial", 0, 60, current, baseline,
+                             True, False, baseline_apply),
+            "edited": state("appearance history edited", 0, 60, current, edited,
+                            True, False, True),
+            "shortcut_undo": state("appearance history Ctrl+Z", 0, 60, current, baseline,
+                                   True, True, baseline_apply),
+            "shortcut_redo": state("appearance history Ctrl+Y", 0, 60, current, edited,
+                                   True, False, True),
+            "menu_undo": state("appearance history menu Undo", 0, 60, current, baseline,
+                               True, True, baseline_apply),
+            "reset": state("appearance history reset", 0, 60, current, baseline,
+                           True, False, baseline_apply) if reset else None}
+
+
 def scenario(mode: str) -> dict:
     if mode == "full-context":
         def confirmation() -> dict:
@@ -284,9 +338,14 @@ def scenario(mode: str) -> dict:
             },
         }
     if mode in {"standard", "text-scale"}:
+        source_names = ["source-0.txt", "source-1.md", "source-2.txt"]
+        destination_names = ["changed-0.txt", "changed-1.md", "source-2.txt"]
         result = {
             "environment": {"text_scale_factor_percent": 150 if mode == "text-scale" else 100},
-            "fixture": {"count": 3, "selected": 1, "changed": 2},
+            "fixture": {"count": 3, "selected": 1, "changed": 2,
+                        "sources": ["C:\\fixture\\" + name for name in source_names],
+                        "destinations": ["C:\\fixture\\" + name for name in destination_names]},
+            "proposal_history": standard_proposal_history(mode, source_names, destination_names),
             "selection": {"selected_count": 1},
             "confirmation": {
                 "scope_3_1_2": True,
@@ -322,7 +381,15 @@ def scenario(mode: str) -> dict:
             result["limitations"] = ["native-taskdialog-text-scale-not-observed"]
             result["blocking"] = {"status": "not-run", "reason": "covered-by-paired-text100-standard-run"}
         else:
-            result["blocking"] = {name: {"blocked": True} for name in ("no_change", "collision", "invalid_name")}
+            result["blocking"] = {
+                "no_change": {"blocked": True, "history": proposal_history_state(
+                    "blocked reset history", 0, 3, source_names[0], source_names[0], True, False, False)},
+                "collision": {"blocked": True, "history": proposal_history_state(
+                    "blocked collision history", 0, 3, source_names[0],
+                    "충돌-😀-같은-대상.txt", True, False, False)},
+                "invalid_name": {"blocked": True, "history": proposal_history_state(
+                    "blocked invalid-name history", 0, 3, source_names[0],
+                    "bad:name.txt", True, False, False)}}
         return result
     return {
         "mode": "context-surface",
@@ -1045,6 +1112,11 @@ class Fixture:
                 "column_preferences": {"source": "isolated-persisted-user-settings", "format_version": 1,
                                        "primary_width_dip": [900, 900, 260], "sha256": "c" * 64}},
             "scenes": scenes, "interactions": interactions,
+            "proposal_history": pair_proposal_history(
+                "00-한국어-日本語.txt", "00-한국어-日本語.txt",
+                "paired-history-00.txt", False, True),
+            "proposal_history_clear": {"row_count": 0, "undo_enabled": False,
+                                       "redo_enabled": False, "apply_enabled": False},
             "transition_preservation": {
                 "snapshot_order": list(FIXTURE_PAIR_TRANSITION_PHASES),
                 "fixture": {"source": "isolated-persisted-user-settings",

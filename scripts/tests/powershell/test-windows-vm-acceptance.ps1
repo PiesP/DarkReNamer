@@ -2053,12 +2053,14 @@ try {
     & $addMenuRow ([int[]]@(0)) 2 'command' 32771 $false
     & $addMenuRow ([int[]]@(1)) 0 'command' 32783 $false
     & $addMenuRow ([int[]]@(1)) 1 'command' 65535 $false
-    & $addMenuRow ([int[]]@(1)) 2 'separator' $null $false
-    & $addMenuRow ([int[]]@(1)) 3 'command' 32798 $true
-    & $addMenuRow ([int[]]@(1)) 4 'command' 32799 $true
-    & $addMenuRow ([int[]]@(1)) 5 'command' 32784 $true
-    & $addMenuRow ([int[]]@(1)) 6 'separator' $null $false
-    & $addMenuRow ([int[]]@(1)) 7 'command' 32781 $false
+    & $addMenuRow ([int[]]@(1)) 2 'command' 32806 $false
+    & $addMenuRow ([int[]]@(1)) 3 'command' 32807 $false
+    & $addMenuRow ([int[]]@(1)) 4 'separator' $null $false
+    & $addMenuRow ([int[]]@(1)) 5 'command' 32798 $true
+    & $addMenuRow ([int[]]@(1)) 6 'command' 32799 $true
+    & $addMenuRow ([int[]]@(1)) 7 'command' 32784 $true
+    & $addMenuRow ([int[]]@(1)) 8 'separator' $null $false
+    & $addMenuRow ([int[]]@(1)) 9 'command' 32781 $false
     & $addMenuRow ([int[]]@(2)) 0 'command' 32800 $true
     foreach ($position in 0..4) {
         & $addMenuRow ([int[]]@(3)) $position 'submenu' $null $true

@@ -79,18 +79,20 @@ def menu_tree() -> list[dict]:
         tree_item((0, 6), 0, "command", 32801),
         tree_item((1,), 0, "command", 32783, enabled=False),
         tree_item((1,), 1, "command", 65535, enabled=False),
-        tree_item((1,), 2, "separator", None, enabled=False),
-        tree_item((1,), 3, "command", 32798, enabled=False),
-        tree_item((1,), 4, "command", 32799, enabled=False),
-        tree_item((1,), 5, "command", 32784),
-        tree_item((1,), 6, "separator", None, enabled=False),
-        tree_item((1,), 7, "command", 32781, enabled=False),
-        tree_item((1,), 8, "submenu", None),
-        tree_item((1,), 9, "separator", None, enabled=False),
-        tree_item((1,), 10, "command", 32782),
-        tree_item((1, 8), 0, "command", 32802), tree_item((1, 8), 1, "command", 32803),
+        tree_item((1,), 2, "command", 32806, enabled=False),
+        tree_item((1,), 3, "command", 32807, enabled=False),
+        tree_item((1,), 4, "separator", None, enabled=False),
+        tree_item((1,), 5, "command", 32798, enabled=False),
+        tree_item((1,), 6, "command", 32799, enabled=False),
+        tree_item((1,), 7, "command", 32784),
+        tree_item((1,), 8, "separator", None, enabled=False),
+        tree_item((1,), 9, "command", 32781, enabled=False),
+        tree_item((1,), 10, "submenu", None),
+        tree_item((1,), 11, "separator", None, enabled=False),
+        tree_item((1,), 12, "command", 32782),
+        tree_item((1, 10), 0, "command", 32802), tree_item((1, 10), 1, "command", 32803),
         tree_item((2,), 0, "command", 32804),
-        tree_item((4,), 0, "command", 32805), tree_item((5,), 0, "command", 32806),
+        tree_item((4,), 0, "command", 32805), tree_item((5,), 0, "command", 32808),
     ])
     groups = ((32772, 32773, 32774), (32775, 32776, 32777), (32778, 32779, 32780),
               (32788, 32789, 32790), (32785, 32786))
@@ -157,7 +159,7 @@ def layout(*, opener_highlights: bool = False) -> dict:
     emit("alt-e", [(1,)], (1, 0) if opener_highlights else None)
     if not opener_highlights:
         emit("down", [(1,)], (1, 0))
-    for position in (1, 3, 4, 5):
+    for position in (1, 2, 3, 5, 6, 7):
         emit("down", [(1,)], (1, position))
     emit("escape", [], (1,))
     emit("escape", [], None)

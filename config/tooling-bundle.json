@@ -219,7 +219,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "0b66e189b4a626568d95ea14367ec86ad9ec575fb7fa6734592819bf35f80b77",
+      "sha256": "ba400cd0ff5502311325a8d3a1741bab276b93bb765b95ddd3137959ada71b71",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -267,7 +267,7 @@
       "bundle": "tooling-contracts-menu-layout.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.menu_layout",
-      "sha256": "75f478dea9949d1ba3c2637d3dea7482d1bd48cfd6f45662946bddb5999a7034",
+      "sha256": "8f301413b71d58e89246371c6a0ed35efc9fda97dca62603004c9007df5f4f4c",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -437,7 +437,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "9828989360a806ed2b4b24869c4337b5572d6910ff9018bf74cd523ad24ff776",
+      "sha256": "a4f5bcc32774f8e13686f6601ccaacd77c06bbdb3915f4e5cc7d879c705812ca",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -601,7 +601,7 @@
       "bundle": "ui-menu.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "422f31951ed9785a71e4e0f8dae101dc4be9d600fe1d34af485246282f341b28",
+      "sha256": "ce57120326577bcbaf796f36f154ceede48795f4ef3280834282f55901f78881",
       "dependencies": []
     },
     {
@@ -619,7 +619,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e0a8925581be2f2f60bb7db7cd3bffab0731929b457179f85ab162df1b5cbd90",
+      "sha256": "4b09c7c63759ea690ac9d59a255b0dfac14e5ad18057dd22cebdd1c77ee341c9",
       "dependencies": []
     },
     {
@@ -637,7 +637,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "d10bf1bb61b3630656aa3a1e99c79b3e469856c43e53a4e2c957a108e8fd89f5",
+      "sha256": "4a9293a380d316634890cc908acb15b5053dba5b21fad5224005f6908fb8d58a",
       "dependencies": []
     },
     {

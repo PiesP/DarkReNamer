@@ -234,6 +234,7 @@ FULL_CONTEXT_SEMANTICS = {
     "mixed_disk_unchanged", "mixed_plan_identity_stable", "journal_clean", "normal_exit",
 }
 STANDARD_SEMANTICS = {
+    "proposal_history_exact",
     "scope_exact", "total_3_selected_1_changed_2", "application_confirmed",
     "destination_reached", "content_preserved", "identity_preserved", "journal_clean",
     "input_text_observed", "full_details_text_observed", "normal_exit",
@@ -572,6 +573,7 @@ def project_raw_semantics(observer: dict, cleanup: dict, run_root: Path, mode: s
         require(isinstance(work_area, dict), "Raw standard work area is missing.")
         metrics = text_metric_samples(run_root / "output" / "text-raster-metrics.json")
         projection = {
+            "proposal_history_exact": isinstance(nested(scenario, "proposal_history"), dict),
             "scope_exact": nested(confirmation, "scope_3_1_2") is True and default_cancel(nested(confirmation, "default_focus")) and nested(actual_apply, "scope") == "3/1/2",
             "total_3_selected_1_changed_2": int_equals(nested(fixture, "count"), 3) and int_equals(nested(fixture, "selected"), 1) and int_equals(nested(fixture, "changed"), 2) and int_equals(nested(scenario, "selection", "selected_count"), 1),
             "application_confirmed": valid_apply_entry(nested(actual_apply, "apply_entry")) and nested(actual_apply, "scope") == "3/1/2" and returned_to_preview(nested(confirmation, "cancellation")),

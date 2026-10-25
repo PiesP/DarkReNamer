@@ -235,7 +235,7 @@ function Invoke-MenuEndpointInput {
         { $_ -like 'alt-*' } {
             if ($menu.root -ne -1 -or $menu.menu_bar) { throw 'Previous menu session was not closed.' }
             $menu.root = switch ($KeyAction) { 'alt-f' { 0 } 'alt-e' { 1 } 'alt-t' { 3 } }
-            $menu.position = if ($menu.root -eq 1) { 5 } else { 0 }
+            $menu.position = if ($menu.root -eq 1) { 7 } else { 0 }
         }
         'down' {
             if ($null -ne $menu.child) {
@@ -452,8 +452,10 @@ foreach ($child in 0..4) { Add-MenuFixtureRow @(3) $child 'submenu' }
 foreach ($spec in @(Get-VmAutomatedNativeMenuCommandSpec)) {
     Add-MenuFixtureRow $spec.menu_path $spec.position 'command' $spec.command_id $spec.expected_enabled
 }
+Add-MenuFixtureRow @(1) 2 'command' 32806 $false
+Add-MenuFixtureRow @(1) 3 'command' 32807 $false
 foreach ($position in @(0,1)) { Add-MenuFixtureRow @(0) $position 'separator' }
-foreach ($position in @(2,3,4,6)) { Add-MenuFixtureRow @(1) $position 'separator' }
+foreach ($position in @(4,5,6,8)) { Add-MenuFixtureRow @(1) $position 'separator' }
 Add-MenuFixtureRow @(2) 0 'separator'
 [void](Assert-VmAutomatedNativeMenuTree -MenuTree $validMenuTree.ToArray())
 function Initialize-AcceptanceNativeOpen { }

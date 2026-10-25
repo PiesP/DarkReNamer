@@ -25,6 +25,7 @@ from darkrenamer_tooling.evidence import gui as evidence
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
     physical_menu_apply_entry, scenario, Fixture, first_clear_product_tree,
+    pair_proposal_history,
 )
 
 
@@ -49,6 +50,18 @@ class SyntheticFixtureTestCase(unittest.TestCase):
 
 
 class GuiEvidenceTests(SyntheticFixtureTestCase):
+    def test_proposal_history_transitions_fail_closed_on_redo_and_blocked_state(self):
+        for mode in ("standard", "text-scale"):
+            record = scenario(mode)
+            self.assertTrue(evidence.validate_standard_proposal_history(record, mode))
+            record["proposal_history"]["new_edit"]["redo_enabled"] = True
+            with self.subTest(mode=mode), self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+                evidence.validate_standard_proposal_history(record, mode)
+        record = scenario("standard")
+        record["blocking"]["collision"]["history"]["apply_enabled"] = True
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_standard_proposal_history(record, "standard")
+
     @staticmethod
     def bind_v2_fixture_vm(run: Path, manifest: dict, transport: dict) -> None:
         """Make the synthetic preflight, postlaunch and transport one VM identity."""
@@ -802,6 +815,18 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
 
 
 class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
+    def test_appearance_history_requires_actual_redo_and_reset_states(self):
+        record = pair_proposal_history("00-한국어-日本語.txt", "00-한국어-日本語.txt",
+                                       "paired-history-00.txt", False, True)
+        evidence.validate_pair_proposal_history(record, current="00-한국어-日本語.txt",
+            baseline="00-한국어-日本語.txt", edited="paired-history-00.txt",
+            baseline_apply=False, reset=True)
+        record["reset"]["redo_enabled"] = True
+        with self.assertRaisesRegex(evidence.EvidenceError, "invalid proposal"):
+            evidence.validate_pair_proposal_history(record, current="00-한국어-日本語.txt",
+                baseline="00-한국어-日本語.txt", edited="paired-history-00.txt",
+                baseline_apply=False, reset=True)
+
     def test_pair_fixture_does_not_follow_changed_verifier_scene_inventory(self):
         with mock.patch.object(evidence, "PAIR_SCENES", ("unexpected-scene",)):
             run = self.pair_run
@@ -1044,7 +1069,10 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
                                                        (255, 255, 0) if active else (142, 83, 0))
         contrast = base["assertions"]["scenario"]["high_contrast"]
         contrast.update({"snapshot": None, "restoration_verified": True,
-                         "original_enabled": False, "acceptance_enabled": True})
+                         "original_enabled": False, "acceptance_enabled": True,
+                         "proposal_history": pair_proposal_history(
+                             base_state["current_names"][0], ".txt",
+                             "forced-history-00.txt", True, False)})
         files = bind_document()
         def capture_pixels(receipt, expected_name, appearance, surface):
             self.assertEqual((receipt["file"], appearance, surface),

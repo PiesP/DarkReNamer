@@ -172,10 +172,10 @@ function Get-VmAutomatedNativeMenuCommandSpec {
         [ordered]@{ command_id = 32778; menu_path = [int[]]@(3,2); position = 0; expected_enabled = $true }
         [ordered]@{ command_id = 32779; menu_path = [int[]]@(3,2); position = 1; expected_enabled = $true }
         [ordered]@{ command_id = 32780; menu_path = [int[]]@(3,2); position = 2; expected_enabled = $true }
-        [ordered]@{ command_id = 32781; menu_path = [int[]]@(1); position = 7; expected_enabled = $false }
+        [ordered]@{ command_id = 32781; menu_path = [int[]]@(1); position = 9; expected_enabled = $false }
         [ordered]@{ command_id = 32783; menu_path = [int[]]@(1); position = 0; expected_enabled = $false }
         [ordered]@{ command_id = 65535; menu_path = [int[]]@(1); position = 1; expected_enabled = $false }
-        [ordered]@{ command_id = 32784; menu_path = [int[]]@(1); position = 5; expected_enabled = $true }
+        [ordered]@{ command_id = 32784; menu_path = [int[]]@(1); position = 7; expected_enabled = $true }
         [ordered]@{ command_id = 32788; menu_path = [int[]]@(3,3); position = 0; expected_enabled = $true }
         [ordered]@{ command_id = 32789; menu_path = [int[]]@(3,3); position = 1; expected_enabled = $true }
         [ordered]@{ command_id = 32790; menu_path = [int[]]@(3,3); position = 2; expected_enabled = $true }
@@ -314,6 +314,16 @@ function Assert-VmAutomatedNativeMenuTree {
         })
         if ($matches.Count -ne 1 -or $matches[0].enabled -ne $spec.expected_enabled) {
             throw "Native menu command $($spec.command_id) path or enabled state differs from the fixed fixture."
+        }
+    }
+    foreach ($historyCommand in @(@{ id = 32806; position = 2 }, @{ id = 32807; position = 3 })) {
+        $matches = @($MenuTree | Where-Object {
+            $_.item_type -ceq 'command' -and $_.command_id -eq $historyCommand.id -and
+            $_.position -eq $historyCommand.position -and
+            (Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @([int[]]@(1)))
+        })
+        if ($matches.Count -ne 1 -or $matches[0].enabled) {
+            throw "Native history menu command $($historyCommand.id) is absent or enabled before an edit."
         }
     }
     $required

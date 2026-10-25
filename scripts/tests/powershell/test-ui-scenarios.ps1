@@ -337,14 +337,16 @@ try {
         [DarkReNamerVmAcceptanceNative]::Calls.Clear()
         Assert-Fails {
             Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
-                -EvidenceRoot $probeRoot -SourceSha 'invalid' -AcceptanceScriptSha256 $scriptSha -Captures $captures
+                -EvidenceRoot $probeRoot -SourceSha 'invalid' -AcceptanceScriptSha256 $scriptSha `
+                -WaitSeconds 2 -Captures $captures
         } 'requires exact source and acceptance script bindings'
         Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls.Count) 0 'Missing source SHA rejected before appearance or session mutation'
         Assert-Equal (Test-Path -LiteralPath $restorePath) $false 'Invalid SHA wrote no restoration document'
 
         Assert-Fails {
             Invoke-ObserverAppearanceSystemProbe -Application $application -Grid @{} -SessionId 1 `
-                -EvidenceRoot $probeRoot -SourceSha $sourceSha -AcceptanceScriptSha256 $scriptSha -Captures $captures
+                -EvidenceRoot $probeRoot -SourceSha $sourceSha -AcceptanceScriptSha256 $scriptSha `
+                -WaitSeconds 2 -Captures $captures
         } 'fixture forced-colors capture failure'
         Assert-Equal ([DarkReNamerVmAcceptanceNative]::Calls -join ',') `
             'appearance:system,capture:before,snapshot:True,high-contrast:1,capture:forced-colors,high-contrast:0,snapshot:False' `

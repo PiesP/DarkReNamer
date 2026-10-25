@@ -904,8 +904,53 @@ function Invoke-ObserverStandardScenario {
                 -TimeoutSeconds $WaitSeconds -LayoutVariant $script:contract.layout_variant
         }
         $importMs = $import.elapsed_ms
+        $history = [ordered]@{}
+        $history['initial'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 0 -ExpectedName $fixture.source_names[0] -UndoEnabled:$false -RedoEnabled:$false `
+            -ApplyEnabled:$false -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history initial'
         $prefixRasterTarget = Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name $fixture.destination_names[0] -SessionId $SessionId -WaitSeconds $WaitSeconds -CaptureRoot $EvidenceRoot -CaptureLeaf ($prefix + '-editable-input-prompt.png') -Captures $Captures
+        $grid.element.SetFocus()
+        $history['edited'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 0 -ExpectedName $fixture.destination_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history edited'
+        Send-AcceptanceChord -Process $application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x5A -Label 'proposal Ctrl+Z'
+        $history['shortcut_undo'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 0 -ExpectedName $fixture.source_names[0] -UndoEnabled:$false -RedoEnabled:$true `
+            -ApplyEnabled:$false -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history shortcut Undo'
+        Send-AcceptanceChord -Process $application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x59 -Label 'proposal Ctrl+Y'
+        $history['shortcut_redo'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 0 -ExpectedName $fixture.destination_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history shortcut Redo'
         Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $grid.element.SetFocus()
+        Send-ObserverProposalHistoryMenuCommand -Application $application -SessionId $SessionId -CommandId 32806
+        $history['menu_undo'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.source_names[1] -UndoEnabled:$true -RedoEnabled:$true `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history menu Undo'
+        Send-ObserverProposalHistoryMenuCommand -Application $application -SessionId $SessionId -CommandId 32807
+        $history['menu_redo'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.destination_names[1] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history menu Redo'
+        Send-ObserverProposalHistoryMenuCommand -Application $application -SessionId $SessionId -CommandId 32806
+        $history['before_branch'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.source_names[1] -UndoEnabled:$true -RedoEnabled:$true `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history before branch'
+        $grid.element.SetFocus()
+        Send-AcceptanceTap -Process $application.process -ExpectedSession $SessionId -VirtualKey 0x71 -Label 'history canceled manual F2'
+        $cancelPrompt = Wait-UniqueAutomationWindow -Process $application.process -ExpectedSession $SessionId `
+            -Owner $application.main -Name '선택 항목 이름 직접 변경' -TimeoutSeconds $WaitSeconds `
+            -Label 'history canceled manual prompt'
+        $cancelHandle = [IntPtr]$cancelPrompt.Current.NativeWindowHandle
+        Send-AcceptanceTap -Process $application.process -ExpectedSession $SessionId -VirtualKey 0x1B `
+            -Label 'history manual prompt Escape'
+        Wait-WindowClosed -Handle $cancelHandle -TimeoutSeconds $WaitSeconds -Label 'history canceled manual prompt'
+        $history['cancelled_edit'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.source_names[1] -UndoEnabled:$true -RedoEnabled:$true `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history canceled edit'
+        Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $history['new_edit'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 1 -ExpectedName $fixture.destination_names[1] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history new edit'
         $selection = Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId
         if ($grid.pattern.GetItem(0, 1).Current.Name -cne $fixture.destination_names[0] -or
             $grid.pattern.GetItem(1, 1).Current.Name -cne $fixture.destination_names[1] -or
@@ -921,13 +966,38 @@ function Invoke-ObserverStandardScenario {
             throw 'Apply cancellation changed a name, content digest, or NTFS identity.'
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $history['apply_cancel'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+            -Row 0 -ExpectedName $fixture.destination_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$true -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history canceled Apply'
         $blocked = if ($script:contract.expected_text_scale_percent -eq 150) {
             [ordered]@{ status = 'not-run'; reason = 'covered-by-paired-text100-standard-run' }
         }
         else {
             Invoke-ObserverBlockedChecks -Application $application -Grid $grid -Fixture $fixture -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -Captures $Captures
         }
+        if ($script:contract.expected_text_scale_percent -ne 150) {
+            $history['reset_after_blocked'] = Wait-ObserverProposalHistoryState -Application $application -Grid $grid `
+                -Row 0 -ExpectedName $fixture.source_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+                -ApplyEnabled:$false -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'history reset after blocked'
+        }
         $actualApply = Invoke-ObserverActualApply -Application $application -Grid $grid -Fixture $fixture -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -Captures $Captures
+        $historyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+        do {
+            $undoAfterApply = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled([IntPtr]$application.main_handle, [uint32]0x8026)
+            $redoAfterApply = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled([IntPtr]$application.main_handle, [uint32]0x8027)
+            $applyAfterApply = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled([IntPtr]$application.main_handle, [uint32]0x8003)
+            if (-not $undoAfterApply -and -not $redoAfterApply -and -not $applyAfterApply) { break }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $historyDeadline)
+        $history['successful_apply'] = [ordered]@{
+            undo_enabled = $undoAfterApply
+            redo_enabled = $redoAfterApply
+            apply_enabled = $applyAfterApply
+            journal_residue_count = 0
+        }
+        if ($undoAfterApply -or $redoAfterApply -or $applyAfterApply) {
+            throw 'Successful Apply retained proposal history or Apply readiness.'
+        }
         $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
@@ -947,6 +1017,7 @@ function Invoke-ObserverStandardScenario {
             appearance = $appearanceSpec.evidence_name
             minimum_window = $minimum
             selection = $selection
+            proposal_history = $history
             confirmation = $confirmation
             text_raster_targets = @($prefixRasterTarget, $confirmation.full_details.text_raster_target)
             blocking = $blocked
@@ -2353,10 +2424,76 @@ function Save-ObserverAppearanceSystemCapture {
             -Leaf "appearance-system-$Phase.png" -Appearance 'system' -Surface 'main-workbench' -SessionId $SessionId -Captures $Captures
     }
 }
+function Invoke-ObserverAppearanceHistoryStep {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][string] $BaselineName, [Parameter(Mandatory)][string] $EditedName,
+        [Parameter(Mandatory)][bool] $BaselineApplyEnabled, [switch] $ResetAfter)
+    [void](Set-ObserverSelectedRow -Application $Application -Grid $Grid -Row 0 -SessionId $SessionId)
+    $Grid.element.SetFocus()
+    $initial = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'appearance history initial'
+    Set-ObserverManualName -Application $Application -Grid $Grid -Row 0 -Name $EditedName `
+        -SessionId $SessionId -WaitSeconds $WaitSeconds
+    $Grid.element.SetFocus()
+    $edited = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $EditedName -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'appearance history edited'
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+        -VirtualKey 0x5A -Label 'appearance proposal Ctrl+Z'
+    $shortcutUndo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$true `
+        -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'appearance history Ctrl+Z'
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 `
+        -VirtualKey 0x59 -Label 'appearance proposal Ctrl+Y'
+    $shortcutRedo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $EditedName -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$true -ExpectedSelectedCount 1 -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'appearance history Ctrl+Y'
+    Send-ObserverProposalHistoryMenuCommand -Application $Application -SessionId $SessionId -CommandId 32806
+    $menuUndo = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$true `
+        -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'appearance history menu Undo'
+    $reset = $null
+    if ($ResetAfter) {
+        Send-ObserverProposalHistoryMenuCommand -Application $Application -SessionId $SessionId -CommandId 32807
+        Reset-ObserverAppearanceProposals -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $reset = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+            -Row 0 -ExpectedName $BaselineName -UndoEnabled:$true -RedoEnabled:$false `
+            -ApplyEnabled:$BaselineApplyEnabled -ExpectedSelectedCount 1 -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds -Label 'appearance history reset'
+    }
+    [ordered]@{ baseline_name = $BaselineName; edited_name = $EditedName; initial = $initial
+        edited = $edited; shortcut_undo = $shortcutUndo; shortcut_redo = $shortcutRedo
+        menu_undo = $menuUndo; reset = $reset }
+}
+function Invoke-ObserverAppearanceHistoryClear {
+    param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid)
+    [DarkReNamerVmAcceptanceNative]::SendBoundPerformanceCommand(
+        [IntPtr]$Application.main_handle, [uint32]$Application.process.Id,
+        [uint32]0x800E, 'appearance-history-clear')
+    $window = [IntPtr]$Application.main_handle
+    $state = [ordered]@{
+        row_count = [int]$Grid.pattern.Current.RowCount
+        undo_enabled = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8026)
+        redo_enabled = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8027)
+        apply_enabled = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8003)
+    }
+    if ($state.row_count -ne 0 -or $state.undo_enabled -or $state.redo_enabled -or $state.apply_enabled) {
+        throw 'Structural Clear retained rows, proposal history, or Apply readiness.'
+    }
+    $state
+}
 function Invoke-ObserverAppearanceSystemProbe {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][object] $Grid,
         [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][string] $SourceSha, [Parameter(Mandatory)][string] $AcceptanceScriptSha256,
+        [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures)
     if ($SourceSha -cnotmatch '^[0-9a-f]{40}$' -or $AcceptanceScriptSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'High Contrast pair requires exact source and acceptance script bindings.'
@@ -2379,6 +2516,9 @@ function Invoke-ObserverAppearanceSystemProbe {
             -AcceptSnapshot { param($candidate) ($candidate.Flags -band 1) -ne 0 -and -not (Test-HighContrastColorsEqual -Expected $original -Actual $candidate) } -Label 'appearance pair High Contrast activation' -MaximumAttempts 24
         $activeCapture = Save-ObserverAppearanceSystemCapture -Application $Application -Grid $Grid -SessionId $SessionId -EvidenceRoot $EvidenceRoot -Phase 'forced-colors' -Captures $Captures
         if ($activeCapture.resolution.resolved_theme -cne 'native') { throw 'Forced Colors probe did not observe native fallback.' }
+        $forcedHistory = Invoke-ObserverAppearanceHistoryStep -Application $Application -Grid $Grid `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -BaselineName '.txt' `
+            -EditedName 'forced-history-00.txt' -BaselineApplyEnabled:$true
     }
     finally {
         [DarkReNamerVmAcceptanceNative]::ApplyHighContrast($original.Flags, $original.Scheme)
@@ -2394,7 +2534,7 @@ function Invoke-ObserverAppearanceSystemProbe {
     [ordered]@{
         snapshot = [ordered]@{ file = 'high-contrast-restore.json'; sha256 = Get-LowerSha256 -Path $restorePath }
         restoration_verified = $true; original_enabled = $false; acceptance_enabled = $true
-        before = $before; active = $activeCapture; after = $after
+        before = $before; active = $activeCapture; after = $after; proposal_history = $forcedHistory
     }
 }
 function Invoke-ObserverAppearancePairScenario {
@@ -2807,13 +2947,25 @@ function Invoke-ObserverAppearancePairScenario {
                 appearance_menu = Get-VmAutomatedAppearance -Window $application.main -Process $application.process -ExpectedSession $SessionId
             })
         }
+        $appearanceHistory = Invoke-ObserverAppearanceHistoryStep -Application $application -Grid $grid `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -BaselineName ([IO.Path]::GetFileName($paths[0])) -EditedName 'paired-history-00.txt' `
+            -BaselineApplyEnabled:$false -ResetAfter
+        $ObservationSink['proposal_history'] = $appearanceHistory
+        $ObservationSink['proposal_history_clear'] = Invoke-ObserverAppearanceHistoryClear `
+            -Application $application -Grid $grid
         $highContrastResult = $null
         if ($HighContrast) {
+            [void](Import-GuiRegressionPathList -Application $application -PathsFile $oneList -ExpectedRows 1 `
+                -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
+            [void](Import-GuiRegressionPathList -Application $application -PathsFile $remainingList -ExpectedRows 60 `
+                -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid)
             Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name '.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
             Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name '.log' -SessionId $SessionId -WaitSeconds $WaitSeconds
             [void](Set-ObserverSelectedRow -Application $application -Grid $grid -Row 0 -SessionId $SessionId)
             $highContrastResult = Invoke-ObserverAppearanceSystemProbe -Application $application -Grid $grid -SessionId $SessionId `
-                -EvidenceRoot $EvidenceRoot -SourceSha $SourceSha -AcceptanceScriptSha256 $AcceptanceScriptSha256 -Captures $Captures
+                -EvidenceRoot $EvidenceRoot -SourceSha $SourceSha -AcceptanceScriptSha256 $AcceptanceScriptSha256 `
+                -WaitSeconds $WaitSeconds -Captures $Captures
         }
         $after = Get-ObserverAppearanceFixtureState -Root $root -Paths $paths.ToArray()
         if (-not (Test-ObserverFixtureStateEqual -Expected $initial -Actual $after)) {

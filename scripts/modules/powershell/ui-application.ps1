@@ -1490,6 +1490,68 @@ function Get-ObserverPublicApplyState {
         Wait-AcceptancePopupMenuClosed -Process $Application.process -Label "$Label File popup"
     }
 }
+function Wait-ObserverProposalHistoryState {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $Row,
+        [Parameter(Mandatory)][string] $ExpectedName,
+        [Parameter(Mandatory)][bool] $UndoEnabled,
+        [Parameter(Mandatory)][bool] $RedoEnabled,
+        [Parameter(Mandatory)][bool] $ApplyEnabled,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][string] $Label,
+        [AllowNull()][object] $ExpectedSelectedCount
+    )
+    $window = [IntPtr]$Application.main_handle
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    do {
+        $name = [string]$Grid.pattern.GetItem($Row, 1).Current.Name
+        $undo = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8026)
+        $redo = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8027)
+        $apply = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled($window, [uint32]0x8003)
+        if ($name -ceq $ExpectedName -and $undo -eq $UndoEnabled -and
+            $redo -eq $RedoEnabled -and $apply -eq $ApplyEnabled) { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ($name -cne $ExpectedName -or $undo -ne $UndoEnabled -or
+        $redo -ne $RedoEnabled -or $apply -ne $ApplyEnabled) {
+        throw "$Label proposal history did not settle: name=$name, undo=$undo, redo=$redo, apply=$apply."
+    }
+    $selectionObject = $null
+    if (-not $Grid.element.TryGetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern, [ref]$selectionObject)) {
+        throw "$Label ListView lacks SelectionPattern."
+    }
+    $selected = @(([Windows.Automation.SelectionPattern]$selectionObject).Current.GetSelection())
+    if ($null -ne $ExpectedSelectedCount -and $selected.Count -ne [int]$ExpectedSelectedCount) {
+        throw "$Label selected $($selected.Count) rows, expected $ExpectedSelectedCount."
+    }
+    $focus = [DarkReNamerVmAcceptanceNative]::ReadGuiThreadSnapshot($window, [uint32]$Application.process.Id)
+    $status = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
+        -ExpectedSession $SessionId -AutomationId '1007' -ControlType ([Windows.Automation.ControlType]::Text) `
+        -TimeoutSeconds $WaitSeconds -Label "$Label status" -RequireWindowHandle
+    [ordered]@{
+        label = $Label; row = $Row; row_count = [int]$Grid.pattern.Current.RowCount
+        current_name = [string]$Grid.pattern.GetItem($Row, 0).Current.Name
+        proposed_name = $name; undo_enabled = [bool]$undo; redo_enabled = [bool]$redo
+        apply_enabled = [bool]$apply; selected_count = $selected.Count
+        selected_name = if ($selected.Count -eq 1) { [string]$selected[0].Current.Name } else { $null }
+        focus_control_id = [string]$focus[2]; status = [string]$status.Current.Name
+    }
+}
+function Send-ObserverProposalHistoryMenuCommand {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][ValidateSet(32806, 32807)][int] $CommandId)
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
+    if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+        [IntPtr]$Application.main_handle, [uint32]$CommandId)) {
+        throw "History menu command $CommandId is disabled."
+    }
+    [DarkReNamerVmAcceptanceNative]::SendMenuCommand([IntPtr]$Application.main_handle, [uint32]$CommandId)
+}
 function Invoke-ObserverBlockedChecks {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1507,8 +1569,11 @@ function Invoke-ObserverBlockedChecks {
     Start-Sleep -Milliseconds 200
     $applyState = Get-ObserverPublicApplyState -Application $Application -SessionId $SessionId -Label 'blocked-check no-change Apply command'
     if ($applyState.enabled) { throw 'Apply stayed enabled with no changes.' }
+    $noChangeHistory = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $Fixture.source_names[0] -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$false -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'blocked reset history'
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-no-change.png') -Label 'no-change blocked state'))
-    $noChange = [ordered]@{ apply = $applyState; status = $status.Current.Name; blocked = $true }
+    $noChange = [ordered]@{ apply = $applyState; status = $status.Current.Name; blocked = $true; history = $noChangeHistory }
 
     $collisionName = '충돌-😀-같은-대상.txt'
     Set-ObserverManualName -Application $Application -Grid $Grid -Row 0 -Name $collisionName -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -1519,8 +1584,11 @@ function Invoke-ObserverBlockedChecks {
     if ($applyState.enabled -or $collisionStatus.IndexOf('대상 경로 충돌', [StringComparison]::Ordinal) -lt 0) {
         throw 'Collision state did not block Apply with its existing meaning.'
     }
+    $collisionHistory = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName $collisionName -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$false -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'blocked collision history'
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-collision.png') -Label 'collision blocked state'))
-    $collision = [ordered]@{ apply = $applyState; status = $collisionStatus; blocked = $true }
+    $collision = [ordered]@{ apply = $applyState; status = $collisionStatus; blocked = $true; history = $collisionHistory }
 
     Invoke-AutomationControl -Element $reset -Label 'reset collision proposals'
     Set-ObserverManualName -Application $Application -Grid $Grid -Row 0 -Name 'bad:name.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -1530,8 +1598,11 @@ function Invoke-ObserverBlockedChecks {
     if ($applyState.enabled -or $invalidStatus.IndexOf('잘못된 대상 이름', [StringComparison]::Ordinal) -lt 0) {
         throw 'Invalid-name state did not block Apply with its existing meaning.'
     }
+    $invalidHistory = Wait-ObserverProposalHistoryState -Application $Application -Grid $Grid `
+        -Row 0 -ExpectedName 'bad:name.txt' -UndoEnabled:$true -RedoEnabled:$false `
+        -ApplyEnabled:$false -ExpectedSelectedCount 1 -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'blocked invalid-name history'
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-invalid.png') -Label 'invalid-name blocked blocked state'))
-    $invalid = [ordered]@{ apply = $applyState; status = $invalidStatus; blocked = $true }
+    $invalid = [ordered]@{ apply = $applyState; status = $invalidStatus; blocked = $true; history = $invalidHistory }
     Invoke-AutomationControl -Element $reset -Label 'reset invalid proposal'
     Start-Sleep -Milliseconds 200
     $actual = Get-ObserverFixtureState -FixtureRoot $Fixture.root

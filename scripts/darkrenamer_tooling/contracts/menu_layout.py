@@ -18,10 +18,10 @@ RAIL_IDS = {
 # menu tree.  They are source-owned and are deliberately independent of UIA.
 COMMAND_PATHS = {
     32771: (0, 2),
-    32781: (1, 7),
+    32781: (1, 9),
     32783: (1, 0),
     65535: (1, 1),
-    32784: (1, 5),
+    32784: (1, 7),
     32772: (3, 0, 0),
     32773: (3, 0, 1),
     32774: (3, 0, 2),
@@ -39,6 +39,7 @@ COMMAND_PATHS = {
 }
 ENABLED_COMMANDS = frozenset(COMMAND_PATHS) - {32771, 32781, 32783, 65535}
 DISABLED_COMMANDS = frozenset(COMMAND_PATHS) - ENABLED_COMMANDS
+HISTORY_COMMAND_PATHS = {32806: (1, 2), 32807: (1, 3)}
 
 _PARENT_PREFIX = "한글-매우-긴-상위-경로-공통-자료-보관-2026-09-"
 _LEAF_PREFIX = "한글-😀-아주긴공통접두어-월별정리-원본자료-검토완료-배포대기-장기보존-최종승인-추가검증-"
@@ -197,6 +198,11 @@ def _tree(value: object) -> dict[tuple[int, ...], dict]:
                 tree[path]["command_id"] == command and tree[path]["checked"] is False and
                 tree[path]["enabled"] is (command in ENABLED_COMMANDS),
                 "Native command path or enabled state differs from the fixed fixture.")
+    for command, path in HISTORY_COMMAND_PATHS.items():
+        require(path in tree and tree[path]["item_type"] == "command" and
+                tree[path]["command_id"] == command and tree[path]["checked"] is False and
+                tree[path]["enabled"] is False,
+                "Native history command must be disabled before an edit.")
     return tree
 
 
