@@ -3,6 +3,7 @@
         Add-Type @'
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerVmNative {
@@ -68,43 +69,103 @@ public static class DarkReNamerVmNative {
         private readonly IntPtr previous;
         private readonly IntPtr requested;
         private readonly uint threadId;
+        private readonly DpiTrace trace;
         private bool disposed;
 
-        private DpiAwarenessScope(IntPtr previous, IntPtr requested) {
+        private sealed class DpiTrace {
+            public IntPtr Before;
+            public IntPtr Requested;
+            public IntPtr EntryReturn;
+            public IntPtr? Entered;
+            public IntPtr? PreDispose;
+            public IntPtr? RestoreReturn;
+            public IntPtr? After;
+            public uint? EntryThreadId;
+            public uint? DisposeThreadId;
+            public int? EntryLastError;
+            public int? RestoreLastError;
+
+            private static string Hex(IntPtr value) {
+                return "0x" + (IntPtr.Size == 8
+                    ? unchecked((ulong)value.ToInt64()).ToString("X", CultureInfo.InvariantCulture)
+                    : unchecked((uint)value.ToInt32()).ToString("X", CultureInfo.InvariantCulture));
+            }
+
+            private static string Hex(IntPtr? value) {
+                return value.HasValue ? Hex(value.Value) : "?";
+            }
+
+            private static string Number(uint? value) {
+                return value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "?";
+            }
+
+            private static string Number(int? value) {
+                return value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "?";
+            }
+
+            public string Describe() {
+                return " [dpi before=" + Hex(Before) + " requested=" + Hex(Requested) +
+                    " entryReturn=" + Hex(EntryReturn) + " entered=" + Hex(Entered) +
+                    " preDispose=" + Hex(PreDispose) + " restoreReturn=" + Hex(RestoreReturn) +
+                    " after=" + Hex(After) + " entryTid=" + Number(EntryThreadId) +
+                    " disposeTid=" + Number(DisposeThreadId) +
+                    " entrySetLastError=" + Number(EntryLastError) +
+                    " restoreSetLastError=" + Number(RestoreLastError) +
+                    " (LastError may be stale after a successful SetThreadDpiAwarenessContext)]";
+            }
+        }
+
+        private DpiAwarenessScope(IntPtr previous, IntPtr requested, DpiTrace trace) {
             this.previous = previous;
             this.requested = requested;
+            this.trace = trace;
             threadId = GetCurrentThreadId();
+            trace.EntryThreadId = threadId;
         }
 
         public static DpiAwarenessScope Enter(IntPtr requested) {
+            DpiTrace trace = new DpiTrace { Before = GetThreadDpiAwarenessContext(), Requested = requested };
             IntPtr previous = SetThreadDpiAwarenessContext(requested);
+            int entryLastError = Marshal.GetLastWin32Error();
+            trace.EntryReturn = previous;
+            trace.EntryLastError = entryLastError;
             if (previous == IntPtr.Zero) {
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                trace.EntryThreadId = GetCurrentThreadId();
+                throw new System.ComponentModel.Win32Exception(entryLastError,
+                    new System.ComponentModel.Win32Exception(entryLastError).Message + trace.Describe());
             }
-            DpiAwarenessScope scope = new DpiAwarenessScope(previous, requested);
-            if (!IsCurrentThreadDpiAwarenessContext(requested)) {
+            DpiAwarenessScope scope = new DpiAwarenessScope(previous, requested, trace);
+            trace.Entered = GetThreadDpiAwarenessContext();
+            if (!AreDpiAwarenessContextsEqual(trace.Entered.Value, requested)) {
                 scope.Dispose();
-                throw new InvalidOperationException("The observer thread did not enter the requested DPI context.");
+                throw new InvalidOperationException("The observer thread did not enter the requested DPI context." + trace.Describe());
             }
             return scope;
         }
 
         public void Dispose() {
             if (disposed) return;
-            if (GetCurrentThreadId() != threadId) {
-                throw new InvalidOperationException("The observer DPI context must be restored on its owning thread.");
+            trace.DisposeThreadId = GetCurrentThreadId();
+            if (trace.DisposeThreadId != threadId) {
+                throw new InvalidOperationException("The observer DPI context must be restored on its owning thread." + trace.Describe());
             }
-            bool remainedRequested = IsCurrentThreadDpiAwarenessContext(requested);
+            trace.PreDispose = GetThreadDpiAwarenessContext();
+            bool remainedRequested = AreDpiAwarenessContextsEqual(trace.PreDispose.Value, requested);
             IntPtr replaced = SetThreadDpiAwarenessContext(previous);
+            int restoreLastError = Marshal.GetLastWin32Error();
+            trace.RestoreReturn = replaced;
+            trace.RestoreLastError = restoreLastError;
+            trace.After = GetThreadDpiAwarenessContext();
             if (replaced == IntPtr.Zero) {
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                throw new System.ComponentModel.Win32Exception(restoreLastError,
+                    new System.ComponentModel.Win32Exception(restoreLastError).Message + trace.Describe());
             }
-            if (!IsCurrentThreadDpiAwarenessContext(previous)) {
-                throw new InvalidOperationException("The observer thread did not restore its previous DPI context.");
+            if (!AreDpiAwarenessContextsEqual(trace.After.Value, previous)) {
+                throw new InvalidOperationException("The observer thread did not restore its previous DPI context." + trace.Describe());
             }
             disposed = true;
             if (!remainedRequested || !AreDpiAwarenessContextsEqual(replaced, requested)) {
-                throw new InvalidOperationException("The observer thread DPI context changed inside its scope.");
+                throw new InvalidOperationException("The observer thread DPI context changed inside its scope." + trace.Describe());
             }
         }
     }

@@ -48,7 +48,8 @@ function Assert-Win32Failure {
     param(
         [Parameter(Mandatory)][scriptblock] $Action,
         [Parameter(Mandatory)][int] $NativeErrorCode,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [string[]] $MessageFragments = @()
     )
 
     try {
@@ -62,6 +63,11 @@ function Assert-Win32Failure {
         }
         if ($null -eq $exception -or $exception.NativeErrorCode -ne $NativeErrorCode) {
             throw "$Label returned an unexpected exception: $($_.Exception.Message)"
+        }
+        foreach ($fragment in $MessageFragments) {
+            if ($exception.Message.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+                throw "$Label is missing diagnostic '$fragment': $($exception.Message)"
+            }
         }
         return
     }
@@ -3421,7 +3427,9 @@ if ($waitProbeResult.natural_status -cne 'natural-exit' -or
         if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
             throw 'The observer thread did not restore DPI awareness after failure.'
         }
-        Assert-Win32Failure -NativeErrorCode 87 -Label 'Invalid observer DPI context' -Action {
+        Assert-Win32Failure -NativeErrorCode 87 -Label 'Invalid observer DPI context' `
+            -MessageFragments @('[dpi before=0x', 'requested=0x0', 'entryReturn=0x0',
+                'entered=?', 'entrySetLastError=87', 'LastError may be stale') -Action {
             [void][DarkReNamerVmNative+DpiAwarenessScope]::Enter([IntPtr]::Zero)
         }
         if (-not [DarkReNamerVmNative]::IsCurrentThreadDpiAwarenessContext($initialDpiContext)) {
