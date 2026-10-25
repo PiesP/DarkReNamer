@@ -52,6 +52,8 @@ public static class DarkReNamerVmNative {
     }
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")]
     public static extern IntPtr GetThreadDpiAwarenessContext();

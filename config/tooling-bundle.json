@@ -501,7 +501,7 @@
       "bundle": "guest-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "f0a84eb697ae6559f3b57abf3bafdf4008f9898004d2fc0f1ed56df4ec7cd25f",
+      "sha256": "718cbc6a8a723b0f6682e6d6bc8fe2fc1d2d5880008b48e300186a71debb0709",
       "dependencies": []
     },
     {
