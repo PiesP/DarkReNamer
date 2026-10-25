@@ -446,6 +446,33 @@ function Assert-Fails {
     throw "Expected failure containing '$Expected'."
 }
 
+$tooltipMain = [pscustomobject]@{ Left=114; Top=0; Right=1008; Bottom=696; Width=894; Height=696 }
+$tooltipList = [pscustomobject]@{ Left=114; Top=60; Right=1008; Bottom=650 }
+$wideTooltip = [ordered]@{ left=133; top=0; right=1046; bottom=561 }
+$neutral = Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $wideTooltip -ListViewBounds $tooltipList
+if ($neutral.x -ne 122 -or $neutral.y -ne 10) {
+    throw 'The post-cancel neutral point remained inside the observed wide ListView infotip.'
+}
+$leftTooltip = [ordered]@{ left=100; top=0; right=550; bottom=561 }
+$neutral = Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $leftTooltip -ListViewBounds $tooltipList
+if ($neutral.x -ne 1000 -or $neutral.y -ne 10) {
+    throw 'The opposite title-bar corner was not selected outside the ListView infotip.'
+}
+$ordinaryTooltip = [ordered]@{ left=400; top=100; right=700; bottom=300 }
+$neutral = Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $ordinaryTooltip -ListViewBounds $tooltipList
+if ($neutral.x -ne 122 -or $neutral.y -ne 10) {
+    throw 'Ordinary tooltip geometry lost its app-owned neutral title-bar point.'
+}
+$coveringTooltip = [ordered]@{ left=0; top=0; right=1100; bottom=561 }
+Assert-Fails {
+    Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $coveringTooltip `
+        -ListViewBounds $tooltipList
+} 'No neutral cursor point inside the application and outside the ListView and infotip'
+Assert-Fails {
+    Resolve-ObserverTooltipNeutralPoint -MainBounds $tooltipMain -TooltipRect $leftTooltip `
+        -ListViewBounds ([pscustomobject]@{ Left=550; Top=0; Right=1008; Bottom=650 })
+} 'No neutral cursor point inside the application and outside the ListView and infotip'
+
 function Get-Sha256([string] $Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }

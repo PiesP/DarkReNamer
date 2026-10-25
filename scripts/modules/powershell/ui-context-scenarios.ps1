@@ -1,4 +1,30 @@
-﻿function Get-ObserverContextConfirmationReachability {
+﻿function Resolve-ObserverTooltipNeutralPoint {
+    param(
+        [Parameter(Mandatory)][object] $MainBounds,
+        [Parameter(Mandatory)][object] $TooltipRect,
+        [Parameter(Mandatory)][object] $ListViewBounds
+    )
+
+    $titleY = [int][Math]::Floor($MainBounds.Top + [Math]::Min(10.0, $MainBounds.Height / 2.0))
+    $candidates = @(
+        [ordered]@{ x = [int][Math]::Floor($MainBounds.Left + [Math]::Min(8.0, $MainBounds.Width / 2.0)); y = $titleY }
+        [ordered]@{ x = [int][Math]::Floor($MainBounds.Right - [Math]::Min(8.0, $MainBounds.Width / 2.0)); y = $titleY }
+        [ordered]@{ x = [int][Math]::Floor($MainBounds.Left + ($MainBounds.Width / 2.0)); y = $titleY }
+    )
+    foreach ($candidate in $candidates) {
+        $x = $candidate.x; $y = $candidate.y
+        if ($x -lt $MainBounds.Left -or $x -ge $MainBounds.Right -or
+            $y -lt $MainBounds.Top -or $y -ge $MainBounds.Bottom) { continue }
+        if ($x -ge $ListViewBounds.Left -and $x -lt $ListViewBounds.Right -and
+            $y -ge $ListViewBounds.Top -and $y -lt $ListViewBounds.Bottom) { continue }
+        if ($x -ge $TooltipRect.left -and $x -lt $TooltipRect.right -and
+            $y -ge $TooltipRect.top -and $y -lt $TooltipRect.bottom) { continue }
+        return [ordered]@{ x = $x; y = $y }
+    }
+    throw 'No neutral cursor point inside the application and outside the ListView and infotip.'
+}
+
+function Get-ObserverContextConfirmationReachability {
     param(
         [Parameter(Mandatory)][object] $Confirmation,
         [Parameter(Mandatory)][object] $Application,
@@ -330,7 +356,18 @@ function Invoke-ObserverContextConfirmation {
             throw 'Ordinary current-name hover did not restore the bound multiline ListView infotip after Cancel.'
         }
         [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-after-cancel-infotip.png') -Label 'context ListView infotip restored after Cancel'))
-        [DarkReNamerVmAcceptanceNative]::MoveCursor($neutralPoint.X, $neutralPoint.Y)
+        $postNeutralPoint = Resolve-ObserverTooltipNeutralPoint `
+            -MainBounds $Application.main.Current.BoundingRectangle `
+            -TooltipRect $postVisibleTooltip[0].rect `
+            -ListViewBounds $gridAfterCancel.element.Current.BoundingRectangle
+        [DarkReNamerVmAcceptanceNative]::MoveCursor($postNeutralPoint.x, $postNeutralPoint.y)
+        $neutralHitPoint = [DarkReNamerVmAcceptanceNative+Point]::new()
+        $neutralHitPoint.X = $postNeutralPoint.x; $neutralHitPoint.Y = $postNeutralPoint.y
+        $neutralHit = [DarkReNamerVmAcceptanceNative]::WindowFromPoint($neutralHitPoint)
+        if ([DarkReNamerVmAcceptanceNative]::GetAncestor($neutralHit, [uint32]2) -ne
+            [IntPtr]$Application.main.Current.NativeWindowHandle) {
+            throw 'Post-cancel neutral point did not hit the exact application root.'
+        }
         Start-Sleep -Milliseconds 600
         $postNeutralWindows = Get-ObserverProcessWindows -Process $Application.process
         $postNeutralTooltip = @($postNeutralWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })
@@ -341,7 +378,7 @@ function Invoke-ObserverContextConfirmation {
             bound_tooltip_reexposed = $true
             window = $postVisibleTooltip[0]
             capture = $Prefix + '-after-cancel-infotip.png'
-            neutral_point = [ordered]@{ x = $neutralPoint.X; y = $neutralPoint.Y }
+            neutral_point = $postNeutralPoint
             neutral_hidden = $postNeutralTooltip.Count -eq 0
             after_neutral = $postNeutralWindows
         }
