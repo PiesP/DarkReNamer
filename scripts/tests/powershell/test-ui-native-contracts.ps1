@@ -20,6 +20,27 @@ function Assert-Equal {
 }
 
 $nativeSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'))
+$guestNativePath = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/guest-native.ps1'
+$guestNativeCheck = @'
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText('GUEST_NATIVE_PATH')
+$declaration = [regex]::Match($source, '(?ms)^\s*Add-Type @''\r?\n(?<csharp>.*?)\r?\n''@')
+if (-not $declaration.Success) { throw 'The guest native C# declaration is missing.' }
+Add-Type -TypeDefinition $declaration.Groups['csharp'].Value
+$method = [DarkReNamerVmNative].GetMethod('SetProcessDpiAwarenessContext', [type[]]@([IntPtr]))
+if ($null -eq $method -or $method.ReturnType -ne [bool]) {
+    throw 'The compiled guest native type cannot set process DPI awareness.'
+}
+$import = $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)
+if ($import.Count -ne 1 -or $import[0].Value -cne 'user32.dll' -or -not $import[0].SetLastError) {
+    throw 'The process DPI awareness method is not the expected Win32 import.'
+}
+'@.Replace('GUEST_NATIVE_PATH', $guestNativePath.Replace("'", "''"))
+$guestNativeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guestNativeCheck))
+$guestNativeOutput = & (Get-Command pwsh).Source -NoLogo -NoProfile -NonInteractive -EncodedCommand $guestNativeEncoded 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Compiled guest native DPI contract failed: $guestNativeOutput"
+}
 function Get-NativeFixtureMember {
     param([string] $Signature)
     $start = $nativeSource.IndexOf($Signature, [StringComparison]::Ordinal)
