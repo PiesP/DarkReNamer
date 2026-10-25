@@ -2022,7 +2022,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::{Sender, channel, sync_channel};
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
 
@@ -2549,6 +2549,32 @@ mod tests {
         }
     }
 
+    struct ControlledImportRelease<'a> {
+        app: &'a PublishedFileDialogTestApp,
+        sender: Option<Sender<()>>,
+    }
+
+    impl ControlledImportRelease<'_> {
+        fn release_and_join(&mut self) -> io::Result<()> {
+            if let Some(sender) = self.sender.take() {
+                let _sent = sender.send(());
+            }
+            self.app.drain_import()
+        }
+    }
+
+    impl Drop for ControlledImportRelease<'_> {
+        fn drop(&mut self) {
+            // Release a controlled read before the test app's Drop reaches its
+            // process-fatal live-import check, including an assertion unwind
+            // or a failed first retirement attempt after the sender was used.
+            if let Err(error) = self.release_and_join() {
+                eprintln!("controlled import retirement failed: {error}");
+                std::process::abort();
+            }
+        }
+    }
+
     #[test]
     fn main_window_modal_guard_suppresses_and_restores_the_list_infotip()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2941,6 +2967,121 @@ mod tests {
                 &LegacyText::from("changed.txt")
             );
         })?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_worker_controlled_provider_delay_observes_cancel_and_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            state.model.append(LegacyListItem::new_with_actual_size(
+                r"C:\fixture\original.txt",
+                false,
+                1,
+                1,
+                0,
+                0,
+            ))
+        })??;
+
+        for (hold, close, session_id) in [
+            (std::time::Duration::from_secs(2), false, 1),
+            (std::time::Duration::from_secs(5), true, 2),
+        ] {
+            let (entered_sender, entered_receiver) = channel();
+            let (release_sender, release_receiver) = channel();
+            let mut release = ControlledImportRelease {
+                app: &app,
+                sender: Some(release_sender),
+            };
+            app.with_state(|state| {
+                state.active_prompt = Some(session_id);
+                let revision = state.revision();
+                start_import_worker_from(
+                    app.owner,
+                    state,
+                    session_id,
+                    revision,
+                    ImportKind::Names,
+                    move |_| {
+                        entered_sender.send(()).map_err(|_| {
+                            io::Error::other("controlled import entry receiver closed")
+                        })?;
+                        release_receiver.recv().map_err(|_| {
+                            io::Error::other("controlled import release sender closed")
+                        })?;
+                        Ok(LegacyText::from("changed.txt"))
+                    },
+                )
+            })??;
+            entered_receiver.recv_timeout(std::time::Duration::from_secs(5))?;
+            let held_at = std::time::Instant::now();
+            let requested_at = std::time::Instant::now();
+            let request_after_entry = requested_at.duration_since(held_at);
+            app.with_state(|state| {
+                if close {
+                    let _action = dispatch_command(app.owner, state, EXIT_COMMAND);
+                } else {
+                    request_active_worker_cancel(state);
+                }
+            })?;
+            let request_ack = requested_at.elapsed();
+            app.with_state(|state| {
+                assert!(state.import_worker.is_some());
+                assert!(state.mutation_locked);
+                assert_eq!(state.close_pending, close);
+                assert_eq!(state.active_prompt, Some(session_id));
+                assert_eq!(
+                    state.model.items()[0].proposed_name(),
+                    &LegacyText::from("original.txt")
+                );
+            })?;
+            while let Some(remaining) = hold.checked_sub(held_at.elapsed()) {
+                thread::sleep(remaining.min(std::time::Duration::from_millis(250)));
+                app.with_state(|state| {
+                    assert!(
+                        state
+                            .import_worker
+                            .as_ref()
+                            .is_some_and(|worker| !worker.handle.is_finished())
+                    );
+                    assert!(state.mutation_locked);
+                    assert_eq!(
+                        state.model.items()[0].proposed_name(),
+                        &LegacyText::from("original.txt")
+                    );
+                })?;
+            }
+            let held_for = held_at.elapsed();
+            let released_at = std::time::Instant::now();
+            release.release_and_join()?;
+            let retired_after_release = released_at.elapsed();
+            app.with_state(|state| {
+                assert!(state.import_worker.is_none());
+                assert_eq!(state.active_prompt, None);
+                assert_eq!(state.close_pending, close);
+                assert_eq!(
+                    state.model.items()[0].proposed_name(),
+                    &LegacyText::from("original.txt")
+                );
+            })?;
+            println!(
+                "controlled-provider-observation {{\"case\":\"import-{}\",\"gate_target_ms\":{},\"gate_held_ms\":{},\"request_after_entry_ms\":{},\"direct_request_ack_ms\":{},\"joined_after_release_ms\":{},\"model_unchanged\":true}}",
+                if close { "close" } else { "cancel" },
+                hold.as_millis(),
+                held_for.as_millis(),
+                request_after_entry.as_millis(),
+                request_ack.as_millis(),
+                retired_after_release.as_millis(),
+            );
+            assert!(held_for >= hold);
+            assert!(request_ack < std::time::Duration::from_millis(100));
+            assert!(retired_after_release < std::time::Duration::from_secs(2));
+        }
         Ok(())
     }
 
