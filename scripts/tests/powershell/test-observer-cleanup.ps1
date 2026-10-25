@@ -1636,6 +1636,19 @@ try {
         -not $gui.job_cleanup) {
         throw 'A rejected GUI launch lost its final cleanup evidence.'
     }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Assert-Fails { Initialize-GuiObserverProcessDpi } 'requires Windows'
+    }
+    foreach ($nativeError in @(0, 5)) {
+        $row = [ordered]@{ error_detail = $null }
+        try { Assert-GuiObserverProcessDpiResult -NativeError $nativeError }
+        catch { Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_ }
+        if ($row.error_detail.native_error -ne $nativeError -or
+            $row.error_detail.message -notlike "*Win32 $nativeError*") {
+            throw 'GUI observer DPI bootstrap lost its native failure code.'
+        }
+    }
+    Assert-GuiObserverProcessDpiResult -NativeError $null
     & {
         $source = Join-Path $PSScriptRoot '../../modules/powershell/guest-scenario.ps1'
         $tokens = $null; $errors = $null
@@ -1646,6 +1659,15 @@ try {
         }, $true))
         if ($errors.Count -or $guiDefinition.Count -ne 1) {
             throw 'The production GUI cleanup function is missing or invalid.'
+        }
+        $guiBody = $guiDefinition[0].Body.Extent.Text
+        $artifactCheck = $guiBody.IndexOf('artifact_changed_after_preflight', [StringComparison]::Ordinal)
+        $processDpi = $guiBody.IndexOf('Initialize-GuiObserverProcessDpi', [StringComparison]::Ordinal)
+        $nativeInit = $guiBody.IndexOf('Initialize-NativeCapture', [StringComparison]::Ordinal)
+        $threadScope = $guiBody.IndexOf('DpiAwarenessScope]::Enter', [StringComparison]::Ordinal)
+        if ($artifactCheck -lt 0 -or $processDpi -le $artifactCheck -or
+            $nativeInit -le $processDpi -or $threadScope -le $nativeInit) {
+            throw 'Private GUI process DPI initialization must precede native, UIA, and thread-scope initialization.'
         }
         $cleanupBlocks = @($guiDefinition[0].Body.FindAll({ param($node)
             $node -is [Management.Automation.Language.TryStatementAst] -and $null -ne $node.Finally

@@ -3954,6 +3954,7 @@ mod native_tests {
 
     fn assert_ordinary_close_waits_for_icon_join(
         image_list: icon_worker::BorrowedSystemImageList,
+        hold: Duration,
     ) -> io::Result<()> {
         let root = tempfile::tempdir()?;
         application::with_production_popup_window_for_test(root.path(), false, |window| {
@@ -4008,9 +4009,13 @@ mod native_tests {
             entered_rx
                 .recv_timeout(Duration::from_secs(2))
                 .map_err(|_| io::Error::other("ordinary close icon lookup did not block"))?;
+            let held_at = Instant::now();
+            let close_requested_at = Instant::now();
+            let close_request_after_entry = close_requested_at.duration_since(held_at);
             // SAFETY: the live production owner handles its ordinary close
             // message after the preceding AppState lease has ended.
             unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
+            let close_ack = close_requested_at.elapsed();
             // SAFETY: this pointer-free query observes the test-owned HWND
             // immediately after its synchronous ordinary close callback.
             assert_ne!(unsafe { IsWindow(window) }, 0);
@@ -4025,7 +4030,27 @@ mod native_tests {
                 );
                 assert!(!guardian.shared.is_joined());
             }
-            assert_ui_ack_while_icon_blocked(window)?;
+            let mut max_queued_ack = Duration::ZERO;
+            let mut queued_ack_samples = 0;
+            while let Some(remaining) = hold.checked_sub(held_at.elapsed()) {
+                let ack_requested_at = Instant::now();
+                assert_ui_ack_while_icon_blocked(window)?;
+                max_queued_ack = max_queued_ack.max(ack_requested_at.elapsed());
+                queued_ack_samples += 1;
+                assert!(!guardian.shared.is_joined());
+                let lease = try_app_state(window).ok_or_else(|| {
+                    io::Error::other("ordinary close state disappeared while held")
+                })?;
+                assert!(lease.state().close_pending && lease.state().mutation_locked);
+                drop(lease);
+                // SAFETY: this scalar query checks the exact test-owned HWND
+                // while the controlled worker call remains gate-held.
+                assert_ne!(unsafe { IsWindow(window) }, 0);
+                thread::sleep(remaining.min(Duration::from_millis(250)));
+            }
+            let held_for = held_at.elapsed();
+            assert!(!guardian.shared.is_joined());
+            let released_at = Instant::now();
             gate.release();
             pump_icon_test_until(window, Duration::from_secs(10), || {
                 guardian.poll_join();
@@ -4034,6 +4059,7 @@ mod native_tests {
                 // SAFETY: this pointer-free query observes the test-owned HWND.
                 unsafe { IsWindow(window) == 0 }
             })?;
+            let joined_after_release = released_at.elapsed();
             let observation = close_join_subclass
                 .observation()
                 .ok_or_else(|| io::Error::other("close-join observation unavailable"))?;
@@ -4043,6 +4069,21 @@ mod native_tests {
             assert!(guardian.shared.is_joined());
             assert!(guardian.shared.owner_destroyed());
             assert_eq!(class_calls.load(Ordering::Acquire), 1);
+            println!(
+                "controlled-provider-observation {{\"case\":\"icon-ordinary-close\",\"gate_target_ms\":{},\"gate_held_ms\":{},\"close_request_after_entry_ms\":{},\"close_request_ack_ms\":{},\"max_queued_ui_ack_ms\":{},\"queued_ui_ack_samples\":{},\"joined_after_release_ms\":{},\"joined_at_destroy\":true}}",
+                hold.as_millis(),
+                held_for.as_millis(),
+                close_request_after_entry.as_millis(),
+                close_ack.as_millis(),
+                max_queued_ack.as_millis(),
+                queued_ack_samples,
+                joined_after_release.as_millis(),
+            );
+            assert!(held_for >= hold);
+            assert!(close_ack < Duration::from_millis(100));
+            assert!(max_queued_ack < Duration::from_millis(100));
+            assert!(queued_ack_samples > 0);
+            assert!(joined_after_release < Duration::from_secs(2));
             Ok(())
         })
     }
@@ -4050,7 +4091,8 @@ mod native_tests {
     #[test]
     fn icon_worker_close_and_forced_destroy_retire() -> io::Result<()> {
         with_icon_native_window(|window, image_list| {
-            assert_ordinary_close_waits_for_icon_join(image_list)?;
+            assert_ordinary_close_waits_for_icon_join(image_list, Duration::from_secs(2))?;
+            assert_ordinary_close_waits_for_icon_join(image_list, Duration::from_secs(5))?;
             let slot = app_state_slot(window);
             // SAFETY: the test owns the published slot; the hold outlives the
             // actual worker join and the deliberately nested owner teardown.
