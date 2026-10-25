@@ -37,6 +37,8 @@ pub const MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS: usize = 2 * 1024 * 1024;
 /// destination-parent storage, the accounting includes a shared parent once
 /// per row because preview and plan construction materialize complete paths.
 pub const MAX_TOTAL_PLANNED_PATH_UTF16_UNITS: usize = 2 * 1024 * 1024;
+/// Maximum charged bytes retained for proposal-only history records.
+pub const MAX_PROPOSAL_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 
 const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
@@ -761,6 +763,170 @@ pub struct LegacyList {
     planned_path_utf16_units: usize,
     identity: Arc<()>,
     source_revision: u64,
+    order_revision: u64,
+}
+
+/// A bounded, proposal-only state for one source list and row order.
+///
+/// This carries no paths with execution authority, rename plans, or journals.
+pub struct ProposalSnapshot {
+    identity: Weak<()>,
+    source_revision: u64,
+    order_revision: u64,
+    rows: Vec<(LegacyText, Arc<LegacyText>)>,
+    proposed_name_utf16_units: usize,
+    planned_path_utf16_units: usize,
+    reserved_bytes: usize,
+}
+
+impl ProposalSnapshot {
+    /// Conservative storage charge for this record in a bounded history.
+    #[must_use]
+    pub const fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
+    }
+
+    /// Whether the record still refers to the same sources in the same order.
+    #[must_use]
+    pub fn matches(&self, list: &LegacyList) -> bool {
+        self.rows.len() == list.items.len()
+            && self.source_revision == list.source_revision
+            && self.order_revision == list.order_revision
+            && self
+                .identity
+                .upgrade()
+                .is_some_and(|identity| Arc::ptr_eq(&identity, &list.identity))
+    }
+}
+
+/// Failure to stage or restore a proposal-only snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalSnapshotError {
+    AllocationFailed,
+    BudgetExceeded,
+    StaleSources,
+}
+
+/// Bounded proposal-only Undo and Redo; structural source changes invalidate it.
+#[derive(Default)]
+pub struct ProposalHistory {
+    undo: Vec<ProposalSnapshot>,
+    redo: Vec<ProposalSnapshot>,
+    reserved_bytes: usize,
+}
+
+/// Maximum number of proposal edits retained across both directions.
+pub const MAX_PROPOSAL_HISTORY_STEPS: usize = 16;
+
+impl ProposalHistory {
+    /// Creates an empty proposal history.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            reserved_bytes: 0,
+        }
+    }
+
+    /// Discards all proposal history, including executable Apply boundaries.
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.reserved_bytes = 0;
+    }
+
+    /// Whether a source-valid proposal edit can be undone.
+    #[must_use]
+    pub fn can_undo(&self, list: &LegacyList) -> bool {
+        self.undo.last().is_some_and(|entry| entry.matches(list))
+    }
+
+    /// Whether a source-valid proposal edit can be redone.
+    #[must_use]
+    pub fn can_redo(&self, list: &LegacyList) -> bool {
+        self.redo.last().is_some_and(|entry| entry.matches(list))
+    }
+
+    /// Reserves stack storage and captures a before-state before mutating a model.
+    pub fn prepare_edit(
+        &mut self,
+        list: &LegacyList,
+    ) -> Result<ProposalSnapshot, ProposalSnapshotError> {
+        self.undo
+            .try_reserve(1)
+            .map_err(|_| ProposalSnapshotError::AllocationFailed)?;
+        list.capture_proposals()
+    }
+
+    /// Records a successful edit and retires Redo; older edits age out by budget.
+    /// The caller first charges the after-state through `reserve_proposals_after_mutation`.
+    pub fn record_edit(&mut self, list: &LegacyList, snapshot: ProposalSnapshot) {
+        debug_assert!(snapshot.matches(list));
+        debug_assert!(snapshot.reserved_bytes <= MAX_PROPOSAL_HISTORY_BYTES);
+        if self.undo.last().is_some_and(|entry| !entry.matches(list)) {
+            self.clear();
+        }
+        for entry in self.redo.drain(..) {
+            self.reserved_bytes -= entry.reserved_bytes;
+        }
+        while self.undo.len() >= MAX_PROPOSAL_HISTORY_STEPS
+            || self.reserved_bytes + snapshot.reserved_bytes > MAX_PROPOSAL_HISTORY_BYTES
+        {
+            let removed = self.undo.remove(0);
+            self.reserved_bytes -= removed.reserved_bytes;
+        }
+        self.reserved_bytes += snapshot.reserved_bytes;
+        self.undo.push(snapshot);
+    }
+
+    fn move_snapshot(
+        &mut self,
+        list: &mut LegacyList,
+        toward_undo: bool,
+    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+        let (source, target) = if toward_undo {
+            (&mut self.undo, &mut self.redo)
+        } else {
+            (&mut self.redo, &mut self.undo)
+        };
+        let Some(entry) = source.last_mut() else {
+            return Ok(None);
+        };
+        if !entry.matches(list) {
+            self.clear();
+            return Err(ProposalSnapshotError::StaleSources);
+        }
+        target
+            .try_reserve(1)
+            .map_err(|_| ProposalSnapshotError::AllocationFailed)?;
+        let result = list.swap_proposals(entry)?;
+        let entry = source.pop().expect("checked snapshot exists");
+        target.push(entry);
+        Ok(Some(result))
+    }
+
+    /// Restores the previous proposals without touching filesystem state.
+    pub fn undo(
+        &mut self,
+        list: &mut LegacyList,
+    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+        self.move_snapshot(list, true)
+    }
+
+    /// Restores a previously undone proposal edit.
+    pub fn redo(
+        &mut self,
+        list: &mut LegacyList,
+    ) -> Result<Option<(Box<[usize]>, bool)>, ProposalSnapshotError> {
+        self.move_snapshot(list, false)
+    }
+
+    /// Conservative bytes charged for retained proposal states.
+    #[must_use]
+    pub const fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
+    }
 }
 
 #[derive(Eq, Hash, PartialEq)]
@@ -780,6 +946,7 @@ impl Clone for LegacyList {
             planned_path_utf16_units: self.planned_path_utf16_units,
             identity: Arc::new(()),
             source_revision: 0,
+            order_revision: 0,
         }
     }
 }
@@ -844,6 +1011,7 @@ impl LegacyList {
             planned_path_utf16_units: 0,
             identity: Arc::new(()),
             source_revision: 0,
+            order_revision: 0,
         }
     }
 
@@ -877,6 +1045,118 @@ impl LegacyList {
         self.planned_path_utf16_units
     }
 
+    fn proposal_snapshot_bytes(&self) -> Result<usize, ProposalSnapshotError> {
+        let row_bytes = self
+            .items
+            .len()
+            .checked_mul(mem::size_of::<(LegacyText, Arc<LegacyText>)>())
+            .ok_or(ProposalSnapshotError::BudgetExceeded)?;
+        self.items
+            .iter()
+            .try_fold(row_bytes, |total, item| {
+                total
+                    .checked_add(item.proposed_name.len().checked_mul(2)?)
+                    .and_then(|bytes| {
+                        bytes.checked_add(item.destination_parent.len().checked_mul(2)?)
+                    })
+            })
+            .ok_or(ProposalSnapshotError::BudgetExceeded)
+    }
+
+    /// Fallibly captures only proposed names and destination parents.
+    ///
+    /// The caller prepares this before a proposal mutation and retains it only
+    /// after a successful mutation. Source changes make the snapshot stale.
+    pub fn capture_proposals(&self) -> Result<ProposalSnapshot, ProposalSnapshotError> {
+        let bytes = self.proposal_snapshot_bytes()?;
+        if bytes > MAX_PROPOSAL_HISTORY_BYTES {
+            return Err(ProposalSnapshotError::BudgetExceeded);
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.items.len())
+            .map_err(|_| ProposalSnapshotError::AllocationFailed)?;
+        for item in &self.items {
+            rows.push((
+                try_clone_text(&item.proposed_name)
+                    .map_err(|_| ProposalSnapshotError::AllocationFailed)?,
+                Arc::clone(&item.destination_parent),
+            ));
+        }
+        Ok(ProposalSnapshot {
+            identity: Arc::downgrade(&self.identity),
+            source_revision: self.source_revision,
+            order_revision: self.order_revision,
+            rows,
+            proposed_name_utf16_units: self.proposed_name_utf16_units,
+            planned_path_utf16_units: self.planned_path_utf16_units,
+            reserved_bytes: bytes,
+        })
+    }
+
+    /// Charges the larger of the before/after proposal states before recording.
+    pub fn reserve_proposals_after_mutation(
+        &self,
+        snapshot: &mut ProposalSnapshot,
+    ) -> Result<(), ProposalSnapshotError> {
+        if !snapshot.matches(self) {
+            return Err(ProposalSnapshotError::StaleSources);
+        }
+        let bytes = self.proposal_snapshot_bytes()?;
+        let reserved = snapshot.reserved_bytes.max(bytes);
+        if reserved > MAX_PROPOSAL_HISTORY_BYTES {
+            return Err(ProposalSnapshotError::BudgetExceeded);
+        }
+        snapshot.reserved_bytes = reserved;
+        Ok(())
+    }
+
+    /// Swaps proposal values without allocating; used to restore a rejected edit.
+    /// Both sides remain valid and retain their original source identity.
+    pub fn swap_proposals_without_allocation(
+        &mut self,
+        snapshot: &mut ProposalSnapshot,
+    ) -> Result<(), ProposalSnapshotError> {
+        if !snapshot.matches(self) {
+            return Err(ProposalSnapshotError::StaleSources);
+        }
+        for (item, (name, parent)) in self.items.iter_mut().zip(&mut snapshot.rows) {
+            mem::swap(&mut item.proposed_name, name);
+            mem::swap(&mut item.destination_parent, parent);
+        }
+        mem::swap(
+            &mut self.proposed_name_utf16_units,
+            &mut snapshot.proposed_name_utf16_units,
+        );
+        mem::swap(
+            &mut self.planned_path_utf16_units,
+            &mut snapshot.planned_path_utf16_units,
+        );
+        Ok(())
+    }
+
+    /// Prepares changed rows, then swaps a valid snapshot atomically for UI refresh.
+    pub fn swap_proposals(
+        &mut self,
+        snapshot: &mut ProposalSnapshot,
+    ) -> Result<(Box<[usize]>, bool), ProposalSnapshotError> {
+        if !snapshot.matches(self) {
+            return Err(ProposalSnapshotError::StaleSources);
+        }
+        let mut changed = Vec::new();
+        changed
+            .try_reserve_exact(self.items.len())
+            .map_err(|_| ProposalSnapshotError::AllocationFailed)?;
+        let mut parent_changed = false;
+        for (row, (item, (name, parent))) in self.items.iter().zip(&snapshot.rows).enumerate() {
+            if item.proposed_name != *name || item.destination_parent != *parent {
+                changed.push(row);
+                parent_changed |= item.destination_parent != *parent;
+            }
+        }
+        self.swap_proposals_without_allocation(snapshot)?;
+        Ok((changed.into_boxed_slice(), parent_changed))
+    }
+
     /// Clears all rows and reports whether the list changed.
     pub fn clear(&mut self) -> bool {
         let changed = !self.items.is_empty();
@@ -895,6 +1175,16 @@ impl LegacyList {
         } else {
             self.identity = Arc::new(());
             self.source_revision = 0;
+        }
+    }
+
+    fn invalidate_row_order(&mut self) {
+        if let Some(next) = self.order_revision.checked_add(1) {
+            self.order_revision = next;
+        } else {
+            self.identity = Arc::new(());
+            self.source_revision = 0;
+            self.order_revision = 0;
         }
     }
 
@@ -1174,6 +1464,9 @@ impl LegacyList {
             self.items.swap(index - 1, *index);
         }
         let changed = !selected.is_empty();
+        if changed {
+            self.invalidate_row_order();
+        }
         let rows = selected
             .into_iter()
             .map(|index| index - 1)
@@ -1202,6 +1495,9 @@ impl LegacyList {
             self.items.swap(*index, index + 1);
         }
         let changed = !selected.is_empty();
+        if changed {
+            self.invalidate_row_order();
+        }
         let rows = selected
             .into_iter()
             .map(|index| index + 1)
@@ -2067,6 +2363,7 @@ impl LegacyList {
                 self.items.push(item);
             }
         }
+        self.invalidate_row_order();
         true
     }
 
