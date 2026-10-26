@@ -229,15 +229,25 @@ def validate_picker_popup(value: object, stage: str, main_handle: int,
             popup["thread_lookup"] in {"not-run", "failed", "complete"} and
             popup["class_lookup"] in {"not-run", "failed", "complete"} and
             popup["visibility_lookup"] in {"not-run", "visible", "hidden"} and
-            popup["owner_lookup"] in {"not-run", "returned", "none"} and
+            popup["owner_lookup"] in {"not-run", "returned", "none", "null-with-error"} and
             popup["owner_chain_lookup"] in {"not-run", "main-reached", "ended", "cycle", "limit"},
             "Picker native lookup statuses are invalid.")
     for field in ("thread_lookup_error", "class_lookup_error", "owner_lookup_error",
                   "owner_chain_lookup_error"):
         require(popup[field] is None or type(popup[field]) is int and 0 <= popup[field] <= 0xFFFFFFFF,
                 f"Picker {field} is invalid.")
-    require(popup["owner_lookup_error"] is None and popup["owner_chain_lookup_error"] is None,
-            "GetWindow owner absence has no unambiguous native error code.")
+    require((popup["owner_lookup"] == "not-run" and popup["owner_lookup_error"] is None or
+             popup["owner_lookup"] == "returned" and popup["direct_owner"] > 0 and
+             popup["owner_lookup_error"] is None or
+             popup["owner_lookup"] == "none" and popup["direct_owner"] == 0 and
+             popup["owner_lookup_error"] == 0 or
+             popup["owner_lookup"] == "null-with-error" and popup["direct_owner"] == 0 and
+             type(popup["owner_lookup_error"]) is int and popup["owner_lookup_error"] > 0) and
+            ((popup["owner_chain_lookup"] == "ended" and popup["direct_owner"] > 0 and
+              type(popup["owner_chain_lookup_error"]) is int) or
+             (popup["owner_chain_lookup"] != "ended" or popup["direct_owner"] == 0) and
+             popup["owner_chain_lookup_error"] is None),
+            "GetWindow null result and immediate error cache are incomplete or mislabeled.")
     require(isinstance(popup["owner_chain"], list) and len(popup["owner_chain"]) <= 8 and
             len(set(popup["owner_chain"])) == len(popup["owner_chain"]) and
             all(type(handle) is int and 0 < handle <= 2**63 - 1 for handle in popup["owner_chain"]) and

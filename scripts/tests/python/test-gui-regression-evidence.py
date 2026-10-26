@@ -129,6 +129,22 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                       disposition="rejected", observed_predicates=["direct-owner-mismatch"],
                       failed_predicates=["direct-owner-mismatch"])
         self.assertEqual(evidence.validate_picker_popup(nested, "before-probe", 800, 42, 7), nested)
+        no_owner = deepcopy(nested)
+        no_owner.update(direct_owner=0, owner_chain=[], owner_chain_lookup="ended",
+                        owner_lookup="null-with-error", owner_lookup_error=5)
+        self.assertEqual(evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7), no_owner)
+        no_owner["owner_lookup_error"] = 0
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7)
+        no_owner.update(owner_lookup="none", owner_lookup_error=0)
+        self.assertEqual(evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7), no_owner)
+        ended_chain = deepcopy(nested)
+        ended_chain.update(owner_chain=[801], owner_chain_lookup="ended",
+                           owner_chain_lookup_error=0)
+        self.assertEqual(evidence.validate_picker_popup(ended_chain, "before-probe", 800, 42, 7), ended_chain)
+        ended_chain["owner_chain_lookup_error"] = None
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(ended_chain, "before-probe", 800, 42, 7)
         for field, value in (("disposition", "owned-popup"), ("thread_lookup", "not-run"),
                              ("owner_chain", [800]), ("popup_process_id", 43)):
             with self.subTest(field=field):

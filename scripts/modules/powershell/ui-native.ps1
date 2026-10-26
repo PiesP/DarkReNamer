@@ -1601,6 +1601,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private readonly System.Threading.Timer timer;
     private readonly int maximumMilliseconds;
     private readonly int maximumSamples;
+    private readonly bool failOnBudget;
     private readonly object gate = new object();
     private readonly List<DarkReNamerPerformanceSample> samples = new List<DarkReNamerPerformanceSample>();
     private string failure;
@@ -1679,16 +1680,24 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             diagnostic.PopupProcessId = popupPid;
             diagnostic.ThreadLookup = popupThread == 0 ? "failed" : "complete";
             if (popupThread == 0) { diagnostic.ThreadLookupError = Marshal.GetLastWin32Error(); faults.Add("thread-lookup"); }
+            SetLastErrorNative(0);
             IntPtr owner = GetWindow(popup, 4);
+            int? ownerNullError = owner == IntPtr.Zero ? (int?)Marshal.GetLastWin32Error() : null;
             diagnostic.DirectOwner = owner.ToInt64();
-            diagnostic.OwnerLookup = owner == IntPtr.Zero ? "none" : "returned";
+            diagnostic.OwnerLookupError = ownerNullError;
+            // A null owner can be ordinary absence even when an error code is set.
+            diagnostic.OwnerLookup = owner == IntPtr.Zero ?
+                (ownerNullError == 0 ? "none" : "null-with-error") : "returned";
             var chain = new List<long>();
             var seen = new HashSet<long>();
             IntPtr current = owner;
             while (current != IntPtr.Zero && chain.Count < 8 && seen.Add(current.ToInt64())) {
                 chain.Add(current.ToInt64());
                 if (current == window) break;
+                SetLastErrorNative(0);
                 current = GetWindow(current, 4);
+                if (current == IntPtr.Zero)
+                    diagnostic.OwnerChainLookupError = Marshal.GetLastWin32Error();
             }
             diagnostic.OwnerChain = chain.ToArray();
             diagnostic.OwnerChainLookup = current == window ? "main-reached" :
@@ -1750,6 +1759,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         process = ownedProcess; window = ownedWindow; startTicks = process.StartTime.ToUniversalTime().Ticks;
         this.maximumMilliseconds = maximumMilliseconds;
         this.maximumSamples = maximumSamples;
+        failOnBudget = maximumMilliseconds != 600000 || maximumSamples != 3000;
         watch = System.Diagnostics.Stopwatch.StartNew();
         timer = new System.Threading.Timer(Sample, null, 0, 200);
     }
@@ -1762,8 +1772,10 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         };
         try {
             if (stopped) return;
-            if (samples.Count >= maximumSamples || watch.ElapsedMilliseconds > maximumMilliseconds)
+            if (samples.Count >= maximumSamples || watch.ElapsedMilliseconds > maximumMilliseconds) {
+                if (!failOnBudget) return;
                 throw new InvalidOperationException("Sampler observation budget exhausted.");
+            }
             diagnostic.MainBefore = CaptureMain();
             process.Refresh();
             uint pid;
