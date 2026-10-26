@@ -1507,9 +1507,68 @@ public sealed class DarkReNamerPerformanceSample {
     public uint OwnedPopupThreadIdBefore { get; set; }
     public string OwnedPopupClass { get; set; }
     public string OwnedPopupClassBefore { get; set; }
+    public DarkReNamerPopupDiagnostic PopupBeforeDiagnostic { get; set; }
+    public DarkReNamerPopupDiagnostic PopupAfterDiagnostic { get; set; }
 }
 
 // Observer-only bounded sampler. It does not inject a thread into the product.
+public sealed class DarkReNamerPopupDiagnostic {
+    public string Stage { get; set; }
+    public long BeginTicks { get; set; }
+    public long EndTicks { get; set; }
+    public long RawPopupHandle { get; set; }
+    public long AcceptedPopupHandle { get; set; }
+    public string PopupLookup { get; set; }
+    public uint PopupProcessId { get; set; }
+    public uint PopupThreadId { get; set; }
+    public string ThreadLookup { get; set; }
+    public int? ThreadLookupError { get; set; }
+    public string PopupClass { get; set; }
+    public string ClassLookup { get; set; }
+    public int? ClassLookupError { get; set; }
+    public bool PopupVisible { get; set; }
+    public bool MainEnabledAtLookup { get; set; }
+    public string VisibilityLookup { get; set; }
+    public long DirectOwner { get; set; }
+    public string OwnerLookup { get; set; }
+    public int? OwnerLookupError { get; set; }
+    public long[] OwnerChain { get; set; }
+    public string OwnerChainLookup { get; set; }
+    public int? OwnerChainLookupError { get; set; }
+    public string Disposition { get; set; }
+    public string[] ObservedPredicates { get; set; }
+    public string[] FailedPredicates { get; set; }
+}
+
+public sealed class DarkReNamerMainDiagnostic {
+    public long Handle { get; set; }
+    public uint ProcessId { get; set; }
+    public long ProcessStartUtcTicks { get; set; }
+    public uint ThreadId { get; set; }
+    public string Class { get; set; }
+    public bool Enabled { get; set; }
+    public string Lookup { get; set; }
+    public int? ThreadLookupError { get; set; }
+    public int? ClassLookupError { get; set; }
+}
+
+public sealed class DarkReNamerSamplerFailure {
+    public int SchemaVersion { get; set; }
+    public string Phase { get; set; }
+    public string ErrorType { get; set; }
+    public string Message { get; set; }
+    public long SampleBeginTicks { get; set; }
+    public long SampleEndTicks { get; set; }
+    public long ProbeBeginTicks { get; set; }
+    public long ProbeEndTicks { get; set; }
+    public int? ProbeErrorCode { get; set; }
+    public long QpcFrequency { get; set; }
+    public DarkReNamerMainDiagnostic MainBefore { get; set; }
+    public DarkReNamerMainDiagnostic MainAfter { get; set; }
+    public DarkReNamerPopupDiagnostic PopupBefore { get; set; }
+    public DarkReNamerPopupDiagnostic PopupAfter { get; set; }
+}
+
 public sealed class DarkReNamerPerformanceSampler : IDisposable {
     [DllImport("user32.dll", SetLastError=true)]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
@@ -1540,9 +1599,12 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private readonly string mainClass;
     private readonly System.Diagnostics.Stopwatch watch;
     private readonly System.Threading.Timer timer;
+    private readonly int maximumMilliseconds;
+    private readonly int maximumSamples;
     private readonly object gate = new object();
     private readonly List<DarkReNamerPerformanceSample> samples = new List<DarkReNamerPerformanceSample>();
     private string failure;
+    private DarkReNamerSamplerFailure failureDiagnostic;
     private string phase = "empty-idle";
     private long previousSampleTicks;
     private bool stopped;
@@ -1552,30 +1614,131 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         return responsive ? "success" : errorCode == 1460 ? "timeout" : "failure_unknown";
     }
 
-    private IntPtr ReadOwnedPopup(bool mainEnabled, out uint popupThread, out string popupClass) {
+    private DarkReNamerMainDiagnostic CaptureMain() {
+        var result = new DarkReNamerMainDiagnostic {
+            Handle = window.ToInt64(), ProcessId = (uint)process.Id,
+            ProcessStartUtcTicks = startTicks, Lookup = "unavailable", Class = ""
+        };
+        try {
+            process.Refresh();
+            if (process.HasExited) { result.Lookup = "process-exited"; return result; }
+            result.ProcessStartUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+            uint pid;
+            SetLastErrorNative(0);
+            result.ThreadId = GetWindowThreadProcessId(window, out pid);
+            result.ProcessId = pid;
+            if (result.ThreadId == 0) {
+                result.ThreadLookupError = Marshal.GetLastWin32Error();
+                result.Lookup = "thread-failed";
+                return result;
+            }
+            var name = new System.Text.StringBuilder(128);
+            SetLastErrorNative(0);
+            if (GetClassNameW(window, name, name.Capacity) == 0) {
+                result.ClassLookupError = Marshal.GetLastWin32Error();
+                result.Lookup = "class-failed";
+                return result;
+            }
+            result.Class = name.ToString();
+            result.Enabled = IsWindowEnabled(window);
+            result.Lookup = "complete";
+        } catch (Exception error) {
+            result.Lookup = "managed-" + error.GetType().Name;
+        }
+        return result;
+    }
+
+    private IntPtr ReadOwnedPopup(bool mainEnabled, string stage,
+                                  DarkReNamerSamplerFailure sampleDiagnostic,
+                                  out uint popupThread, out string popupClass,
+                                  out DarkReNamerPopupDiagnostic diagnostic) {
+        diagnostic = new DarkReNamerPopupDiagnostic {
+            Stage = stage, BeginTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            MainEnabledAtLookup = mainEnabled,
+            ThreadLookup = "not-run", ClassLookup = "not-run", OwnerLookup = "not-run",
+            VisibilityLookup = "not-run", OwnerChainLookup = "not-run",
+            PopupClass = "", OwnerChain = new long[0], Disposition = "unavailable",
+            ObservedPredicates = new string[0], FailedPredicates = new string[0]
+        };
         IntPtr popup = GetLastActivePopup(window);
-        if (popup == IntPtr.Zero)
-            throw new InvalidOperationException("Sampler owned popup state is unavailable.");
+        diagnostic.RawPopupHandle = popup.ToInt64();
+        diagnostic.PopupLookup = popup == IntPtr.Zero ? "zero" : popup == window ? "main" : "popup";
         popupThread = 0;
         popupClass = "";
-        if (popup != window && !IsWindowVisible(popup) && mainEnabled) popup = window;
-        if (popup != window) {
-            uint popupPid;
-            var popupName = new System.Text.StringBuilder(128);
+        var faults = new List<string>();
+        // GetLastActivePopup and IsWindowVisible do not define a last-error result.
+        if (popup == IntPtr.Zero) {
+            faults.Add("popup-zero");
+        } else if (popup != window) {
+            diagnostic.PopupVisible = IsWindowVisible(popup);
+            diagnostic.VisibilityLookup = diagnostic.PopupVisible ? "visible" : "hidden";
+            uint popupPid = 0;
+            SetLastErrorNative(0);
             popupThread = GetWindowThreadProcessId(popup, out popupPid);
-            if (popupThread != mainThreadId || popupPid != (uint)process.Id ||
-                GetWindow(popup, 4) != window || !IsWindowVisible(popup) ||
-                GetClassNameW(popup, popupName, popupName.Capacity) == 0)
-                throw new InvalidOperationException("Sampler active owned popup identity changed.");
-            popupClass = popupName.ToString();
+            diagnostic.PopupThreadId = popupThread;
+            diagnostic.PopupProcessId = popupPid;
+            diagnostic.ThreadLookup = popupThread == 0 ? "failed" : "complete";
+            if (popupThread == 0) { diagnostic.ThreadLookupError = Marshal.GetLastWin32Error(); faults.Add("thread-lookup"); }
+            IntPtr owner = GetWindow(popup, 4);
+            diagnostic.DirectOwner = owner.ToInt64();
+            diagnostic.OwnerLookup = owner == IntPtr.Zero ? "none" : "returned";
+            var chain = new List<long>();
+            var seen = new HashSet<long>();
+            IntPtr current = owner;
+            while (current != IntPtr.Zero && chain.Count < 8 && seen.Add(current.ToInt64())) {
+                chain.Add(current.ToInt64());
+                if (current == window) break;
+                current = GetWindow(current, 4);
+            }
+            diagnostic.OwnerChain = chain.ToArray();
+            diagnostic.OwnerChainLookup = current == window ? "main-reached" :
+                current != IntPtr.Zero && chain.Count >= 8 ? "limit" :
+                current != IntPtr.Zero ? "cycle" : "ended";
+            var popupName = new System.Text.StringBuilder(128);
+            SetLastErrorNative(0);
+            int classLength = GetClassNameW(popup, popupName, popupName.Capacity);
+            diagnostic.ClassLookup = classLength == 0 ? "failed" : "complete";
+            if (classLength == 0) { diagnostic.ClassLookupError = Marshal.GetLastWin32Error(); faults.Add("class-lookup"); }
+            diagnostic.PopupClass = popupName.ToString();
+            if (classLength != 0) popupClass = diagnostic.PopupClass;
+            if (popupThread != mainThreadId) faults.Add("thread-mismatch");
+            if (popupPid != (uint)process.Id) faults.Add("process-mismatch");
+            if (owner != window) faults.Add("direct-owner-mismatch");
+            if (!diagnostic.PopupVisible) faults.Add("hidden");
+            if (classLength == 0) faults.Add("class-unavailable");
+            if (!diagnostic.PopupVisible && mainEnabled) {
+                popup = window;
+                popupThread = 0;
+                popupClass = "";
+            }
         }
+        diagnostic.AcceptedPopupHandle = popup == window ? 0 : popup.ToInt64();
+        diagnostic.ObservedPredicates = faults.ToArray();
+        diagnostic.Disposition = diagnostic.PopupLookup == "zero" ? "unavailable" :
+            popup == window && diagnostic.PopupLookup == "popup" ? "inactive-ignored" :
+            popup == window ? "main" : faults.Count == 0 ? "owned-popup" : "rejected";
+        diagnostic.FailedPredicates = diagnostic.Disposition == "rejected" ||
+            diagnostic.Disposition == "unavailable" ? faults.ToArray() : new string[0];
+        diagnostic.EndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (stage == "before-probe") sampleDiagnostic.PopupBefore = diagnostic;
+        else sampleDiagnostic.PopupAfter = diagnostic;
+        if (diagnostic.Disposition == "unavailable")
+            throw new InvalidOperationException("Sampler owned popup state is unavailable.");
+        if (diagnostic.Disposition == "rejected")
+            throw new InvalidOperationException("Sampler active owned popup identity changed.");
         // A disabled owner can briefly have no active popup during modal creation/retirement.
         // Preserve that observed transition; it is not evidence of a modal throughout the probe.
         return popup == window ? IntPtr.Zero : popup;
     }
 
-    public DarkReNamerPerformanceSampler(System.Diagnostics.Process ownedProcess, IntPtr ownedWindow) {
+    public DarkReNamerPerformanceSampler(System.Diagnostics.Process ownedProcess, IntPtr ownedWindow)
+        : this(ownedProcess, ownedWindow, 600000, 3000) { }
+    public DarkReNamerPerformanceSampler(System.Diagnostics.Process ownedProcess, IntPtr ownedWindow,
+                                         int maximumMilliseconds, int maximumSamples) {
         if (ownedProcess == null || ownedWindow == IntPtr.Zero) throw new ArgumentException("Missing owned target.");
+        if (maximumMilliseconds < 1000 || maximumMilliseconds > 600000 ||
+            maximumSamples < 1 || maximumSamples > 3000)
+            throw new ArgumentOutOfRangeException("Sampler bounds are invalid.");
         uint pid;
         uint thread = GetWindowThreadProcessId(ownedWindow, out pid);
         if (thread == 0 || pid != (uint)ownedProcess.Id)
@@ -1585,13 +1748,23 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             throw new InvalidOperationException("Sampler main window class is unavailable.");
         mainThreadId = thread; mainClass = className.ToString();
         process = ownedProcess; window = ownedWindow; startTicks = process.StartTime.ToUniversalTime().Ticks;
+        this.maximumMilliseconds = maximumMilliseconds;
+        this.maximumSamples = maximumSamples;
         watch = System.Diagnostics.Stopwatch.StartNew();
         timer = new System.Threading.Timer(Sample, null, 0, 200);
     }
     private void Sample(object ignored) {
         if (!System.Threading.Monitor.TryEnter(gate)) return;
+        var diagnostic = new DarkReNamerSamplerFailure {
+            SchemaVersion = 1, Phase = phase,
+            SampleBeginTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            QpcFrequency = System.Diagnostics.Stopwatch.Frequency
+        };
         try {
-            if (stopped || samples.Count >= 3000 || watch.ElapsedMilliseconds > 600000) return;
+            if (stopped) return;
+            if (samples.Count >= maximumSamples || watch.ElapsedMilliseconds > maximumMilliseconds)
+                throw new InvalidOperationException("Sampler observation budget exhausted.");
+            diagnostic.MainBefore = CaptureMain();
             process.Refresh();
             uint pid;
             uint thread = GetWindowThreadProcessId(window, out pid);
@@ -1604,21 +1777,35 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             bool mainEnabledBefore = IsWindowEnabled(window);
             uint popupThreadBefore;
             string popupClassBefore;
-            IntPtr popupBefore = ReadOwnedPopup(mainEnabledBefore, out popupThreadBefore, out popupClassBefore);
+            DarkReNamerPopupDiagnostic popupBeforeDiagnostic;
+            IntPtr popupBefore = ReadOwnedPopup(mainEnabledBefore, "before-probe", diagnostic, out popupThreadBefore,
+                                                 out popupClassBefore, out popupBeforeDiagnostic);
             IntPtr result;
             SetLastErrorNative(0);
             long begun = System.Diagnostics.Stopwatch.GetTimestamp();
+            diagnostic.ProbeBeginTicks = begun;
             bool responsive = SendMessageTimeoutW(window, 0, IntPtr.Zero, IntPtr.Zero, 3, 50, out result) != IntPtr.Zero;
             long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();
+            diagnostic.ProbeEndTicks = probeEnded;
             // SetLastError=true cached this call's native error; QPC does not replace that cache.
             int probeError = responsive ? 0 : Marshal.GetLastWin32Error();
+            diagnostic.ProbeErrorCode = probeError;
             string probeStatus = ClassifyProbe(responsive, probeError);
             if (probeStatus == "failure_unknown")
                 throw new InvalidOperationException("Sampler probe returned an unknown failure.");
             bool mainEnabled = IsWindowEnabled(window);
             uint popupThread;
             string popupClass;
-            IntPtr popup = ReadOwnedPopup(mainEnabled, out popupThread, out popupClass);
+            DarkReNamerPopupDiagnostic popupDiagnostic;
+            IntPtr popup = ReadOwnedPopup(mainEnabled, "after-probe", diagnostic, out popupThread,
+                                          out popupClass, out popupDiagnostic);
+            diagnostic.MainAfter = CaptureMain();
+            if (diagnostic.MainAfter.Lookup != "complete" ||
+                diagnostic.MainAfter.ProcessStartUtcTicks != startTicks ||
+                diagnostic.MainAfter.ThreadId != mainThreadId ||
+                diagnostic.MainAfter.Class != mainClass ||
+                diagnostic.MainAfter.ProcessId != (uint)process.Id)
+                throw new InvalidOperationException("Sampler target identity changed after probe.");
             long cpuMs = (long)process.TotalProcessorTime.TotalMilliseconds;
             long privateBytes = process.PrivateMemorySize64;
             long workingSetBytes = process.WorkingSet64;
@@ -1645,9 +1832,19 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
                 OwnedPopupThreadIdBefore = popupThreadBefore, OwnedPopupClassBefore = popupClassBefore,
                 OwnedPopupHandle = popup.ToInt64(),
                 OwnedPopupThreadId = popupThread, OwnedPopupClass = popupClass,
+                PopupBeforeDiagnostic = popupBeforeDiagnostic,
+                PopupAfterDiagnostic = popupDiagnostic,
             });
             previousSampleTicks = begun;
-        } catch (Exception error) { failure = error.GetType().Name + ": " + error.Message; stopped = true; }
+        } catch (Exception error) {
+            failure = error.GetType().Name + ": " + error.Message;
+            diagnostic.ErrorType = error.GetType().Name;
+            diagnostic.Message = error.Message;
+            diagnostic.SampleEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (diagnostic.MainAfter == null) diagnostic.MainAfter = CaptureMain();
+            failureDiagnostic = diagnostic;
+            stopped = true;
+        }
         finally { System.Threading.Monitor.Exit(gate); }
     }
     public void SetPhase(string value) {
@@ -1670,6 +1867,12 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         lock (gate) {
             if (!stopped) throw new InvalidOperationException("Sampler is still running.");
             return samples.ToArray();
+        }
+    }
+    public DarkReNamerSamplerFailure ReadFailureDiagnostic() {
+        lock (gate) {
+            if (!stopped) throw new InvalidOperationException("Sampler is still running.");
+            return failureDiagnostic;
         }
     }
     public void Dispose() { if (!stopped) Stop(); }

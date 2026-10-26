@@ -721,12 +721,18 @@ finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($scheme) }
     finally { $process.Dispose() }
 }
 $performanceSample = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSample'
+$popupDiagnostic = Get-NativeFixtureMember 'public sealed class DarkReNamerPopupDiagnostic'
+$mainDiagnostic = Get-NativeFixtureMember 'public sealed class DarkReNamerMainDiagnostic'
+$samplerFailure = Get-NativeFixtureMember 'public sealed class DarkReNamerSamplerFailure'
 $performanceSampler = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSampler'
 Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 $performanceSample
+$popupDiagnostic
+$mainDiagnostic
+$samplerFailure
 $performanceSampler
 "@
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($true, 0)) 'success' 'Successful probe classification'
@@ -734,12 +740,12 @@ Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, 1460)) 'tim
 foreach ($unknown in @(0, 5, 87)) {
     Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, $unknown)) 'failure_unknown' 'Unknown failure classification'
 }
-$resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
 $preModalAt = $performanceSampler.IndexOf('bool mainEnabledBefore = IsWindowEnabled(window);', [StringComparison]::Ordinal)
+$resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', $preModalAt, [StringComparison]::Ordinal)
 $beginAt = $performanceSampler.IndexOf('long begun = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
 $sendAt = $performanceSampler.IndexOf('bool responsive = SendMessageTimeoutW(', [StringComparison]::Ordinal)
 $endAt = $performanceSampler.IndexOf('long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
-$errorAt = $performanceSampler.IndexOf('Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
+$errorAt = $performanceSampler.IndexOf('int probeError = responsive ? 0 : Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
 $postModalAt = $performanceSampler.IndexOf('bool mainEnabled = IsWindowEnabled(window);', [StringComparison]::Ordinal)
 $resourcesAt = $performanceSampler.IndexOf('process.TotalProcessorTime', [StringComparison]::Ordinal)
 if (-not (0 -le $preModalAt -and $preModalAt -lt $resetAt -and $resetAt -lt $beginAt -and

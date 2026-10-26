@@ -47,7 +47,7 @@ function Invoke-DrWindowsVmAcceptance {
     [switch] $HighContrast,
     [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
     [switch] $RestoreHighContrastOnly,
-    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'icon-settlement')]
+    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
