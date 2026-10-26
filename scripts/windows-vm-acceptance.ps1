@@ -13,7 +13,7 @@ param(
     [switch] $HighContrast,
     [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
     [switch] $RestoreHighContrastOnly,
-    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'icon-settlement')]
+    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
     throw 'Unsupported VM acceptance profile identity.'
 }
-$ToolingManifestSha256 = '5f2eec7e58b3729c3c36b0bcbd9091b7622a445e75d9ef4d754b33ec42815537'
+$ToolingManifestSha256 = '59a09297d834e408816acb23fbf9f95048f66d135a7dfe34d0eedd435ae21c5e'
 $ToolingLoaderSha256 = '455d2b82f5def378fa9b1d8ff3ef21755e4994d55c866c718314044aa126b174'
 
 function Get-DrBootstrapSha256 {

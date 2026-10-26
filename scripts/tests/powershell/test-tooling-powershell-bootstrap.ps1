@@ -33,6 +33,41 @@ function Assert-DrTestThrows {
     throw $Message
 }
 
+function Assert-DrPublicPickerBinding {
+    # Execute the actual public parameter declaration with an inert body. This
+    # exercises PowerShell's binder without entering the controller or guest.
+    foreach ($case in @(
+        [ordered]@{leaf='run-windows-vm-tests.ps1'; parameter='AcceptanceMode';
+            arguments=@{BundleRoot='unused';VmName='fixture';CredentialHelper='unused'}},
+        [ordered]@{leaf='windows-vm-acceptance.ps1'; parameter='RegressionMode';
+            arguments=@{BundleRoot='unused';ExpectedSessionId=1;OutputRoot='unused';
+                ExpectedScriptSha256=('0' * 64)}})) {
+        foreach ($suffix in @('', '.in')) {
+            $path = Join-Path $toolingScriptsRoot ($case.leaf + $suffix)
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                $path, [ref]$tokens, [ref]$errors)
+            Assert-DrTestTrue -Condition ($null -ne $ast.ParamBlock) `
+                -Message "Public $($case.leaf)$suffix parameter block is missing."
+            $binder = [scriptblock]::Create($ast.ParamBlock.Extent.Text + "`n'bound'")
+            $arguments = @{} + $case.arguments
+            $arguments[$case.parameter] = 'picker-identity-observation'
+            Assert-DrTestTrue -Condition ((& $binder @arguments) -ceq 'bound') `
+                -Message "Public $($case.leaf)$suffix rejected picker before its body."
+            $arguments[$case.parameter] = 'unsupported-picker-mode'
+            Assert-DrTestThrows -Action { & $binder @arguments | Out-Null } `
+                -Message "Public $($case.leaf)$suffix accepted an unknown mode."
+        }
+        $generated = Get-Command -Name (Join-Path $toolingScriptsRoot $case.leaf) `
+            -CommandType ExternalScript -ErrorAction Stop
+        $validateSet = @($generated.Parameters[$case.parameter].Attributes |
+            Where-Object { $_ -is [Management.Automation.ValidateSetAttribute] })
+        Assert-DrTestTrue -Condition ($validateSet.Count -eq 1 -and
+            $validateSet[0].ValidValues -ccontains 'picker-identity-observation') `
+            -Message "Generated public $($case.leaf) metadata lacks the picker mode."
+    }
+}
+
 function Get-DrTestSha256 {
     param([byte[]] $Bytes)
     $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -222,6 +257,7 @@ try {
             -Condition ($functionAst.Name -match '-DrTooling') `
             -Message "Bootstrap function lacks the DrTooling prefix: $($functionAst.Name)."
     }
+    Assert-DrPublicPickerBinding
 
     Remove-Variable -Name DrToolingExecutionMarker -Scope Global -ErrorAction SilentlyContinue
     . $bootstrapPath

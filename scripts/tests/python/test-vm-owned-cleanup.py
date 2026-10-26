@@ -390,6 +390,11 @@ class OwnedCleanupTests(unittest.TestCase):
             self.rebind_original()
             with self.subTest(mode=mode):
                 self.assertEqual(verify_preserved_owned_cleanup(self.root)['acceptance'], 'rejected')
+        context['acceptance_mode'] = 'picker-identity-observation'
+        self.rebind_original()
+        with self.assertRaisesRegex(EvidenceError, 'reviewed V2 revision-3'):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_mode'] = 'appearance-pair'
         context['acceptance_text_scale_percent'] = 150
         self.rebind_original()
         with self.assertRaises(EvidenceError):
@@ -401,7 +406,12 @@ class OwnedCleanupTests(unittest.TestCase):
             verify_preserved_owned_cleanup(self.root)
         context['high_contrast_requested'] = False
         context.pop('acceptance_text_scale_percent')
+        context['acceptance_mode'] = 'picker-identity-observation'
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
         context['acceptance_mode'] = 'unrelated-mode'
+        context['acceptance_text_scale_percent'] = 100
         self.rebind_original()
         with self.assertRaises(EvidenceError):
             verify_preserved_owned_cleanup(self.root)

@@ -478,7 +478,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
     raw_context = original.get("owned_cleanup_failure_context")
     bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
                   raw_context.get("acceptance_mode") in
-                  ("appearance-pair", "performance-sample", "first-clear-observation"))
+                  ("appearance-pair", "performance-sample", "first-clear-observation",
+                   "picker-identity-observation"))
     context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -532,7 +533,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
             (context["acceptance_mode"] in
              ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
              (context["acceptance_mode"] in
-              ("appearance-pair", "performance-sample", "first-clear-observation") and
+              ("appearance-pair", "performance-sample", "first-clear-observation",
+               "picker-identity-observation") and
               type(context["acceptance_text_scale_percent"]) is int and
               context["acceptance_text_scale_percent"] == 100 and
               context["high_contrast_requested"] is False)
@@ -596,6 +598,11 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     schema = (2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3) if v2 else 1
     possible_owned_performance = v2 and profile_sha256 == OWNED_PERFORMANCE_PROFILE_SHA256
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
+    selected_context = original.get("owned_cleanup_failure_context")
+    if type(selected_context) is dict and selected_context.get("acceptance_mode") == \
+            "picker-identity-observation":
+        require(possible_owned_performance,
+                "Focused picker preservation requires reviewed V2 revision-3 cleanup.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
         "schema_version", "kind", "run_name", "vm_id", "nonce", "desktop_lease_id", "original_transport",
