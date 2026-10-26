@@ -1760,6 +1760,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     if ($timelineEnabled) {
         $ObservationSink['response_timeline'] = [ordered]@{
             schema_version=$script:PerformanceResponseTimelineSchemaVersion;
+            qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
             events=$timelineEvents }
     }
     try {
