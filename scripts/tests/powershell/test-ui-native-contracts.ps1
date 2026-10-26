@@ -721,25 +721,51 @@ finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($scheme) }
     finally { $process.Dispose() }
 }
 $performanceSample = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSample'
+$popupDiagnostic = Get-NativeFixtureMember 'public sealed class DarkReNamerPopupDiagnostic'
+$mainDiagnostic = Get-NativeFixtureMember 'public sealed class DarkReNamerMainDiagnostic'
+$samplerFailure = Get-NativeFixtureMember 'public sealed class DarkReNamerSamplerFailure'
 $performanceSampler = Get-NativeFixtureMember 'public sealed class DarkReNamerPerformanceSampler'
 Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 $performanceSample
+$popupDiagnostic
+$mainDiagnostic
+$samplerFailure
 $performanceSampler
 "@
+$defaultFailure = [DarkReNamerSamplerFailure]::new()
+$defaultFailure.SchemaVersion = 2
+$defaultFailure.Phase = 'ordinary-100'
+$defaultFailure.ErrorType = 'InvalidOperationException'
+$defaultFailure.Message = 'Sampler active owned popup identity changed.'
+$defaultFailure.QpcFrequency = 10000000
+Assert-Equal (Convert-ObserverSamplerFailure -Failure $defaultFailure).schema_version 2 `
+    'Default full sampler failure retains current diagnostic schema'
+$defaultFailure.SchemaVersion = 1
+Assert-Fails { Convert-ObserverSamplerFailure -Failure $defaultFailure } 'source-selected producer'
+$fullTransition = [DarkReNamerPerformanceSample]::new()
+$fullTransition.Phase = 'ordinary-100'
+$fullTransition.MainEnabled = $false
+$fullTransition.OwnedPopupHandle = 0
+$fullRows = @(Convert-ObserverPerformanceSampleRows -Samples @($fullTransition) -Timeline)
+Assert-Equal $fullRows.Count 1 'Full sampler transition row count'
+Assert-Equal $fullRows[0].owned_popup_handle 0 'Full sampler disabled/no-active-popup endpoint'
+if ($fullRows[0].Contains('popup_before') -or $fullRows[0].Contains('popup_after')) {
+    throw 'Full sampler endpoint acquired focused raw-popup fields.'
+}
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($true, 0)) 'success' 'Successful probe classification'
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, 1460)) 'timeout' 'Identified timeout classification'
 foreach ($unknown in @(0, 5, 87)) {
     Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, $unknown)) 'failure_unknown' 'Unknown failure classification'
 }
-$resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
 $preModalAt = $performanceSampler.IndexOf('bool mainEnabledBefore = IsWindowEnabled(window);', [StringComparison]::Ordinal)
+$resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', $preModalAt, [StringComparison]::Ordinal)
 $beginAt = $performanceSampler.IndexOf('long begun = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
 $sendAt = $performanceSampler.IndexOf('bool responsive = SendMessageTimeoutW(', [StringComparison]::Ordinal)
 $endAt = $performanceSampler.IndexOf('long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
-$errorAt = $performanceSampler.IndexOf('Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
+$errorAt = $performanceSampler.IndexOf('int probeError = responsive ? 0 : Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
 $postModalAt = $performanceSampler.IndexOf('bool mainEnabled = IsWindowEnabled(window);', [StringComparison]::Ordinal)
 $resourcesAt = $performanceSampler.IndexOf('process.TotalProcessorTime', [StringComparison]::Ordinal)
 if (-not (0 -le $preModalAt -and $preModalAt -lt $resetAt -and $resetAt -lt $beginAt -and

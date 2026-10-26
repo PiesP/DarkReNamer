@@ -1,4 +1,5 @@
 ﻿$script:PerformanceResponseTimelineSchemaVersion = 1
+$script:PickerFailureSchemaVersion = 2
 
 function Get-ObserverContextConfirmationReachability {
     param(
@@ -1600,8 +1601,40 @@ function Invoke-ObserverBoundPerformanceCommand {
     }
 }
 
+function Convert-ObserverPopupDiagnostic {
+    param([AllowNull()][object] $Popup)
+    if ($null -eq $Popup) { return $null }
+    [ordered]@{
+        stage=[string]$Popup.Stage; begin_ticks=[long]$Popup.BeginTicks;
+        end_ticks=[long]$Popup.EndTicks;
+        raw_popup_handle=[long]$Popup.RawPopupHandle;
+        accepted_popup_handle=[long]$Popup.AcceptedPopupHandle;
+        popup_lookup=[string]$Popup.PopupLookup;
+        popup_process_id=[long]$Popup.PopupProcessId;
+        popup_thread_id=[long]$Popup.PopupThreadId;
+        thread_lookup=[string]$Popup.ThreadLookup;
+        thread_lookup_error=$Popup.ThreadLookupError;
+        popup_class=[string]$Popup.PopupClass;
+        class_lookup=[string]$Popup.ClassLookup;
+        class_lookup_error=$Popup.ClassLookupError;
+        popup_visible=[bool]$Popup.PopupVisible;
+        main_enabled_at_lookup=[bool]$Popup.MainEnabledAtLookup;
+        visibility_lookup=[string]$Popup.VisibilityLookup;
+        direct_owner=[long]$Popup.DirectOwner;
+        owner_lookup=[string]$Popup.OwnerLookup;
+        owner_lookup_error=$Popup.OwnerLookupError;
+        owner_chain=@($Popup.OwnerChain | ForEach-Object { [long]$_ });
+        owner_chain_lookup=[string]$Popup.OwnerChainLookup;
+        owner_chain_lookup_error=$Popup.OwnerChainLookupError;
+        disposition=[string]$Popup.Disposition;
+        observed_predicates=@($Popup.ObservedPredicates | ForEach-Object { [string]$_ });
+        failed_predicates=@($Popup.FailedPredicates | ForEach-Object { [string]$_ })
+    }
+}
+
 function Convert-ObserverPerformanceSampleRows {
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples, [switch] $Timeline)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples,
+          [switch] $Timeline, [switch] $Picker)
     @($Samples | ForEach-Object {
         $row = [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
             private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
@@ -1625,9 +1658,47 @@ function Convert-ObserverPerformanceSampleRows {
             $row['owned_popup_thread_id_before'] = [long]$_.OwnedPopupThreadIdBefore
             $row['owned_popup_class'] = [string]$_.OwnedPopupClass
             $row['owned_popup_class_before'] = [string]$_.OwnedPopupClassBefore
+            if ($Picker) {
+                $row['popup_before'] = Convert-ObserverPopupDiagnostic -Popup $_.PopupBeforeDiagnostic
+                $row['popup_after'] = Convert-ObserverPopupDiagnostic -Popup $_.PopupAfterDiagnostic
+            }
         }
         $row
     })
+}
+
+function Convert-ObserverSamplerFailure {
+    param([AllowNull()][object] $Failure)
+    if ($null -eq $Failure) { return $null }
+    if ($Failure.SchemaVersion -ne $script:PickerFailureSchemaVersion) {
+        throw 'Sampler failure schema differs from its source-selected producer.'
+    }
+    $mainBefore = $Failure.MainBefore
+    $mainAfter = $Failure.MainAfter
+    $convertMain = {
+        param($value)
+        if ($null -eq $value) { return $null }
+        [ordered]@{ handle=[long]$value.Handle; process_id=[long]$value.ProcessId;
+            process_start_utc_ticks=[long]$value.ProcessStartUtcTicks;
+            thread_id=[long]$value.ThreadId; class=[string]$value.Class;
+            enabled=[bool]$value.Enabled; lookup=[string]$value.Lookup;
+            thread_lookup_error=$value.ThreadLookupError;
+            class_lookup_error=$value.ClassLookupError }
+    }
+    [ordered]@{
+        schema_version=[int]$Failure.SchemaVersion; phase=[string]$Failure.Phase;
+        error_type=[string]$Failure.ErrorType; message=[string]$Failure.Message;
+        sample_begin_ticks=[long]$Failure.SampleBeginTicks;
+        sample_end_ticks=[long]$Failure.SampleEndTicks;
+        probe_begin_ticks=[long]$Failure.ProbeBeginTicks;
+        probe_end_ticks=[long]$Failure.ProbeEndTicks;
+        probe_error_code=$Failure.ProbeErrorCode;
+        qpc_frequency=[long]$Failure.QpcFrequency;
+        main_before=(& $convertMain $mainBefore);
+        main_after=(& $convertMain $mainAfter);
+        popup_before=(Convert-ObserverPopupDiagnostic -Popup $Failure.PopupBefore);
+        popup_after=(Convert-ObserverPopupDiagnostic -Popup $Failure.PopupAfter)
+    }
 }
 
 function Initialize-ObserverOwnedPerformanceLifetime {
@@ -1661,14 +1732,21 @@ function Invoke-ObserverPerformanceSampleScenario {
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
         [switch] $StopAfterFirstClear,
         [switch] $ObserveFirstClear,
+        [switch] $ObservePicker,
         [switch] $OwnedPerformance,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
-    if ($StopAfterFirstClear -and $ObserveFirstClear) { throw 'First-clear modes are mutually exclusive.' }
+    if ([int][bool]$StopAfterFirstClear + [int][bool]$ObserveFirstClear +
+        [int][bool]$ObservePicker -gt 1) {
+        throw 'Focused performance modes are mutually exclusive.'
+    }
     if ($OwnedPerformance -and ($StopAfterFirstClear -or $ObserveFirstClear)) {
-        throw 'Owned performance lifetime applies only to the complete fixed workload.'
+        throw 'Owned performance lifetime applies only to a reviewed owned workload.'
+    }
+    if ($ObservePicker -and -not $OwnedPerformance) {
+        throw 'Focused picker requires the owned-resource lifetime contract.'
     }
     $scenarioClock = if ($ObserveFirstClear) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
     $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'performance-fixture'
@@ -1682,12 +1760,12 @@ function Invoke-ObserverPerformanceSampleScenario {
     $ordinaryPaths = [Collections.Generic.List[string]]::new()
     $longPaths = [Collections.Generic.List[string]]::new()
     $extensionPaths = [Collections.Generic.List[string]]::new()
-    foreach ($index in 0..9999) {
+    foreach ($index in 0..$(if ($ObservePicker) { 99 } else { 9999 })) {
         $path = Join-Path $ordinary ('ordinary-{0:D5}.txt' -f $index)
         [IO.File]::WriteAllText($path, ('issue24-ordinary-{0:D5}' -f $index), [Text.Encoding]::ASCII)
         $ordinaryPaths.Add($path)
     }
-    foreach ($index in 0..999) {
+    if (-not $ObservePicker) { foreach ($index in 0..999) {
         $path = Join-Path $longRoot ('long-{0:D4}.txt' -f $index)
         [IO.File]::WriteAllText($path, ('issue24-long-{0:D4}' -f $index), [Text.Encoding]::ASCII)
         $longPaths.Add($path)
@@ -1696,17 +1774,17 @@ function Invoke-ObserverPerformanceSampleScenario {
         $extensionPath = Join-Path $extensionRoot ($name + '.' + $extension)
         [IO.File]::WriteAllText($extensionPath, ('issue24-extension-{0:D4}' -f $index), [Text.Encoding]::ASCII)
         $extensionPaths.Add($extensionPath)
-    }
+    } }
     $paths100 = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 100)) -Leaf 'performance-100.txt'
-    $paths900 = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(100, 900)) -Leaf 'performance-900.txt'
-    $paths2250 = @(0..3 | ForEach-Object {
+    $paths900 = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(100, 900)) -Leaf 'performance-900.txt' }
+    $paths2250 = if ($ObservePicker) { @() } else { @(0..3 | ForEach-Object {
         New-ObserverPathList -RuntimeRoot $RuntimeRoot `
             -Paths ([string[]]$ordinaryPaths.GetRange(1000 + 2250 * $_, 2250)) `
             -Leaf ('performance-2250-{0}.txt' -f $_)
-    })
-    $pathsLong = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$longPaths.ToArray()) -Leaf 'performance-long.txt'
-    $pathsExtensions = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$extensionPaths.ToArray()) -Leaf 'performance-extensions.txt'
-    $pathsCycle = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 1000)) -Leaf 'performance-cycle.txt'
+    }) }
+    $pathsLong = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$longPaths.ToArray()) -Leaf 'performance-long.txt' }
+    $pathsExtensions = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$extensionPaths.ToArray()) -Leaf 'performance-extensions.txt' }
+    $pathsCycle = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 1000)) -Leaf 'performance-cycle.txt' }
     $applicationPath = Join-Path $Verified.root $Verified.application.file
     if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
         throw 'Performance application differs from the staged executable.'
@@ -1726,8 +1804,16 @@ function Invoke-ObserverPerformanceSampleScenario {
     $resetControl = $null
     $prefixControl = $null
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-        elseif ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
-    $ObservationSink['plan'] = if ($ObserveFirstClear) {
+        elseif ($StopAfterFirstClear) { 'focused-10k-clear' }
+        elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
+    if ($ObservePicker) {
+        $ObservationSink['popup_diagnostic_schema_version'] = $script:PickerFailureSchemaVersion
+    }
+    $ObservationSink['plan'] = if ($ObservePicker) {
+        [ordered]@{ ordinary_rows=@(100); idle_ms=1000; picker_settle_ms=350; sample_interval_ms=200;
+            maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;
+            full_performance_sample=$false }
+    } elseif ($ObserveFirstClear) {
         [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
             sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
             command_timeout_ms=5000; passive_poll_limit=50; passive_window_ms=10000;
@@ -1810,26 +1896,73 @@ function Invoke-ObserverPerformanceSampleScenario {
         if (@($hiddenWidths | Where-Object { $_ -ne 0 }).Count -ne 0) {
             throw 'Performance auxiliary columns were not hidden at clean start.'
         }
-        $sampler = [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle)
+        $sampler = if ($ObservePicker) {
+            [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle,
+                120000, 650)
+        } else {
+            [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle)
+        }
         if ($OwnedPerformance) {
             $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
                 [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
             $nativeLifetimeCheckpoints.Add([ordered]@{ phase='idle'; creation_filetime=[long]$check[0] })
         }
-        Start-Sleep -Seconds 30
-        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
-            -Window $application.main -Process $application.process -ExpectedSession $SessionId `
-            -Root $EvidenceRoot -Leaf 'performance-empty.png' -Label 'performance empty idle'))
-        foreach ($stage in @(
-            [ordered]@{ id='ordinary-100'; file=$paths100; rows=100 },
-            [ordered]@{ id='ordinary-1000'; file=$paths900; rows=1000 })) {
+        if ($ObservePicker) { Start-Sleep -Milliseconds 1000 } else { Start-Sleep -Seconds 30 }
+        if (-not $ObservePicker) {
+            [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+                -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+                -Root $EvidenceRoot -Leaf 'performance-empty.png' -Label 'performance empty idle'))
+        }
+        foreach ($stage in $(if ($ObservePicker) {
+                @([ordered]@{ id='ordinary-100'; file=$paths100; rows=100 })
+            } else { @(
+                [ordered]@{ id='ordinary-100'; file=$paths100; rows=100 },
+                [ordered]@{ id='ordinary-1000'; file=$paths900; rows=1000 }) })) {
             $sampler.SetPhase($stage.id)
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -PickerSettleMilliseconds $(if ($ObservePicker) { 350 } else { 0 }) `
                 -TimelineEvents $activeTimelineEvents -TimelineOperation $stage.id
             $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
                 command_ready_after_rows_ms=$timing.command_ready_after_rows_ms;
                 rows=$stage.rows; observed_rows=[int]$grid.pattern.Current.RowCount })
+            if ($ObservePicker) {
+                $sampler.SetPhase('post')
+                $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                    [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
+                $nativeLifetimeCheckpoints.Add([ordered]@{ phase='post'; creation_filetime=[long]$check[0] })
+                Start-Sleep -Milliseconds 400
+                $samples = @($sampler.Stop())
+                $sampler = $null
+                $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline -Picker)
+                [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+                    -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+                    -Root $EvidenceRoot -Leaf 'picker-100-after.png' -Label 'focused picker rows'))
+                $ObservationSink['picker'] = [ordered]@{
+                    expected_rows=100; observed_rows=[int]$grid.pattern.Current.RowCount;
+                    import_command_ready=$true; picker_closed=$true;
+                    import_elapsed_ms=$timing.elapsed_ms; fixture_files=100 }
+                $ObservationSink['disk_unchanged'] = $false
+                if (@(Get-ChildItem -LiteralPath $ordinary -File -Force).Count -ne 100) {
+                    throw 'Picker fixture file count changed on disk.'
+                }
+                foreach ($index in 0..99) {
+                    if ([IO.File]::ReadAllText($ordinaryPaths[$index], [Text.Encoding]::ASCII) -cne
+                        ('issue24-ordinary-{0:D5}' -f $index)) {
+                        throw 'Picker fixture content changed on disk.'
+                    }
+                }
+                $ObservationSink['disk_unchanged'] = $true
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+                $ObservationSink['journal_residue_count'] = 0
+                $ObservationSink['normal_exit_code'] = Close-AcceptanceApplication `
+                    -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+                $terminal = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                    [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$true)
+                $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
+                $ObservationSink['appearance'] = 'light'
+                return $ObservationSink
+            }
             if ($stage.rows -eq 100) {
                 # Retain stable command controls before the ListView grows.
                 $resetControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
@@ -1959,12 +2092,12 @@ function Invoke-ObserverPerformanceSampleScenario {
                 if ($null -ne $sampler) {
                     try {
                         $ObservationSink['partial_samples'] = @(
-                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
                     }
                     catch {
                         $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name
                         $ObservationSink['partial_samples'] = @(
-                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled)
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
                     }
                     finally { $sampler = $null }
                 }
@@ -2135,7 +2268,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
         $sampler = $null
-        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled)
+        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled -Picker:$ObservePicker)
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
             'single-row','full-preview') + $(if ($StopAfterFirstClear -or $ObserveFirstClear) { @() }
                 else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
@@ -2171,19 +2304,24 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
         $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-            elseif ($StopAfterFirstClear) { 'focused-10k-clear' } else { 'performance-sample' }
+            elseif ($StopAfterFirstClear) { 'focused-10k-clear' }
+            elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
         return $ObservationSink
     }
     finally {
         if ($null -ne $sampler) {
             try {
                 $ObservationSink['partial_samples'] = @(
-                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
             }
             catch {
                 $ObservationSink['partial_sampling_error'] = $_.Exception.Message
                 $ObservationSink['partial_samples'] = @(
-                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled)
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
+            }
+            $failure = $sampler.ReadFailureDiagnostic()
+            if ($null -ne $failure) {
+                $ObservationSink['sampler_failure'] = Convert-ObserverSamplerFailure -Failure $failure
             }
         }
         if ($null -ne $application) {

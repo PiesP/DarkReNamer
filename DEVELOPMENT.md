@@ -1170,6 +1170,32 @@ activity. Preserved V1 failures keep their original verdicts. Do not combine
 V1 and V2 runs into a common timing baseline or balanced-order median; compare
 products only under the same reviewed profile, workload, and desktop conditions.
 
+### Focused picker identity observation
+
+Use a clean committed source, its prepared source-built native bundle, and the
+exact executable SHA observed by the native runner. Run one focused observation:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic picker-identity-observation \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/verified-native-bundle \
+  --expected-prepared-application-sha256 <native-executed-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-picker-observation
+```
+
+The fixed run imports exactly 100 ordinary files once, with a 350-ms picker
+settle interval. The sampler has a 120-second and 650-sample limit; the
+controller has 120-second task and 240-second suite limits. Output is capped at
+32 MiB and one screenshot. The revision-3 V2 profile, managed desktop closure,
+owned process/task cleanup, pre-delete restoration gate, and failed first-record
+preservation remain required. `sampler_failure` retains native lookup status,
+failed predicates, owner chain, pre/post main identity, and QPC boundaries.
+The independent verifier requires a source-selected schema and a sampled owned
+picker interval. A failed or incomplete observation remains failed; this mode
+does not run the fixed performance workload or complete performance acceptance.
+
 ### Focused first-10k-clear diagnostic
 
 The first-clear replay for the original issue #32 bundle is a source-bound,

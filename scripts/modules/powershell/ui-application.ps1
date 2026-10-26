@@ -309,6 +309,7 @@ function Import-GuiRegressionPathList {
         [object] $Grid,
         [switch] $MeasureCommandReadiness,
         [switch] $IncludeOpenTicks,
+        [ValidateRange(0, 500)][int] $PickerSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents,
         [string] $TimelineOperation
     )
@@ -341,6 +342,9 @@ function Import-GuiRegressionPathList {
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
     $nativeOpen = Resolve-AcceptanceNativeOpen -Dialog $dialog -Process $Application.process -ExpectedSession $SessionId
+    if ($PickerSettleMilliseconds -gt 0) {
+        Start-Sleep -Milliseconds $PickerSettleMilliseconds
+    }
     $openTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'

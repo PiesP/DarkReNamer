@@ -128,6 +128,7 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
                                     'owned-performance-profile.json', 'bundle.json')}
             roots = {'guest': {'file_id': 'a' * 48}, 'trusted': {'file_id': 'b' * 48}}
             original = {'owned_cleanup_failure_context': {'source_sha': source,
+                'acceptance_mode': 'performance-sample',
                 'bundle': {'sha256': bundle_sha},
                 'source_result': indexed['acceptance-result.json']}}
             receipt = {'run_name': RUN, 'vm_id': VM, 'nonce': 'f' * 32,
@@ -172,6 +173,51 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
                         write(predelete_path, altered)
                     with self.assertRaises(EvidenceError):
                         verify()
+                    write(predelete_path, frozen)
+            # The new focused selector reuses the same source/profile/desktop gate.
+            picker_id = 'picker-identity-observation-v1-1366x768-96-text100'
+            picker_plan = {'ordinary_rows': [100], 'idle_ms': 1000,
+                           'picker_settle_ms': 350, 'sample_interval_ms': 200,
+                           'maximum_seconds': 120, 'command_timeout_ms': 5000,
+                           'fixture_file_limit': 100, 'full_performance_sample': False}
+            manifest['run_id'] = observations['run_id'] = frozen['run_id'] = picker_id
+            manifest['request'] = {'mode': 'picker-identity-observation',
+                                   'picker_identity_plan': picker_plan}
+            original['owned_cleanup_failure_context']['acceptance_mode'] = 'picker-identity-observation'
+            observation_bytes = write(root / 'acceptance-observations.json', observations)
+            result['observations']['sha256'] = digest(observation_bytes)
+            result['acceptance_observations'] = observations
+            write(root / 'acceptance-result.json', result)
+            write(root / 'owned-performance-input-manifest.json', manifest)
+            for name in ('acceptance-observations.json', 'acceptance-result.json',
+                         'owned-performance-input-manifest.json'):
+                indexed[name] = {'file': name, 'bytes': (root / name).stat().st_size,
+                                 'sha256': digest((root / name).read_bytes())}
+                refs[name] = indexed[name]
+            original['owned_cleanup_failure_context']['source_result'] = indexed['acceptance-result.json']
+            write(predelete_path, frozen)
+            verify()
+            for mutation in ('wrong-mode', 'wrong-plan', 'wrong-profile', 'missing-observation'):
+                with self.subTest(picker_mutation=mutation):
+                    changed = deepcopy(manifest)
+                    if mutation == 'wrong-mode': changed['request']['mode'] = 'performance-sample'
+                    elif mutation == 'wrong-plan': changed['request']['picker_identity_plan']['idle_ms'] = 30000
+                    elif mutation == 'wrong-profile': changed['acceptance_profile_sha256'] = 'e' * 64
+                    else: changed['request'].pop('picker_identity_plan')
+                    write(root / 'owned-performance-input-manifest.json', changed)
+                    indexed['owned-performance-input-manifest.json'] = {
+                        'file': 'owned-performance-input-manifest.json',
+                        'bytes': (root / 'owned-performance-input-manifest.json').stat().st_size,
+                        'sha256': digest((root / 'owned-performance-input-manifest.json').read_bytes())}
+                    refs['owned-performance-input-manifest.json'] = indexed['owned-performance-input-manifest.json']
+                    write(predelete_path, frozen)
+                    with self.assertRaises(EvidenceError): verify()
+                    write(root / 'owned-performance-input-manifest.json', manifest)
+                    indexed['owned-performance-input-manifest.json'] = {
+                        'file': 'owned-performance-input-manifest.json',
+                        'bytes': (root / 'owned-performance-input-manifest.json').stat().st_size,
+                        'sha256': digest((root / 'owned-performance-input-manifest.json').read_bytes())}
+                    refs['owned-performance-input-manifest.json'] = indexed['owned-performance-input-manifest.json']
                     write(predelete_path, frozen)
 
 
@@ -344,6 +390,11 @@ class OwnedCleanupTests(unittest.TestCase):
             self.rebind_original()
             with self.subTest(mode=mode):
                 self.assertEqual(verify_preserved_owned_cleanup(self.root)['acceptance'], 'rejected')
+        context['acceptance_mode'] = 'picker-identity-observation'
+        self.rebind_original()
+        with self.assertRaisesRegex(EvidenceError, 'reviewed V2 revision-3'):
+            verify_preserved_owned_cleanup(self.root)
+        context['acceptance_mode'] = 'appearance-pair'
         context['acceptance_text_scale_percent'] = 150
         self.rebind_original()
         with self.assertRaises(EvidenceError):
@@ -355,7 +406,12 @@ class OwnedCleanupTests(unittest.TestCase):
             verify_preserved_owned_cleanup(self.root)
         context['high_contrast_requested'] = False
         context.pop('acceptance_text_scale_percent')
+        context['acceptance_mode'] = 'picker-identity-observation'
+        self.rebind_original()
+        with self.assertRaises(EvidenceError):
+            verify_preserved_owned_cleanup(self.root)
         context['acceptance_mode'] = 'unrelated-mode'
+        context['acceptance_text_scale_percent'] = 100
         self.rebind_original()
         with self.assertRaises(EvidenceError):
             verify_preserved_owned_cleanup(self.root)

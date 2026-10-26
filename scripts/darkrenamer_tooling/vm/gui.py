@@ -94,6 +94,14 @@ FOCUSED_CLEAR_PLAN = {
 }
 FIRST_CLEAR_MODE = "first-clear-observation"
 FIRST_CLEAR_RUN_ID = "first-clear-observation-v1-1366x768-96-text100"
+PICKER_MODE = "picker-identity-observation"
+PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
+PICKER_PLAN = {
+    "ordinary_rows": [100], "idle_ms": 1000, "picker_settle_ms": 350,
+    "sample_interval_ms": 200,
+    "maximum_seconds": 120, "command_timeout_ms": 5000,
+    "fixture_file_limit": 100, "full_performance_sample": False,
+}
 FIRST_CLEAR_PRODUCT_REFERENCE_SHA = "d37f73cbb1e93dbc4334b6a92b0bdfbf4a8ddda2"
 FIRST_CLEAR_PLAN = {
     "ordinary_rows": [100, 1000, 10000], "idle_seconds": 30,
@@ -109,6 +117,13 @@ def first_clear_run() -> dict:
     return {"run_id": FIRST_CLEAR_RUN_ID, "mode": FIRST_CLEAR_MODE,
             "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
             "text_scale_percent": 100, "acceptance_profile_id": V1_PROFILE_ID}
+
+
+def picker_run() -> dict:
+    return {"run_id": PICKER_RUN_ID, "mode": PICKER_MODE,
+            "appearance": "light", "width": 1366, "height": 768, "dpi": 96,
+            "text_scale_percent": 100, "acceptance_profile_id": V2_PROFILE_ID,
+            "acceptance_profile_sha256": OWNED_PERFORMANCE_PROFILE_SHA256}
 
 
 def first_clear_text_scale_restored(observations: object) -> bool:
@@ -1018,7 +1033,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                    reference: dict | None = None,
                    prepared_application_sha256: str | None = None) -> dict:
     require(prepared_application_sha256 is None or
-            (run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} and
+            (run["mode"] in {"performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} and
              SHA256.fullmatch(prepared_application_sha256) is not None),
             "Prepared bundle provenance is restricted to pinned performance runs.")
     require(run["mode"] != ICON_SETTLEMENT_MODE or prepared_application_sha256 is not None,
@@ -1027,6 +1042,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "Focused clear requires a pinned prepared executable.")
     require(run["mode"] != FIRST_CLEAR_MODE or prepared_application_sha256 is not None,
             "First-clear observation requires a pinned prepared executable.")
+    require(run["mode"] != PICKER_MODE or prepared_application_sha256 is not None,
+            "Picker observation requires a pinned prepared executable.")
     _, inputs = run_input_artifacts(repo, bundle, run_root,
                                     run.get("acceptance_profile_id", V1_PROFILE_ID),
                                     focused_preserved=run["mode"] == FOCUSED_CLEAR_MODE,
@@ -1076,6 +1093,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
                if run["mode"] == FOCUSED_CLEAR_MODE else {}),
             **({"first_clear_observation_plan": FIRST_CLEAR_PLAN}
                if run["mode"] == FIRST_CLEAR_MODE else {}),
+            **({"picker_identity_plan": PICKER_PLAN}
+               if run["mode"] == PICKER_MODE else {}),
             **({"settlement_plan": ICON_SETTLEMENT_PLAN,
                 "endpoint_method": run["endpoint_method"],
                 **({"baseline_product_source_sha": run["baseline_product_source_sha"]}
@@ -1087,7 +1106,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
             *(["--diagnostic", run["mode"]] if run["mode"] in
-              {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} else []),
+              {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} else []),
             *(["--performance-column-order", run["long_path_order"]]
               if run["mode"] == "performance-sample" else []),
             *(["--preserved-product-bundle-root", "<external-preserved-product-bundle-root>",
@@ -1115,7 +1134,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
     }
     if reference is not None:
         result["full_context_reference"] = reference
-    if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
+    if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
         result["acceptance_profile_id"] = run.get("acceptance_profile_id", V1_PROFILE_ID)
         if run["mode"] == FIRST_CLEAR_MODE:
             staged = inputs["v1_acceptance_profile"]
@@ -1182,9 +1201,11 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
         "-AcceptanceAppearance", run["appearance"],
         "-AcceptanceTextScalePercent", str(run["text_scale_percent"]),
     ]
-    if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
+    if run["mode"] in {"appearance-pair", FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} or run.get("acceptance_profile_id") == V2_PROFILE_ID:
         if run["mode"] in {"appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
             command += ["-TestTimeoutSeconds", "600", "-SuiteTimeoutSeconds", "1200"]
+        elif run["mode"] == PICKER_MODE:
+            command += ["-TestTimeoutSeconds", "120", "-SuiteTimeoutSeconds", "240"]
         command += ["-AcceptanceProfileId", run.get("acceptance_profile_id", V1_PROFILE_ID)]
         if run["mode"] == FIRST_CLEAR_MODE:
             manifest = read_json(run_root / "input-manifest.json")
@@ -1193,7 +1214,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
             require(manifest.get("acceptance_profile_id") == V1_PROFILE_ID and
                     manifest.get("acceptance_profile_sha256") == digest(staged) ==
                     digest(repo / "config" / V1_PROFILE_FILE),
-                    "First-clear strict V1 profile differs from immutable source/staging.")
+                    "Focused strict V1 profile differs from immutable source/staging.")
         if run.get("acceptance_profile_id") == V2_PROFILE_ID:
             manifest = read_json(run_root / "input-manifest.json")
             staged = ordinary_file(run_root / "inputs" / V2_PROFILE_FILE, 1024 * 1024, "Staged V2 profile")
@@ -1201,7 +1222,7 @@ def controller_command(repo: Path, bundle: Path, run_root: Path, run: dict,
                     manifest.get("acceptance_profile_sha256") == run["acceptance_profile_sha256"] == digest(staged) and
                     manifest.get("acceptance_profile", {}).get("sha256") == run["acceptance_profile_sha256"],
                     "V2 controller profile differs from its immutable staged manifest.")
-            if run["mode"] in {"full-context", "standard", "text-scale", "tooltip", "performance-sample"}:
+            if run["mode"] in {"full-context", "standard", "text-scale", "tooltip", "performance-sample", PICKER_MODE}:
                 source_profile = ordinary_file(repo / "config" / V2_PROFILE_FILE, 1024 * 1024,
                                                "Source V2 profile")
                 require(digest(source_profile) == run["acceptance_profile_sha256"],
@@ -1244,10 +1265,10 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
     if run_id in {performance_run(order, owned=owned)["run_id"]
                   for order in PERFORMANCE_ORDERS for owned in (False, True)} | \
-            {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
+            {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID, PICKER_RUN_ID}:
         png_count = sum(row["relative_path"].endswith(".png") for row in files)
         require(total_bytes <= 32 * 1024 * 1024 and
-                (png_count <= 1 if run_id == FIRST_CLEAR_RUN_ID else png_count == 1),
+                (png_count <= 1 if run_id in {FIRST_CLEAR_RUN_ID, PICKER_RUN_ID} else png_count == 1),
                 "Performance diagnostic must stay within 32 MiB and one original PNG.")
     return {
         "schema_version": 1,
@@ -1340,7 +1361,7 @@ def finalize_run(run_root: Path) -> None:
     mode = manifest["request"]["mode"]
     normalized = (normalize_pair_result(run_root, input_sha256) if mode == "appearance-pair"
                   else normalize_performance_result(run_root, input_sha256) if mode in
-                  {"performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}
+                  {"performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE}
                   else normalize_run_result(run_root, input_sha256))
     write_json(result_path, normalized, exclusive=True)
 
@@ -1431,6 +1452,30 @@ def validate_failed_first_clear(repo: Path, run_root: Path) -> None:
     }, exclusive=True)
 
 
+def validate_failed_picker(repo: Path, run_root: Path) -> None:
+    validator = ordinary_file(repo / "scripts" / "validate-gui-regression-evidence.py",
+                              2 * 1024 * 1024, "Picker independent verifier")
+    source_sha, _ = source_identity(repo)
+    completed = subprocess.run(
+        [sys.executable, "-I", str(validator), "--result-root", str(run_root.parent),
+         "--expected-source-sha", source_sha, "--run", PICKER_RUN_ID,
+         "--diagnostic", PICKER_MODE, "--acceptance-profile-id", V2_PROFILE_ID],
+        cwd=repo, capture_output=True, text=True, timeout=120)
+    require(len(completed.stdout) <= 1024 * 1024 and len(completed.stderr) <= 1024 * 1024,
+            "Picker verifier stream exceeded its bound.")
+    try:
+        report = json.loads(completed.stdout)
+    except ValueError:
+        report = {"schema_version": 1, "diagnostic": PICKER_MODE,
+                  "status": "incomplete", "verifier_error_type": "unparseable-report"}
+    require(isinstance(report, dict), "Picker verifier returned no diagnostic object.")
+    write_json(run_root / "diagnostic-validation.json", {
+        "schema_version": 1, "diagnostic": PICKER_MODE,
+        "verifier_exit_code": completed.returncode, "report": report,
+        "stderr_sha256": hashlib.sha256(completed.stderr.encode("utf-8")).hexdigest(),
+    }, exclusive=True)
+
+
 def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: dict,
                 native_runner) -> None:
     output = run_root / "output"
@@ -1444,11 +1489,11 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
     try:
         with controller_stdout.open("x", encoding="utf-8") as stdout, \
                 controller_stderr.open("x", encoding="utf-8") as stderr:
-            suite_timeout = (1200 if run["mode"] in {
+            suite_timeout = (240 if run["mode"] == PICKER_MODE else 1200 if run["mode"] in {
                 "appearance-pair", ICON_SETTLEMENT_MODE, "performance-sample", FOCUSED_CLEAR_MODE,
                 FIRST_CLEAR_MODE,
             } else launcher.CONTROLLER_SUITE_TIMEOUT_SECONDS)
-            owned_performance = (run["mode"] == "performance-sample" and
+            owned_performance = (run["mode"] in {"performance-sample", PICKER_MODE} and
                                  run.get("acceptance_profile_id") == V2_PROFILE_ID)
             managed_options = {"capture_desktop_closure": True} if owned_performance else {}
             completed, _lease = native_runner.run_managed_controller(
@@ -1487,7 +1532,7 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
         text = observer.get("text_scale", {}) if isinstance(observer.get("text_scale"), dict) else {}
         if run["mode"] == FIRST_CLEAR_MODE:
             text_scale_restored = first_clear_text_scale_restored(observations)
-        elif run["mode"] == "performance-sample" and run.get("acceptance_profile_id") == V2_PROFILE_ID:
+        elif run["mode"] in {"performance-sample", PICKER_MODE} and run.get("acceptance_profile_id") == V2_PROFILE_ID:
             try:
                 verify_owned_performance_text_scale(observations)
                 text_scale_restored = True
@@ -1517,16 +1562,17 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
             write_json(output / "cleanup-errors.json", {
                 "schema_version": 1, "run_id": run["run_id"], "errors": summary_errors,
             }, exclusive=True)
-    if run["mode"] == FIRST_CLEAR_MODE and controller_exit != 0:
+    if run["mode"] in {FIRST_CLEAR_MODE, PICKER_MODE} and controller_exit != 0:
         try:
             write_json(run_root / "collection.json",
                        collection_document(run_root, digest(run_root / "input-manifest.json"), run["run_id"]),
                        exclusive=True)
-            validate_failed_first_clear(repo, run_root)
+            (validate_failed_picker if run["mode"] == PICKER_MODE else
+             validate_failed_first_clear)(repo, run_root)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             try:
                 write_json(run_root / "diagnostic-validation-error.json", {
-                    "schema_version": 1, "diagnostic": FIRST_CLEAR_MODE,
+                    "schema_version": 1, "diagnostic": run["mode"],
                     "status": "incomplete", "error_type": type(error).__name__,
                     "controller_exit_code": controller_exit,
                 }, exclusive=True)
@@ -1556,12 +1602,13 @@ def validate_all(repo: Path, result_root: Path, output_root: Path,
         (performance_run(),) if diagnostic == "performance-sample" else
         (focused_clear_run(),) if diagnostic == FOCUSED_CLEAR_MODE else
         (first_clear_run(),) if diagnostic == FIRST_CLEAR_MODE else
+        (picker_run(),) if diagnostic == PICKER_MODE else
         (icon_settlement_run(),) if diagnostic == ICON_SETTLEMENT_MODE else RUNS)
     for run in runs:
         command += ["--run", run["run_id"]]
-    if diagnostic in {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}:
+    if diagnostic in {"appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE}:
         command += ["--diagnostic", diagnostic]
-        if diagnostic == "performance-sample" and runs[0].get("acceptance_profile_id") == V2_PROFILE_ID:
+        if diagnostic in {"performance-sample", PICKER_MODE} and runs[0].get("acceptance_profile_id") == V2_PROFILE_ID:
             command += ["--acceptance-profile-id", V2_PROFILE_ID]
         if configuration_set == "focused":
             command += ["--configuration-set", "focused"]
@@ -1578,7 +1625,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--connection-profile", type=Path, required=True)
-    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=["appearance-pair", "performance-sample", FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--icon-endpoint-method", choices=[ICON_BASELINE_METHOD])
     parser.add_argument("--baseline-product-source-sha")
     parser.add_argument("--expected-run-source-sha")
@@ -1602,12 +1649,14 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Desktop selection requires a diagnostic.")
     require(not args.configuration_set or args.diagnostic == "appearance-pair",
             "A configuration set requires --diagnostic appearance-pair.")
-    require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE},
+    require(args.acceptance_profile_id is None or args.diagnostic in {None, "appearance-pair", "performance-sample", FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE},
             "Acceptance profile selection is unsupported for this diagnostic.")
     require(args.diagnostic != ICON_SETTLEMENT_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
             "Icon settlement requires explicit V2 owned-resource profile selection.")
     require(args.diagnostic != FIRST_CLEAR_MODE or args.acceptance_profile_id == V1_PROFILE_ID,
             "First-clear observation requires explicit strict V1 profile selection.")
+    require(args.diagnostic != PICKER_MODE or args.acceptance_profile_id == V2_PROFILE_ID,
+            "Picker observation requires explicit owned V2 profile selection.")
     require(args.diagnostic != "performance-sample" or
             args.acceptance_profile_id in {None, V2_PROFILE_ID},
             "Performance sample V1 is selected by omitting the profile option.")
@@ -1624,7 +1673,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Long-path order selection requires --diagnostic performance-sample.")
     require(args.prepared_bundle_root is None or
             (args.expected_prepared_application_sha256 is not None and
-             args.diagnostic in {"performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}),
+             args.diagnostic in {"performance-sample", FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE}),
             "Prepared bundle and pinned application hash require the performance diagnostic together.")
     focused = args.diagnostic == FOCUSED_CLEAR_MODE
     require((focused and args.preserved_product_bundle_root is not None and
@@ -1644,6 +1693,8 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
             "Icon settlement requires a prepared bundle and pinned application hash.")
     require(args.diagnostic != FIRST_CLEAR_MODE or args.prepared_bundle_root is not None,
             "First-clear observation requires a prepared bundle and pinned application hash.")
+    require(args.diagnostic != PICKER_MODE or args.prepared_bundle_root is not None,
+            "Picker observation requires a prepared bundle and pinned application hash.")
     require(not args.configuration_set or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Focused configuration set does not accept desktop overrides.")
@@ -1652,6 +1703,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                      if args.diagnostic == "performance-sample" else
                      (focused_clear_run(),) if args.diagnostic == FOCUSED_CLEAR_MODE else
                      (first_clear_run(),) if args.diagnostic == FIRST_CLEAR_MODE else
+                     (picker_run(),) if args.diagnostic == PICKER_MODE else
                      (icon_settlement_run(args.icon_endpoint_method or ICON_SETTLEMENT_METHOD),)
                      if args.diagnostic == ICON_SETTLEMENT_MODE else
                      FOCUSED_PAIR_RUNS if args.configuration_set == "focused" else
@@ -1659,7 +1711,7 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                      if args.diagnostic == "appearance-pair" else
                      V2_RUNS if args.acceptance_profile_id == V2_PROFILE_ID else RUNS)
     if (args.diagnostic is None and args.acceptance_profile_id == V2_PROFILE_ID or
-            args.diagnostic in {"appearance-pair", "performance-sample", FIRST_CLEAR_MODE, ICON_SETTLEMENT_MODE}):
+            args.diagnostic in {"appearance-pair", "performance-sample", FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE}):
         selected_profile = args.acceptance_profile_id or V1_PROFILE_ID
         profile_digest = None
         if selected_profile == V2_PROFILE_ID:
@@ -1672,9 +1724,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
                     profile_document.get("revision") == 3,
                     "V2 acceptance profile definition is unavailable.")
             profile_digest = digest(profile_file)
-            if args.diagnostic == "performance-sample":
+            if args.diagnostic in {"performance-sample", PICKER_MODE}:
                 require(profile_digest == OWNED_PERFORMANCE_PROFILE_SHA256,
-                        "Owned performance requires its reviewed revision-3 profile bytes.")
+                        "Owned diagnostic requires its reviewed revision-3 profile bytes.")
         selected_runs = tuple({**run, "acceptance_profile_id": selected_profile,
                                **({"acceptance_profile_sha256": profile_digest} if profile_digest else {})}
                               for run in selected_runs)

@@ -26,6 +26,11 @@ RUN = re.compile(r"DarkReNamerTests-[0-9a-f]{32}\Z")
 OWNED_PERFORMANCE_PROFILE_SHA256 = "11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f"
 OWNED_PERFORMANCE_RUN = re.compile(
     r"performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)\Z")
+PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
+PICKER_PLAN = {"ordinary_rows": [100], "idle_ms": 1000, "picker_settle_ms": 350,
+               "sample_interval_ms": 200, "maximum_seconds": 120,
+               "command_timeout_ms": 5000, "fixture_file_limit": 100,
+               "full_performance_sample": False}
 
 
 def require(condition: bool, message: str) -> None:
@@ -350,8 +355,9 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
     context = original["owned_cleanup_failure_context"]
     run_id = frozen["run_id"]
     match = OWNED_PERFORMANCE_RUN.fullmatch(run_id) if type(run_id) is str else None
+    picker = run_id == PICKER_RUN_ID
     require(frozen["schema_version"] == 1 and
-            frozen["kind"] == "owned_performance_predelete_restoration" and match is not None and
+            frozen["kind"] == "owned_performance_predelete_restoration" and (match is not None or picker) and
             frozen["run_name"] == receipt["run_name"] and
             frozen["vm_id"] == receipt["vm_id"] and
             frozen["nonce"] == receipt["nonce"] and
@@ -396,9 +402,13 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
             manifest.get("acceptance_profile", {}).get("sha256") ==
                 OWNED_PERFORMANCE_PROFILE_SHA256 and
             manifest.get("bundle_manifest", {}).get("sha256") == frozen["bundle_sha256"] and
-            manifest.get("request", {}).get("mode") == "performance-sample" and
-            manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
-                match.group(1) and
+            manifest.get("request", {}).get("mode") ==
+                ("picker-identity-observation" if picker else "performance-sample") and
+            context.get("acceptance_mode") == manifest.get("request", {}).get("mode") and
+            ((manifest.get("request", {}).get("picker_identity_plan") == PICKER_PLAN and
+              "performance_plan" not in manifest.get("request", {})) if picker else
+             manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
+                match.group(1)) and
             result.get("application", {}).get("sha256") ==
                 manifest.get("artifacts", {}).get("application", {}).get("sha256") and
             result.get("observations", {}).get("sha256") ==
@@ -468,7 +478,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
     raw_context = original.get("owned_cleanup_failure_context")
     bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
                   raw_context.get("acceptance_mode") in
-                  ("appearance-pair", "performance-sample", "first-clear-observation"))
+                  ("appearance-pair", "performance-sample", "first-clear-observation",
+                   "picker-identity-observation"))
     context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -522,7 +533,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
             (context["acceptance_mode"] in
              ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
              (context["acceptance_mode"] in
-              ("appearance-pair", "performance-sample", "first-clear-observation") and
+              ("appearance-pair", "performance-sample", "first-clear-observation",
+               "picker-identity-observation") and
               type(context["acceptance_text_scale_percent"]) is int and
               context["acceptance_text_scale_percent"] == 100 and
               context["high_contrast_requested"] is False)
@@ -586,6 +598,11 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     schema = (2 if profile_sha256 == HISTORICAL_V2_PROFILE_SHA256 else 3) if v2 else 1
     possible_owned_performance = v2 and profile_sha256 == OWNED_PERFORMANCE_PROFILE_SHA256
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
+    selected_context = original.get("owned_cleanup_failure_context")
+    if type(selected_context) is dict and selected_context.get("acceptance_mode") == \
+            "picker-identity-observation":
+        require(possible_owned_performance,
+                "Focused picker preservation requires reviewed V2 revision-3 cleanup.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
         "schema_version", "kind", "run_name", "vm_id", "nonce", "desktop_lease_id", "original_transport",
@@ -699,15 +716,18 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         context = original["owned_cleanup_failure_context"]
         embedded = result.get("acceptance_observations")
         run_id = embedded.get("run_id") if type(embedded) is dict else None
-        candidate = (context["acceptance_mode"] == "performance-sample" or
+        candidate = (context["acceptance_mode"] in {"performance-sample", "picker-identity-observation"} or
                      type(run_id) is str and
-                     run_id.startswith("performance-sample-v2-owned-r3-") or
+                     run_id.startswith("performance-sample-v2-owned-r3-") or run_id == PICKER_RUN_ID or
                      any(name.startswith("owned-performance-") for name in listed) or
                      "predelete_sha256" in proof or
                      (root / "owned-performance-predelete.json").exists())
         if candidate:
-            require(context["acceptance_mode"] == "performance-sample" and
-                    type(run_id) is str and OWNED_PERFORMANCE_RUN.fullmatch(run_id) is not None and
+            require(type(run_id) is str and
+                    ((context["acceptance_mode"] == "performance-sample" and
+                      OWNED_PERFORMANCE_RUN.fullmatch(run_id) is not None) or
+                     (context["acceptance_mode"] == "picker-identity-observation" and
+                      run_id == PICKER_RUN_ID)) and
                     "predelete_sha256" in proof,
                     "Owned performance route lacks its frozen restoration gate.")
             _owned_performance_predelete(root, original, receipt, proof,

@@ -22,6 +22,7 @@ from controller_cleanup_fixture import (
     clean_controller_cleanup_v3,
 )
 from darkrenamer_tooling.evidence import gui as evidence
+from darkrenamer_tooling.vm import gui as vm_gui
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
     physical_menu_apply_entry, scenario, Fixture, first_clear_product_tree,
@@ -49,6 +50,183 @@ class SyntheticFixtureTestCase(unittest.TestCase):
 
 
 class GuiEvidenceTests(SyntheticFixtureTestCase):
+    def test_picker_source_selects_v1_or_v2_without_receipt_downgrade(self):
+        marker = '$script:PickerFailureSchemaVersion = {}\n' \
+                 'Failure.SchemaVersion -ne $script:PickerFailureSchemaVersion\n' \
+                 'sampler_failure\n'
+        native = b'knownHiddenInactive ? "owned-hidden-inactive"\n' \
+                 b'SchemaVersion = 2, Phase = phase'
+        for version in (1, 2):
+            with self.subTest(version=version):
+                responses = [SimpleNamespace(returncode=0, stdout=marker.format(version).encode())]
+                if version == 2:
+                    responses.append(SimpleNamespace(returncode=0,
+                        stdout=b'popup_diagnostic_schema_version'))
+                    # The marker belongs to the scenario producer, while state emission is native.
+                    responses[0].stdout += b'popup_diagnostic_schema_version'
+                    responses[1].stdout = native
+                with mock.patch.object(evidence.subprocess, 'run', side_effect=responses):
+                    self.assertEqual(evidence.selected_picker_failure_schema(
+                        SCRIPT_ROOT.parent, 'a' * 40), version)
+        with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=marker.format(2).encode())):
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.selected_picker_failure_schema(SCRIPT_ROOT.parent, 'a' * 40)
+
+    @staticmethod
+    def picker_popup():
+        return {"stage": "before-probe", "begin_ticks": 100, "end_ticks": 110,
+                "raw_popup_handle": 900, "accepted_popup_handle": 900,
+                "popup_lookup": "popup", "popup_process_id": 42, "popup_thread_id": 7,
+                "thread_lookup": "complete", "thread_lookup_error": None,
+                "popup_class": "#32770", "class_lookup": "complete", "class_lookup_error": None,
+                "popup_visible": True, "main_enabled_at_lookup": False,
+                "visibility_lookup": "visible", "direct_owner": 800,
+                "owner_lookup": "returned", "owner_lookup_error": None,
+                "owner_chain": [800], "owner_chain_lookup": "main-reached",
+                "owner_chain_lookup_error": None, "disposition": "owned-popup",
+                "observed_predicates": [], "failed_predicates": []}
+
+    def test_picker_popup_independently_binds_pid_thread_owner_and_inactive_policy(self):
+        popup = self.picker_popup()
+        self.assertEqual(evidence.validate_picker_popup(popup, "before-probe", 800, 42, 7), popup)
+        for field, value in (("popup_process_id", 43), ("popup_thread_id", 8),
+                             ("direct_owner", 801), ("owner_chain", [801]),
+                             ("owner_chain_lookup", "ended"), ("popup_visible", False)):
+            with self.subTest(field=field):
+                changed = deepcopy(popup)
+                changed[field] = value
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_picker_popup(changed, "before-probe", 800, 42, 7)
+        ignored = deepcopy(popup)
+        ignored.update(popup_visible=False, main_enabled_at_lookup=True,
+                       visibility_lookup="hidden", accepted_popup_handle=0,
+                       disposition="inactive-ignored", observed_predicates=["hidden"])
+        self.assertEqual(evidence.validate_picker_popup(ignored, "before-probe", 800, 42, 7), ignored)
+        ignored["main_enabled_at_lookup"] = False
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(ignored, "before-probe", 800, 42, 7)
+
+    def test_picker_v2_hidden_owned_state_requires_complete_identity(self):
+        hidden = self.picker_popup()
+        hidden.update(accepted_popup_handle=0, popup_visible=False,
+                      visibility_lookup="hidden", disposition="owned-hidden-inactive",
+                      observed_predicates=["hidden"])
+        self.assertEqual(evidence.validate_picker_popup(
+            hidden, "before-probe", 800, 42, 7, schema_version=2), hidden)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(hidden, "before-probe", 800, 42, 7,
+                                           schema_version=1)
+        for changes in (
+            {"popup_process_id": 43, "observed_predicates": ["process-mismatch", "hidden"]},
+            {"popup_thread_id": 8, "observed_predicates": ["thread-mismatch", "hidden"]},
+            {"popup_class": "Other"},
+            {"direct_owner": 801, "owner_chain": [801, 800],
+             "observed_predicates": ["direct-owner-mismatch", "hidden"]},
+            {"owner_chain": [801, 800]},
+            {"owner_lookup": "null-with-error", "owner_lookup_error": 5,
+             "direct_owner": 0, "owner_chain": [], "owner_chain_lookup": "ended",
+             "observed_predicates": ["direct-owner-mismatch", "hidden"]},
+            {"class_lookup": "failed", "class_lookup_error": 5,
+             "popup_class": "", "observed_predicates": ["hidden", "class-lookup", "class-unavailable"]},
+            {"main_enabled_at_lookup": True},
+            {"failed_predicates": ["hidden"]},
+        ):
+            with self.subTest(changes=changes):
+                changed = {**hidden, **changes}
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_picker_popup(changed, "before-probe", 800, 42, 7,
+                                                   schema_version=2)
+
+    def test_picker_failure_rejects_schema_downgrade_and_missing_transition(self):
+        popup = self.picker_popup()
+        main = {"handle": 800, "process_id": 42, "process_start_utc_ticks": 500,
+                "thread_id": 7, "class": "DarkReNamerWindow", "enabled": False,
+                "lookup": "complete", "thread_lookup_error": None,
+                "class_lookup_error": None}
+        rejected = deepcopy(popup)
+        rejected.update(disposition="rejected", accepted_popup_handle=900,
+                        popup_process_id=43, observed_predicates=["process-mismatch"],
+                        failed_predicates=["process-mismatch"])
+        failure = {"schema_version": 1, "phase": "ordinary-100",
+                   "error_type": "InvalidOperationException",
+                   "message": "Sampler active owned popup identity changed.",
+                   "sample_begin_ticks": 90, "sample_end_ticks": 130,
+                   "probe_begin_ticks": 111, "probe_end_ticks": 120,
+                   "probe_error_code": 0, "qpc_frequency": 1000000,
+                   "main_before": main, "main_after": main,
+                   "popup_before": popup, "popup_after": {**rejected,
+                       "stage": "after-probe", "begin_ticks": 121, "end_ticks": 129}}
+        self.assertEqual(evidence.validate_picker_failure(failure, main_handle=800,
+            process_id=42, process_start_utc_ticks=500)["failed_predicates"],
+            ["process-mismatch"])
+        for field, value in (("schema_version", 0), ("popup_before", None),
+                             ("main_before", None), ("popup_after", None)):
+            with self.subTest(field=field):
+                changed = deepcopy(failure)
+                changed[field] = value
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_picker_failure(changed, main_handle=800,
+                        process_id=42, process_start_utc_ticks=500)
+
+    def test_picker_disabled_no_popup_nested_owner_missing_lookup_and_teardown(self):
+        base = self.picker_popup()
+        no_popup = deepcopy(base)
+        no_popup.update(raw_popup_handle=800, accepted_popup_handle=0,
+            popup_lookup="main", popup_process_id=0, popup_thread_id=0,
+            thread_lookup="not-run", popup_class="", class_lookup="not-run",
+            popup_visible=False, main_enabled_at_lookup=False,
+            visibility_lookup="not-run", direct_owner=0, owner_lookup="not-run",
+            owner_chain=[], owner_chain_lookup="not-run", disposition="main")
+        self.assertEqual(evidence.validate_picker_popup(no_popup, "before-probe", 800, 42, 7), no_popup)
+        nested = deepcopy(base)
+        nested.update(direct_owner=801, owner_chain=[801, 800],
+                      disposition="rejected", observed_predicates=["direct-owner-mismatch"],
+                      failed_predicates=["direct-owner-mismatch"])
+        self.assertEqual(evidence.validate_picker_popup(nested, "before-probe", 800, 42, 7), nested)
+        no_owner = deepcopy(nested)
+        no_owner.update(direct_owner=0, owner_chain=[], owner_chain_lookup="ended",
+                        owner_lookup="null-with-error", owner_lookup_error=5)
+        self.assertEqual(evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7), no_owner)
+        no_owner["owner_lookup_error"] = 0
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7)
+        no_owner.update(owner_lookup="none", owner_lookup_error=0)
+        self.assertEqual(evidence.validate_picker_popup(no_owner, "before-probe", 800, 42, 7), no_owner)
+        ended_chain = deepcopy(nested)
+        ended_chain.update(owner_chain=[801], owner_chain_lookup="ended",
+                           owner_chain_lookup_error=0)
+        self.assertEqual(evidence.validate_picker_popup(ended_chain, "before-probe", 800, 42, 7), ended_chain)
+        ended_chain["owner_chain_lookup_error"] = None
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(ended_chain, "before-probe", 800, 42, 7)
+        for field, value in (("disposition", "owned-popup"), ("thread_lookup", "not-run"),
+                             ("owner_chain", [800]), ("popup_process_id", 43)):
+            with self.subTest(field=field):
+                altered = deepcopy(nested)
+                altered[field] = value
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_picker_popup(altered, "before-probe", 800, 42, 7)
+        main_before = {"handle": 800, "process_id": 42, "process_start_utc_ticks": 500,
+                       "thread_id": 7, "class": "DarkReNamerWindow", "enabled": False,
+                       "lookup": "complete", "thread_lookup_error": None,
+                       "class_lookup_error": None}
+        after = deepcopy(no_popup)
+        after.update(stage="after-probe", begin_ticks=121, end_ticks=129)
+        failure = {"schema_version": 1, "phase": "ordinary-100",
+            "error_type": "InvalidOperationException", "message": "Sampler target identity changed after probe.",
+            "sample_begin_ticks": 90, "sample_end_ticks": 130,
+            "probe_begin_ticks": 111, "probe_end_ticks": 120,
+            "probe_error_code": 0, "qpc_frequency": 1000000,
+            "main_before": main_before, "main_after": {**main_before,
+                "lookup": "process-exited"}, "popup_before": base,
+            "popup_after": after}
+        self.assertEqual(evidence.validate_picker_failure(failure, main_handle=800,
+            process_id=42, process_start_utc_ticks=500)["main_identity_after"], "process-exited")
+        failure["popup_after"] = None
+        self.assertEqual(evidence.validate_picker_failure(failure, main_handle=800,
+            process_id=42, process_start_utc_ticks=500)["probe_executed"], True)
+
     @staticmethod
     def bind_v2_fixture_vm(run: Path, manifest: dict, transport: dict) -> None:
         """Make the synthetic preflight, postlaunch and transport one VM identity."""
@@ -2012,6 +2190,343 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             'observer_result_sha256': digest(raw_path.read_bytes()),
             'status': 'review_required', 'exit_code': 0}
         write_json(output / 'run-result.json', result)
+
+    def picker_run(self):
+        run, profile_sha = self.owned_run()
+        run = run.rename(self.root / evidence.PICKER_RUN_ID)
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['run_id'] = evidence.PICKER_RUN_ID
+        manifest['request'] = {'mode': evidence.PICKER_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'picker_identity_plan': deepcopy(evidence.PICKER_PLAN)}
+        manifest['prepared_bundle'] = {'origin': 'external-prepared-source-built-bundle',
+            'bundle_manifest_sha256': manifest['bundle_manifest']['sha256'],
+            'application_sha256': manifest['artifacts']['application']['sha256']}
+        manifest['command'] = ['python3', '-I', 'scripts/run-gui-regression.py',
+            '--output-root', '<external-output-root>', '--connection-profile',
+            '<private-connection-profile>', '--diagnostic', evidence.PICKER_MODE,
+            '--prepared-bundle-root', '<external-prepared-bundle-root>',
+            '--expected-prepared-application-sha256', manifest['artifacts']['application']['sha256'],
+            '--acceptance-profile-id', evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        for name in ('cleanup.json', 'platform-preflight.json', 'platform-postlaunch.json'):
+            path = output / name
+            document = json.loads(path.read_text())
+            document['run_id'] = evidence.PICKER_RUN_ID
+            write_json(path, document)
+        (output / 'performance-empty.png').rename(output / 'picker-100-after.png')
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        original = raw['assertions']['scenario']
+        filetime = original['native_process_lifetime']['creation_filetime']
+        def popup(stage, begin, end, active):
+            if not active:
+                return {'stage': stage, 'begin_ticks': begin, 'end_ticks': end,
+                    'raw_popup_handle': 1001, 'accepted_popup_handle': 0,
+                    'popup_lookup': 'main', 'popup_process_id': 0, 'popup_thread_id': 0,
+                    'thread_lookup': 'not-run', 'thread_lookup_error': None,
+                    'popup_class': '', 'class_lookup': 'not-run', 'class_lookup_error': None,
+                    'popup_visible': False, 'main_enabled_at_lookup': True,
+                    'visibility_lookup': 'not-run', 'direct_owner': 0,
+                    'owner_lookup': 'not-run', 'owner_lookup_error': None,
+                    'owner_chain': [], 'owner_chain_lookup': 'not-run',
+                    'owner_chain_lookup_error': None, 'disposition': 'main',
+                    'observed_predicates': [], 'failed_predicates': []}
+            return {'stage': stage, 'begin_ticks': begin, 'end_ticks': end,
+                'raw_popup_handle': 900, 'accepted_popup_handle': 900,
+                'popup_lookup': 'popup', 'popup_process_id': 4242, 'popup_thread_id': 7,
+                'thread_lookup': 'complete', 'thread_lookup_error': None,
+                'popup_class': '#32770', 'class_lookup': 'complete', 'class_lookup_error': None,
+                'popup_visible': True, 'main_enabled_at_lookup': False,
+                'visibility_lookup': 'visible', 'direct_owner': 1001,
+                'owner_lookup': 'returned', 'owner_lookup_error': None,
+                'owner_chain': [1001], 'owner_chain_lookup': 'main-reached',
+                'owner_chain_lookup_error': None, 'disposition': 'owned-popup',
+                'observed_predicates': [], 'failed_predicates': []}
+        def sample(phase, begin, end, active):
+            before = popup('before-probe', begin - 10, begin - 1, active)
+            after = popup('after-probe', end + 1, end + 10, active)
+            return {'phase': phase, 'process_id': 4242,
+                'process_start_utc_ticks': original['process_start_utc_ticks'],
+                'main_window_handle': 1001, 'main_thread_id': 7,
+                'main_class': 'DarkReNamerWindow', 'main_enabled_before': not active,
+                'main_enabled': not active, 'probe_status': 'success',
+                'probe_begin_ticks': begin, 'probe_end_ticks': end,
+                'owned_popup_handle_before': before['accepted_popup_handle'],
+                'owned_popup_handle': after['accepted_popup_handle'],
+                'popup_before': before, 'popup_after': after}
+        samples = [sample('empty-idle', 20, 30, False),
+                   sample('ordinary-100', 200, 210, True),
+                   sample('post', 400, 410, False)]
+        events = [{'operation': 'ordinary-100', 'step': step, 'ticks': tick,
+                   'window_handle': 900 if step in {'picker_found', 'open_invoke', 'dialog_closed'} else 0}
+                  for step, tick in zip(evidence.PERFORMANCE_IMPORT_BOUNDARIES,
+                                        (150, 175, 220, 250, 280, 310), strict=True)]
+        scenario = {'mode': evidence.PICKER_MODE, 'plan': deepcopy(evidence.PICKER_PLAN),
+            'appearance': 'light', 'process_id': 4242,
+            'process_start_utc_ticks': original['process_start_utc_ticks'],
+            'executable_sha256': manifest['artifacts']['application']['sha256'],
+            'environment': original['environment'],
+            'native_process_lifetime': {'pid': 4242, 'creation_filetime': filetime,
+                'checkpoints': [{'phase': phase, 'creation_filetime': filetime}
+                    for phase in ('pre-work', 'idle', 'post')],
+                'terminal_exit_filetime': filetime + 5_000_000},
+            'response_timeline': {'schema_version': 1, 'qpc_frequency': 1000000,
+                                  'events': events}, 'samples': samples,
+            'timings': [{'id': 'ordinary-100', 'rows': 100, 'observed_rows': 100,
+                         'elapsed_ms': 10.0, 'command_ready_after_rows_ms': 1.0}],
+            'picker': {'expected_rows': 100, 'observed_rows': 100,
+                       'import_command_ready': True, 'picker_closed': True,
+                       'import_elapsed_ms': 10.0, 'fixture_files': 100},
+            'disk_unchanged': True, 'journal_residue_count': 0, 'normal_exit_code': 0}
+        raw['assertions'] = {'overall': 'passed', 'scope': evidence.PICKER_SCOPE,
+                             'scenario': scenario}
+        raw['screenshots'] = [{'file': 'picker-100-after.png',
+            'sha256': digest((output / 'picker-100-after.png').read_bytes())}]
+        write_json(raw_path, raw)
+        observations_path = output / 'acceptance-observations.json'
+        observations = json.loads(observations_path.read_text())
+        observations['run_id'] = evidence.PICKER_RUN_ID
+        write_json(observations_path, observations)
+        self.refresh_owned(run)
+        result_path = output / 'run-result.json'
+        result = json.loads(result_path.read_text())
+        result.update(diagnostic=evidence.PICKER_MODE, run_id=evidence.PICKER_RUN_ID,
+                      input_manifest_sha256=digest(manifest_path.read_bytes()),
+                      collection_sha256=digest((run / 'collection.json').read_bytes()),
+                      cleanup_sha256=digest((output / 'cleanup.json').read_bytes()),
+                      observer_result_sha256=digest(raw_path.read_bytes()))
+        write_json(result_path, result)
+        return run
+
+    def picker_v2_run(self):
+        run = self.picker_run()
+        raw_path = run / 'output/acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        scenario = raw['assertions']['scenario']
+        scenario['popup_diagnostic_schema_version'] = 2
+        visible = scenario['samples'][1]
+        hidden = deepcopy(visible)
+        hidden.update(probe_begin_ticks=160, probe_end_ticks=170,
+                      owned_popup_handle_before=0, owned_popup_handle=0,
+                      owned_popup_thread_id_before=0, owned_popup_thread_id=0,
+                      owned_popup_class_before='', owned_popup_class='')
+        for key, begin, end in (('popup_before', 150, 159), ('popup_after', 171, 180)):
+            hidden[key].update(begin_ticks=begin, end_ticks=end, accepted_popup_handle=0,
+                               popup_visible=False, visibility_lookup='hidden',
+                               disposition='owned-hidden-inactive',
+                               observed_predicates=['hidden'])
+        scenario['samples'].insert(1, hidden)
+        write_json(raw_path, raw)
+        self.refresh_picker(run)
+        return run
+
+    def refresh_picker(self, run):
+        self.refresh_owned(run)
+        result_path = run / 'output/run-result.json'
+        result = json.loads(result_path.read_text())
+        result['diagnostic'] = evidence.PICKER_MODE
+        write_json(result_path, result)
+
+    def test_picker_v2_success_requires_visible_bound_picker_and_postlaunch(self):
+        run = self.picker_v2_run()
+        with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=2):
+            self.assertEqual(evidence.validate_picker_run(
+                self.root, run.name, SOURCE, SCRIPT_ROOT.parent)['status'], 'observed')
+            profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+            with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                    returncode=0, stdout=profile)), redirect_stdout(io.StringIO()) as report:
+                self.assertEqual(evidence.main(SCRIPT_ROOT.parent, [
+                    '--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                    '--run', run.name, '--diagnostic', evidence.PICKER_MODE,
+                    '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
+                self.assertEqual(json.loads(report.getvalue())['status'], 'observed')
+            raw_path = run / 'output/acceptance-result.json'
+            original = raw_path.read_bytes()
+            def alter_visible(scenario, field, value):
+                for key in ('popup_before', 'popup_after'):
+                    scenario['samples'][2][key][field] = value
+            for mutate in (
+                lambda s: alter_visible(s, 'raw_popup_handle', 901),
+                lambda s: alter_visible(s, 'popup_class', 'Other'),
+                lambda s: s.__setitem__('popup_diagnostic_schema_version', 1),
+                lambda s: s['samples'][1]['popup_after'].__setitem__('popup_process_id', 4243),
+            ):
+                with self.subTest(mutate=mutate):
+                    raw = json.loads(original)
+                    mutate(raw['assertions']['scenario'])
+                    write_json(raw_path, raw)
+                    self.refresh_picker(run)
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                     SCRIPT_ROOT.parent)
+            raw_path.write_bytes(original)
+            self.refresh_picker(run)
+            postlaunch = run / 'output/platform-postlaunch.json'
+            postlaunch.unlink()
+            self.refresh_picker(run)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+
+    def test_picker_collection_precheck_bounds_png_count_and_bytes(self):
+        run = self.picker_run()
+        output = run / 'output'
+        input_hash = digest((run / 'input-manifest.json').read_bytes())
+        self.assertEqual(vm_gui.collection_document(run, input_hash, run.name)['run_id'], run.name)
+        extra = output / 'unexpected.png'
+        extra.write_bytes((output / 'picker-100-after.png').read_bytes())
+        with self.assertRaises(ValueError):
+            vm_gui.collection_document(run, input_hash, run.name)
+        extra.unlink()
+        oversized = output / 'oversized.bin'
+        with oversized.open('wb') as stream:
+            stream.truncate(32 * 1024 * 1024)
+        with self.assertRaises(ValueError):
+            vm_gui.collection_document(run, input_hash, run.name)
+
+    def picker_failed_run(self, schema_version=2):
+        run = self.picker_v2_run()
+        output = run / 'output'
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        scenario = raw['assertions']['scenario']
+        if schema_version == 1:
+            scenario.pop('popup_diagnostic_schema_version')
+        samples = scenario.pop('samples')
+        scenario['partial_samples'] = samples[:1 if schema_version == 1 else 2]
+        scenario['native_process_lifetime']['terminal_exit_filetime'] = None
+        main = {'handle': 1001, 'process_id': 4242,
+            'process_start_utc_ticks': scenario['process_start_utc_ticks'],
+            'thread_id': 7, 'class': 'DarkReNamerWindow', 'enabled': False,
+            'lookup': 'complete', 'thread_lookup_error': None,
+            'class_lookup_error': None}
+        rejected = deepcopy(samples[1]['popup_before'])
+        rejected.update(begin_ticks=510, end_ticks=520, disposition='rejected',
+                        accepted_popup_handle=900, failed_predicates=['hidden'])
+        scenario['sampler_failure'] = {'schema_version': schema_version,
+            'phase': 'ordinary-100', 'error_type': 'InvalidOperationException',
+            'message': 'Sampler active owned popup identity changed.',
+            'sample_begin_ticks': 500, 'sample_end_ticks': 530,
+            'probe_begin_ticks': 0, 'probe_end_ticks': 0, 'probe_error_code': None,
+            'qpc_frequency': 1000000, 'main_before': main, 'main_after': main,
+            'popup_before': rejected, 'popup_after': None}
+        raw['status'] = 'failed'
+        raw['assertions']['overall'] = 'failed'
+        write_json(raw_path, raw)
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport.update(status='failed', guest_cleanup=False)
+        write_json(transport_path, transport)
+        cleanup_path = output / 'cleanup.json'
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup.update(status='failed', guest=False, controller_exit_code=1)
+        write_json(cleanup_path, cleanup)
+        (output / 'platform-postlaunch.json').unlink()
+        self.fixture.refresh(run)
+        (output / 'run-result.json').unlink()
+        return run
+
+    def test_picker_failed_preflight_only_preserves_v1_and_rejects_v2_downgrade(self):
+        for version in (1, 2):
+            with self.subTest(version=version):
+                self.reset_fixture()
+                run = self.picker_failed_run(version)
+                proof = {'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
+                         'acceptance': 'rejected'}
+                with mock.patch.object(evidence, 'selected_picker_failure_schema',
+                                       return_value=version), \
+                     mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                                       return_value=proof) as verified:
+                    verdict = evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                           SCRIPT_ROOT.parent)
+                    self.assertEqual(verdict['status'], 'failure-observed')
+                    self.assertEqual(verdict['postlaunch'], 'unavailable')
+                    self.assertEqual(verdict['acceptance'], 'rejected')
+                    verified.assert_called_once_with(run / 'output', profile_id=evidence.V2_PROFILE_ID,
+                        profile_sha256=evidence.OWNED_PERFORMANCE_PROFILE_SHA256)
+                    profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+                    with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                            returncode=0, stdout=profile)), redirect_stdout(io.StringIO()) as report:
+                        self.assertEqual(evidence.main(SCRIPT_ROOT.parent, [
+                            '--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                            '--run', run.name, '--diagnostic', evidence.PICKER_MODE,
+                            '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 1)
+                        self.assertEqual(json.loads(report.getvalue())['status'], 'failure-observed')
+                    with mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                                           side_effect=evidence.EvidenceError('missing owned proof')):
+                        with self.assertRaisesRegex(evidence.EvidenceError, 'missing owned proof'):
+                            evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                         SCRIPT_ROOT.parent)
+                    raw_path = run / 'output/acceptance-result.json'
+                    raw = json.loads(raw_path.read_text())
+                    raw['assertions']['scenario']['partial_samples'] = []
+                    write_json(raw_path, raw)
+                    self.fixture.refresh(run)
+                    (run / 'output/run-result.json').unlink()
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                     SCRIPT_ROOT.parent)
+                if version == 2:
+                    self.reset_fixture()
+                    run = self.picker_failed_run(1)
+                    with mock.patch.object(evidence, 'selected_picker_failure_schema',
+                                           return_value=2):
+                        with self.assertRaises(evidence.EvidenceError):
+                            evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                         SCRIPT_ROOT.parent)
+
+    def test_picker_one_import_collection_and_cli_reject_downgrade_and_missing_lease(self):
+        run = self.picker_run()
+        with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=1):
+            verdict = evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+            self.assertEqual(verdict['status'], 'observed')
+            profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+            with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                    returncode=0, stdout=profile)):
+                with redirect_stdout(io.StringIO()) as report:
+                    exit_code = evidence.main(SCRIPT_ROOT.parent, [
+                        '--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                        '--run', run.name, '--diagnostic', evidence.PICKER_MODE,
+                        '--acceptance-profile-id', evidence.V2_PROFILE_ID])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(json.loads(report.getvalue())['status'], 'observed')
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.main(SCRIPT_ROOT.parent, [
+                        '--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                        '--run', run.name, '--diagnostic', evidence.PICKER_MODE,
+                        '--acceptance-profile-id', evidence.V1_PROFILE_ID])
+            for leaf, mutate in (
+                ('input-manifest.json', lambda d: d['request']['picker_identity_plan'].__setitem__('idle_ms', 30000)),
+                ('input-manifest.json', lambda d: d.__setitem__('acceptance_profile_sha256', '0' * 64)),
+                ('input-manifest.json', lambda d: d.__setitem__('acceptance_profile_id', evidence.V1_PROFILE_ID)),
+                ('output/desktop-stop-response.json', lambda d: d.__setitem__('lifecycleStatus', 'pending')),
+            ):
+                with self.subTest(leaf=leaf, mutate=mutate):
+                    path = run / leaf
+                    saved = path.read_bytes()
+                    changed = json.loads(saved)
+                    mutate(changed)
+                    write_json(path, changed)
+                    if leaf.startswith('output/'):
+                        self.fixture.refresh(run)
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+                    path.write_bytes(saved)
+                    if leaf.startswith('output/'):
+                        self.fixture.refresh(run)
+            raw_path = run / 'output/acceptance-result.json'
+            raw = json.loads(raw_path.read_text())
+            raw['assertions']['scenario']['samples'] = []
+            write_json(raw_path, raw)
+            self.refresh_owned(run)
+            result_path = run / 'output/run-result.json'
+            result = json.loads(result_path.read_text())
+            result['diagnostic'] = evidence.PICKER_MODE
+            write_json(result_path, result)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
 
     def test_owned_legacy_receipt_cannot_downgrade_selected_timeline_source(self):
         run, profile_sha = self.owned_run()
