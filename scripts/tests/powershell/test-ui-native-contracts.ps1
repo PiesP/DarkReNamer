@@ -21,6 +21,8 @@ function Assert-Equal {
 
 $nativeSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'))
 $scenarioSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-context-scenarios.ps1'))
+$emptyPerformanceRows = @(Convert-ObserverPerformanceSampleRows -Samples @() -Timeline)
+Assert-Equal $emptyPerformanceRows.Count 0 'Failed sampler with no completed rows remains an empty partial snapshot'
 if ($scenarioSource -notmatch '(?s)\$ObservationSink\[''response_timeline''\]\s*=\s*\[ordered\]@\{[^}]*qpc_frequency\s*=\s*\[long\]\[Diagnostics.Stopwatch\]::Frequency') {
     throw 'Performance response timeline must emit its actual QPC frequency for independent interval validation.'
 }

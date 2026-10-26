@@ -1601,7 +1601,7 @@ function Invoke-ObserverBoundPerformanceCommand {
 }
 
 function Convert-ObserverPerformanceSampleRows {
-    param([Parameter(Mandatory)][object[]] $Samples, [switch] $Timeline)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples, [switch] $Timeline)
     @($Samples | ForEach-Object {
         $row = [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
             private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
@@ -1961,7 +1961,11 @@ function Invoke-ObserverPerformanceSampleScenario {
                         $ObservationSink['partial_samples'] = @(
                             Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
                     }
-                    catch { $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name }
+                    catch {
+                        $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name
+                        $ObservationSink['partial_samples'] = @(
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled)
+                    }
                     finally { $sampler = $null }
                 }
                 $pollClock = $null
@@ -2176,7 +2180,11 @@ function Invoke-ObserverPerformanceSampleScenario {
                 $ObservationSink['partial_samples'] = @(
                     Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
             }
-            catch { $ObservationSink['partial_sampling_error'] = $_.Exception.Message }
+            catch {
+                $ObservationSink['partial_sampling_error'] = $_.Exception.Message
+                $ObservationSink['partial_samples'] = @(
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled)
+            }
         }
         if ($null -ne $application) {
             Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned

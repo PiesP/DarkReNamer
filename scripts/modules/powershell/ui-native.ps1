@@ -1546,6 +1546,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private string phase = "empty-idle";
     private long previousSampleTicks;
     private bool stopped;
+    private bool timerDisposed;
 
     public static string ClassifyProbe(bool responsive, int errorCode) {
         return responsive ? "success" : errorCode == 1460 ? "timeout" : "failure_unknown";
@@ -1568,8 +1569,8 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
                 throw new InvalidOperationException("Sampler active owned popup identity changed.");
             popupClass = popupName.ToString();
         }
-        if (!mainEnabled && popup == window)
-            throw new InvalidOperationException("Sampler disabled main window has no bound modal popup.");
+        // A disabled owner can briefly have no active popup during modal creation/retirement.
+        // Preserve that observed transition; it is not evidence of a modal throughout the probe.
         return popup == window ? IntPtr.Zero : popup;
     }
 
@@ -1654,11 +1655,20 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         lock (gate) { if (stopped) throw new InvalidOperationException("Sampler stopped."); phase = value; }
     }
     public DarkReNamerPerformanceSample[] Stop() {
-        timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
         lock (gate) {
-            stopped = true; timer.Dispose();
+            if (!timerDisposed) {
+                timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                timer.Dispose(); timerDisposed = true;
+            }
+            stopped = true;
             if (failure != null) throw new InvalidOperationException("Performance sampling failed: " + failure);
             if (samples.Count == 0) throw new InvalidOperationException("Performance sampler produced no samples.");
+            return samples.ToArray();
+        }
+    }
+    public DarkReNamerPerformanceSample[] ReadStoppedSamples() {
+        lock (gate) {
+            if (!stopped) throw new InvalidOperationException("Sampler is still running.");
             return samples.ToArray();
         }
     }

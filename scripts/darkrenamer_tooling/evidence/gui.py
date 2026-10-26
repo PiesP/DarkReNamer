@@ -3486,7 +3486,6 @@ def validate_performance_metrics(scenario: dict, *,
                 popup = checked_int(sample["owned_popup_handle" + suffix], 0, 2**63 - 1,
                                     "performance owned popup handle")
                 require(type(sample["main_enabled" + suffix]) is bool and
-                        (sample["main_enabled" + suffix] or popup > 0) and
                         ((popup == 0 and sample["owned_popup_thread_id" + suffix] == 0 and
                           sample["owned_popup_class" + suffix] == "") or
                          (popup > 0 and sample["owned_popup_thread_id" + suffix] == sample["main_thread_id"] and

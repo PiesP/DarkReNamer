@@ -1623,6 +1623,19 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         self.assertEqual(picker["begin_ticks"], probe["probe_end_ticks"])
         self.assertEqual(picker["timeout_probe_overlap_count"], 0)
 
+    def test_disabled_owner_without_active_popup_is_a_transition_snapshot(self):
+        scenario = self.timed_scenario()
+        probe = scenario["samples"][150]
+        probe.update(main_enabled_before=False, main_enabled=False,
+                     probe_status="timeout", probe_error_code=1460)
+        metrics = evidence.validate_performance_metrics(scenario)["response_timeline"]
+        self.assertEqual(metrics["timeout_endpoint_snapshot_stable_modal"], 0)
+        self.assertEqual(metrics["timeout_endpoint_snapshot_stable_nonmodal"], 0)
+        self.assertEqual(metrics["timeout_endpoint_snapshot_transition_or_other"], 1)
+        probe["main_enabled"] = True
+        metrics = evidence.validate_performance_metrics(scenario)["response_timeline"]
+        self.assertEqual(metrics["timeout_endpoint_snapshot_transition_or_other"], 1)
+
     def test_response_timeline_rejects_wrong_sample_phase_and_source_downgrade(self):
         scenario = self.timed_scenario()
         with self.assertRaisesRegex(evidence.EvidenceError, "selected source schema"):
@@ -1658,7 +1671,10 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         for mutation, error in (
             (lambda row: row.pop("probe_begin_ticks"), "performance sample"),
             (lambda row: row.update(main_window_handle=999), "main HWND"),
-            (lambda row: row.update(main_enabled=False), "modal identity"),
+            (lambda row: row.update(main_enabled=0), "modal identity"),
+            (lambda row: row.update(owned_popup_handle=100, owned_popup_thread_id=99,
+                                    owned_popup_class="#32770"), "modal identity"),
+            (lambda row: row.update(owned_popup_thread_id=42), "modal identity"),
             (lambda row: row.update(probe_end_ticks=row["probe_begin_ticks"]), "probe QPC"),
             (lambda row: row.update(probe_status="failure_unknown", probe_error_code=5), "modal identity"),
         ):
