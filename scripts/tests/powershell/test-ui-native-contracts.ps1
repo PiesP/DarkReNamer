@@ -735,6 +735,26 @@ $mainDiagnostic
 $samplerFailure
 $performanceSampler
 "@
+$defaultFailure = [DarkReNamerSamplerFailure]::new()
+$defaultFailure.SchemaVersion = 2
+$defaultFailure.Phase = 'ordinary-100'
+$defaultFailure.ErrorType = 'InvalidOperationException'
+$defaultFailure.Message = 'Sampler active owned popup identity changed.'
+$defaultFailure.QpcFrequency = 10000000
+Assert-Equal (Convert-ObserverSamplerFailure -Failure $defaultFailure).schema_version 2 `
+    'Default full sampler failure retains current diagnostic schema'
+$defaultFailure.SchemaVersion = 1
+Assert-Fails { Convert-ObserverSamplerFailure -Failure $defaultFailure } 'source-selected producer'
+$fullTransition = [DarkReNamerPerformanceSample]::new()
+$fullTransition.Phase = 'ordinary-100'
+$fullTransition.MainEnabled = $false
+$fullTransition.OwnedPopupHandle = 0
+$fullRows = @(Convert-ObserverPerformanceSampleRows -Samples @($fullTransition) -Timeline)
+Assert-Equal $fullRows.Count 1 'Full sampler transition row count'
+Assert-Equal $fullRows[0].owned_popup_handle 0 'Full sampler disabled/no-active-popup endpoint'
+if ($fullRows[0].Contains('popup_before') -or $fullRows[0].Contains('popup_after')) {
+    throw 'Full sampler endpoint acquired focused raw-popup fields.'
+}
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($true, 0)) 'success' 'Successful probe classification'
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, 1460)) 'timeout' 'Identified timeout classification'
 foreach ($unknown in @(0, 5, 87)) {

@@ -1668,6 +1668,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         popupClass = "";
         var faults = new List<string>();
         // GetLastActivePopup and IsWindowVisible do not define a last-error result.
+        bool knownHiddenInactive = false;
         if (popup == IntPtr.Zero) {
             faults.Add("popup-zero");
         } else if (popup != window) {
@@ -1715,7 +1716,12 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             if (owner != window) faults.Add("direct-owner-mismatch");
             if (!diagnostic.PopupVisible) faults.Add("hidden");
             if (classLength == 0) faults.Add("class-unavailable");
-            if (!diagnostic.PopupVisible && mainEnabled) {
+            // A bound hidden dialog is inactive at this instant; it is not an active probe target.
+            knownHiddenInactive = !mainEnabled && faults.Count == 1 && faults[0] == "hidden" &&
+                diagnostic.ThreadLookup == "complete" && diagnostic.ClassLookup == "complete" &&
+                diagnostic.PopupClass == "#32770" && diagnostic.OwnerLookup == "returned" &&
+                chain.Count == 1 && chain[0] == window.ToInt64();
+            if ((!diagnostic.PopupVisible && mainEnabled) || knownHiddenInactive) {
                 popup = window;
                 popupThread = 0;
                 popupClass = "";
@@ -1724,6 +1730,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
         diagnostic.AcceptedPopupHandle = popup == window ? 0 : popup.ToInt64();
         diagnostic.ObservedPredicates = faults.ToArray();
         diagnostic.Disposition = diagnostic.PopupLookup == "zero" ? "unavailable" :
+            knownHiddenInactive ? "owned-hidden-inactive" :
             popup == window && diagnostic.PopupLookup == "popup" ? "inactive-ignored" :
             popup == window ? "main" : faults.Count == 0 ? "owned-popup" : "rejected";
         diagnostic.FailedPredicates = diagnostic.Disposition == "rejected" ||
@@ -1766,7 +1773,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private void Sample(object ignored) {
         if (!System.Threading.Monitor.TryEnter(gate)) return;
         var diagnostic = new DarkReNamerSamplerFailure {
-            SchemaVersion = 1, Phase = phase,
+            SchemaVersion = 2, Phase = phase,
             SampleBeginTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
             QpcFrequency = System.Diagnostics.Stopwatch.Frequency
         };

@@ -1,5 +1,5 @@
 ﻿$script:PerformanceResponseTimelineSchemaVersion = 1
-$script:PickerFailureSchemaVersion = 1
+$script:PickerFailureSchemaVersion = 2
 
 function Get-ObserverContextConfirmationReachability {
     param(
@@ -1806,6 +1806,9 @@ function Invoke-ObserverPerformanceSampleScenario {
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
         elseif ($StopAfterFirstClear) { 'focused-10k-clear' }
         elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
+    if ($ObservePicker) {
+        $ObservationSink['popup_diagnostic_schema_version'] = $script:PickerFailureSchemaVersion
+    }
     $ObservationSink['plan'] = if ($ObservePicker) {
         [ordered]@{ ordinary_rows=@(100); idle_ms=1000; picker_settle_ms=350; sample_interval_ms=200;
             maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;

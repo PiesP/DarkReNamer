@@ -1265,10 +1265,10 @@ def collection_document(run_root: Path, input_sha256: str, run_id: str) -> dict:
                 f"Appearance pair must stay within 120 MiB and exactly {expected_pngs} original PNGs.")
     if run_id in {performance_run(order, owned=owned)["run_id"]
                   for order in PERFORMANCE_ORDERS for owned in (False, True)} | \
-            {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID}:
+            {FOCUSED_CLEAR_RUN_ID, FIRST_CLEAR_RUN_ID, ICON_SETTLEMENT_RUN_ID, PICKER_RUN_ID}:
         png_count = sum(row["relative_path"].endswith(".png") for row in files)
         require(total_bytes <= 32 * 1024 * 1024 and
-                (png_count <= 1 if run_id == FIRST_CLEAR_RUN_ID else png_count == 1),
+                (png_count <= 1 if run_id in {FIRST_CLEAR_RUN_ID, PICKER_RUN_ID} else png_count == 1),
                 "Performance diagnostic must stay within 32 MiB and one original PNG.")
     return {
         "schema_version": 1,

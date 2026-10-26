@@ -23,7 +23,9 @@ from darkrenamer_tooling.contracts.platform import (
 from darkrenamer_tooling.contracts.tooling import (
     RECORD_NAME, staged_tooling_files, trusted_tooling_inventory,
 )
-from darkrenamer_tooling.contracts.owned_cleanup import verify_owned_performance_text_scale
+from darkrenamer_tooling.contracts.owned_cleanup import (
+    verify_owned_performance_text_scale, verify_preserved_owned_cleanup,
+)
 from darkrenamer_tooling.campaign.planning import verify_process_job_cleanup
 
 
@@ -192,11 +194,20 @@ def selected_picker_failure_schema(repo: Path, source_sha: str) -> int:
     except UnicodeDecodeError as error:
         raise EvidenceError("Selected picker producer source is not UTF-8.") from error
     versions = PICKER_FAILURE_SCHEMA_MARKER.findall(producer)
-    require(versions == ["1"] and
+    require(versions in (["1"], ["2"]) and
             "Failure.SchemaVersion -ne $script:PickerFailureSchemaVersion" in producer and
             "sampler_failure" in producer,
             "Selected picker failure schema marker is unsupported or unused.")
-    return 1
+    if versions == ["2"]:
+        native = subprocess.run(
+            ["git", "show", f"{source_sha}:scripts/modules/powershell/ui-native.ps1"],
+            cwd=repo, capture_output=True, check=False)
+        require(native.returncode == 0 and
+                "popup_diagnostic_schema_version" in producer and
+                b'knownHiddenInactive ? "owned-hidden-inactive"' in native.stdout and
+                b'SchemaVersion = 2, Phase = phase' in native.stdout,
+                "Selected picker v2 schema does not produce its new state marker.")
+    return int(versions[0])
 
 
 PICKER_FAULTS = {"popup-zero", "thread-lookup", "thread-mismatch", "process-mismatch",
@@ -204,7 +215,9 @@ PICKER_FAULTS = {"popup-zero", "thread-lookup", "thread-mismatch", "process-mism
 
 
 def validate_picker_popup(value: object, stage: str, main_handle: int,
-                          process_id: int, main_thread_id: int) -> dict | None:
+                          process_id: int, main_thread_id: int,
+                          *, schema_version: int = 1) -> dict | None:
+    require(schema_version in {1, 2}, "Picker popup schema version is unsupported.")
     if value is None:
         return None
     popup = exact_keys(value, {"stage", "begin_ticks", "end_ticks", "raw_popup_handle",
@@ -298,6 +311,18 @@ def validate_picker_popup(value: object, stage: str, main_handle: int,
             require(not popup["popup_visible"] and popup["main_enabled_at_lookup"] and accepted == 0 and not failed and
                     "hidden" in observed,
                     "Picker inactive popup was silently accepted or reclassified.")
+        elif disposition == "owned-hidden-inactive":
+            require(schema_version == 2 and not popup["popup_visible"] and
+                    not popup["main_enabled_at_lookup"] and accepted == 0 and
+                    observed == ["hidden"] and not failed and
+                    popup["thread_lookup"] == "complete" and
+                    popup["class_lookup"] == "complete" and popup["popup_class"] == "#32770" and
+                    popup["owner_lookup"] == "returned" and popup["direct_owner"] == main_handle and
+                    popup["owner_chain"] == [main_handle] and
+                    popup["owner_chain_lookup"] == "main-reached" and
+                    popup["popup_process_id"] == process_id and
+                    popup["popup_thread_id"] == main_thread_id > 0,
+                    "Picker hidden owned popup has unknown identity or mixed faults.")
         elif disposition == "owned-popup":
             require(popup["popup_visible"] and accepted == raw and not observed and not failed and
                     popup["thread_lookup"] == "complete" and
@@ -315,12 +340,14 @@ def validate_picker_popup(value: object, stage: str, main_handle: int,
 
 
 def validate_picker_failure(value: object, *, main_handle: int, process_id: int,
-                            process_start_utc_ticks: int) -> dict:
+                            process_start_utc_ticks: int,
+                            schema_version: int = 1) -> dict:
     failure = exact_keys(value, {"schema_version", "phase", "error_type", "message",
         "sample_begin_ticks", "sample_end_ticks", "probe_begin_ticks", "probe_end_ticks",
         "probe_error_code", "qpc_frequency", "main_before", "main_after", "popup_before",
         "popup_after"}, "picker sampler failure")
-    require(type(failure["schema_version"]) is int and failure["schema_version"] == 1 and
+    require(schema_version in {1, 2} and type(failure["schema_version"]) is int and
+            failure["schema_version"] == schema_version and
             failure["phase"] in {"empty-idle", "ordinary-100", "post"} and
             failure["error_type"] in {"InvalidOperationException", "Win32Exception"} and
             isinstance(failure["message"], str) and 0 < len(failure["message"]) <= 256,
@@ -365,9 +392,9 @@ def validate_picker_failure(value: object, *, main_handle: int, process_id: int,
         main_rows.append(main)
     main_thread_id = main_rows[0]["thread_id"]
     before = validate_picker_popup(failure["popup_before"], "before-probe", main_handle,
-                                   process_id, main_thread_id)
+                                   process_id, main_thread_id, schema_version=schema_version)
     after = validate_picker_popup(failure["popup_after"], "after-probe", main_handle,
-                                  process_id, main_thread_id)
+                                  process_id, main_thread_id, schema_version=schema_version)
     require(before is not None or probe_begin == 0, "Picker preprobe popup detail is missing.")
     require(after is None or before is not None and probe_end > 0 and
             before["end_ticks"] <= probe_begin and probe_end <= after["begin_ticks"],
@@ -1173,7 +1200,8 @@ def validate_cleanup(run_root: Path, input_hash: str) -> tuple[dict, bytes]:
     return cleanup, data
 
 
-def validate_platform_preflight(run_root: Path, manifest: dict, input_hash: str) -> tuple[dict, dict]:
+def validate_platform_preflight(run_root: Path, manifest: dict, input_hash: str,
+                                *, require_postlaunch: bool = True) -> tuple[dict, dict | None]:
     value, _ = read_json(run_root / "output", Path("platform-preflight.json"), "platform preflight")
     preflight = exact_keys(
         value,
@@ -1196,6 +1224,8 @@ def validate_platform_preflight(run_root: Path, manifest: dict, input_hash: str)
     guest = validate_guest_platform(preflight["guest_platform"], "platform preflight guest_platform")
     require(guest == manifest["guest_preflight"],
             "Platform preflight guest differs from the immutable guest preflight.")
+    if not require_postlaunch:
+        return preflight, None
     post_value, _ = read_json(run_root / "output", Path("platform-postlaunch.json"), "platform postlaunch identity")
     post = exact_keys(
         post_value,
@@ -4595,13 +4625,16 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
     require(manifest["request"]["mode"] == PICKER_MODE and
             typed_equal(manifest["request"]["picker_identity_plan"], PICKER_PLAN),
             "Picker source-bound request differs.")
-    require(selected_picker_failure_schema(repo, source_sha) == 1,
-            "Picker failure schema is not selected by the source.")
+    schema_version = selected_picker_failure_schema(repo, source_sha)
     input_hash = sha256_bytes(input_bytes)
     failed = not (run_root / "output" / "run-result.json").exists()
     files = validate_picker_collection(run_root, input_hash, failed)
+    if failed:
+        require("platform-postlaunch.json" not in files,
+                "Failed picker postlaunch identity is present without a qualified target.")
     artifacts = manifest["artifacts"]
-    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash,
+                                               require_postlaunch=not failed)
     raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "picker observer")
     observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"),
                                                 "picker observations")
@@ -4615,17 +4648,20 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
             raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
             raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
-            nested(raw, "assertions", "scope") == PICKER_SCOPE,
+            (failed or nested(raw, "assertions", "scope") == PICKER_SCOPE),
             "Picker observer identity or protected observations differ.")
     scenario = observations.get("scenario")
     require(isinstance(scenario, dict) and scenario.get("mode") == PICKER_MODE and
             typed_equal(scenario.get("plan"), PICKER_PLAN) and
             scenario.get("executable_sha256") == artifacts["application"]["sha256"] and
-            int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"]) and
+            (failed or int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"])) and
             nested(scenario, "environment", "main_window", "process_id") == scenario["process_id"] and
             nested(scenario, "environment", "hwnd_dpi") == 96 and
             nested(scenario, "environment", "text_scale_factor_percent") == 100,
             "Picker process, display, or fixed workload differs.")
+    require((scenario.get("popup_diagnostic_schema_version") == 2 if schema_version == 2 else
+             "popup_diagnostic_schema_version" not in scenario),
+            "Picker popup schema marker differs from selected source.")
     main_handle = checked_int(nested(scenario, "environment", "main_window", "hwnd"),
                               1, 2**63 - 1, "picker main HWND")
     start_ticks = checked_int(scenario.get("process_start_utc_ticks"), 1, 2**63 - 1,
@@ -4675,9 +4711,11 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 "Picker probe bracket is invalid or exceeds its 50 ms timeout tolerance.")
         last_probe = end
         before = validate_picker_popup(sample.get("popup_before"), "before-probe", main_handle,
-                                       scenario["process_id"], sample["main_thread_id"])
+                                       scenario["process_id"], sample["main_thread_id"],
+                                       schema_version=schema_version)
         after = validate_picker_popup(sample.get("popup_after"), "after-probe", main_handle,
-                                      scenario["process_id"], sample["main_thread_id"])
+                                      scenario["process_id"], sample["main_thread_id"],
+                                      schema_version=schema_version)
         require(before is not None and after is not None and
                 before["end_ticks"] <= begin and end <= after["begin_ticks"] and
                 sample.get("owned_popup_handle_before") == before["accepted_popup_handle"] and
@@ -4685,30 +4723,58 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 sample.get("main_enabled_before") == before["main_enabled_at_lookup"] and
                 sample.get("main_enabled") == after["main_enabled_at_lookup"],
                 "Picker sample popup transition is missing or inconsistent.")
+        for suffix, popup in (("_before", before), ("", after)):
+            if popup["disposition"] == "owned-hidden-inactive":
+                require(sample.get(f"owned_popup_thread_id{suffix}") == 0 and
+                        sample.get(f"owned_popup_class{suffix}") == "",
+                        "Picker hidden inactive popup leaked into the active endpoint.")
     failure = scenario.get("sampler_failure")
     if failed:
         require(raw.get("status") == "failed" and failure is not None,
                 "Picker failed receipt omits its sampler failure record.")
         detail = validate_picker_failure(failure, main_handle=main_handle,
                                          process_id=scenario["process_id"],
-                                         process_start_utc_ticks=start_ticks)
+                                         process_start_utc_ticks=start_ticks,
+                                         schema_version=schema_version)
         require(failure["qpc_frequency"] == frequency and
                 samples[-1]["probe_end_ticks"] <= failure["sample_begin_ticks"],
                 "Picker failure is not ordered after retained samples.")
         transport, _ = read_json(run_root / "output", Path("transport.json"), "picker transport")
         cleanup, _ = read_json(run_root / "output", Path("cleanup.json"), "picker cleanup")
-        require(transport.get("status") == "collected" and
-                transport.get("guest_cleanup") is True and
+        require(transport.get("status") == "failed" and
+                transport.get("guest_cleanup") is False and
+                cleanup.get("status") == "failed" and
                 cleanup.get("run_id") == run_id and
                 cleanup.get("input_manifest_sha256") == input_hash,
                 "Picker failed transport or cleanup binding differs.")
-        owned = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
-                                          profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+        lifetime = exact_keys(scenario.get("native_process_lifetime"),
+            {"pid", "creation_filetime", "checkpoints", "terminal_exit_filetime"},
+            "picker failed native lifetime")
+        require(int_equals(lifetime["pid"], scenario["process_id"]) and
+                int_equals(lifetime["creation_filetime"], start_ticks - 504911232000000000) and
+                lifetime["terminal_exit_filetime"] is None and
+                isinstance(lifetime["checkpoints"], list) and
+                1 <= len(lifetime["checkpoints"]) <= 3 and
+                all(isinstance(row, dict) and
+                    int_equals(row.get("creation_filetime"), lifetime["creation_filetime"])
+                    for row in lifetime["checkpoints"]),
+                "Picker failed native lifetime is unbound.")
+        require(typed_equal(raw.get("process_job_cleanup"),
+                            nested(transport, "raw_cleanup", "owned_resource_evidence",
+                                   "process_job_cleanup")) and
+                typed_equal(raw.get("observer_lifecycle"),
+                            nested(transport, "raw_cleanup", "owned_resource_evidence",
+                                   "task_execution", "observer_lifecycle")),
+                "Picker failed observer and owned Job proof differ.")
         validate_current_protected_transport(manifest, transport)
-        validate_owned_performance_desktop(run_root, files, manifest, transport,
-                                           owned["owned_resource_evidence"])
+        owned = verify_preserved_owned_cleanup(run_root / "output", profile_id=V2_PROFILE_ID,
+                                                profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+        require(owned == {"environment": "strict-failed", "owned_cleanup": "owned-clean",
+                          "acceptance": "rejected"},
+                "Picker failed execution cannot qualify as accepted cleanup.")
         return {"run_id": run_id, "status": "failure-observed", "failure": detail,
                 "retained_samples": len(samples), "resource_cleanup": "owned-clean",
+                "postlaunch": "unavailable", "acceptance": "rejected",
                 "full_performance_sample": "not-run"}
     require(failure is None and len(events) == 6 and
             samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
@@ -4738,13 +4804,15 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             int_equals(scenario.get("journal_residue_count"), 0) and
             int_equals(scenario.get("normal_exit_code"), 0),
             "Picker one-import completion or fixture readback differs.")
-    require(any(row["phase"] == "ordinary-100" and
-                any(isinstance(row.get(key), dict) and
-                    row[key]["disposition"] == "owned-popup" and
-                    row[key]["begin_ticks"] < events[2]["ticks"] and
-                    row[key]["end_ticks"] > events[1]["ticks"]
-                    for key in ("popup_before", "popup_after"))
-                for row in samples),
+    snapshots = [row[key] for row in samples for key in ("popup_before", "popup_after")
+                 if row["phase"] == "ordinary-100"]
+    visible = [popup for popup in snapshots
+               if popup["disposition"] == "owned-popup" and
+               popup["raw_popup_handle"] == events[1]["window_handle"] and
+               popup["popup_class"] == "#32770" and
+               popup["begin_ticks"] < events[2]["ticks"] and
+               popup["end_ticks"] > events[1]["ticks"]]
+    require(visible,
             "A bound owned popup was not sampled during picker settlement; observation is inconclusive.")
     _, cleanup_bytes = validate_cleanup(run_root, input_hash)
     collection, collection_bytes, _ = validate_collection(run_root, input_hash)
