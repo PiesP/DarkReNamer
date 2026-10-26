@@ -308,8 +308,16 @@ function Import-GuiRegressionPathList {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [object] $Grid,
         [switch] $MeasureCommandReadiness,
-        [switch] $IncludeOpenTicks
+        [switch] $IncludeOpenTicks,
+        [Collections.Generic.List[object]] $TimelineEvents,
+        [string] $TimelineOperation
     )
+    if ($null -ne $TimelineEvents) {
+        if ([string]::IsNullOrWhiteSpace($TimelineOperation) -or $TimelineEvents.Count + 6 -gt 128) {
+            throw 'Performance import timeline identity or event budget is invalid.'
+        }
+        $IncludeOpenTicks = $true
+    }
     if ($null -eq $Grid) {
         $Grid = Get-ObserverGrid -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
     }
@@ -324,9 +332,11 @@ function Import-GuiRegressionPathList {
         if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
         Start-Sleep -Milliseconds 100
     }
+    $pickerRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
         -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
     $dialog = Wait-ObserverPathImportDialog -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds
+    $pickerFoundTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
@@ -335,6 +345,7 @@ function Import-GuiRegressionPathList {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
+    $dialogClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     do {
         if ($Grid.pattern.Current.RowCount -eq $ExpectedRows) { break }
@@ -358,10 +369,26 @@ function Import-GuiRegressionPathList {
         }
         $readinessMs = [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3)
     }
+    $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+    if ($null -ne $TimelineEvents) {
+        foreach ($boundary in @(
+            @('picker_request', $pickerRequestTicks, 0),
+            @('picker_found', $pickerFoundTicks, $handle.ToInt64()),
+            @('open_invoke', $openTicks, $handle.ToInt64()),
+            @('dialog_closed', $dialogClosedTicks, $handle.ToInt64()),
+            @('rows_observed', $rowObservedTicks, 0),
+            @('command_ready', $commandReadyTicks, 0))) {
+            $TimelineEvents.Add([ordered]@{ operation=$TimelineOperation; step=[string]$boundary[0];
+                ticks=[long]$boundary[1]; window_handle=[long]$boundary[2] })
+        }
+    }
     [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
         command_ready_after_rows_ms = $readinessMs;
         open_ticks = $(if ($IncludeOpenTicks) { $openTicks } else { $null });
-        row_observed_ticks = $(if ($IncludeOpenTicks) { $rowObservedTicks } else { $null }) }
+        row_observed_ticks = $(if ($IncludeOpenTicks) { $rowObservedTicks } else { $null });
+        picker_request_ticks = $(if ($IncludeOpenTicks) { $pickerRequestTicks } else { $null });
+        dialog_closed_ticks = $(if ($IncludeOpenTicks) { $dialogClosedTicks } else { $null });
+        command_ready_ticks = $(if ($IncludeOpenTicks) { $commandReadyTicks } else { $null }) }
 }
 function Set-ObserverSelectedRow {
     param(
@@ -1011,21 +1038,29 @@ function Invoke-ObserverPrefix {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [string] $ExpectedFirstSourceName = 'item-00000.txt',
-        [object] $Command
+        [object] $Command,
+        [Collections.Generic.List[object]] $TimelineEvents
     )
+    if ($null -ne $TimelineEvents -and $TimelineEvents.Count + 5 -gt 128) {
+        throw 'Performance preview timeline event budget exceeded.'
+    }
     if ($null -eq $Command) {
         $Command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
     }
     Assert-ObserverCommandButton -Control $Command -Application $Application -SessionId $SessionId -AutomationId '32773'
+    $promptRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $command -Label 'large smoke prefix command'
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
+    $promptFoundTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix edit' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $Prefix -Label 'large smoke prefix edit'
     $ok = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix OK' -RequireEnabled -RequireWindowHandle
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $commitTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     Invoke-AutomationControl -Element $ok -Label 'large smoke prefix OK'
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
+    $promptClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
     $expected = $Prefix + $ExpectedFirstSourceName
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -1035,6 +1070,18 @@ function Invoke-ObserverPrefix {
     } while ((Get-Date) -lt $deadline)
     if ($Grid.pattern.GetItem(0, 1).Current.Name -cne $expected) {
         throw 'Large smoke preview did not settle.'
+    }
+    $firstObservedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+    if ($null -ne $TimelineEvents) {
+        foreach ($boundary in @(
+            @('prompt_request', $promptRequestTicks, 0),
+            @('prompt_found', $promptFoundTicks, $handle.ToInt64()),
+            @('commit_invoke', $commitTicks, $handle.ToInt64()),
+            @('prompt_closed', $promptClosedTicks, $handle.ToInt64()),
+            @('first_row_observed', $firstObservedTicks, 0))) {
+            $TimelineEvents.Add([ordered]@{ operation='full-preview'; step=[string]$boundary[0];
+                ticks=[long]$boundary[1]; window_handle=[long]$boundary[2] })
+        }
     }
     [ordered]@{ elapsed_ms = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3); expected_first_name = $expected }
 }

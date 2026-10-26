@@ -1515,6 +1515,162 @@ class AppearancePairEvidenceTests(SyntheticFixtureTestCase):
 
 
 class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
+    def test_selected_source_schema_rejects_downgrade_and_unknown_versions(self):
+        producer = ("$script:PerformanceResponseTimelineSchemaVersion = 1\n"
+                    "schema_version=$script:PerformanceResponseTimelineSchemaVersion\n")
+        with mock.patch.object(evidence.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0, stdout=producer.encode())):
+            self.assertEqual(evidence.selected_performance_response_schema(self.root, SOURCE), 1)
+        legacy_sha = next(iter(evidence.LEGACY_PERFORMANCE_RESPONSE_SOURCE_SHAS))
+        with mock.patch.object(evidence.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0, stdout=b"legacy producer")):
+            self.assertEqual(evidence.selected_performance_response_schema(self.root, legacy_sha), 0)
+            with self.assertRaisesRegex(evidence.EvidenceError, "approved response schema marker"):
+                evidence.selected_performance_response_schema(self.root, SOURCE)
+        for altered in (producer.replace("= 1", "= 2"),
+                        producer.replace("schema_version=$script:PerformanceResponseTimelineSchemaVersion", "schema_version=1")):
+            with mock.patch.object(evidence.subprocess, "run",
+                                   return_value=SimpleNamespace(returncode=0, stdout=altered.encode())):
+                with self.assertRaisesRegex(evidence.EvidenceError, "schema marker"):
+                    evidence.selected_performance_response_schema(self.root, SOURCE)
+
+    def timed_scenario(self):
+        scenario = self.sample_scenario()
+        scenario.update(process_id=4242, process_start_utc_ticks=134041000000000000,
+                        environment={"main_window": {"hwnd": 1001}})
+        base = 100_000_000_000
+        frequency = 10_000_000
+        for index, row in enumerate(scenario["samples"]):
+            begin = base + index * 2_000_000
+            row.update(probe_begin_ticks=begin, probe_end_ticks=begin + 20_000,
+                       process_id=4242, process_start_utc_ticks=134041000000000000,
+                       main_window_handle=1001, main_thread_id=42,
+                       main_class="DarkReNamerMain", main_enabled=True,
+                       main_enabled_before=True,
+                       owned_popup_handle=0, owned_popup_thread_id=0,
+                       owned_popup_class="", owned_popup_handle_before=0,
+                       owned_popup_thread_id_before=0, owned_popup_class_before="")
+        order = ("long-hidden", "long-visible")
+        operations = ("ordinary-100", "ordinary-1000") + tuple(
+            f"ordinary-10000-{index}" for index in range(1, 5)) + order + (
+            "extensions", "cycle-1", "cycle-2", "cycle-3")
+        events = []
+        for operation in operations:
+            if operation == order[0]:
+                events.extend(("full-preview", step) for step in
+                              evidence.PERFORMANCE_PREVIEW_BOUNDARIES)
+            events.extend((operation, step) for step in evidence.PERFORMANCE_IMPORT_BOUNDARIES)
+        window_steps = {"picker_found", "open_invoke", "dialog_closed",
+                        "prompt_found", "commit_invoke", "prompt_closed"}
+        phase_sample = {phase: next(index for index, row in enumerate(scenario["samples"])
+                              if row["phase"] == phase)
+                        for phase in evidence.PERFORMANCE_PHASES}
+        phase_operations = {}
+        event_rows = []
+        for operation, step in events:
+            phase = "ordinary-10000" if operation.startswith("ordinary-10000-") else operation
+            if operation not in phase_operations:
+                phase_operations[operation] = sum(
+                    key.startswith("ordinary-10000-") if phase == "ordinary-10000" else key == phase
+                    for key in phase_operations)
+            step_index = (evidence.PERFORMANCE_PREVIEW_BOUNDARIES if operation == "full-preview"
+                          else evidence.PERFORMANCE_IMPORT_BOUNDARIES).index(step)
+            ticks = (base + phase_sample[phase] * 2_000_000 - 10_000 +
+                     phase_operations[operation] * 200_000 + step_index * 20_000)
+            event_rows.append({"operation": operation, "step": step, "ticks": ticks,
+                               "window_handle": 3000 + operations.index(operation)
+                               if step in window_steps and operation != "full-preview"
+                               else 4000 if step in window_steps else 0})
+        scenario["response_timeline"] = {"schema_version": 1, "qpc_frequency": frequency,
+            "events": event_rows}
+        return scenario
+
+    def test_response_timeline_validates_qpc_dialog_and_main_identity(self):
+        scenario = self.timed_scenario()
+        metrics = evidence.validate_performance_metrics(scenario)
+        self.assertEqual(metrics["response_timeline"]["boundary_count"], 81)
+        self.assertEqual(metrics["response_timeline"]["import_count"], 12)
+        scenario["samples"][151].update(main_enabled=False, owned_popup_handle=4000,
+                                         owned_popup_thread_id=42, owned_popup_class="#32770")
+        scenario["samples"][151].update(probe_status="timeout", probe_error_code=1460)
+        metrics = evidence.validate_performance_metrics(scenario)
+        self.assertEqual(metrics["sample_count"], len(scenario["samples"]))
+        self.assertEqual(metrics["response_timeline"]["timeout_endpoint_snapshot_transition_or_other"], 1)
+        scenario["samples"][151].update(main_enabled_before=False,
+                                         owned_popup_handle_before=4000,
+                                         owned_popup_thread_id_before=42,
+                                         owned_popup_class_before="#32770")
+        self.assertEqual(evidence.validate_performance_metrics(scenario)["response_timeline"]["timeout_endpoint_snapshot_stable_modal"], 1)
+
+    def test_response_timeline_joins_operation_phase_and_probe_interval_boundaries(self):
+        scenario = self.timed_scenario()
+        probe = scenario["samples"][151]
+        probe.update(probe_status="timeout", probe_error_code=1460)
+        intervals = evidence.validate_performance_metrics(scenario)["response_timeline"]["operation_intervals"]
+        picker = next(row for row in intervals if row["operation"] == "ordinary-10000-1"
+                      and row["segment"] == "picker")
+        self.assertEqual(picker["phase"], "ordinary-10000")
+        self.assertEqual(picker["phase_sample_count"], 1)
+        self.assertEqual(picker["phase_join_status"], "sampled")
+        self.assertEqual(picker["timeout_probe_overlap_count"], 1)
+        self.assertIn("no modal causation", evidence.validate_performance_metrics(scenario)["response_timeline"]["interpretation"])
+        for event in scenario["response_timeline"]["events"]:
+            if event["operation"] == "ordinary-10000-1":
+                event["ticks"] += 30_000
+        intervals = evidence.validate_performance_metrics(scenario)["response_timeline"]["operation_intervals"]
+        picker = next(row for row in intervals if row["operation"] == "ordinary-10000-1"
+                      and row["segment"] == "picker")
+        self.assertEqual(picker["begin_ticks"], probe["probe_end_ticks"])
+        self.assertEqual(picker["timeout_probe_overlap_count"], 0)
+
+    def test_response_timeline_rejects_wrong_sample_phase_and_source_downgrade(self):
+        scenario = self.timed_scenario()
+        with self.assertRaisesRegex(evidence.EvidenceError, "selected source schema"):
+            evidence.validate_performance_metrics(self.sample_scenario(),
+                                                  expected_response_schema_version=1)
+        with self.assertRaisesRegex(evidence.EvidenceError, "selected source schema"):
+            evidence.validate_performance_metrics(scenario, expected_response_schema_version=0)
+        scenario["samples"][149]["phase"] = "ordinary-1000"
+        with self.assertRaisesRegex(evidence.EvidenceError, "operation/sample phase"):
+            evidence.validate_performance_metrics(scenario, expected_response_schema_version=1)
+
+    def test_response_timeline_rejects_lost_or_ambiguous_boundaries(self):
+        scenario = self.timed_scenario()
+        malformed = deepcopy(scenario)
+        malformed["response_timeline"]["events"].pop(10)
+        with self.assertRaisesRegex(evidence.EvidenceError, "incomplete"):
+            evidence.validate_performance_metrics(malformed)
+        malformed = deepcopy(scenario)
+        malformed["response_timeline"]["events"][8]["ticks"] = malformed["response_timeline"]["events"][7]["ticks"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "QPC time regressed"):
+            evidence.validate_performance_metrics(malformed)
+        malformed = deepcopy(scenario)
+        malformed["response_timeline"]["events"][2]["window_handle"] += 1
+        with self.assertRaisesRegex(evidence.EvidenceError, "dialog identity changed"):
+            evidence.validate_performance_metrics(malformed)
+        malformed = deepcopy(scenario)
+        malformed["response_timeline"]["schema_version"] = 2
+        with self.assertRaisesRegex(evidence.EvidenceError, "schema version"):
+            evidence.validate_performance_metrics(malformed)
+
+    def test_response_timeline_rejects_unbound_or_unknown_samples(self):
+        scenario = self.timed_scenario()
+        for mutation, error in (
+            (lambda row: row.pop("probe_begin_ticks"), "performance sample"),
+            (lambda row: row.update(main_window_handle=999), "main HWND"),
+            (lambda row: row.update(main_enabled=False), "modal identity"),
+            (lambda row: row.update(probe_end_ticks=row["probe_begin_ticks"]), "probe QPC"),
+            (lambda row: row.update(probe_status="failure_unknown", probe_error_code=5), "modal identity"),
+        ):
+            malformed = deepcopy(scenario)
+            mutation(malformed["samples"][150])
+            with self.assertRaisesRegex(evidence.EvidenceError, error):
+                evidence.validate_performance_metrics(malformed)
+        legacy = deepcopy(scenario)
+        legacy.pop("response_timeline")
+        with self.assertRaisesRegex(evidence.EvidenceError, "performance sample"):
+            evidence.validate_performance_metrics(legacy)
+
     def test_producer_wrapped_lifecycle_requires_exact_normal_exit(self):
         scenario = {"process_id": 42, "process_start_utc_ticks": "123456"}
         lifecycle = {"pid": 42, "start_time_utc_ticks": "123456",
@@ -1840,6 +1996,14 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             'observer_result_sha256': digest(raw_path.read_bytes()),
             'status': 'review_required', 'exit_code': 0}
         write_json(output / 'run-result.json', result)
+
+    def test_owned_legacy_receipt_cannot_downgrade_selected_timeline_source(self):
+        run, profile_sha = self.owned_run()
+        with self.assertRaisesRegex(evidence.EvidenceError, "selected source schema"):
+            evidence.validate_performance_run(
+                self.root, run.name, SOURCE,
+                expected_profile_sha256=profile_sha,
+                expected_response_schema_version=1)
 
     def test_owned_run_requires_exact_profile_lifetime_job_desktop_and_text(self):
         run, profile_sha = self.owned_run()

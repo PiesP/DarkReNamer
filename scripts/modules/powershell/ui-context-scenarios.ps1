@@ -1,4 +1,6 @@
-﻿function Get-ObserverContextConfirmationReachability {
+﻿$script:PerformanceResponseTimelineSchemaVersion = 1
+
+function Get-ObserverContextConfirmationReachability {
     param(
         [Parameter(Mandatory)][object] $Confirmation,
         [Parameter(Mandatory)][object] $Application,
@@ -1599,14 +1601,32 @@ function Invoke-ObserverBoundPerformanceCommand {
 }
 
 function Convert-ObserverPerformanceSampleRows {
-    param([Parameter(Mandatory)][object[]] $Samples)
+    param([Parameter(Mandatory)][object[]] $Samples, [switch] $Timeline)
     @($Samples | ForEach-Object {
-        [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
+        $row = [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
             private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
             threads=$_.Threads; handles=$_.Handles; gdi_objects=$_.GdiObjects;
             ui_response_ms=$_.UiResponseMs; probe_status=$_.ProbeStatus;
             probe_error_code=$_.ProbeErrorCode;
             resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
+        if ($Timeline) {
+            $row['probe_begin_ticks'] = [long]$_.ProbeBeginTicks
+            $row['probe_end_ticks'] = [long]$_.ProbeEndTicks
+            $row['process_id'] = [long]$_.ProcessId
+            $row['process_start_utc_ticks'] = [long]$_.ProcessStartUtcTicks
+            $row['main_window_handle'] = [long]$_.BoundMainHandle
+            $row['main_thread_id'] = [long]$_.MainThreadId
+            $row['main_class'] = [string]$_.MainClass
+            $row['main_enabled'] = [bool]$_.MainEnabled
+            $row['main_enabled_before'] = [bool]$_.MainEnabledBefore
+            $row['owned_popup_handle'] = [long]$_.OwnedPopupHandle
+            $row['owned_popup_handle_before'] = [long]$_.OwnedPopupHandleBefore
+            $row['owned_popup_thread_id'] = [long]$_.OwnedPopupThreadId
+            $row['owned_popup_thread_id_before'] = [long]$_.OwnedPopupThreadIdBefore
+            $row['owned_popup_class'] = [string]$_.OwnedPopupClass
+            $row['owned_popup_class_before'] = [string]$_.OwnedPopupClassBefore
+        }
+        $row
     })
 }
 
@@ -1697,6 +1717,10 @@ function Invoke-ObserverPerformanceSampleScenario {
     $timings = [Collections.Generic.List[object]]::new()
     $clearRowCounts = [Collections.Generic.List[int]]::new()
     $commandSends = [Collections.Generic.List[object]]::new()
+    $timelineEnabled = -not ($StopAfterFirstClear -or $ObserveFirstClear)
+    $timelineEvents = [Collections.Generic.List[object]]::new()
+    $activeTimelineEvents = $null
+    if ($timelineEnabled) { $activeTimelineEvents = $timelineEvents }
     $nativeCreationFileTime = [long]0
     $nativeLifetimeCheckpoints = [Collections.Generic.List[object]]::new()
     $resetControl = $null
@@ -1733,6 +1757,11 @@ function Invoke-ObserverPerformanceSampleScenario {
     $ObservationSink['timings'] = $timings
     $ObservationSink['clear_row_counts'] = $clearRowCounts
     $ObservationSink['command_sends'] = $commandSends
+    if ($timelineEnabled) {
+        $ObservationSink['response_timeline'] = [ordered]@{
+            schema_version=$script:PerformanceResponseTimelineSchemaVersion;
+            events=$timelineEvents }
+    }
     try {
         $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'performance sample application' `
@@ -1795,7 +1824,8 @@ function Invoke-ObserverPerformanceSampleScenario {
             [ordered]@{ id='ordinary-1000'; file=$paths900; rows=1000 })) {
             $sampler.SetPhase($stage.id)
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
-                -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness
+                -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -TimelineEvents $activeTimelineEvents -TimelineOperation $stage.id
             $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
                 command_ready_after_rows_ms=$timing.command_ready_after_rows_ms;
                 rows=$stage.rows; observed_rows=[int]$grid.pattern.Current.RowCount })
@@ -1819,7 +1849,9 @@ function Invoke-ObserverPerformanceSampleScenario {
         $largeReadiness = [Collections.Generic.List[double]]::new()
         for ($chunk = 0; $chunk -lt 4; $chunk++) {
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $paths2250[$chunk] `
-                -ExpectedRows (1000 + 2250 * ($chunk + 1)) -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness
+                -ExpectedRows (1000 + 2250 * ($chunk + 1)) -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -TimelineEvents $activeTimelineEvents `
+                -TimelineOperation ('ordinary-10000-{0}' -f ($chunk + 1))
             $largeElapsed += [double]$timing.elapsed_ms
             $largeReadiness.Add([double]$timing.command_ready_after_rows_ms)
         }
@@ -1842,14 +1874,29 @@ function Invoke-ObserverPerformanceSampleScenario {
         $sampler.SetPhase('full-preview')
         $fullWatch = [Diagnostics.Stopwatch]::StartNew()
         $prefix = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'sample-' `
-            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt' -Command $prefixControl
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt' -Command $prefixControl `
+            -TimelineEvents $activeTimelineEvents
         $previewIndices = [int[]]@(0,2499,4999,7499,9999)
         $prefixRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
             -Prefix 'sample-' -WaitSeconds $WaitSeconds
+        if ($timelineEnabled) {
+            $timelineEvents.Add([ordered]@{operation='full-preview'; step='representatives_observed';
+                ticks=[long][Diagnostics.Stopwatch]::GetTimestamp(); window_handle=0})
+            $timelineEvents.Add([ordered]@{operation='full-preview'; step='reset_request';
+                ticks=[long][Diagnostics.Stopwatch]::GetTimestamp(); window_handle=0})
+        }
         $fullElapsedMs = [Math]::Round($fullWatch.Elapsed.TotalMilliseconds, 3)
         Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Control $resetControl
+        if ($timelineEnabled) {
+            $timelineEvents.Add([ordered]@{operation='full-preview'; step='reset_returned';
+                ticks=[long][Diagnostics.Stopwatch]::GetTimestamp(); window_handle=0})
+        }
         $resetRows = Read-ObserverPerformancePreviewRows -Grid $grid -Indices $previewIndices `
             -Prefix '' -WaitSeconds $WaitSeconds
+        if ($timelineEnabled) {
+            $timelineEvents.Add([ordered]@{operation='full-preview'; step='reset_observed';
+                ticks=[long][Diagnostics.Stopwatch]::GetTimestamp(); window_handle=0})
+        }
         $ObservationSink['full_preview_rows'] = @(
             for ($probe = 0; $probe -lt $previewIndices.Count; $probe++) {
                 [ordered]@{ index=$previewIndices[$probe]; source=$prefixRows[$probe].source;
@@ -1911,7 +1958,7 @@ function Invoke-ObserverPerformanceSampleScenario {
                 if ($null -ne $sampler) {
                     try {
                         $ObservationSink['partial_samples'] = @(
-                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
                     }
                     catch { $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name }
                     finally { $sampler = $null }
@@ -1998,7 +2045,8 @@ function Invoke-ObserverPerformanceSampleScenario {
             if ($wantVisible) { $visibleWidths = $widths }
             $sampler.SetPhase($mode)
             $longTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsLong `
-                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness
+                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -TimelineEvents $timelineEvents -TimelineOperation $mode
             $timings.Add([ordered]@{ id=$mode; elapsed_ms=$longTiming.elapsed_ms;
                 command_ready_after_rows_ms=$longTiming.command_ready_after_rows_ms;
                 rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount })
@@ -2034,7 +2082,8 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['columns']['extension_widths'] = $restoredWidths
         $sampler.SetPhase('extensions')
         $extensionTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsExtensions `
-            -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness
+            -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+            -TimelineEvents $timelineEvents -TimelineOperation 'extensions'
         $timings.Add([ordered]@{ id='extensions'; elapsed_ms=$extensionTiming.elapsed_ms;
             command_ready_after_rows_ms=$extensionTiming.command_ready_after_rows_ms;
             rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount })
@@ -2053,7 +2102,8 @@ function Invoke-ObserverPerformanceSampleScenario {
             $sampler.SetPhase($id)
             $cycleWatch = [Diagnostics.Stopwatch]::StartNew()
             $cycleTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsCycle `
-                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness
+                -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -TimelineEvents $timelineEvents -TimelineOperation $id
             $cycleObservedRows = [int]$grid.pattern.Current.RowCount
             [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 `
                 -Name ('cycle-{0}.txt' -f $cycle) -SessionId $SessionId -WaitSeconds $WaitSeconds)
@@ -2080,7 +2130,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
         $sampler = $null
-        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples)
+        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled)
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
             'single-row','full-preview') + $(if ($StopAfterFirstClear -or $ObserveFirstClear) { @() }
                 else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
@@ -2123,7 +2173,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         if ($null -ne $sampler) {
             try {
                 $ObservationSink['partial_samples'] = @(
-                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled)
             }
             catch { $ObservationSink['partial_sampling_error'] = $_.Exception.Message }
         }
