@@ -154,6 +154,42 @@ PERFORMANCE_TIMINGS = (
     "ordinary-100", "ordinary-1000", "ordinary-10000", "full-preview",
     "long-hidden", "long-visible", "extensions", "cycle-1", "cycle-2", "cycle-3",
 )
+PERFORMANCE_IMPORT_BOUNDARIES = (
+    "picker_request", "picker_found", "open_invoke", "dialog_closed",
+    "rows_observed", "command_ready",
+)
+PERFORMANCE_PREVIEW_BOUNDARIES = (
+    "prompt_request", "prompt_found", "commit_invoke", "prompt_closed",
+    "first_row_observed", "representatives_observed", "reset_request",
+    "reset_returned", "reset_observed",
+)
+LEGACY_PERFORMANCE_RESPONSE_SOURCE_SHAS = {
+    "5a9c948ee95b17402a8eda85458e791fbd0e6e94",
+}
+PERFORMANCE_RESPONSE_SCHEMA_MARKER = re.compile(
+    r"^\$script:PerformanceResponseTimelineSchemaVersion = ([0-9]+)$", re.MULTILINE)
+
+
+def selected_performance_response_schema(repo: Path, source_sha: str) -> int:
+    require(SHA1.fullmatch(source_sha) is not None, "Performance source SHA is invalid.")
+    blob = subprocess.run(
+        ["git", "show", f"{source_sha}:scripts/modules/powershell/ui-context-scenarios.ps1"],
+        cwd=repo, capture_output=True, check=False)
+    require(blob.returncode == 0, "Selected performance producer source is unavailable.")
+    try:
+        producer = blob.stdout.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise EvidenceError("Selected performance producer source is not UTF-8.") from error
+    versions = PERFORMANCE_RESPONSE_SCHEMA_MARKER.findall(producer)
+    if not versions:
+        require(source_sha in LEGACY_PERFORMANCE_RESPONSE_SOURCE_SHAS and
+                "response_timeline" not in producer,
+                "Selected performance producer lacks an approved response schema marker.")
+        return 0
+    require(len(versions) == 1 and versions[0] == "1" and
+            "schema_version=$script:PerformanceResponseTimelineSchemaVersion" in producer,
+            "Selected performance response schema marker is unsupported or unused.")
+    return 1
 PAIR_RUN_ID = "appearance-pair-light-dark-light"
 PAIR_CONFIGURATIONS = {
     "appearance-pair-base-1920x1080-96-text100": ("light", 1920, 1080, 96, 100, False),
@@ -3175,7 +3211,97 @@ def validate_focused_pair_results(pairs: list[dict]) -> None:
             "Appearance Text150 did not enlarge both dimensions of the same glyphs.")
 
 
-def validate_performance_metrics(scenario: dict) -> dict:
+def validate_response_timeline(scenario: dict, samples: list[dict], order: str) -> dict:
+    timeline = exact_keys(scenario.get("response_timeline"),
+                          {"schema_version", "qpc_frequency", "events"}, "performance response timeline")
+    require(type(timeline["schema_version"]) is int and timeline["schema_version"] == 1,
+            "Performance response timeline schema version is unsupported.")
+    frequency = checked_int(timeline["qpc_frequency"], 1, 10**10,
+                            "performance QPC frequency")
+    long_order = ("long-visible", "long-hidden") if order == "visible-hidden" else (
+        "long-hidden", "long-visible")
+    import_operations = ("ordinary-100", "ordinary-1000") + tuple(
+        f"ordinary-10000-{index}" for index in range(1, 5)) + long_order + (
+        "extensions", "cycle-1", "cycle-2", "cycle-3")
+    expected = []
+    for operation in import_operations:
+        if operation == long_order[0]:
+            expected.extend(("full-preview", step) for step in PERFORMANCE_PREVIEW_BOUNDARIES)
+        expected.extend((operation, step) for step in PERFORMANCE_IMPORT_BOUNDARIES)
+    events = timeline["events"]
+    require(isinstance(events, list) and len(events) == len(expected),
+            "Performance response timeline is incomplete or over budget.")
+    previous_tick = 0
+    popup_handles: dict[str, int] = {}
+    operation_events: dict[str, dict[str, dict]] = {}
+    for index, (event, pair) in enumerate(zip(events, expected, strict=True)):
+        row = exact_keys(event, {"operation", "step", "ticks", "window_handle"},
+                         f"performance boundary {index}")
+        require((row["operation"], row["step"]) == pair,
+                "Performance response boundary order differs.")
+        operation_events.setdefault(row["operation"], {})[row["step"]] = row
+        tick = checked_int(row["ticks"], 1, 2**63 - 1, "performance boundary tick")
+        require(tick > previous_tick, "Performance response boundary QPC time regressed.")
+        previous_tick = tick
+        handle = checked_int(row["window_handle"], 0, 2**63 - 1,
+                             "performance boundary window handle")
+        is_window_step = row["step"] in {"picker_found", "open_invoke", "dialog_closed",
+                                          "prompt_found", "commit_invoke", "prompt_closed"}
+        require((handle > 0) == is_window_step,
+                "Performance response boundary dialog identity is incomplete.")
+        if is_window_step:
+            original = popup_handles.setdefault(row["operation"], handle)
+            require(handle == original, "Performance response boundary dialog identity changed.")
+    require(samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
+            events[-1]["ticks"] < samples[-1]["probe_end_ticks"],
+            "Performance response boundaries fall outside the sampled QPC domain.")
+    timeouts = [row for row in samples if row["probe_status"] == "timeout"]
+    stable_modal = sum(not row["main_enabled_before"] and not row["main_enabled"] and
+                       row["owned_popup_handle_before"] == row["owned_popup_handle"] > 0
+                       for row in timeouts)
+    stable_nonmodal = sum(row["main_enabled_before"] and row["main_enabled"] and
+                          row["owned_popup_handle_before"] == row["owned_popup_handle"] == 0
+                          for row in timeouts)
+    operation_intervals = []
+    for operation, boundaries in operation_events.items():
+        phase = "ordinary-10000" if operation.startswith("ordinary-10000-") else operation
+        steps = PERFORMANCE_PREVIEW_BOUNDARIES if operation == "full-preview" else PERFORMANCE_IMPORT_BOUNDARIES
+        begin, end = boundaries[steps[0]]["ticks"], boundaries[steps[-1]]["ticks"]
+        phase_samples = [row for row in samples if begin <= row["probe_begin_ticks"] <= end]
+        require(all(row["phase"] == phase for row in phase_samples),
+                "Performance response operation/sample phase differs.")
+        segments = (
+            (("prompt", "prompt_request", "commit_invoke"),
+             ("commit", "commit_invoke", "prompt_closed"),
+             ("observation", "prompt_closed", "representatives_observed"),
+             ("reset", "reset_request", "reset_observed"))
+            if operation == "full-preview" else
+            (("picker", "picker_request", "open_invoke"),
+             ("commit", "open_invoke", "dialog_closed"),
+             ("observation", "dialog_closed", "rows_observed"),
+             ("readiness", "rows_observed", "command_ready")))
+        for segment, first, last in segments:
+            interval_begin, interval_end = boundaries[first]["ticks"], boundaries[last]["ticks"]
+            overlaps = [row for row in timeouts if
+                        row["probe_begin_ticks"] < interval_end and
+                        row["probe_end_ticks"] > interval_begin]
+            operation_intervals.append({"operation": operation, "phase": phase,
+                "segment": segment, "begin_step": first, "end_step": last,
+                "begin_ticks": interval_begin, "end_ticks": interval_end,
+                "phase_sample_count": len(phase_samples),
+                "phase_join_status": "sampled" if phase_samples else "not-sampled",
+                "timeout_probe_overlap_count": len(overlaps)})
+    return {"schema_version": 1, "qpc_frequency": frequency,
+            "boundary_count": len(events), "import_count": len(import_operations),
+            "timeout_endpoint_snapshot_stable_modal": stable_modal,
+            "timeout_endpoint_snapshot_stable_nonmodal": stable_nonmodal,
+            "timeout_endpoint_snapshot_transition_or_other": len(timeouts) - stable_modal - stable_nonmodal,
+            "operation_intervals": operation_intervals,
+            "interpretation": "probe-interval-overlap-and-endpoint-snapshots; no modal causation or full stall duration"}
+
+
+def validate_performance_metrics(scenario: dict, *,
+                                 expected_response_schema_version: int | None = None) -> dict:
     plan = exact_keys(scenario.get("plan"),
                       {"ordinary_rows", "long_path_rows", "extension_classes",
                        "add_remove_reset_cycles", "idle_seconds", "sample_interval_ms", "long_path_order"},
@@ -3286,15 +3412,27 @@ def validate_performance_metrics(scenario: dict) -> dict:
                         "long-hidden" if name == "long-visible" else name
                         for name in PERFORMANCE_PHASES) if order == "visible-hidden" else PERFORMANCE_PHASES
     phases = {phase: [] for phase in phase_order}
+    timeline_enabled = "response_timeline" in scenario
+    require(expected_response_schema_version in (None, 0, 1),
+            "Expected performance response schema is unsupported.")
+    if expected_response_schema_version is not None:
+        require(timeline_enabled == (expected_response_schema_version == 1),
+                "Performance response timeline differs from selected source schema.")
     previous_time = -1
     previous_cpu = -1
     previous_phase = 0
     for index, value in enumerate(samples):
-        sample = exact_keys(value,
-                            {"phase", "elapsed_ms", "cpu_ms", "private_bytes", "working_set_bytes",
-                             "threads", "handles", "gdi_objects", "ui_response_ms", "probe_status",
-                             "probe_error_code", "resource_collection_ms", "sample_gap_ms"},
-                            f"performance sample {index}")
+        fields = {"phase", "elapsed_ms", "cpu_ms", "private_bytes", "working_set_bytes",
+                  "threads", "handles", "gdi_objects", "ui_response_ms", "probe_status",
+                  "probe_error_code", "resource_collection_ms", "sample_gap_ms"}
+        if timeline_enabled:
+            fields |= {"probe_begin_ticks", "probe_end_ticks", "process_id",
+                       "process_start_utc_ticks", "main_window_handle", "main_thread_id",
+                       "main_class", "main_enabled", "owned_popup_handle",
+                       "owned_popup_thread_id", "owned_popup_class",
+                       "main_enabled_before", "owned_popup_handle_before",
+                       "owned_popup_thread_id_before", "owned_popup_class_before"}
+        sample = exact_keys(value, fields, f"performance sample {index}")
         require(sample["phase"] in phases, "Performance sample phase is invalid.")
         phase_index = phase_order.index(sample["phase"])
         require(phase_index >= previous_phase, "Performance sample phases regressed.")
@@ -3323,12 +3461,45 @@ def validate_performance_metrics(scenario: dict) -> dict:
         require((index == 0 and sample["sample_gap_ms"] == 0) or
                 (index > 0 and sample["sample_gap_ms"] > 0),
                 "Performance sample gap is invalid.")
+        if timeline_enabled:
+            frequency = scenario["response_timeline"].get("qpc_frequency")
+            require(type(frequency) is int and 1 <= frequency <= 10**10,
+                    "Performance QPC frequency is invalid.")
+            begin = checked_int(sample["probe_begin_ticks"], 1, 2**63 - 1,
+                                "performance probe begin QPC")
+            end = checked_int(sample["probe_end_ticks"], 1, 2**63 - 1,
+                              "performance probe end QPC")
+            require(begin < end and (index == 0 or begin > samples[index - 1]["probe_end_ticks"]) and
+                    abs((end - begin) * 1000 / frequency - sample["ui_response_ms"]) < 0.05 and
+                    (index == 0 or abs((begin - samples[index - 1]["probe_begin_ticks"]) * 1000 /
+                                       frequency - sample["sample_gap_ms"]) < 0.05),
+                    "Performance probe QPC interval differs from recorded duration or cadence.")
+            require(int_equals(sample["process_id"], scenario.get("process_id")) and
+                    int_equals(sample["process_start_utc_ticks"], scenario.get("process_start_utc_ticks")) and
+                    int_equals(sample["main_window_handle"], nested(scenario, "environment", "main_window", "hwnd")) and
+                    type(sample["main_thread_id"]) is int and sample["main_thread_id"] > 0 and
+                    isinstance(sample["main_class"], str) and 0 < len(sample["main_class"]) <= 128 and
+                    (index == 0 or sample["main_thread_id"] == samples[0]["main_thread_id"] and
+                     sample["main_class"] == samples[0]["main_class"]),
+                    "Performance sample main HWND/process/thread/class identity differs.")
+            for suffix in ("_before", ""):
+                popup = checked_int(sample["owned_popup_handle" + suffix], 0, 2**63 - 1,
+                                    "performance owned popup handle")
+                require(type(sample["main_enabled" + suffix]) is bool and
+                        ((popup == 0 and sample["owned_popup_thread_id" + suffix] == 0 and
+                          sample["owned_popup_class" + suffix] == "") or
+                         (popup > 0 and sample["owned_popup_thread_id" + suffix] == sample["main_thread_id"] and
+                          isinstance(sample["owned_popup_class" + suffix], str) and
+                          0 < len(sample["owned_popup_class" + suffix]) <= 128)) and
+                        sample["probe_status"] != "failure_unknown",
+                        "Performance sample modal identity or unknown probe is invalid.")
         phases[sample["phase"]].append(sample)
     require(samples[0]["phase"] == "empty-idle" and samples[-1]["phase"] == "post" and
             phases["empty-idle"][-1]["elapsed_ms"] >= 29000 and
             all(phases[phase] for phase in ("ordinary-10000", "full-preview", "long-hidden",
                                              "long-visible", "extensions", "cycle-1", "cycle-2", "cycle-3")),
             "Performance samples do not cover idle and each expensive import/refresh phase.")
+    timeline_metrics = validate_response_timeline(scenario, samples, order) if timeline_enabled else None
     phase_summary = scenario.get("phase_summary")
     require(isinstance(phase_summary, list) and len(phase_summary) == len(phase_order),
             "Performance per-phase sampling summary is missing.")
@@ -3369,7 +3540,8 @@ def validate_performance_metrics(scenario: dict) -> dict:
             "probe_duration_max_ms": max(row["ui_response_ms"] for row in samples),
             "probe_timeout_count": sum(row["probe_status"] == "timeout" for row in samples),
             "probe_failure_unknown_count": sum(row["probe_status"] == "failure_unknown" for row in samples),
-            "wakeups": "not_run"}
+            "wakeups": "not_run",
+            **({"response_timeline": timeline_metrics} if timeline_metrics is not None else {})}
 
 
 def validate_performance_lifecycle(lifecycles: object, scenario: dict, application_sha256: str) -> None:
@@ -4125,7 +4297,8 @@ def validate_owned_performance_transport(run_root: Path, files: dict[str, dict],
 
 
 def validate_performance_run(root: Path, run_id: str, source_sha: str, *,
-                             expected_profile_sha256: str | None = None) -> dict:
+                             expected_profile_sha256: str | None = None,
+                             expected_response_schema_version: int = 0) -> dict:
     owned = expected_profile_sha256 is not None
     require(run_id in {(owned_performance_run_id(order) if owned else performance_run_id(order))
                        for order in PERFORMANCE_ORDERS}, "Performance run id is invalid.")
@@ -4201,7 +4374,8 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str, *,
             captures[0].get("file") == "performance-empty.png" and
             captures[0].get("sha256") == files["performance-empty.png"]["sha256"],
             "Performance empty-idle PNG evidence is missing or unbound.")
-    metrics = validate_performance_metrics(scenario)
+    metrics = validate_performance_metrics(
+        scenario, expected_response_schema_version=expected_response_schema_version)
     return {"run_id": run_id, "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
             "bundle_mode": "prepared" if "prepared_bundle" in manifest else "built",
@@ -4494,8 +4668,11 @@ def main(repo: Path, argv=None) -> int:
             require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
                     "Owned performance source profile differs from the reviewed revision-3 blob.")
             profile_digest = OWNED_PERFORMANCE_PROFILE_SHA256
-        measured = validate_performance_run(root, args.runs[0], args.expected_source_sha,
-                                            expected_profile_sha256=profile_digest)
+        measured = validate_performance_run(
+            root, args.runs[0], args.expected_source_sha,
+            expected_profile_sha256=profile_digest,
+            expected_response_schema_version=selected_performance_response_schema(
+                repo, args.expected_source_sha))
         print(json.dumps({"schema_version": 1, "diagnostic": PERFORMANCE_MODE,
                           "status": "measured", "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",

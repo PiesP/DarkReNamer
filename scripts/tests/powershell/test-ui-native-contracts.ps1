@@ -20,6 +20,12 @@ function Assert-Equal {
 }
 
 $nativeSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'))
+$scenarioSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-context-scenarios.ps1'))
+$emptyPerformanceRows = @(Convert-ObserverPerformanceSampleRows -Samples @() -Timeline)
+Assert-Equal $emptyPerformanceRows.Count 0 'Failed sampler with no completed rows remains an empty partial snapshot'
+if ($scenarioSource -notmatch '(?s)\$ObservationSink\[''response_timeline''\]\s*=\s*\[ordered\]@\{[^}]*qpc_frequency\s*=\s*\[long\]\[Diagnostics.Stopwatch\]::Frequency') {
+    throw 'Performance response timeline must emit its actual QPC frequency for independent interval validation.'
+}
 $guestNativePath = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/guest-native.ps1'
 $guestNativeCheck = @'
 $ErrorActionPreference = 'Stop'
@@ -729,13 +735,19 @@ foreach ($unknown in @(0, 5, 87)) {
     Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, $unknown)) 'failure_unknown' 'Unknown failure classification'
 }
 $resetAt = $performanceSampler.IndexOf('SetLastErrorNative(0);', [StringComparison]::Ordinal)
+$preModalAt = $performanceSampler.IndexOf('bool mainEnabledBefore = IsWindowEnabled(window);', [StringComparison]::Ordinal)
 $beginAt = $performanceSampler.IndexOf('long begun = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
 $sendAt = $performanceSampler.IndexOf('bool responsive = SendMessageTimeoutW(', [StringComparison]::Ordinal)
 $endAt = $performanceSampler.IndexOf('long probeEnded = System.Diagnostics.Stopwatch.GetTimestamp();', [StringComparison]::Ordinal)
 $errorAt = $performanceSampler.IndexOf('Marshal.GetLastWin32Error();', [StringComparison]::Ordinal)
+$postModalAt = $performanceSampler.IndexOf('bool mainEnabled = IsWindowEnabled(window);', [StringComparison]::Ordinal)
 $resourcesAt = $performanceSampler.IndexOf('process.TotalProcessorTime', [StringComparison]::Ordinal)
-if (-not (0 -le $resetAt -and $resetAt -lt $beginAt -and $beginAt -lt $sendAt -and
-    $sendAt -lt $endAt -and $endAt -lt $errorAt -and $errorAt -lt $resourcesAt)) {
+if (-not (0 -le $preModalAt -and $preModalAt -lt $resetAt -and $resetAt -lt $beginAt -and
+    $beginAt -lt $sendAt -and $sendAt -lt $endAt -and $endAt -lt $errorAt -and
+    $errorAt -lt $postModalAt -and $postModalAt -lt $resourcesAt) -or
+    -not $performanceSampler.Contains('GetLastActivePopup(window)') -or
+    -not $performanceSampler.Contains('popupThread != mainThreadId') -or
+    -not $performanceSampler.Contains('ProbeBeginTicks = begun, ProbeEndTicks = probeEnded')) {
     throw 'Performance native probe timestamp or last-error capture order changed.'
 }
 $iconStatus = [ordered]@{ version=1; session='41'; generation='2'; bootstrap=1;
