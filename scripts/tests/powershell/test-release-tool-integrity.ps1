@@ -431,16 +431,20 @@ try {
             throw 'The version probe did not execute every verified release tool in order.'
         }
         $aboutExecutable = Join-Path $toolsRoot 'cargo-about.exe'
-        Set-Item -LiteralPath "Function:script:$aboutExecutable" -Value {
-            $global:LASTEXITCODE = 1
-            return 'cargo-about failed to start'
+        $successfulProbeExitCode = $global:LASTEXITCODE
+        try {
+            Set-Item -LiteralPath "Function:script:$aboutExecutable" -Value {
+                $global:LASTEXITCODE = 1
+                return 'cargo-about failed to start'
+            }
+            $probeFailure = $null
+            try { & ([scriptblock]::Create($probeLoops[0].Extent.Text)) }
+            catch { $probeFailure = $_.Exception.Message }
+            if ($null -eq $probeFailure -or $probeFailure -notlike '*Verified cargo-about version probe failed*') {
+                throw "A failed cargo-about install was not rejected: $probeFailure"
+            }
         }
-        $probeFailure = $null
-        try { & ([scriptblock]::Create($probeLoops[0].Extent.Text)) }
-        catch { $probeFailure = $_.Exception.Message }
-        if ($null -eq $probeFailure -or $probeFailure -notlike '*Verified cargo-about version probe failed*') {
-            throw "A failed cargo-about install was not rejected: $probeFailure"
-        }
+        finally { $global:LASTEXITCODE = $successfulProbeExitCode }
     }
     finally {
         foreach ($functionPath in $probeFunctions) { Remove-Item -LiteralPath $functionPath }
