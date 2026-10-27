@@ -4428,7 +4428,6 @@ foreach ($call in $applicationStartCalls) {
     }
     $result = $null
     $ownedV2 = $true
-    $runtimeBrokerEnabled = $false
     $desktop = [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1001'; session_id = 7 }
     $runnerTaskBaseline = @()
     $runnerProcessBaseline = @()

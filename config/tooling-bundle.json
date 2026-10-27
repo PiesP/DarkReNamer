@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "fd227a8ae9c678185a6b674a5ea44c3bf1ccbe5239212bfd9d2c29755f10f223",
+      "sha256": "6617499c73931a8d86cc9197c3bbac46e20f7408fb2480a513b5ebfb3d0bb982",
       "dependencies": [
         "package-root"
       ]
@@ -192,25 +192,6 @@
         "package-evidence",
         "evidence-errors",
         "powershell-controller-entry"
-      ]
-    },
-    {
-      "role": "vm-runtimebroker-diagnostic",
-      "source": "scripts/darkrenamer_tooling/vm/runtimebroker_diagnostic.py",
-      "bundle": "tooling-vm-runtimebroker-diagnostic.py",
-      "kind": "python",
-      "module": "darkrenamer_tooling.vm.runtimebroker_diagnostic",
-      "sha256": "3d6f9a5bc3702626e8634f402eab62374ddcb6a23134621e76822e85a3cf74a0",
-      "dependencies": [
-        "tooling-loader",
-        "package-root",
-        "package-vm",
-        "vm-launcher",
-        "powershell-runtimebroker-bridge",
-        "powershell-runtimebroker-observer",
-        "powershell-guest-contracts",
-        "powershell-guest-process",
-        "powershell-guest-native"
       ]
     },
     {
@@ -474,7 +455,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "455d2b82f5def378fa9b1d8ff3ef21755e4994d55c866c718314044aa126b174",
+      "sha256": "322bfaad0639f443756a4da7680594ebc86e011e139f49d1c22976db6bc058f1",
       "dependencies": []
     },
     {
@@ -655,7 +636,7 @@
       "bundle": "ui-current-dpi.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "db25eeb7db26bdcbf69d35b389632399a17d9d05adfd6bb5dc0b18f415ce46d2",
+      "sha256": "2fb72dd8aad679aa30609adb969213d4080689a4dd77084d10c56a99e9103fb7",
       "dependencies": []
     },
     {
@@ -664,7 +645,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "fdefe0f65b32ac0a98d436f5f2b3433bfae893cc894195043d9ec5ccaa321edf",
+      "sha256": "386a7dfd239b80511f5f9d9cc7a3547d2953d2719e8e27a11c6db76dad5e1054",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -777,35 +758,12 @@
       ]
     },
     {
-      "role": "powershell-runtimebroker-observer",
-      "source": "scripts/modules/powershell/runtimebroker-observer.ps1",
-      "bundle": "runtimebroker-observer.ps1",
-      "kind": "powershell",
-      "module": null,
-      "sha256": "afeec17844832657b2a1909cb86ea10cb7201dedb9edad1f23547928c845b2ef",
-      "dependencies": []
-    },
-    {
-      "role": "powershell-runtimebroker-bridge",
-      "source": "scripts/modules/powershell/runtimebroker-bridge.ps1",
-      "bundle": "runtimebroker-bridge.ps1",
-      "kind": "powershell",
-      "module": null,
-      "sha256": "962bdae4f4dc90e1fa7e2b3d4ed95f9792def5181e9ed7c13514074890796686",
-      "dependencies": [
-        "powershell-runtimebroker-observer",
-        "powershell-guest-contracts",
-        "powershell-guest-process",
-        "powershell-guest-native"
-      ]
-    },
-    {
       "role": "powershell-controller-contracts",
       "source": "scripts/modules/powershell/controller-contracts.ps1",
       "bundle": "controller-contracts.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "90a3d7337ed495f8a40932b5274391979b3200ac0b5997eec0726f5c5b17ad9e",
+      "sha256": "ceade9735182d5d74229d7d7e541e82917b636ca64e2d3a339337d69a56d4a3f",
       "dependencies": []
     },
     {
@@ -841,7 +799,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "23ed3052213742bf5a3f2fdc341d9ff6108ecd614a62523a857424a29007f5c2",
+      "sha256": "450cb6f7fc5ae37fdfe7ee19ead44d3e2e2f49d5c9f2bbd7b2b8499149a96707",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

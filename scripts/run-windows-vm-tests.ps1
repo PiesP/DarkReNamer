@@ -38,10 +38,6 @@ param(
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $RecoveryObserverSha256,
     [switch] $RecoveryExport,
     [switch] $RecoveryIntentOnlyCandidateDiscard,
-    [string] $RuntimeBrokerDiagnosticRoot,
-    [ValidatePattern('^[0-9a-f]{32}\z')][string] $RuntimeBrokerDiagnosticRunId,
-    [ValidateRange(1, 900)][int] $RuntimeBrokerDiagnosticBudgetSeconds,
-    [switch] $RuntimeBrokerPreparationOnly,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
     [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
     [ValidateSet('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')]
@@ -54,8 +50,8 @@ if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v
     throw 'Unsupported VM acceptance profile identity.'
 }
 
-$ToolingManifestSha256 = '88065abab1670d4de38ac104120baef17daa7901e861c086781a81715c1b37a1'
-$ToolingLoaderSha256 = '455d2b82f5def378fa9b1d8ff3ef21755e4994d55c866c718314044aa126b174'
+$ToolingManifestSha256 = '02eb89ad4e7a0c661514d4de1a8790bf830efd5d754b5a4d9101223abef7e863'
+$ToolingLoaderSha256 = '322bfaad0639f443756a4da7680594ebc86e011e139f49d1c22976db6bc058f1'
 
 function Get-DrBootstrapSha256 {
     param([Parameter(Mandatory)][byte[]] $Bytes)

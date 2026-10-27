@@ -78,6 +78,52 @@ Git. An external visual root must be immutable for validation and writable only
 by the acceptance operator. Static reparse checks do not protect against a
 different local process replacing files during validation.
 
+## Retired RuntimeBroker producer
+
+The frozen RuntimeBroker diagnostic producer and its exclusive Python,
+PowerShell, controller and UI hooks are retired. The original four-attempt
+investigation is terminal: preparation-only and normal-250 attempts failed;
+the high-contrast-125 and high-contrast-300 attempts completed. Its original
+failures and observation limits remain unchanged. No active campaign requires
+this producer; reading retained evidence does not require starting it.
+
+Use immutable pre-retirement source
+[`4e9b6c28ce1bcb457a5d85c0318620e02e0fb27c`](https://github.com/PiesP/DarkReNamer/tree/4e9b6c28ce1bcb457a5d85c0318620e02e0fb27c)
+to inspect `scripts/diagnose-runtimebroker.py --help`, its
+`scripts/darkrenamer_tooling/vm/runtimebroker_diagnostic.py` implementation,
+the dedicated `runtimebroker-*` tooling tests and the original development
+instructions. Reproduce each recorded attempt with its own pinned diagnostic
+source, not by assigning all receipts to the pre-retirement source. The later
+attempts use diagnostic source `b6410530048d082097b58a025ef1b124dddd2970`;
+the first failed preparation uses `bb2d438344cab668214529b1a0b344187a1972fd`.
+The candidate remains product source
+`d25f67a357d360c45d2a6899f4a83c1edc70e0d5`, executable SHA-256
+`11ec750a997d6143ec91d0e5172b2528c2f2a27a0d9a92aaec66ea787fe63e89`,
+under `vm-automated-v1-win11-ntfs`. Omitted profile selection in those frozen
+plans means strict v1; it cannot become v2 acceptance.
+
+Reproduction requires the original hash-bound plan, input manifests, candidate
+and authenticated tooling bundle, Python 3.11+, PowerShell 7.4+, and the bound
+prepared Windows VM/managed desktop. The historical command accepts
+`--plan`, `--plan-sha256`, `--attempt` and an exclusive `--output`;
+consult that source's help for the full prerequisites before any VM contact.
+The four consumed attempt directories cannot be replaced or retried. A new
+investigation requires a concrete unresolved identity/lifetime question and a
+new explicitly authorized plan with fresh source, candidate and VM bindings.
+It must preserve the 900-second budget, bounded metadata/handles, readiness,
+restoration and owned-cleanup rules rather than broadening this frozen producer.
+
+Original plans, failed/successful receipts, raw observer files, summaries,
+private archives and their digest inventories remain in the operator's external
+evidence custody. The completed closeout records the four consumed attempts,
+independent archive verification and removal of the diagnostic Windows stage.
+Access requires that private custody; Git contains neither those artifacts nor
+credentials, and their current absence from Git is not evidence of deletion.
+Current v1/v2 readers, authenticated loading, independent verification, task-map
+equality, process/Job/root ownership and failure precedence remain active.
+The retirement does not change product rename safety, GUI/release qualification
+or the evidence for proposal history, recipes and later diagnostics.
+
 ## Historical formal matrix
 
 The legacy formal gate required all of the following, bound to one Windows 11

@@ -123,7 +123,7 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
    the source-bound VM campaign below, then independently verify it through the
    existing hosted path. Maintenance CI is not a fresh candidate verdict;
    promotion and publication require separate authorization.
-4. Run RuntimeBroker, standalone GUI or optimization diagnostics
+4. Run standalone GUI or optimization diagnostics
    only for a concrete investigation, using their existing bounded utilities
    and opt-in scopes. Ambient OS activity alone does not mandate diagnosis or
    create a release requirement. Preserve failures and inspect their evidence
@@ -229,7 +229,7 @@ are the only discovery exclusions. Add or move a test by updating its registry
 record in the same change.
 
 The default `Current` scope covers current runtime, release and evidence contracts.
-`Diagnostics` contains targeted GUI regression and RuntimeBroker tooling;
+`Diagnostics` contains targeted GUI regression tooling;
 `Historical` remains a recognized scope for old registries, but the retired
 standalone chain has no current entries; selecting it here fails with no matches.
 Reproduce historical tests from the pre-retirement checkout linked below.
@@ -298,10 +298,10 @@ second command or asset registry.
 | Command / implementation | Runtime and stage; input | Output or side effect; verification |
 | --- | --- | --- |
 | `test-tooling.ps1` / PowerShell runner | PowerShell 7.4+ on actual Linux or Windows; registry `-Scope`, `-Id`, `-Category`, `-Runner`, `-List` | Validates discovery before selection, invokes registered subprocesses with timeout, returns failure status and optional external result JSON. CI calls it on Ubuntu/Windows; `tooling-registry` tests selection. |
-| `update-tooling-bundle.py` / Python generator | Python 3.11+ in the checkout; explicit source inventory, public CLI and PowerShell entrypoint templates, and `--check` | Regenerates the bundle manifest, seven self-contained public Python wrappers and four self-contained PowerShell wrappers, or reports drift without writes under `--check`; `tooling-bundle` and `tooling-bootstrap` tests cover closure and rejection. |
+| `update-tooling-bundle.py` / Python generator | Python 3.11+ in the checkout; explicit source inventory, public CLI and PowerShell entrypoint templates, and `--check` | Regenerates the bundle manifest and self-contained public Python and PowerShell wrappers, or reports drift without writes under `--check`; `tooling-bundle` and `tooling-bootstrap` tests cover closure and rejection. |
 | `tooling_bootstrap.py`, `tooling-bootstrap.ps1` / private authenticated loaders | Isolated Python or PowerShell 7.4+ after a public wrapper checks the pinned loader bytes; fixed manifest, role and layout | Validate and hold the required module closure, then expose verified import/scriptblock APIs. Bootstrap and bundle tests cover tampering, layouts and missing roles; neither loader is a general public CLI. |
 | `test-windows-vm.py`, `run-vm-automated-campaign.py` / Python `vm` and `campaign` modules | Isolated Python on host/WSL, prepared VM connection, selected profile/source/candidate | Prepare and run source-bound native tests/campaigns, producing private bundles and receipts; registered VM, campaign, authority and cleanup tests cover contracts. Actual VM evidence is a separate gate. |
-| `run-gui-regression.py`, `diagnose-runtimebroker.py` / Python `vm.gui` and diagnostic modules | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produce bounded GUI or RuntimeBroker diagnostic evidence. GUI/RuntimeBroker diagnostic tests are opt-in; neither command publishes acceptance by itself. |
+| `run-gui-regression.py` / Python `vm.gui` | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produces bounded GUI diagnostic evidence. GUI diagnostic tests are opt-in; this command does not publish acceptance by itself. |
 | `validate-gui-regression-evidence.py`, `validate-vm-automated-evidence.py`, `validate-vm-automated-authority.py` / Python `evidence`, `campaign`, `contracts` | Isolated Python, source identity and private evidence or authenticated hosted facts | Independent verdict/JSON or failure; evidence, binding, authority and GUI fixture tests cover malformed and successful input. Workflow callers retain artifact and GitHub authority. |
 | `run-scheduled-rust-audit.py` / Python | Python 3.11+ on Ubuntu CI/security runners and hosted Windows candidate validation; checked-out lockfile, pinned scanners, fresh advisory data | Uses `SECURITY_TOOLS_ROOT/bin` on Ubuntu or explicit verified absolute `.exe` paths on Windows; validates versions, runs both scanners and rejects incomplete/data-failure results. `scheduled-rust-audit` tests and the three workflow callers own its invocation. |
 | `build-patched-cargo-audit.py` / Python | Python 3.11+, the selected Rust toolchain and native linker; reviewed release-tool metadata and patched scanner lock | Requires a fresh `--work` directory and explicit `--destination`; verifies source/lock hashes before extraction/build, uses isolated Cargo state, then copies the exact-version binary. `--archive` accepts already downloaded verified bytes; `--verify-only` checks inputs without building. `scheduled-rust-audit` fixtures cover tampering and the locked build boundary; actual platform builds remain separate evidence. |
@@ -854,47 +854,12 @@ observed product behavior, essential input/focus/settings and owned-resource
 cleanup. It does not claim whole-session OS process stasis or explain every
 ambient OS lifetime; raw ambient observations remain in the private evidence.
 
-### RuntimeBroker identity diagnostics
+### Historical RuntimeBroker diagnostics
 
-[`scripts/diagnose-runtimebroker.py`](scripts/diagnose-runtimebroker.py) executes
-one selected attempt from an externally stored, hash-pinned diagnostic plan.
-The plan declares at most four attempts and separately pins the unchanged
-candidate source/EXE and the clean diagnostic harness source. Use `--help` for
-the plan and invocation contract. An exclusive attempt directory prevents a
-failed attempt from being replaced or automatically retried.
-
-The observer subscribes to process start/stop events and captures the initial
-RuntimeBroker inventory before reporting READY. Managed desktop preparation
-starts only after READY. It observes runner lifetimes across sessions through
-registration preflight, the original acceptance baselines, the selected UI
-workload, strict cleanup, desktop teardown and bounded follow-up. Preparation-only
-attempts stop after the original baselines and never launch the candidate.
-Diagnostic snapshots and phase journals are separate from acceptance evidence.
-This historical utility explicitly retains strict v1 for frozen plans with an
-omitted profile; it rejects v2 selection rather than changing the original contract.
-
-Each attempt has a 900-second total budget, with at most 360 seconds of
-post-cleanup observation within that budget. The controller reserves time for
-its existing cleanup and appearance restoration before starting a candidate.
-If a synchronous platform call overruns its cooperative deadline, the attempt
-fails its duration bound and further attempts stop; restoration is completed
-before owned resources are closed. It is never interrupted merely to report a
-successful time bound.
-
-Diagnostic metadata is partitioned into 14 MiB of observer output, 1 MiB of
-phase journals and 1 MiB of orchestration metadata. The observer holds at most
-64 combined target and parent process handles. WMI delivery, access failures,
-processes missed before capture, buffer limits and lifetimes still alive at
-observation end remain explicit coverage limits. Same-held-handle wait, native
-creation/exit times and exit code establish that a lifetime exited; they do not
-establish its termination cause. Package absence and API failure remain distinct.
-
-These records do not change the cleanup allowlist, process singleton rule,
-acceptance baseline or any prior failure. Observer readiness or owned cleanup
-failure, uncertain restoration, and a duration overrun stop further attempts.
-After a strict OS-delta rejection, a separately hash-bound coordinator cleanup
-proof may establish only workload-owned cleanup before the next declared
-attempt. It cannot replace the original receipt or reclassify acceptance.
+The frozen strict-v1 RuntimeBroker producer is retired. Its reproduction
+entrypoint, pinned identities and evidence boundary are preserved in
+[Historical Windows acceptance](docs/history/WINDOWS-ACCEPTANCE.md#retired-runtimebroker-producer).
+Current v1/v2 evidence readers, GUI validation and cleanup contracts remain active.
 
 ### Fixed GUI cleanup profiles
 
