@@ -25,7 +25,6 @@ PYTHON_INVENTORY = (
     ("package-vm", "scripts/darkrenamer_tooling/vm/__init__.py", "tooling-package-vm.py", "python-package", "darkrenamer_tooling.vm", ("package-root",)),
     ("vm-host-tools", "scripts/darkrenamer_tooling/vm/host_tools.py", "tooling-vm-host-tools.py", "python", "darkrenamer_tooling.vm.host_tools", ("package-root", "package-vm")),
     ("vm-launcher", "scripts/darkrenamer_tooling/vm/launcher.py", "tooling-vm-launcher.py", "python", "darkrenamer_tooling.vm.launcher", ("tooling-loader", "package-root", "package-vm", "vm-host-tools", "package-contracts", "contracts-platform", "contracts-tooling", "package-evidence", "evidence-errors", "powershell-controller-entry")),
-    ("vm-runtimebroker-diagnostic", "scripts/darkrenamer_tooling/vm/runtimebroker_diagnostic.py", "tooling-vm-runtimebroker-diagnostic.py", "python", "darkrenamer_tooling.vm.runtimebroker_diagnostic", ("tooling-loader", "package-root", "package-vm", "vm-launcher", "powershell-runtimebroker-bridge", "powershell-runtimebroker-observer", "powershell-guest-contracts", "powershell-guest-process", "powershell-guest-native")),
     ("vm-gui", "scripts/darkrenamer_tooling/vm/gui.py", "tooling-vm-gui.py", "python", "darkrenamer_tooling.vm.gui", ("tooling-loader", "package-root", "package-vm", "vm-launcher", "vm-host-tools", "package-contracts", "contracts-tooling", "contracts-owned-cleanup", "package-evidence", "evidence-errors", "vm-connection", "package-formats", "formats-png")),
     ("package-contracts", "scripts/darkrenamer_tooling/contracts/__init__.py", "tooling-package-contracts.py", "python-package", "darkrenamer_tooling.contracts", ("package-root",)),
     ("contracts-binding", "scripts/darkrenamer_tooling/contracts/binding.py", "tooling-contracts-binding.py", "python", "darkrenamer_tooling.contracts.binding", ("package-root", "package-contracts", "package-evidence", "evidence-archive")),
@@ -113,8 +112,6 @@ POWERSHELL_INVENTORY = (
     powershell_entry("powershell-recovery-scenarios", "recovery-scenarios.ps1"),
     powershell_entry("powershell-recovery-entry", "recovery-entry.psm1",
                      ("powershell-loader", *RECOVERY_PRIVATE_ROLES, *GUEST_PRIVATE_ROLES)),
-    powershell_entry("powershell-runtimebroker-observer", "runtimebroker-observer.ps1"),
-    powershell_entry("powershell-runtimebroker-bridge", "runtimebroker-bridge.ps1", ("powershell-runtimebroker-observer", "powershell-guest-contracts", "powershell-guest-process", "powershell-guest-native")),
     powershell_entry("powershell-controller-contracts", "controller-contracts.ps1"),
     powershell_entry("powershell-controller-transport", "controller-transport.ps1"),
     powershell_entry("powershell-controller-poll", "controller-poll.ps1"),
@@ -128,9 +125,6 @@ POWERSHELL_INVENTORY = (
 TOOLING_INVENTORY = PYTHON_INVENTORY + POWERSHELL_INVENTORY
 
 PUBLIC_BOOTSTRAPS = (
-    ("scripts/diagnose-runtimebroker.py",
-     "Run one frozen, bounded RuntimeBroker identity and lifetime diagnostic.",
-     "vm-runtimebroker-diagnostic", "str(error)"),
     ("scripts/test-windows-vm.py",
      "Build the current checkout's Windows tests and execute them in a Hyper-V VM.",
      "vm-launcher", "str(error)"),
