@@ -351,7 +351,8 @@ try {
 
     foreach ($corruption in @(
             [pscustomobject]@{ id = 'rust-manifest'; url = $productionRecord.rust.manifest.url },
-            [pscustomobject]@{ id = 'rustc'; url = $productionRecord.rust.components[0].url }
+            [pscustomobject]@{ id = 'rustc'; url = $productionRecord.rust.components[0].url },
+            [pscustomobject]@{ id = 'cargo-about'; url = $productionRecord.tools[2].url }
         )) {
         $approved = $downloadMap[$corruption.url]
         $tampered = Join-Path $fixtureArchives "$($corruption.id)-wrong-bytes"
@@ -368,20 +369,21 @@ try {
         $downloadMap[$corruption.url] = $approved
     }
 
-    $denyTool = $productionRecord.tools[1]
-    $badLayout = Join-Path $fixtureArchives 'cargo-deny-wrong-layout.tar.gz'
-    New-TarFixture -Path $badLayout -Entries ([ordered]@{ 'unexpected.exe' = 'wrong layout' })
-    $approvedDenyDigest = $denyTool.sha256
-    $denyTool.sha256 = (Get-FileHash -LiteralPath $badLayout -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Record $fixtureRecordPath $productionRecord
-    $downloadMap[$denyTool.url] = $badLayout
-    Assert-ProductionFixture -FixtureInstaller $fixtureInstaller `
-        -Destination (Join-Path $testRoot 'production-wrong-layout') `
-        -DownloadMap $downloadMap -Marker $rustupMarker `
-        -ExpectedFailure 'Expected content is missing from verified archive' -ExpectRustup $false
-    $denyTool.sha256 = $approvedDenyDigest
-    Write-Record $fixtureRecordPath $productionRecord
-    $downloadMap[$denyTool.url] = Join-Path $fixtureArchives 'cargo-deny.tar.gz'
+    foreach ($layoutTool in @($productionRecord.tools[1], $productionRecord.tools[2])) {
+        $badLayout = Join-Path $fixtureArchives "$($layoutTool.id)-wrong-layout.tar.gz"
+        New-TarFixture -Path $badLayout -Entries ([ordered]@{ 'unexpected.exe' = 'wrong layout' })
+        $approvedDigest = $layoutTool.sha256
+        $layoutTool.sha256 = (Get-FileHash -LiteralPath $badLayout -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Record $fixtureRecordPath $productionRecord
+        $downloadMap[$layoutTool.url] = $badLayout
+        Assert-ProductionFixture -FixtureInstaller $fixtureInstaller `
+            -Destination (Join-Path $testRoot "production-$($layoutTool.id)-wrong-layout") `
+            -DownloadMap $downloadMap -Marker $rustupMarker `
+            -ExpectedFailure 'Expected content is missing from verified archive' -ExpectRustup $false
+        $layoutTool.sha256 = $approvedDigest
+        Write-Record $fixtureRecordPath $productionRecord
+        $downloadMap[$layoutTool.url] = Join-Path $fixtureArchives "$($layoutTool.id).tar.gz"
+    }
     if ($IsWindows -ne $testPlatformIsWindows) {
         throw 'Production fixture changed the PowerShell platform flag outside its call.'
     }
@@ -428,6 +430,21 @@ try {
         if (($observedProbes -join ',') -cne (($record.tools.id) -join ',')) {
             throw 'The version probe did not execute every verified release tool in order.'
         }
+        $aboutExecutable = Join-Path $toolsRoot 'cargo-about.exe'
+        $successfulProbeExitCode = $global:LASTEXITCODE
+        try {
+            Set-Item -LiteralPath "Function:script:$aboutExecutable" -Value {
+                $global:LASTEXITCODE = 1
+                return 'cargo-about failed to start'
+            }
+            $probeFailure = $null
+            try { & ([scriptblock]::Create($probeLoops[0].Extent.Text)) }
+            catch { $probeFailure = $_.Exception.Message }
+            if ($null -eq $probeFailure -or $probeFailure -notlike '*Verified cargo-about version probe failed*') {
+                throw "A failed cargo-about install was not rejected: $probeFailure"
+            }
+        }
+        finally { $global:LASTEXITCODE = $successfulProbeExitCode }
     }
     finally {
         foreach ($functionPath in $probeFunctions) { Remove-Item -LiteralPath $functionPath }
