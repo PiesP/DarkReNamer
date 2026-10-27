@@ -23,7 +23,7 @@ param(
     [string] $FocusedRefreshCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,

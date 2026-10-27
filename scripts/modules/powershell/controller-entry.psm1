@@ -1431,7 +1431,7 @@ function Invoke-DrWindowsVmController {
     [string] $FocusedRefreshCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1621,29 +1621,12 @@ try {
     }
     $manifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
     $candidateLane = $manifest.schema_version -eq 2 -and $manifest.lane -ceq 'candidate-gui-only'
-    $focusedPreservedLane = $manifest.schema_version -eq 2 -and
-        $manifest.lane -ceq 'focused-preserved-source-built-product-v1'
-    $splitLane = $candidateLane -or $focusedPreservedLane
-    if ($focusedPreservedLane -and (-not $acceptance -or $AcceptanceMode -cne 'focused-10k-clear')) {
-        throw 'Preserved source-built product lane is restricted to focused-10k-clear acceptance.'
-    }
-    if ($acceptance -and $AcceptanceMode -ceq 'focused-10k-clear' -and -not $focusedPreservedLane) {
-        throw 'Focused clear acceptance requires the preserved source-built product lane.'
-    }
-    if ($splitLane) {
+    if ($candidateLane) {
         if ($manifest.product.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
             $manifest.product.source_state -cne 'clean' -or
             $manifest.harness.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
             $manifest.harness.source_state -cne 'clean' -or
-            ($candidateLane -and
-             $manifest.product.candidate.origin_authentication -cne 'pending-hosted') -or
-            ($focusedPreservedLane -and
-             ($manifest.product.source_sha -cne
-                  '8248c73859e3a3ff0e524fd9448acfe965fa3f68' -or
-              $manifest.product.application.sha256 -cne
-                  '06c5511e042714f5a343e541856f2dbdc3850d5d60eeb62c3c36c2dacfef2f0f' -or
-              $manifest.product.provenance.original_bundle_manifest.sha256 -cne
-                  '23f42a2c2af9e7a9417e275e10b9415be46dc05a0ecf610527a89e632ec7f38e')) -or
+            $manifest.product.candidate.origin_authentication -cne 'pending-hosted' -or
             @($manifest.test_binaries).Count -ne 0) {
             throw 'A split-provenance GUI-only bundle is invalid.'
         }
@@ -1653,17 +1636,7 @@ try {
         if ([string]::IsNullOrEmpty($ExpectedBundleManifestSha256)) {
             throw 'Exact-candidate execution requires a launcher-frozen bundle manifest digest.'
         }
-        $artifacts = if ($focusedPreservedLane) { @(
-            $manifest.product.application
-            $manifest.product.provenance.original_bundle_manifest
-            $manifest.harness.launcher
-            $manifest.harness.builder
-            $manifest.harness.controller
-            $manifest.harness.runner
-            $manifest.harness.observers.ui
-            $manifest.harness.tooling_record
-            [pscustomobject]@{ file = 'Cargo.lock'; sha256 = $manifest.product.provenance.cargo_lock_sha256 }
-        ) } else { @(
+        $artifacts = @(
             $manifest.product.application
             $manifest.product.provenance.release_handoff
             $manifest.product.provenance.run_metadata
@@ -1673,7 +1646,7 @@ try {
             $manifest.harness.runner
             @($manifest.harness.observers.PSObject.Properties | ForEach-Object Value)
             @($manifest.harness.validators.PSObject.Properties | ForEach-Object Value)
-        ) }
+        )
         if ($manifest.harness.controller.file -cne 'run-windows-vm-tests.ps1' -or
             (Get-FileHash -LiteralPath $EntryPointPath -Algorithm SHA256).Hash -ine
                 $manifest.harness.controller.sha256) {
@@ -1762,7 +1735,7 @@ try {
         }
         $acceptanceInput = Get-Content -LiteralPath $AcceptanceManifest -Raw | ConvertFrom-Json
         Assert-SafeAcceptanceRunId -RunId $acceptanceInput.run_id
-        $expectedAcceptanceSourceSha = if ($splitLane) {
+        $expectedAcceptanceSourceSha = if ($candidateLane) {
             $manifest.product.source_sha
         } else {
             $manifest.source_sha
@@ -1784,13 +1757,13 @@ try {
         Assert-AcceptanceInputArtifactBinding `
             -InputDocument $acceptanceInput `
             -Manifest $manifest `
-            -CandidateLane $splitLane
+            -CandidateLane $candidateLane
         $observer = $acceptanceInput.artifacts.observer
         if ($observer.file -cne 'inputs/windows-vm-acceptance.ps1' -or
             (Get-FileHash -LiteralPath (Join-Path $BundleRoot 'windows-vm-acceptance.ps1') -Algorithm SHA256).Hash -ine $observer.sha256) {
             throw 'Acceptance observer differs from the immutable input manifest.'
         }
-        if ($splitLane -and
+        if ($candidateLane -and
             ($manifest.harness.observers.ui.file -cne 'windows-vm-acceptance.ps1' -or
              $manifest.harness.observers.ui.sha256 -ine $observer.sha256)) {
             throw 'Acceptance observer differs from the frozen candidate harness role.'
@@ -1803,7 +1776,7 @@ try {
             @(Get-ChildItem -LiteralPath $outputItem.FullName -Force).Count -ne 0) {
             throw 'Recovery output must be an existing empty ordinary directory.'
         }
-        $observer = if ($splitLane) {
+        $observer = if ($candidateLane) {
             $manifest.harness.observers.recovery
         }
         else {
@@ -1909,7 +1882,7 @@ public static class VmDesktopState {
         if (-not (Test-Path "$env:SystemRoot\System32\VCRUNTIME140.dll")) { throw 'Install the Microsoft x64 Visual C++ runtime in the VM before testing.' }
         [pscustomobject]@{sid = $sid; session_id = $unlocked[0]}
     }
-    $anchorSourceSha = if ($splitLane) { [string]$manifest.harness.source_sha } else {
+    $anchorSourceSha = if ($candidateLane) { [string]$manifest.harness.source_sha } else {
         [string]$manifest.source_sha
     }
     $anchorBundleSha256 = (Get-FileHash -LiteralPath $bundleManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()

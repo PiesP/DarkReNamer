@@ -320,11 +320,16 @@ The commands below came from the
 
 ### Focused first-10k-clear observation
 
-Use `focused-10k-clear` only for a separately authorized, single observation of
-the first clear after the ordinary 10,000-row full preview/reset. It retains
-the original source-built product EXE and original bundle manifest unchanged,
-while separately binding the corrected tooling to the current clean checkout.
-Pin both origins before VM contact:
+The current GUI controller retired this producer after the #32 Option B
+closeout left the normal A/B/B/A comparison deferred. No maintained current
+caller needs another single frozen replay, which cannot complete that
+comparison. Historical receipts remain readable by the current evidence
+validator. Reproduce a separately authorized historical observation from the
+[pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/7e8059960a68b556de4bc537af77de8e54b3621e),
+using its [original producer and tooling contract](https://github.com/PiesP/DarkReNamer/blob/7e8059960a68b556de4bc537af77de8e54b3621e/docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
+That version retains the source-built product EXE and original bundle manifest
+unchanged while separately binding its clean tooling. Pin both origins before
+VM contact from that historical checkout:
 
 ```bash
 python3 -I scripts/run-gui-regression.py \
