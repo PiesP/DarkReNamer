@@ -1167,8 +1167,9 @@ The current GUI controller no longer produces the frozen `focused-10k-clear`
 observation. Its source-bound historical replay, original pins, receipt limits,
 and pre-retirement reproduction source remain in
 [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
-Historical evidence remains readable; that single observation cannot replace
-the fixed performance sample or a release verdict.
+The historical reader retains its exact recorded tooling-tree requirement;
+validate old receipts from their recorded tooling revision. That single
+observation cannot replace the fixed performance sample or a release verdict.
 
 ### First-clear failure observation
 

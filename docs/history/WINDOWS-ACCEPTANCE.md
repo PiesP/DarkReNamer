@@ -323,8 +323,10 @@ The commands below came from the
 The current GUI controller retired this producer after the #32 Option B
 closeout left the normal A/B/B/A comparison deferred. No maintained current
 caller needs another single frozen replay, which cannot complete that
-comparison. Historical receipts remain readable by the current evidence
-validator. Reproduce a separately authorized historical observation from the
+comparison. The historical reader and its strict source bindings remain
+preserved. Validate an existing receipt from its exact recorded tooling revision;
+the validator requires that checkout's tree to match the recorded tooling tree.
+Reproduce a new, separately authorized historical observation from the
 [pre-retirement source](https://github.com/PiesP/DarkReNamer/tree/7e8059960a68b556de4bc537af77de8e54b3621e),
 using its [original producer and tooling contract](https://github.com/PiesP/DarkReNamer/blob/7e8059960a68b556de4bc537af77de8e54b3621e/docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
 That version retains the source-built product EXE and original bundle manifest
