@@ -366,32 +366,6 @@ function Assert-GuiRegressionInvocationBinding {
             throw 'First-clear observation differs from its fixed immutable plan.'
         }
     }
-    elseif ($RegressionMode -ceq 'focused-10k-clear') {
-        $expectedPlan = [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
-            sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
-            stop_after_first_clear=$true; full_performance_sample=$false }
-        $actualPlan = $ManifestInput.request.PSObject.Properties['focused_clear_plan']
-        if ($null -eq $actualPlan -or
-            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
-            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
-            $null -ne $ManifestInput.request.PSObject.Properties['performance_plan'] -or
-            $Verified.lane -cne 'focused-preserved-source-built-product-v1' -or
-            $ManifestInput.source_sha -cne $Verified.product.source_sha -or
-            $ManifestInput.source_tree -cne $Verified.product.source_tree -or
-            $ManifestInput.tooling_source_sha -cne $Verified.harness_source_sha -or
-            $ManifestInput.tooling_source_tree -cne $Verified.harness.source_tree -or
-            $ManifestInput.prepared_bundle.original_bundle_manifest_sha256 -cne
-                $Verified.product.provenance.original_bundle_manifest.sha256 -or
-            $ManifestInput.prepared_bundle.tooling_record_sha256 -cne
-                $Verified.harness.tooling_record.sha256 -or
-            $ManifestInput.run_id -cne 'focused-10k-clear-v1-1366x768-96-text100' -or
-            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
-            $ManifestInput.request.desktop.width -ne 1366 -or
-            $ManifestInput.request.desktop.height -ne 768 -or
-            $ManifestInput.request.desktop.dpi -ne 96) {
-            throw 'Focused clear differs from its fixed immutable plan.'
-        }
-    }
     elseif ($RegressionMode -ceq 'icon-settlement') {
         $expectedPlan = [ordered]@{ ordinary_rows=1000; churn_rows=1000; extension_classes=300;
             poll_interval_ms=100; maximum_seconds=600 }
@@ -421,9 +395,8 @@ function Assert-GuiRegressionInvocationBinding {
     elseif ($null -ne $ManifestInput.request.PSObject.Properties['performance_plan']) {
         throw 'Performance plan is restricted to performance-sample.'
     }
-    if ($RegressionMode -cne 'focused-10k-clear' -and
-        $null -ne $ManifestInput.request.PSObject.Properties['focused_clear_plan']) {
-        throw 'Focused clear plan is restricted to focused-10k-clear.'
+    if ($null -ne $ManifestInput.request.PSObject.Properties['focused_clear_plan']) {
+        throw 'Retired focused clear plan is unsupported.'
     }
     if ($RegressionMode -cne 'first-clear-observation' -and
         $null -ne $ManifestInput.request.PSObject.Properties['first_clear_observation_plan']) {
@@ -540,8 +513,7 @@ function New-GuiRegressionResult {
         [Parameter(Mandatory)][string] $Appearance
     )
 
-    $splitLane = $Verified.lane -cin @('candidate-gui-only',
-        'focused-preserved-source-built-product-v1')
+    $splitLane = $Verified.lane -ceq 'candidate-gui-only'
     $result = [ordered]@{
         schema_version = if ($splitLane) { 2 } else { 1 }
         target = $Verified.target
@@ -869,7 +841,7 @@ function Invoke-GuiRegressionAcceptance {
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations
             }
-            elseif ($RegressionMode -in @('performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation')) {
+            elseif ($RegressionMode -in @('performance-sample', 'first-clear-observation', 'picker-identity-observation')) {
                 $scenarioSink = [ordered]@{}
                 $observations.scenario = $scenarioSink
                 $result.assertions.scenario = $scenarioSink
@@ -882,9 +854,8 @@ function Invoke-GuiRegressionAcceptance {
                     -EvidenceRoot $resolved.output_root `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -LongPathOrder $(if ($RegressionMode -in @('focused-10k-clear','first-clear-observation','picker-identity-observation')) {
+                    -LongPathOrder $(if ($RegressionMode -in @('first-clear-observation','picker-identity-observation')) {
                         'hidden-visible' } else { [string]$manifestInput.request.performance_plan.long_path_order }) `
-                    -StopAfterFirstClear:($RegressionMode -eq 'focused-10k-clear') `
                     -ObserveFirstClear:($RegressionMode -eq 'first-clear-observation') `
                     -ObservePicker:($RegressionMode -eq 'picker-identity-observation') `
                     -OwnedPerformance:$ownedPerformanceRun `
@@ -955,17 +926,14 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','focused-10k-clear','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
         }
         elseif ($RegressionMode -eq 'performance-sample') {
             $result.assertions['scope'] = 'performance-sample-p1-p3-v2'
-        }
-        elseif ($RegressionMode -eq 'focused-10k-clear') {
-            $result.assertions['scope'] = 'focused-10k-clear-v1'
         }
         elseif ($RegressionMode -eq 'first-clear-observation') {
             $result.assertions['scope'] = 'first-clear-observation-v1'

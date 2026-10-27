@@ -1047,8 +1047,8 @@ both observations bound to the same executable bytes, first build with
 Read and freeze `application.sha256` from its `bundle.json`, then pass
 `--prepared-bundle-root /absolute/private/native-bundle` and
 `--expected-prepared-application-sha256` with that digest to each performance
-invocation. Prepared reuse is restricted to declared performance, focused-clear,
-first-clear-observation, and icon-settlement diagnostics; the runner verifies
+invocation. Prepared reuse is restricted to declared performance,
+first-clear-observation, picker-identity-observation, and icon-settlement diagnostics; the runner verifies
 the clean source, executable, test binaries and trusted native tooling closure
 before contacting the VM. Each attempt retains its own authenticated inputs and
 prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
@@ -1163,12 +1163,13 @@ does not run the fixed performance workload or complete performance acceptance.
 
 ### Focused first-10k-clear diagnostic
 
-The first-clear replay for the original issue #32 bundle is a source-bound,
-single-observation diagnostic. Its frozen bundle pins, command and receipt limits
-are in [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
-A new investigation needs its own authorization and clean source/tooling bindings;
-failed or partial attempts remain failed. This observation cannot replace the
-fixed performance sample or a release verdict.
+The current GUI controller no longer produces the frozen `focused-10k-clear`
+observation. Its source-bound historical replay, original pins, receipt limits,
+and pre-retirement reproduction source remain in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md#focused-first-10k-clear-observation).
+The historical reader retains its exact recorded tooling-tree requirement;
+validate old receipts from their recorded tooling revision. That single
+observation cannot replace the fixed performance sample or a release verdict.
 
 ### First-clear failure observation
 

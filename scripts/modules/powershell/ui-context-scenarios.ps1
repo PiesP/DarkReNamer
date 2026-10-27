@@ -1730,7 +1730,6 @@ function Invoke-ObserverPerformanceSampleScenario {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
-        [switch] $StopAfterFirstClear,
         [switch] $ObserveFirstClear,
         [switch] $ObservePicker,
         [switch] $OwnedPerformance,
@@ -1738,11 +1737,11 @@ function Invoke-ObserverPerformanceSampleScenario {
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
-    if ([int][bool]$StopAfterFirstClear + [int][bool]$ObserveFirstClear +
+    if ([int][bool]$ObserveFirstClear +
         [int][bool]$ObservePicker -gt 1) {
         throw 'Focused performance modes are mutually exclusive.'
     }
-    if ($OwnedPerformance -and ($StopAfterFirstClear -or $ObserveFirstClear)) {
+    if ($OwnedPerformance -and $ObserveFirstClear) {
         throw 'Owned performance lifetime applies only to a reviewed owned workload.'
     }
     if ($ObservePicker -and -not $OwnedPerformance) {
@@ -1795,7 +1794,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     $timings = [Collections.Generic.List[object]]::new()
     $clearRowCounts = [Collections.Generic.List[int]]::new()
     $commandSends = [Collections.Generic.List[object]]::new()
-    $timelineEnabled = -not ($StopAfterFirstClear -or $ObserveFirstClear)
+    $timelineEnabled = -not $ObserveFirstClear
     $timelineEvents = [Collections.Generic.List[object]]::new()
     $activeTimelineEvents = $null
     if ($timelineEnabled) { $activeTimelineEvents = $timelineEvents }
@@ -1804,7 +1803,6 @@ function Invoke-ObserverPerformanceSampleScenario {
     $resetControl = $null
     $prefixControl = $null
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-        elseif ($StopAfterFirstClear) { 'focused-10k-clear' }
         elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
     if ($ObservePicker) {
         $ObservationSink['popup_diagnostic_schema_version'] = $script:PickerFailureSchemaVersion
@@ -1818,10 +1816,6 @@ function Invoke-ObserverPerformanceSampleScenario {
             sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
             command_timeout_ms=5000; passive_poll_limit=50; passive_window_ms=10000;
             passive_interval_ms=200; individual_query_timeout_ms=50;
-            stop_after_first_clear=$true; full_performance_sample=$false }
-    } elseif ($StopAfterFirstClear) {
-        [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
-            sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
             stop_after_first_clear=$true; full_performance_sample=$false }
     } else {
         [ordered]@{
@@ -2040,7 +2034,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         $timings.Add([ordered]@{ id='full-preview'; elapsed_ms=$fullElapsedMs;
             command_elapsed_ms=$prefix.elapsed_ms; rows=10000;
             observed_rows=[int]$grid.pattern.Current.RowCount })
-        if ($StopAfterFirstClear -or $ObserveFirstClear) {
+        if ($ObserveFirstClear) {
             $ObservationSink['first_clear'] = [ordered]@{
                 stage = 'before-send'; command_id = 32782
                 process_id = [int]$application.process.Id
@@ -2049,15 +2043,13 @@ function Invoke-ObserverPerformanceSampleScenario {
                 preview_reset = @($ObservationSink['full_preview_rows'] | ForEach-Object { $_.reset })
                 post_clear_rows = $null
             }
-            if ($ObserveFirstClear) {
-                $ObservationSink['first_clear']['schema_version'] = 1
-                $ObservationSink['first_clear']['polls'] = @()
-                $ObservationSink['first_clear']['poll_status'] = 'not-started'
-                $ObservationSink['first_clear']['poll_elapsed_ms'] = 0
-                $ObservationSink['first_clear']['native_identity'] = $null
-            }
+            $ObservationSink['first_clear']['schema_version'] = 1
+            $ObservationSink['first_clear']['polls'] = @()
+            $ObservationSink['first_clear']['poll_status'] = 'not-started'
+            $ObservationSink['first_clear']['poll_elapsed_ms'] = 0
+            $ObservationSink['first_clear']['native_identity'] = $null
             if ($ObservationSink['first_clear'].pre_clear_rows -ne 10000) {
-                throw 'Focused clear did not begin with 10000 rows.'
+                throw 'First-clear observation did not begin with 10000 rows.'
             }
         }
         $firstClearIdentity = $null
@@ -2083,7 +2075,7 @@ function Invoke-ObserverPerformanceSampleScenario {
                 -ScenarioPhase 'full-preview-clear' -CommandSends $commandSends
         }
         catch {
-            if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'send-failed' }
+            if ($ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'send-failed' }
             if ($ObserveFirstClear -and $commandSends.Count -gt 0 -and
                 $commandSends[$commandSends.Count - 1].command_id -eq 32782 -and
                 $commandSends[$commandSends.Count - 1].status -ceq 'timeout' -and
@@ -2150,16 +2142,16 @@ function Invoke-ObserverPerformanceSampleScenario {
             }
             throw
         }
-        if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'sent' }
+        if ($ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'sent' }
         $clearedRows = [int]$grid.pattern.Current.RowCount
-        if ($StopAfterFirstClear -or $ObserveFirstClear) {
+        if ($ObserveFirstClear) {
             $ObservationSink['first_clear'].post_clear_rows = $clearedRows
             $ObservationSink['first_clear'].stage = 'after-send'
         }
         if ($clearedRows -ne 0) { throw 'Performance list clear did not remove all rows.' }
-        if ($StopAfterFirstClear -or $ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'verified-empty' }
+        if ($ObserveFirstClear) { $ObservationSink['first_clear'].stage = 'verified-empty' }
         $clearRowCounts.Add([int]$grid.pattern.Current.RowCount)
-        if (-not $StopAfterFirstClear -and -not $ObserveFirstClear) {
+        if (-not $ObserveFirstClear) {
         $longModes = if ($LongPathOrder -eq 'visible-hidden') { @('long-visible','long-hidden') }
             else { @('long-hidden','long-visible') }
         $columnsVisible = $false
@@ -2270,7 +2262,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         $sampler = $null
         $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled -Picker:$ObservePicker)
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
-            'single-row','full-preview') + $(if ($StopAfterFirstClear -or $ObserveFirstClear) { @() }
+            'single-row','full-preview') + $(if ($ObserveFirstClear) { @() }
                 else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
         $ObservationSink['phase_summary'] = @(Get-ObserverPerformancePhaseSummary `
             -Samples $ObservationSink['samples'] -PhaseOrder $phaseOrder)
@@ -2304,7 +2296,6 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
         $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-            elseif ($StopAfterFirstClear) { 'focused-10k-clear' }
             elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
         return $ObservationSink
     }

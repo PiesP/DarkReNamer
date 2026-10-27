@@ -144,8 +144,7 @@ function Resolve-AcceptanceBundle {
         $verified.contract.harness_source_state -cne 'clean') {
         throw 'A clean source-bound bundle is required for acceptance evidence.'
     }
-    $observer = if ($verified.contract.lane -cin @('candidate-gui-only',
-            'focused-preserved-source-built-product-v1')) {
+    $observer = if ($verified.contract.lane -ceq 'candidate-gui-only') {
         $verified.contract.observers.ui
     }
     else {
@@ -204,12 +203,10 @@ function Resolve-AcceptanceBundle {
         product_source_state = $verified.contract.product_source_state
         harness_source_sha = $verified.contract.harness_source_sha
         harness_source_state = $verified.contract.harness_source_state
-        product = if ($verified.contract.lane -cin @('candidate-gui-only',
-                'focused-preserved-source-built-product-v1')) {
+        product = if ($verified.contract.lane -ceq 'candidate-gui-only') {
             $verified.manifest.product
         } else { $null }
-        harness = if ($verified.contract.lane -cin @('candidate-gui-only',
-                'focused-preserved-source-built-product-v1')) {
+        harness = if ($verified.contract.lane -ceq 'candidate-gui-only') {
             $verified.manifest.harness
         } else { $null }
         target = $verified.manifest.target

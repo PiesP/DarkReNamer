@@ -472,18 +472,6 @@ try {
     $global:DrUiApplicationEntryProbe.events.Clear()
     Invoke-DrWindowsVmAcceptance @arguments
     if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap,current-dpi') { throw 'Default current-DPI dispatch changed.' }
-    $global:DrUiApplicationEntryProbe.lane = 'focused-preserved-source-built-product-v1'
-    $global:DrUiApplicationEntryProbe.events.Clear()
-    Assert-Fails { Invoke-DrWindowsVmAcceptance @arguments } 'Preserved product observer requires'
-    if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap') { throw 'Focused lane reached current-DPI dispatch.' }
-    foreach ($mode in @('standard', 'focused-10k-clear')) {
-        $global:DrUiApplicationEntryProbe.events.Clear()
-        Assert-Fails { Invoke-DrWindowsVmAcceptance @arguments -RegressionMode $mode } 'Preserved product observer requires'
-        if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap') { throw 'Focused lane escaped its diagnostic dispatch boundary.' }
-    }
-    $global:DrUiApplicationEntryProbe.events.Clear(); $global:DrUiApplicationEntryProbe.reject = $false
-    Invoke-DrWindowsVmAcceptance @arguments -RegressionMode focused-10k-clear -InputManifestPath 'input.json'
-    if (($global:DrUiApplicationEntryProbe.events -join ',') -cne 'bootstrap,verify,regression') { throw 'Focused diagnostic skipped shared authentication.' }
 }
 finally {
     if ($null -ne $entry) { Remove-Module $entry }

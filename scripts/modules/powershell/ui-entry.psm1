@@ -46,7 +46,7 @@ function Invoke-DrWindowsVmAcceptance {
     [switch] $Clipboard,
     [switch] $HighContrast,
     [switch] $RestoreHighContrastOnly,
-    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'focused-10k-clear', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
+    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
@@ -75,12 +75,6 @@ $bootstrap = Resolve-AcceptanceBootstrap `
     -Root $BundleRoot `
     -ScriptPath $EntryPointPath `
     -ScriptSha256 $ExpectedScriptSha256
-
-if ($bootstrap.lane -ceq 'focused-preserved-source-built-product-v1' -and
-    ($RegressionMode -cne 'focused-10k-clear' -or
-     [string]::IsNullOrEmpty($InputManifestPath))) {
-    throw 'Preserved product observer requires focused-10k-clear and InputManifestPath.'
-}
 
 if (-not [string]::IsNullOrEmpty($RegressionMode)) {
     if ([string]::IsNullOrEmpty($InputManifestPath)) {
