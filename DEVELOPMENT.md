@@ -53,6 +53,62 @@ These are authoring defaults; the [safety model](SAFETY.md),
   comparable [performance samples](#fixed-performance-sample). Reviewed
   allocation removal alone does not establish an application-level speedup.
 
+### Foreground worker ownership
+
+`AppState` owns four optional foreground workers: admission, import, planning,
+and apply. They are intended to run one at a time. File-dialog and drop
+admission use their session and `drop_locked` gates; import starts only after
+the file-dialog session passes its revision and lock checks; `apply_changes`
+uses `apply_locked` before planning, and the confirmed plan passes the prompt,
+revision, fingerprint, and lock checks before apply. The worker-start helpers
+are not a second, general admission API: callers must preserve these gates.
+`mutation_locked` also covers modal transitions and close, while recovery and
+journal state independently prohibit apply. See `windows.rs` (`AppState`,
+`apply_locked`), `windows/command_dispatch.rs` (file-dialog sessions),
+`windows/drag_drop.rs` (drop gate), and `windows/worker.rs` (start paths).
+
+Each worker retains its cancellation token, bounded terminal-result receiver,
+and thread handle in its own `AppState` field. Cancel requests are cooperative;
+an acknowledged request is not retirement. Completion is polled or posted to
+the UI thread, which waits for the thread's terminal state, takes its worker,
+joins it, and consumes its terminal result once before accepting a new mutable
+operation. Import and admission reject stale session or model revisions;
+planning rechecks the revision and confirmation state; apply revalidates the
+confirmed immutable plan before filesystem mutation and retains journal
+evidence for uncertain outcomes. Failure and missing-result paths retire the
+worker too. `request_window_close` requests cancellation and
+`try_finish_window_close` / `prepare_window_close` require every foreground
+field to be empty before destruction. On message-loop failure, the separate
+shutdown path joins owned workers; an import provider that cannot retire
+forces process abort rather than releasing its runtime lock while it runs.
+
+Native callbacks may reenter during synchronous messages. The current
+prepare/release/native-call/reacquire/revalidate pattern keeps an `AppState`
+lease out of those calls; a copied session or revision is checked after return.
+Win32 [`SendMessage`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessage)
+is synchronous, and a receiving thread can process incoming nonqueued messages
+while waiting on a cross-thread send. Worker fields remain owned until join;
+cancellation alone cannot clear them. Icon work
+has separate retirement and join state. Appearance and column preference
+writers have their own bounded persistence, failure reporting, and shutdown;
+window close waits for them independently of the foreground worker fields.
+
+The four fields admit more *representable* combinations than the intended
+single foreground operation. `worker_activity` and `active_worker_kind` project
+them for controls; the latter returns no kind for both idle and multiple active
+flags, but its boolean test does not establish a reachable overlap. Existing
+native tests cover stale import retirement, admission cancellation, and close
+while icon work is active (`windows/application.rs`, `windows/list_view.rs`);
+they do not prove a simultaneous foreground worker state is reachable. A shared
+projection of the repeated field checks would shorten some lock and close
+predicates, yet would leave the distinct cancellation, result, join, and
+failure transitions at their current owners. A Rust
+[`enum`](https://doc.rust-lang.org/book/ch06-01-defining-an-enum.html) could encode one active
+variant in Rust's type system, but moving these lifetimes through callback,
+prompt, and shutdown paths would add broad transitions and drop-order review.
+The current procedural gates and worker-specific retirement remain the smaller
+supported design until a concrete overlap or missed transition is found.
+
 ## Native Windows development
 
 Install Git, PowerShell 7.4 or newer, Python 3.11 or newer, and rustup. The tooling
