@@ -379,6 +379,22 @@ try {
     if (($actualInputLayout -join ',') -cne ($expectedInputLayout -join ',')) {
         throw "Native SendInput layout is wrong: $($actualInputLayout -join ',')."
     }
+    foreach ($key in @(
+        @{ virtual_key = 0x23; extended = $true },
+        @{ virtual_key = 0x27; extended = $true },
+        @{ virtual_key = 0x24; extended = $true },
+        @{ virtual_key = 0x28; extended = $true },
+        @{ virtual_key = 0x56; extended = $false },
+        @{ virtual_key = 0x0D; extended = $false }
+    )) {
+        $actualPackets = @([DarkReNamerLanguageMenuReader]::InspectTapPackets(
+            [uint16]$key.virtual_key, [bool]$key.extended))
+        $expectedPackets = @(1, $key.virtual_key, [int]$key.extended, 1,
+            $key.virtual_key, $(if ($key.extended) { 3 } else { 2 }))
+        if (($actualPackets -join ',') -cne ($expectedPackets -join ',')) {
+            throw "Native language key packet flags differ for virtual key $($key.virtual_key)."
+        }
+    }
     Initialize-ProductionLanguageMenuReader
     $valid = New-Fixture -Name 'valid'
     Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly

@@ -2657,7 +2657,7 @@ function Test-ProductionLanguageNativeInputAudit {
     $nativeText = $initializer[0].Extent.Text
     if ($senderText.IndexOf("[ValidateSet('alt-v', 'end', 'right', 'home', 'down', 'enter')]", [StringComparison]::Ordinal) -lt 0 -or
         [regex]::Matches($SourceAst.Extent.Text,
-            '\[DarkReNamerLanguageMenuReader\]::(?:KeyDown|KeyUp|Tap)\(').Count -ne 4) {
+            '\[DarkReNamerLanguageMenuReader\]::(?:KeyDown|KeyUp|Tap|TapExtended)\(').Count -ne 5) {
         return $false
     }
     foreach ($fragment in @(
@@ -2666,6 +2666,8 @@ function Test-ProductionLanguageNativeInputAudit {
         "[DarkReNamerLanguageMenuReader]::Tap([uint16]0x56)",
         "[DarkReNamerLanguageMenuReader]::KeyUp([uint16]0x12)",
         '[DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)',
+        '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)',
+        "if (`$Action -ceq 'enter')",
         "'end'   { 0x23 }", "'right' { 0x27 }", "'home'  { 0x24 }",
         "'down'  { 0x28 }", "'enter' { 0x0D }"
     )) {
@@ -2685,6 +2687,12 @@ function Test-ProductionLanguageNativeInputAudit {
         'throw new Win32Exception(Marshal.GetLastWin32Error())',
         'public static void Tap(ushort virtualKey)',
         'finally { KeyUp(virtualKey); }',
+        'public static void TapExtended(ushort virtualKey)',
+        'try { SendKey(virtualKey, 1); }',
+        'finally { SendKey(virtualKey, 3); }',
+        'Input down = KeyboardPacket(virtualKey, extended ? 1u : 0u)',
+        'Input up = KeyboardPacket(virtualKey, extended ? 3u : 2u)',
+        'Input input = KeyboardPacket(virtualKey, flags)',
         'TopStates = new uint[6], ViewStates = new uint[10]'
     )) {
         if ($nativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
@@ -2693,6 +2701,20 @@ function Test-ProductionLanguageNativeInputAudit {
 }
 if (-not (Test-ProductionLanguageNativeInputAudit -SourceAst $fromFile)) {
     throw 'Language menu native input lost its reviewed keys, foreground guard, or SendInput ABI.'
+}
+$nonExtendedLanguageSource = $recoveryModuleSource.Replace(
+    '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)',
+    '[DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)')
+if ($nonExtendedLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Extended language navigation negative fixture no longer matches the source.'
+}
+$nonExtendedTokens = $null
+$nonExtendedErrors = $null
+$nonExtendedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $nonExtendedLanguageSource, [ref]$nonExtendedTokens, [ref]$nonExtendedErrors)
+if ($nonExtendedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $nonExtendedAst)) {
+    throw 'Ordinary language navigation unexpectedly passed the extended-key source audit.'
 }
 $unguardedLanguageSource = $recoveryModuleSource.Replace(
     'Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session' + "`n" +
