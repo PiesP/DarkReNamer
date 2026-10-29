@@ -204,6 +204,30 @@ $script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
 $testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    if ($IsWindows) {
+        Initialize-NativeCapture
+        $lockedJournal = Join-Path $temporaryRoot 'held-active.drj'
+        [IO.File]::WriteAllBytes($lockedJournal, [Text.Encoding]::ASCII.GetBytes('held-journal-fixture'))
+        $fullBefore = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1
+        $held = [IO.FileStream]::new($lockedJournal, [IO.FileMode]::Open,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            $live = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1 -LiveJournal
+            Assert-ProductionLiveJournalCheckpoint -Expected $fullBefore -Actual $live
+            if ($live.Contains('sha256') -or $live.native_error -ne 32) {
+                throw 'Live held journal incorrectly reported readable content.'
+            }
+        }
+        finally { $held.Dispose() }
+        $fullAfter = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1
+        if (($fullBefore | ConvertTo-Json -Compress) -cne
+            ($fullAfter | ConvertTo-Json -Compress)) {
+            throw 'Held journal full checkpoint changed after releasing its content lock.'
+        }
+        Assert-Fails {
+            Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1 -LiveJournal
+        } 'unexpectedly allowed a content read handle'
+    }
     $languageRoot = Join-Path $temporaryRoot 'language-record'
     $languageDirectory = Join-Path $languageRoot 'DarkReNamer'
     [void](New-Item -ItemType Directory -Path $languageDirectory -Force)
@@ -4569,7 +4593,7 @@ function Test-DrValidActiveLanguageCrashContract {
         'Complete-AcceptanceOwnedProcessJob -Owned $child',
         'cancel.Current.HasKeyboardFocus',
         'Invoke-AutomationControl -Element $cancel',
-        'Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterCancel',
+        'Assert-ProductionValidActiveLiveCheckpoint -Expected $partial -Actual $afterCancel',
         'Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterClose',
         'if ($fullyVerified -and (Test-Path -LiteralPath $fixtureRoot))'
     )) {
