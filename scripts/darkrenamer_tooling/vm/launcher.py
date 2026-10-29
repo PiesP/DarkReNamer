@@ -1428,6 +1428,7 @@ def verify_valid_active_recovery(root, manifest, record):
                 (title, question, detail) or
                 row.get('cancel_default_focused') is not True or
                 row.get('apply_locked_after_cancel') is not True or
+                row.get('apply_locked_after_choice') is not True or
                 row.get('normal_close') is not True or
                 row.get('process_job_clean') is not True or
                 any(type(row.get(key)) is not int or row[key] <= 0 for key in

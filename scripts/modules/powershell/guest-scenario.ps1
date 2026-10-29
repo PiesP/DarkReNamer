@@ -1804,6 +1804,9 @@ function Invoke-ProductionValidActiveRecoveryCheck {
                         -Session $Session -CurrentLanguage $step.language `
                         -NextPreference $step.next -TimeoutSeconds $TimeoutSeconds
                 }
+                if ($apply.Current.IsEnabled) {
+                    throw 'Language selection enabled Apply while valid-active recovery remained pending.'
+                }
                 $afterChoice = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
                 Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterChoice
                 Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
@@ -1831,6 +1834,7 @@ function Invoke-ProductionValidActiveRecoveryCheck {
                     cancel_bounds = [ordered]@{ x=$cancelBounds.X; y=$cancelBounds.Y
                         width=$cancelBounds.Width; height=$cancelBounds.Height }
                     cancel_default_focused = $true; apply_locked_after_cancel = $true
+                    apply_locked_after_choice = $true
                     before = $before; at_startup = $atStartup; after_cancel = $afterCancel
                     after_choice = $afterChoice; after_close = $afterClose
                     choice = $choice; normal_close = $true; process_job_clean = $true

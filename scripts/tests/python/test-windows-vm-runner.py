@@ -293,6 +293,7 @@ class VmRunnerTests(unittest.TestCase):
                 'main_hwnd': main_hwnd, 'notice_hwnd': notice_hwnd,
                 'title': title, 'question': question, 'cancel_guidance': guidance,
                 'cancel_default_focused': True, 'apply_locked_after_cancel': True,
+                'apply_locked_after_choice': True,
                 'notice_bounds': {'x': 100, 'y': 100, 'width': 540, 'height': 320},
                 'cancel_bounds': {'x': 520, 'y': 350, 'width': 80, 'height': 30},
                 'before': copy.deepcopy(partial), 'at_startup': copy.deepcopy(partial),
@@ -407,6 +408,8 @@ class VmRunnerTests(unittest.TestCase):
                 process_id=999),
             lambda row: row['valid_active_recovery']['observations'][2].update(
                 apply_locked_after_cancel=False),
+            lambda row: row['valid_active_recovery']['observations'][0].update(
+                apply_locked_after_choice=False),
             lambda row: row['valid_active_recovery']['observations'][1]['cancel_bounds'].update(
                 x=700),
             lambda row: row['valid_active_recovery']['observations'][1]['startup_preference'].update(
