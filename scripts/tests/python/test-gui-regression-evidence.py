@@ -3797,7 +3797,18 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             cell = {'id': name, 'preference_kind': 'absent' if index == 0 else 'valid-saved',
                 'preference_value': value, 'resolved_language': 'ko' if index < 2 else 'en',
                 'process_id': pid, 'process_start_utc_ticks': ticks,
-                'startup': {'launch_request_to_ready_ms': 200.0,
+                'startup': {'clock': {
+                    'qpc_frequency': 10000000,
+                    'launch_request_ticks': 1000000000 + index * 1000000000,
+                    'process_create_begin_ticks': 1000100000 + index * 1000000000,
+                    'process_create_end_ticks': 1000200000 + index * 1000000000,
+                    'main_window_bound_ticks': 1001000000 + index * 1000000000,
+                    'command_ready_ticks': 1002000000 + index * 1000000000},
+                    'launch_request_to_main_bound_ms': 100.0,
+                    'process_start_to_main_bound_lower_ms': 80.0,
+                    'process_start_to_main_bound_upper_ms': 90.0,
+                    'main_bound_to_ready_ms': 100.0,
+                    'launch_request_to_ready_ms': 200.0,
                     'process_start_to_ready_lower_ms': 180.0,
                     'process_start_to_ready_upper_ms': 190.0,
                     'main_hwnd_bound': True, 'empty_grid': True, 'import_command_enabled': True},
@@ -3922,6 +3933,78 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                     evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
         path.write_bytes(original)
         self.refresh_runtime(run)
+
+    def test_runtime_startup_rounding_uses_raw_qpc_and_preserves_distinct_endpoints(self):
+        run = self.runtime_run()
+        raw = json.loads((run / 'output/acceptance-result.json').read_text())
+        for cell in raw['assertions']['scenario']['cells']:
+            startup = cell['startup']
+            evidence.validate_runtime_startup(startup, 'fixture startup')
+            self.assertEqual(startup['launch_request_to_main_bound_ms'], 100.0)
+            self.assertEqual(startup['main_bound_to_ready_ms'], 100.0)
+        startup = deepcopy(raw['assertions']['scenario']['cells'][0]['startup'])
+        startup['clock']['command_ready_ticks'] += 5
+        # A half-microsecond boundary may round differently in .NET/Python.
+        for value in (200.0, 200.001):
+            startup['launch_request_to_ready_ms'] = value
+            evidence.validate_runtime_startup(startup, 'midpoint startup')
+        startup['launch_request_to_ready_ms'] = 200.002
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_startup(startup, 'outside midpoint startup')
+
+    def test_rehashed_raw_startup_clock_rejects_missing_types_order_and_derived_corruption(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        mutations = []
+        raw = json.loads(original)
+        clock = raw['assertions']['scenario']['cells'][1]['startup']['clock']
+        for name in clock:
+            mutations.append((f'missing-{name}', lambda s, key=name: s['clock'].pop(key)))
+            for bad in (False, 0, -1, 2**63, float(clock[name])):
+                mutations.append((f'{name}-{bad!r}',
+                    lambda s, key=name, value=bad: s['clock'].__setitem__(key, value)))
+        boundaries = ('launch_request_ticks', 'process_create_begin_ticks', 'process_create_end_ticks',
+                      'main_window_bound_ticks', 'command_ready_ticks')
+        for earlier, later in zip(boundaries, boundaries[1:]):
+            mutations.append((f'inverted-{earlier}-{later}',
+                lambda s, left=earlier, right=later: s['clock'].__setitem__(right, s['clock'][left] - 1)))
+        for name in evidence.RUNTIME_STARTUP_INTERVALS:
+            mutations.extend(((f'missing-{name}', lambda s, key=name: s.pop(key)),
+                (f'plus-.001-{name}', lambda s, key=name: s.__setitem__(key, s[key] + 0.001)),
+                (f'bool-{name}', lambda s, key=name: s.__setitem__(key, True))))
+        mutations.append(('main-bound-flag', lambda s: s.__setitem__('main_hwnd_bound', 1)))
+        for name, mutate in mutations:
+            changed = json.loads(original)
+            mutate(changed['assertions']['scenario']['cells'][1]['startup'])
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_rehashed_duplicate_raw_qpc_field_is_rejected(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_text()
+        target = '"qpc_frequency": 10000000'
+        self.assertIn(target, original)
+        changed = original.replace(target, target + ', "qpc_frequency": 10000000', 1).encode()
+        path.write_bytes(changed)
+        collection_path = run / 'collection.json'
+        collection = json.loads(collection_path.read_text())
+        for row in collection['files']:
+            if row['relative_path'] == path.name:
+                row.update(bytes=len(changed), sha256=digest(changed))
+        write_json(collection_path, collection)
+        result_path = run / 'output/run-result.json'
+        result = json.loads(result_path.read_text())
+        result.update(collection_sha256=digest(collection_path.read_bytes()),
+                      observer_result_sha256=digest(changed))
+        write_json(result_path, result)
+        with self.assertRaisesRegex(evidence.EvidenceError, 'duplicate field: qpc_frequency'):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
 
     def test_product_appearance_golden_codec_and_strict_default_snapshot(self):
         record = self.saved_default_appearance()

@@ -3645,6 +3645,43 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds `
                     -Label 'runtime baseline application' `
                     -ProcessLifecycleObservations $ProcessLifecycleObservations
+                $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+                if ($grid.pattern.Current.RowCount -ne 0) {
+                    throw 'Runtime baseline product did not start with an empty list.'
+                }
+                $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+                while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                    [IntPtr]$application.main_handle, [uint32]0x801D)) {
+                    if ((Get-Date) -ge $readyDeadline) {
+                        throw 'Runtime baseline import command was not ready.'
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
+                $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                $createBegin = [long]$application.owned.ProcessCreateBeginTimestamp
+                $createEnd = [long]$application.owned.ProcessCreateEndTimestamp
+                $mainBound = [long]$application.main_bound_ticks
+                $frequency = [long][Diagnostics.Stopwatch]::Frequency
+                if ($application.launch_ticks -le 0 -or $frequency -le 0 -or
+                    $createBegin -lt $application.launch_ticks -or $createEnd -lt $createBegin -or
+                    $mainBound -lt $createEnd -or $readyTicks -lt $mainBound) {
+                    throw 'Runtime baseline process creation, main binding, or readiness clock is invalid.'
+                }
+                $cell.startup = [ordered]@{
+                    clock=[ordered]@{ qpc_frequency=$frequency;
+                        launch_request_ticks=[long]$application.launch_ticks;
+                        process_create_begin_ticks=$createBegin; process_create_end_ticks=$createEnd;
+                        main_window_bound_ticks=$mainBound; command_ready_ticks=[long]$readyTicks }
+                    launch_request_to_main_bound_ms=[Math]::Round(($mainBound - $application.launch_ticks) * 1000.0 / $frequency, 3)
+                    process_start_to_main_bound_lower_ms=[Math]::Round(($mainBound - $createEnd) * 1000.0 / $frequency, 3)
+                    process_start_to_main_bound_upper_ms=[Math]::Round(($mainBound - $createBegin) * 1000.0 / $frequency, 3)
+                    main_bound_to_ready_ms=[Math]::Round(($readyTicks - $mainBound) * 1000.0 / $frequency, 3)
+                    launch_request_to_ready_ms=[Math]::Round(($readyTicks - $application.launch_ticks) * 1000.0 / $frequency, 3)
+                    process_start_to_ready_lower_ms=[Math]::Round(($readyTicks - $createEnd) * 1000.0 / $frequency, 3)
+                    process_start_to_ready_upper_ms=[Math]::Round(($readyTicks - $createBegin) * 1000.0 / $frequency, 3)
+                    main_hwnd_bound=$true; empty_grid=$true; import_command_enabled=$true
+                }
+                # Lifetime verification, capture sizing, and environment probes are outside these clocks.
                 $nativeLifetime = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
                     [IntPtr]$application.process.Handle, [uint32]$application.process.Id, 0, $false)
                 if ([decimal]$application.owned.process_start_time_utc_ticks -ne
@@ -3670,30 +3707,6 @@ function Invoke-ObserverRuntimeBaselineScenario {
                 $cell['environment'] = $environment
                 $cell.process_id = [int]$application.process.Id
                 $cell.process_start_utc_ticks = [long]$application.process.StartTime.ToUniversalTime().Ticks
-                $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
-                if ($grid.pattern.Current.RowCount -ne 0) {
-                    throw 'Runtime baseline product did not start with an empty list.'
-                }
-                $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
-                while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                    [IntPtr]$application.main_handle, [uint32]0x801D)) {
-                    if ((Get-Date) -ge $readyDeadline) {
-                        throw 'Runtime baseline import command was not ready.'
-                    }
-                    Start-Sleep -Milliseconds 100
-                }
-                $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
-                $createBegin = [long]$application.owned.ProcessCreateBeginTimestamp
-                $createEnd = [long]$application.owned.ProcessCreateEndTimestamp
-                if ($createBegin -le 0 -or $createEnd -lt $createBegin -or $readyTicks -lt $createEnd) {
-                    throw 'Runtime baseline process creation bracket is invalid.'
-                }
-                $cell.startup = [ordered]@{
-                    launch_request_to_ready_ms=[Math]::Round(($readyTicks - $application.launch_ticks) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
-                    process_start_to_ready_lower_ms=[Math]::Round(($readyTicks - $createEnd) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
-                    process_start_to_ready_upper_ms=[Math]::Round(($readyTicks - $createBegin) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
-                    main_hwnd_bound=$true; empty_grid=$true; import_command_enabled=$true
-                }
                 # Keep environment queries outside the launch-to-ready clock above.
                 $appearanceReady = Get-ObserverRuntimeLightAppearance
                 $appearanceMenu = Get-VmAutomatedAppearance -Window $application.main `

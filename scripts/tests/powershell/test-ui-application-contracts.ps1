@@ -86,7 +86,11 @@ namespace Windows.Automation {
         public List<AutomationElement> Children = new List<AutomationElement>();
         public Dictionary<object, object> Patterns = new Dictionary<object, object>();
         public int FocusCalls;
-        public void SetFocus() { FocusCalls++; }
+        public long FirstFocusTicks;
+        public void SetFocus() {
+            if (FirstFocusTicks == 0) FirstFocusTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            FocusCalls++;
+        }
         public bool TryGetCurrentPattern(object key, out object value) { return Patterns.TryGetValue(key, out value); }
         public AutomationElement[] FindAll(TreeScope scope, Condition condition) {
             var result = new List<AutomationElement>();
@@ -423,10 +427,12 @@ public static class DarkReNamerVmAcceptanceNative {
     function Wait-ExactApplicationMainWindow { param($Process, $ExpectedSession, $ExpectedClassName, $ExpectedTitle, $TimeoutSeconds, $Label)
         if ($Process -ne $startupFixture.process -or $ExpectedSession -ne 2 -or $ExpectedClassName -cne 'DarkReNamerWindow' -or
             $ExpectedTitle -cne 'DarkReNamer' -or $TimeoutSeconds -ne 17) { throw 'Startup lost its exact window wait contract.' }
-        $events.Add('wait'); @{ element = $startupFixture.window; handle = 5151L }
+        $events.Add('wait'); $startupFixture.wait_return_ticks = [Diagnostics.Stopwatch]::GetTimestamp()
+        @{ element = $startupFixture.window; handle = 5151L }
     }
     function Assert-AcceptanceForegroundBinding { param($Process, $ExpectedSession, $MainWindowHandle, [switch]$RequireMainWindow)
         if ($MainWindowHandle -ne 5151 -or -not $RequireMainWindow) { throw 'Startup foreground used an unpinned window.' }
+        $startupFixture.foreground_ticks = [Diagnostics.Stopwatch]::GetTimestamp()
         $events.Add('foreground')
     }
     $lifecycles = [Collections.Generic.List[object]]::new()
@@ -434,6 +440,17 @@ public static class DarkReNamerVmAcceptanceNative {
     if (($events -join ',') -cne 'hash:verified-app.exe,start,wait,foreground' -or $application.main_handle -ne 5151 -or
         $application.main -ne $window -or $window.FocusCalls -ne 1 -or $lifecycles.Count -ne 1 -or
         $application.process_lifecycle.executable_path -cne 'verified-app.exe' -or $application.process_lifecycle.executable_sha256 -cne ('d' * 64)) { throw 'Successful startup lost its pinned window or source lifecycle.' }
+    if ($application.main_bound_ticks -isnot [long] -or
+        $application.launch_ticks -gt $startupFixture.wait_return_ticks -or
+        $startupFixture.wait_return_ticks -gt $application.main_bound_ticks -or
+        $application.main_bound_ticks -gt $window.FirstFocusTicks -or
+        $window.FirstFocusTicks -gt $startupFixture.foreground_ticks) {
+        throw 'Main-window binding clock did not precede foreground work after the exact wait.'
+    }
+    $startupSource = ${function:Start-AcceptanceApplication}.ToString()
+    if ($startupSource -cnotmatch '(?s)-Label \$Label\s+\$application\.main_bound_ticks = \[Diagnostics.Stopwatch\]::GetTimestamp\(\)\s+\$window = \$binding.element') {
+        throw 'The main-bound QPC endpoint is not immediately after the exact window wait.'
+    }
 }
 
 # Import the real entry module: only its verified definition libraries are inert.
