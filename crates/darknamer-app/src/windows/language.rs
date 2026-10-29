@@ -21,6 +21,7 @@ pub(super) fn initialize_startup_language() -> io::Result<StartupLanguage> {
         || LanguagePreferencesLoad {
             preference: LanguagePreference::System,
             missing: false,
+            migration_failure: None,
             failure: Some(io::Error::other("LOCALAPPDATA is unavailable")),
         },
         |root| load_language_or_default(&PathBuf::from(root).join("DarkReNamer").join("journal")),

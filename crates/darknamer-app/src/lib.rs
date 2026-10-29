@@ -978,7 +978,7 @@ pub(crate) fn format_exact_bytes(bytes: u64) -> String {
         }
         grouped.push(digit);
     }
-    format!("{grouped} bytes")
+    crate::i18n::common::byte_count(&grouped)
 }
 
 #[cfg(any(windows, test))]
@@ -5334,7 +5334,15 @@ mod tests {
         ] {
             assert_eq!(format_iec_file_size(bytes), expected);
         }
-        assert_eq!(format_exact_bytes(134_637_824), "134,637,824 bytes");
+        for (language, expected) in [
+            (crate::i18n::Language::Korean, "134,637,824바이트"),
+            (crate::i18n::Language::English, "134,637,824 bytes"),
+            (crate::i18n::Language::Japanese, "134,637,824 バイト"),
+        ] {
+            crate::i18n::with_language(language, || {
+                assert_eq!(format_exact_bytes(134_637_824), expected)
+            });
+        }
     }
 
     #[test]

@@ -468,7 +468,7 @@ fn draw_owner_button_with_readiness(
     paint_button(
         resources,
         draw.hwndItem,
-        rail_spec.map(|spec| spec.rail_label),
+        rail_spec.map(|spec| spec.localized_rail_label()),
         draw.hDC,
         draw.rcItem,
         ButtonPaintContext {

@@ -1364,8 +1364,9 @@ pub(super) fn apply_command_states(state: &AppState) {
             MF_BYCOMMAND,
         )
     };
-    // The checked choice is the preference saved for the next normal startup.
-    // It does not change the language of this live window or its work session.
+    // SAFETY: the four contiguous language IDs belong to this live menu. The
+    // check follows the acknowledged saved preference, without changing this
+    // window's language or work session.
     unsafe {
         CheckMenuRadioItem(
             state.menu,

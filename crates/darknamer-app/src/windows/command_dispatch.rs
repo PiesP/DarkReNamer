@@ -1039,7 +1039,7 @@ pub(super) fn prompt_spec(
 }
 
 fn prompt_caption(command: u16) -> Option<String> {
-    let menu_label = command_ui_spec(command)?.menu_label;
+    let menu_label = command_ui_spec(command)?.localized_menu_label();
     Some(
         menu_label
             .strip_suffix("...")

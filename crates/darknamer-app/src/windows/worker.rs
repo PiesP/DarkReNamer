@@ -433,6 +433,9 @@ fn drain_preferences_events(state: &mut AppState) {
     for message in state.preference_persistence.drain(state.close_pending) {
         state.set_transient_status(message);
     }
+    if let Some(preference) = state.preference_persistence.take_saved_language() {
+        state.language_preference = preference;
+    }
 }
 
 pub(super) fn handle_preferences_wake(window: HWND, state: &mut AppState) {

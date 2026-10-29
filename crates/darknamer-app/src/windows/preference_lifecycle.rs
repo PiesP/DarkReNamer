@@ -17,6 +17,7 @@ pub(crate) struct PreferencePersistence {
     language_terminal_observed: bool,
     language_notify_saved: bool,
     language_requested: Option<u64>,
+    language_saved: Option<LanguagePreference>,
 }
 
 #[derive(Default)]
@@ -87,6 +88,9 @@ impl WriterStatus {
 }
 
 impl PreferencePersistence {
+    pub(crate) fn take_saved_language(&mut self) -> Option<LanguagePreference> {
+        self.language_saved.take()
+    }
     pub(crate) fn install_language_writer(&mut self, writer: LanguagePreferencesWriter) {
         self.language = Some(writer);
     }
@@ -151,6 +155,9 @@ impl PreferencePersistence {
             closing,
         ));
         if let Some(writer) = &self.language {
+            if let Some(preference) = writer.take_saved() {
+                self.language_saved = Some(preference);
+            }
             for event in writer.drain_events() {
                 match event {
                     PreferenceWriteEvent::Saved { generation }

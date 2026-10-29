@@ -2399,7 +2399,7 @@ impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
                 let folder = folder.as_ref().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "the current save folder was not retained; navigate to it again",
+                        crate::i18n::native_ui::Text::SaveFolderNotRetained.get(),
                     )
                 })?;
                 require_matching_folder_identity(folder.identity, selected_parent_identity)?;

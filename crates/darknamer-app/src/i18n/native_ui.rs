@@ -2,6 +2,7 @@
 
 crate::i18n::catalog! {
     text {
+        SaveFolderNotRetained = ("현재 저장 폴더를 유지하지 못했습니다. 폴더를 다시 선택하세요.", "The current save folder was not retained; navigate to it again.", "現在の保存先フォルダーを保持できませんでした。フォルダーを再度選択してください。");
         MenuFile = ("파일(&F)", "&File", "ファイル(&F)");
         MenuEdit = ("편집(&E)", "&Edit", "編集(&E)");
         MenuView = ("보기(&V)", "&View", "表示(&V)");

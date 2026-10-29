@@ -357,7 +357,11 @@ fn perform_recovery_export(
             .create_new_file(std::ffi::OsStr::new(name))
             .and_then(|mut output| evidence.copy_exact_to_file(&mut output));
         match copy {
-            Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
+            Ok(bytes) => results.push(format!(
+                "{}: {}",
+                crate::format_exact_bytes(bytes),
+                path.display()
+            )),
             Err(error) => {
                 failures = failures.saturating_add(1);
                 results.push(rt::export_failed(&path.display(), &error));
@@ -388,7 +392,11 @@ pub(super) fn export_valid_journal(
         .create_new_file(std::ffi::OsStr::new(leaf))
         .and_then(|mut output| journal.copy_exact_to_file(&mut output));
     match copy {
-        Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
+        Ok(bytes) => results.push(format!(
+            "{}: {}",
+            crate::format_exact_bytes(bytes),
+            path.display()
+        )),
         Err(error) => {
             *failures = failures.saturating_add(1);
             results.push(rt::export_failed(&path.display(), &error));

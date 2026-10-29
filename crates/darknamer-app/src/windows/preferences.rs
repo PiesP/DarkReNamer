@@ -50,6 +50,7 @@ pub(crate) struct AppearancePreferencesLoad {
 pub(crate) struct LanguagePreferencesLoad {
     pub(crate) preference: LanguagePreference,
     pub(crate) missing: bool,
+    pub(crate) migration_failure: Option<io::Error>,
     pub(crate) failure: Option<io::Error>,
 }
 
@@ -79,28 +80,35 @@ pub(crate) fn load_language_or_default(journal_root: &Path) -> LanguagePreferenc
         Ok(Some(preference)) => LanguagePreferencesLoad {
             preference,
             missing: false,
+            migration_failure: None,
             failure: None,
         },
         Ok(None) => {
-            // Only a successfully decoded old record establishes a legacy user.
-            let legacy = matches!(read(&path_for_journal_root(journal_root)), Ok(Some(_)))
-                || matches!(
-                    read_appearance(&appearance_path_for_journal_root(journal_root)),
-                    Ok(Some(_))
-                );
+            let columns = read(&path_for_journal_root(journal_root));
+            let appearance = read_appearance(&appearance_path_for_journal_root(journal_root));
+            let legacy = matches!(&columns, Ok(Some(_))) || matches!(&appearance, Ok(Some(_)));
+            let migration_failure = if legacy {
+                None
+            } else {
+                columns.err().or_else(|| appearance.err())
+            };
             LanguagePreferencesLoad {
-                preference: if legacy {
+                // A temporarily unreadable old file cannot establish a fresh
+                // installation. Keep Korean until migration can be resolved.
+                preference: if legacy || migration_failure.is_some() {
                     LanguagePreference::Korean
                 } else {
                     LanguagePreference::System
                 },
                 missing: true,
+                migration_failure,
                 failure: None,
             }
         }
         Err(error) => LanguagePreferencesLoad {
             preference: LanguagePreference::System,
             missing: false,
+            migration_failure: None,
             failure: Some(error),
         },
     }
@@ -152,16 +160,31 @@ pub(crate) fn save_language(path: &Path, preference: LanguagePreference) -> io::
 
 /// Language has an independent queue and authority; closing never creates a new request.
 pub(crate) struct LanguagePreferencesWriter {
+    saved: Receiver<LanguagePreference>,
     writer: CoalescingWriter<LanguagePreference>,
 }
 
 impl LanguagePreferencesWriter {
+    pub(crate) fn take_saved(&self) -> Option<LanguagePreference> {
+        self.saved.try_iter().last()
+    }
     pub(crate) fn spawn(
         path: PathBuf,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
+        let (sender, saved) = channel();
         Ok(Self {
-            writer: CoalescingWriter::spawn(path, "darkrenamer-language", wake, save_language)?,
+            saved,
+            writer: CoalescingWriter::spawn(
+                path,
+                "darkrenamer-language",
+                wake,
+                move |path, preference| {
+                    save_language(path, preference)?;
+                    let _sent = sender.send(preference);
+                    Ok(())
+                },
+            )?,
         })
     }
     pub(crate) fn submit(&mut self, preference: LanguagePreference) -> io::Result<u64> {
@@ -1654,6 +1677,45 @@ mod language_tests {
     }
 
     #[test]
+    fn unreadable_legacy_settings_defer_default_migration_but_allow_explicit_language()
+    -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let journal = temp.path().join("journal");
+        let columns = path_for_journal_root(&journal);
+        fs::create_dir(&columns)?;
+        let uncertain = load_language_or_default(&journal);
+        assert_eq!(uncertain.preference, LanguagePreference::Korean);
+        assert!(
+            uncertain.missing
+                && uncertain.failure.is_none()
+                && uncertain.migration_failure.is_some()
+        );
+        assert!(!language_path_for_journal_root(&journal).exists());
+        fs::remove_dir(&columns)?;
+        save(&columns, &crate::default_column_states())?;
+        let recovered = load_language_or_default(&journal);
+        assert_eq!(recovered.preference, LanguagePreference::Korean);
+        assert!(recovered.migration_failure.is_none());
+        fs::remove_file(&columns)?;
+        fs::create_dir(&columns)?;
+        save_appearance(
+            &appearance_path_for_journal_root(&journal),
+            UiAppearance::default(),
+        )?;
+        let proven_legacy = load_language_or_default(&journal);
+        assert_eq!(proven_legacy.preference, LanguagePreference::Korean);
+        assert!(proven_legacy.migration_failure.is_none());
+        save_language(
+            &language_path_for_journal_root(&journal),
+            LanguagePreference::Japanese,
+        )?;
+        let explicit = load_language_or_default(&journal);
+        assert_eq!(explicit.preference, LanguagePreference::Japanese);
+        assert!(explicit.failure.is_none() && explicit.migration_failure.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn invalid_language_records_fail_without_changing_existing_settings() -> io::Result<()> {
         let temp = tempfile::tempdir()?;
         let journal = temp.path().join("journal");
@@ -1712,6 +1774,7 @@ mod language_tests {
             lifecycle.install_language_writer(writer);
             assert!(!lifecycle.is_joined());
             lifecycle.submit_language(LanguagePreference::English)?;
+            assert_eq!(lifecycle.take_saved_language(), None);
             receiver
                 .recv_timeout(Duration::from_secs(5))
                 .map_err(io::Error::other)?;
@@ -1720,6 +1783,10 @@ mod language_tests {
                     .drain(false)
                     .iter()
                     .any(|message| message.contains("next normal startup"))
+            );
+            assert_eq!(
+                lifecycle.take_saved_language(),
+                Some(LanguagePreference::English)
             );
             assert_eq!(
                 load_language_or_default(&journal).preference,
@@ -1751,6 +1818,7 @@ mod language_tests {
                     .any(|message| message.contains("may not survive"))
             );
             lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
+            assert_eq!(lifecycle.take_saved_language(), None);
             assert!(path.is_dir());
             Ok(())
         })

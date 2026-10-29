@@ -27,7 +27,7 @@ crate::i18n::catalog! {
         CopyElided = ("\n\n표시 길이를 넘는 부분은 …으로 생략합니다. 복사한 정보에도 같은 축약이 적용됩니다.", "\n\nText beyond the display limit is shortened with …. Copied details use the same shortening.", "\n\n表示上限を超える部分は…で省略します。コピーした情報にも同じ省略が適用されます。");
         CompareFull = ("\n\n축약문에 차이가 드러나지 않습니다. 전체 정보에서 비교하세요.", "\n\nThe shortened text hides the difference. Compare the full details.", "\n\n省略表示では差異が分かりません。詳細情報で比較してください。");
         LongElided = ("\n\n긴 부분은 …으로 생략합니다.", "\n\nLong portions are shortened with ….", "\n\n長い部分は…で省略します。");
-        FullInfoHint = ("\n전체 이름과 경로: '예시 전체 정보 · 복사'", "\nFull names and paths: 'Full example details · Copy'", "\n名前とパスの詳細: 「例の詳細情報・コピー」");
+        FullInfoHint = ("\n전체 이름과 경로: '예시 전체 정보 · 복사'", "\nFull names and paths: 'Full example details · Copy'", "\n名前とパスの詳細: 「変更例の詳細・コピー」");
         RecoveryGuidance = ("복구 확인을 다시 보려면 앱을 종료한 뒤 다시 실행하세요. 취소해도 파일은 변경되지 않고 복구 잠금을 유지합니다.", "To see recovery confirmation again, close and reopen the app. Cancel leaves files unchanged and keeps the recovery lock.", "復旧の確認を再表示するには、アプリを終了して再度起動してください。キャンセルしてもファイルは変更されず、復旧ロックは保持されます。");
         CurrentName = ("현재 이름", "Current name", "現在の名前");
         ProposedName = ("변경 후 이름", "Proposed name", "変更後の名前");
@@ -79,6 +79,8 @@ crate::i18n::catalog! {
         AppearancePreferences = ("모양 설정", "Appearance preferences", "外観設定");
     }
     messages {
+        language_migration_pending(error: &dyn std::fmt::Display) = ("기존 설정의 언어 정책을 확인하지 못해 임시로 한국어를 사용합니다. 기본 언어는 저장하지 않습니다. 언어를 직접 선택하거나 다시 시작해 재시도하세요: {error}", "Legacy language migration could not be resolved. Korean is used temporarily without saving a default. Select a language explicitly or restart to retry: {error}", "従来の設定から言語を移行できないため、一時的に韓国語を使用します。既定の言語は保存しません。言語を明示的に選択するか、再起動して再試行してください: {error}");
+        byte_count(value: &dyn std::fmt::Display) = ("{value}바이트", "{value} bytes", "{value} バイト");
         language_read_failed(error: &dyn std::fmt::Display) = ("언어 설정을 읽지 못해 이번 실행에서는 덮어쓰지 않습니다: {error}", "Language preferences could not be read; this run will not overwrite them: {error}", "言語設定を読み込めなかったため、この実行中は上書きしません: {error}");
         system_languages_read_failed(error: &dyn std::fmt::Display) = ("Windows 표시 언어를 읽지 못해 이번 실행에서는 영어를 사용합니다: {error}", "Windows UI languages could not be read. English is used for this run: {error}", "Windowsの表示言語を読み込めないため、この実行中は英語を使用します: {error}");
         default_language_save_failed(error: &dyn std::fmt::Display) = ("기본 UI 언어를 저장하지 못해 다음 실행 때 언어가 달라질 수 있습니다: {error}", "The default UI language could not be saved and may change at the next startup: {error}", "既定のUI言語を保存できなかったため、次回起動時に言語が変わる可能性があります: {error}");

@@ -867,11 +867,15 @@ impl AppState {
         // Commit a missing System/legacy default before other settings can turn
         // a new installation into an apparent Korean legacy installation.
         if startup.loaded.missing
+            && startup.loaded.migration_failure.is_none()
             && language_preferences_authorized
             && let Err(error) =
                 crate::preferences::save_language(&language_preferences_path, language_preference)
         {
             ui_status.set_transient(crate::i18n::common::default_language_save_failed(&(error)));
+        }
+        if let Some(error) = startup.loaded.migration_failure {
+            ui_status.set_transient(crate::i18n::common::language_migration_pending(&error));
         }
         let column_states = loaded_columns.columns;
         let appearance = loaded_appearance.appearance;
@@ -1259,7 +1263,6 @@ impl AppState {
         }
         match self.preference_persistence.submit_language(preference) {
             Ok(()) => {
-                self.language_preference = preference;
                 self.set_transient_status(crate::i18n::common::Text::LanguageSaving.get());
             }
             Err(error) => {
