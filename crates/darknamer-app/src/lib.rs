@@ -140,43 +140,37 @@ pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 pub(crate) const LIST_COLUMN_FIT_GUTTER_DIP: i32 = 1;
 #[cfg(any(windows, test))]
 pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) const EMPTY_LIST_STATUS: &str =
     crate::i18n::common::Text::EmptyList.in_language(crate::i18n::Language::Korean);
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) const PREVIEW_SYNC_FAILURE_STATUS: &str =
     crate::i18n::common::Text::PreviewRenderBlocked.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
-pub(crate) const PREVIEW_SYNC_BLOCK_MESSAGE: &str =
-    crate::i18n::common::Text::PreviewSyncBlocked.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str =
     crate::i18n::common::Text::EmptyInstruction.in_language(crate::i18n::Language::Korean);
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) const EMPTY_STATE_SAFETY: &str =
     crate::i18n::common::Text::EmptySafety.in_language(crate::i18n::Language::Korean);
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) const EMPTY_STATE_SAFETY_RAILS: &str =
     crate::i18n::common::Text::EmptySafetyWrapped.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const EMPTY_STATE_ADD_LABEL: &str =
     crate::i18n::common::Text::AddFiles.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const DROP_ACCEPTING_TEXT: &str =
     crate::i18n::common::Text::DropAccepting.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const DROP_LOCKED_TEXT: &str =
     crate::i18n::common::Text::DropLocked.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const DROP_UNSUPPORTED_TEXT: &str =
     crate::i18n::common::Text::DropUnsupported.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const DROP_FULL_TEXT: &str =
     crate::i18n::common::Text::DropFull.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
-pub(crate) const STATUS_COUNT_SAMPLE: &str =
-    crate::i18n::common::Text::StatusSample.in_language(crate::i18n::Language::Korean);
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) const STATUS_CANCEL_LABEL: &str =
     crate::i18n::common::Text::Cancel.in_language(crate::i18n::Language::Korean);
 
@@ -1000,7 +994,7 @@ pub(crate) fn format_timestamp_fallback(date: [u16; 3], time: [u16; 3]) -> Strin
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
 pub const COMPATIBILITY_TARGET: &str = "DarkNamer 08.02.10";
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) const ACTIVE_RECOVERY_STATUS_GUIDANCE: &str =
     crate::i18n::common::Text::RecoveryGuidance.in_language(crate::i18n::Language::Korean);
 

@@ -575,6 +575,7 @@ fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
 }
 
 fn run_unsafe() -> io::Result<()> {
+    let startup_language = super::language::initialize_startup_language()?;
     if process_is_elevated()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -627,7 +628,6 @@ fn run_unsafe() -> io::Result<()> {
     if unsafe { RegisterClassExW(&window_class) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let startup_language = super::language::initialize_startup_language()?;
     let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
     let startup_recovery_pending = runtime.recovery_locked

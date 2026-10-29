@@ -145,7 +145,7 @@ crate::i18n::catalog! {
         DragDropItemAndPathLimit = ("선택 항목이 남은 개수와 UTF-16 경로 용량 안전 한도를 초과해 제한된 수만 처리합니다.", "The selection exceeds both the remaining item count and safe UTF-16 path capacity; only a bounded number will be processed.", "選択項目が残り件数と UTF-16 パス容量の安全上限を超えたため、制限内の件数のみ処理します。");
         DragDropItemLimit = ("선택 항목이 남은 개수 한도를 초과해 제한된 수만 처리합니다.", "The selection exceeds the remaining item count; only a bounded number will be processed.", "選択項目が残り件数の上限を超えたため、制限内の件数のみ処理します。");
         DragDropPathLimit = ("선택 경로가 UTF-16 경로 용량 안전 한도를 초과해 이미 확인한 항목만 처리합니다.", "Selected paths exceed the safe UTF-16 path capacity; only already checked items will be processed.", "選択したパスが UTF-16 パス容量の安全上限を超えたため、確認済みの項目のみ処理します。");
-        ListViewIconRetiring = ("아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다.", "Finishing icon lookup. The window will close when it completes.", "アイコン情報の取得を終了しています。完了後にウィンドウを閉じます。");
+
         TextIoFileTooLarge = ("가져오기 파일이 2 MiB 한도를 초과합니다", "The import file exceeds the 2 MiB limit", "読み込みファイルが 2 MiB の上限を超えています");
     }
     messages {

@@ -2392,7 +2392,7 @@ impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
                 let leaf = path.file_name().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "text export destination must have a file name",
+                        crate::i18n::runtime::Text::ExportMissingName.get(),
                     )
                 })?;
                 let folder = self.folder.borrow();

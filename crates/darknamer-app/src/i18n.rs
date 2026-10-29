@@ -148,7 +148,7 @@ pub(crate) fn with_language<T>(language: Language, body: impl FnOnce() -> T) -> 
 macro_rules! catalog {
     (
         text { $( $key:ident = ($ko:literal, $en:literal, $ja:literal); )* }
-        messages { $( $name:ident ( $( $arg:ident : $kind:ty ),* $(,)? ) =
+        messages { $( $(#[$message_attr:meta])* $name:ident ( $( $arg:ident : $kind:ty ),* $(,)? ) =
             ($msg_ko:literal, $msg_en:literal, $msg_ja:literal); )* }
     ) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,6 +168,7 @@ macro_rules! catalog {
             }
         }
         $( #[cfg_attr(not(windows), allow(dead_code, reason = "catalogs also embed Windows-only presentation"))]
+        $(#[$message_attr])*
         pub(crate) fn $name( $( $arg: $kind ),* ) -> String {
             match $crate::i18n::current_language() {
                 $crate::i18n::Language::Korean => format!($msg_ko, $( $arg = $arg ),*),

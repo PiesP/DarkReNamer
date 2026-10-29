@@ -491,7 +491,7 @@ pub(crate) fn prepare_text_export_target(path: &Path) -> io::Result<TextExportTa
     let parent_path = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            crate::i18n::runtime::Text::ExportMissingParent.get(),
+            "text export destination must have a parent directory",
         )
     })?;
     let leaf = path.file_name().ok_or_else(|| {

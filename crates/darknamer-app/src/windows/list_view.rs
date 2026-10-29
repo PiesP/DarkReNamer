@@ -4024,7 +4024,7 @@ mod native_tests {
                 assert!(state.close_pending && state.mutation_locked);
                 assert_eq!(
                     state.ui_status.message_text(),
-                    crate::i18n::native_ui::Text::ListViewIconRetiring.get()
+                    crate::i18n::runtime::Text::IconShutdownProgress.get()
                 );
                 assert!(!guardian.shared.is_joined());
             }
