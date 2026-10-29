@@ -317,7 +317,9 @@ fn with_production_test_window<R>(
     // Attach the startup menu before selecting the requested production mode.
     // SAFETY: the live owner handles this pointer-free private message.
     unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
-    install_menu_mode_for_test(window, owner_draw)?;
+    if customize {
+        install_menu_mode_for_test(window, owner_draw)?;
+    }
     // SAFETY: the window is live, owned by this UI thread, and made visible so
     // TrackPopupMenuEx creates a genuine system #32768 popup window.
     unsafe {
