@@ -43,7 +43,8 @@ class CliFixture:
         self.executable_sha = hashlib.sha256(self.executable_bytes).hexdigest()
         (self.handoff_root / "DarkReNamer.exe").write_bytes(self.executable_bytes)
         self.handoff = {
-            "schema_version": 1, "source_sha": self.source_sha, "workflow_run": 12,
+            "schema_version": 2, "source_sha": self.source_sha, "workflow_run": 12,
+            "workflow_attempt": 1, "package_layout": "portable-windows-x64-v1",
             "executable": {"filename": "DarkReNamer.exe", "sha256": self.executable_sha},
         }
         self.handoff_bytes = compact(self.handoff)

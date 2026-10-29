@@ -2,6 +2,7 @@
 param(
     [string] $ArchivePath,
     [string] $DestinationPath,
+    [ValidateSet('Handoff', 'User', 'Support')][string] $Layout = 'Handoff',
     [switch] $LibraryOnly
 )
 
@@ -11,10 +12,23 @@ $ErrorActionPreference = 'Stop'
 function Get-CandidateHandoffNames {
     @(
         'DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json',
-        'DarkReNamer.exe', 'DarkReNamer.pdb', 'DISTRIBUTION.md', 'LICENSE',
+        'DarkReNamer.exe', 'DarkReNamer.pdb',
+        'DarkReNamer-support-windows-x64.zip', 'DarkReNamer-windows-x64.zip',
+        'DISTRIBUTION.md', 'LICENSE',
         'release-handoff.json', 'release-metrics.json', 'SHA256SUMS.txt',
         'THIRD_PARTY_LICENSES.html', 'THIRD_PARTY_NOTICES.md'
     )
+}
+
+function Get-CandidateArchiveNames {
+    param([ValidateSet('Handoff', 'User', 'Support')][string] $Layout)
+    switch ($Layout) {
+        'Handoff' { @(Get-CandidateHandoffNames) }
+        'User' { @('DarkReNamer.exe', 'LICENSE', 'release-handoff.json',
+            'RUN.txt', 'THIRD_PARTY_LICENSES.html', 'THIRD_PARTY_NOTICES.md') }
+        'Support' { @('DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json',
+            'DISTRIBUTION.md', 'release-handoff.json', 'release-metrics.json') }
+    }
 }
 
 function Read-CandidateBytes {
@@ -45,7 +59,8 @@ function Assert-CandidateExtraFields {
 }
 
 function Get-BoundedCandidateDirectory {
-    param([IO.FileStream] $Stream, [long] $MaximumEntryBytes, [long] $MaximumExpandedBytes)
+    param([IO.FileStream] $Stream, [long] $MaximumEntryBytes, [long] $MaximumExpandedBytes,
+        [string] $Layout)
     # Bound metadata before materializing entries or opening any decompressor.
     $tailLength = [int][Math]::Min(65557, $Stream.Length)
     if ($tailLength -lt 22) { throw 'Candidate ZIP has no complete end record.' }
@@ -64,7 +79,7 @@ function Get-BoundedCandidateDirectory {
     $directorySize = [long][BitConverter]::ToUInt32($tail, $end + 12)
     $directoryOffset = [long][BitConverter]::ToUInt32($tail, $end + 16)
     $endOffset = $Stream.Length - $tailLength + $end
-    $names = @(Get-CandidateHandoffNames)
+    $names = @(Get-CandidateArchiveNames -Layout $Layout)
     if ([BitConverter]::ToUInt16($tail, $end + 4) -ne 0 -or
         [BitConverter]::ToUInt16($tail, $end + 6) -ne 0 -or
         [BitConverter]::ToUInt16($tail, $end + 8) -ne $count -or
@@ -216,6 +231,7 @@ function Expand-BoundedCandidateArchive {
     param(
         [Parameter(Mandatory)][string] $ArchivePath,
         [Parameter(Mandatory)][string] $DestinationPath,
+        [ValidateSet('Handoff', 'User', 'Support')][string] $Layout = 'Handoff',
         [long] $MaximumArchiveBytes = 536870912,
         [long] $MaximumEntryBytes = 268435456,
         [long] $MaximumExpandedBytes = 536870912,
@@ -245,7 +261,7 @@ function Expand-BoundedCandidateArchive {
         if ($inputStream.Length -le 0 -or $inputStream.Length -gt $MaximumArchiveBytes) {
             throw 'Candidate ZIP compressed bytes exceed budget.'
         }
-        $directory = @(Get-BoundedCandidateDirectory $inputStream $MaximumEntryBytes $MaximumExpandedBytes)
+        $directory = @(Get-BoundedCandidateDirectory $inputStream $MaximumEntryBytes $MaximumExpandedBytes $Layout)
         Initialize-CandidateSliceStream
         # Never merge into existing files. A failure retains only this new task-owned directory.
         $null = New-Item -ItemType Directory -Path $destination -ErrorAction Stop
@@ -286,7 +302,7 @@ function Expand-BoundedCandidateArchive {
                 $compressedStream.Dispose()
             }
         }
-        Write-Host "Extracted $($directory.Count) fixed candidate files ($total bytes) within resource limits."
+        Write-Host "Extracted $($directory.Count) fixed $Layout files ($total bytes) within resource limits."
     }
     finally {
         $inputStream.Dispose()
@@ -296,5 +312,5 @@ function Expand-BoundedCandidateArchive {
 
 if (-not $LibraryOnly) {
     if (-not $ArchivePath -or -not $DestinationPath) { throw 'ArchivePath and DestinationPath are required.' }
-    Expand-BoundedCandidateArchive -ArchivePath $ArchivePath -DestinationPath $DestinationPath
+    Expand-BoundedCandidateArchive -ArchivePath $ArchivePath -DestinationPath $DestinationPath -Layout $Layout
 }

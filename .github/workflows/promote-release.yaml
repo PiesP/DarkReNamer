@@ -285,6 +285,9 @@ jobs:
           if ($handoff.workflow_run -cne $env:CANDIDATE_RUN_ID) {
             throw 'Release handoff workflow_run does not match the candidate run.'
           }
+          if ($handoff.workflow_attempt -cne '${{ inputs.candidate_run_attempt }}') {
+            throw 'Release handoff workflow_attempt does not match the candidate attempt.'
+          }
           if ($handoff.source_sha -cne $env:CANDIDATE_SOURCE_SHA) {
             throw 'Release handoff source_sha does not match the candidate source.'
           }
@@ -292,7 +295,7 @@ jobs:
             throw 'Release handoff executable digest does not match the expected candidate digest.'
           }
 
-      - name: Verify original provenance of every published candidate asset
+      - name: Verify original provenance of public assets and raw EXE/SBOM
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -301,7 +304,7 @@ jobs:
           CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
         run: |
           New-Item -ItemType Directory -Path verified-candidate | Out-Null
-          $files = @(python -I ./scripts/validate-release-publication.py list --candidate-root dist)
+          $files = @(python -I ./scripts/validate-release-publication.py list-provenance --candidate-root dist)
           if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
             throw 'Candidate publication list could not be loaded.'
           }
@@ -462,8 +465,15 @@ jobs:
             default { throw 'Unknown promotion profile ID.' }
           }
           $channelLabel = if ($env:RELEASE_CHANNEL -ceq 'release') { 'stable release' } else { 'prerelease' }
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/DarkReNamer-windows-x64.zip"
+          $supportUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/DarkReNamer-support-windows-x64.zip"
+          $userZipHash = (Get-FileHash -LiteralPath dist/DarkReNamer-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $supportZipHash = (Get-FileHash -LiteralPath dist/DarkReNamer-support-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           @(
-            "VM-Automated Windows $channelLabel. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion."
+            "**Download for Windows 11 or later (x64): [DarkReNamer-windows-x64.zip]($downloadUrl).** Extract the ZIP to a folder you control and run ``DarkReNamer.exe`` normally without administrator elevation. No installer or support package is needed."
+            ''
+            "VM-Automated Windows $channelLabel. The published files come from the exact immutable candidate artifact; they were not rebuilt during promotion."
+            "[DarkReNamer-support-windows-x64.zip]($supportUrl) contains debug symbols, the SBOM, and release provenance for diagnosis. GitHub's automatic Source code (zip/tar.gz) downloads contain source, not the Windows application."
             ''
             '## Changes'
             ''
@@ -487,9 +497,11 @@ jobs:
             "Candidate artifact ID: $env:CANDIDATE_ARTIFACT_ID"
             "Candidate artifact ZIP SHA-256: $env:EXPECTED_ARTIFACT_SHA256"
             "DarkReNamer.exe SHA-256: $env:EXPECTED_EXE_SHA256"
+            "User package SHA-256: $userZipHash"
+            "Support package SHA-256: $supportZipHash"
             "Automated validation workflow: $env:VALIDATION_RUN_ID (attempt $env:VALIDATION_RUN_ATTEMPT)"
             ''
-            'The executable is intentionally unsigned. Verify SHA256SUMS.txt and the original candidate attestation before use.'
+            'The executable is intentionally unsigned. SHA256SUMS.txt covers the two candidate ZIPs only; the later validation-statement.json has its separate hosted attestation. Check the downloaded user ZIP against SHA256SUMS.txt, then inspect its release-handoff.json for the source and executable digests. The original candidate attestations authenticate both ZIPs and the raw executable; the separately authenticated hosted statement records VM validation.'
           ) | Out-File -LiteralPath release-notes.md -Encoding utf8
 
           $channelFlags = @(if ($env:RELEASE_CHANNEL -ceq 'prerelease') { '--prerelease' })

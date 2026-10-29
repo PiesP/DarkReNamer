@@ -62,10 +62,11 @@ function Get-ZipDirectoryOffset {
     [int][BitConverter]::ToUInt32($data, $data.Length - 6)
 }
 function Assert-Rejected {
-    param([string] $Path, [hashtable] $Limits = @{}, [switch] $Partial)
+    param([string] $Path, [hashtable] $Limits = @{}, [switch] $Partial,
+        [string] $Layout = 'Handoff')
     $destination = Join-Path $root ([guid]::NewGuid().ToString('N'))
     $rejected = $false
-    try { Expand-BoundedCandidateArchive -ArchivePath $Path -DestinationPath $destination @Limits }
+    try { Expand-BoundedCandidateArchive -ArchivePath $Path -DestinationPath $destination -Layout $Layout @Limits }
     catch { $rejected = $true }
     if (-not $rejected) { throw 'Unsafe candidate fixture was accepted.' }
     if (-not $Partial -and (Test-Path -LiteralPath $destination)) {
@@ -82,12 +83,25 @@ try {
     $valid = New-Fixture
     $destination = Join-Path $root 'valid'
     Expand-BoundedCandidateArchive -ArchivePath $valid -DestinationPath $destination `
-        -MaximumArchiveBytes (Get-Item -LiteralPath $valid).Length -MaximumEntryBytes 4 -MaximumExpandedBytes 44
+        -MaximumArchiveBytes (Get-Item -LiteralPath $valid).Length -MaximumEntryBytes 4 -MaximumExpandedBytes 52
     $files = @(Get-ChildItem -LiteralPath $destination -File)
-    if ($files.Count -ne 11 -or @($files | Where-Object Length -ne 4).Count -ne 0) {
+    if ($files.Count -ne 13 -or @($files | Where-Object Length -ne 4).Count -ne 0) {
         throw 'Exact reduced limits must preserve the complete normal handoff.'
     }
     $script:cases++
+    foreach ($layout in 'User', 'Support') {
+        $names = @(Get-CandidateArchiveNames -Layout $layout)
+        $package = New-Fixture -Names $names
+        $output = Join-Path $root "$layout-valid"
+        Expand-BoundedCandidateArchive -ArchivePath $package -DestinationPath $output `
+            -Layout $layout -MaximumEntryBytes 4 -MaximumExpandedBytes (4 * $names.Count)
+        if (@(Get-ChildItem -LiteralPath $output -File).Count -ne $names.Count) {
+            throw "The fixed $layout package layout lost a member."
+        }
+        Assert-Rejected -Path $package -Layout $(if ($layout -ceq 'User') { 'Support' } else { 'User' })
+        $names[0] = 'unexpected.txt'
+        Assert-Rejected -Path (New-Fixture -Names $names) -Layout $layout
+    }
     foreach ($mode in @('descriptor', 'stored')) {
         $path = if ($mode -ceq 'descriptor') { New-Fixture -Descriptor } else { New-Fixture -Stored }
         $data = [IO.File]::ReadAllBytes($path)
@@ -99,13 +113,13 @@ try {
             throw 'Stored fixture must exercise uncompressed entries.'
         }
         $output = Join-Path $root $mode
-        Expand-BoundedCandidateArchive $path $output -MaximumEntryBytes 4 -MaximumExpandedBytes 44
-        if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 11) { throw 'Normal format lost handoff files.' }
+        Expand-BoundedCandidateArchive $path $output -MaximumEntryBytes 4 -MaximumExpandedBytes 52
+        if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 13) { throw 'Normal format lost handoff files.' }
         $script:cases++
     }
     Assert-Rejected $valid @{ MaximumArchiveBytes = (Get-Item -LiteralPath $valid).Length - 1 }
     Assert-Rejected $valid @{ MaximumEntryBytes = 3 }
-    Assert-Rejected $valid @{ MaximumExpandedBytes = 43 }
+    Assert-Rejected $valid @{ MaximumExpandedBytes = 51 }
     Assert-Rejected $valid @{ MaximumEntryBytes = 268435457 }
     foreach ($bad in @('LICENSE', 'license', '../LICENSE', '/LICENSE', 'sub/LICENSE', 'C:\LICENSE')) {
         $names = @(Get-CandidateHandoffNames)
@@ -117,7 +131,7 @@ try {
         $size = [int](Get-Item -LiteralPath $path).Length
         $central = Get-ZipDirectoryOffset $path
         switch ($mutation) {
-            count { Set-ZipField $path ($size - 12) ([BitConverter]::GetBytes([uint16]12)) }
+            count { Set-ZipField $path ($size - 12) ([BitConverter]::GetBytes([uint16]14)) }
             directory { Set-ZipField $path ($size - 10) ([BitConverter]::GetBytes([uint32]32769)) }
             encrypt { Set-ZipField $path ($central + 8) ([BitConverter]::GetBytes([uint16]1)) }
             link { Set-ZipField $path ($central + 38) ([BitConverter]::GetBytes([Convert]::ToUInt32('a1ff0000', 16))) }

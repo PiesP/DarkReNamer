@@ -14,11 +14,14 @@ DarkReNamer는 [DarkNamer](https://github.com/nanpuhaha/DarkNamer)의 비공식
 
 ## 다운로드
 
-[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases)에서 최신 포터블
-릴리스와 체크섬을 받으세요. 실행 파일은 설치 과정이 필요 없는
-`DarkReNamer.exe` 하나입니다. 현재 빌드는 서명되지 않았습니다. 릴리스를
-사용하기 전에 [배포 정책 — 영어](DISTRIBUTION.md#current-unsigned-handoff)을
-읽고 제공된 체크섬과 출처 증명을 확인하세요.
+[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases)에서 받으세요.
+새 묶음 형식의 릴리스에서는 권장 파일인 `DarkReNamer-windows-x64.zip`을
+선택하고 `SHA256SUMS.txt`로 확인한 뒤 압축을 풀어 `DarkReNamer.exe`를
+관리자 권한 없이 실행하세요. 지원 ZIP은 진단과 릴리스 증거용이며 실행에는
+필요하지 않습니다. 이미 게시된 v0.1.9는 실행 파일을 포함한 기존 개별
+파일 구성을 유지합니다. 현재 빌드는 서명되지 않았으므로 사용 전에
+[배포 정책 — 영어](DISTRIBUTION.md#current-unsigned-handoff)에 따라 출처를
+확인하세요.
 
 정식 릴리스는 문서화된 지원 범위 안에서 일반 사용자를 대상으로 배포하며,
 프리릴리스는 별도로 표시합니다. 두 채널 모두 기존 자동 검증을 사용하고,

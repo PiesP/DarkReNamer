@@ -14,11 +14,15 @@ additional interface languages.
 
 ## Download
 
-Download a portable release and its checksum from
-[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases). The runnable
-product is one installer-free `DarkReNamer.exe`. Current builds are unsigned;
-read the [distribution policy](DISTRIBUTION.md#current-unsigned-handoff) before
-using a release and verify the supplied checksum and provenance.
+Download from [GitHub Releases](https://github.com/PiesP/DarkReNamer/releases).
+For releases using the new package layout, choose the single recommended
+`DarkReNamer-windows-x64.zip`, check it against `SHA256SUMS.txt`, extract it,
+and run `DarkReNamer.exe` normally without elevation. The support ZIP is for
+debugging and release evidence; it is not needed to run the application.
+Published v0.1.9 retains its original separate assets, including the raw EXE.
+Current builds are unsigned; read the
+[distribution policy](DISTRIBUTION.md#current-unsigned-handoff) for provenance
+verification before use.
 
 Regular releases are intended for general use within the supported scope;
 prereleases are labeled separately. Both use the documented automated

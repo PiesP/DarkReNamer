@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "ab5159223bf1561041d8e0e5f0b6ba92086a52e1bbb860191ab36ebbb73c420a",
+      "sha256": "d46823038322e2d8bdb482ac0d515c8678a152aa9f55b82b7b1cbe84021e76c2",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -436,7 +436,7 @@
       "bundle": "tooling-evidence-cli.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.cli",
-      "sha256": "8a469980b31ec1d208e6ed0ce77fa9ecf722d9107004479746ccaf48777562b7",
+      "sha256": "0ea6ce6efcc0f3611ec8d80c081b05d056064aaeba087f4f62edaaa27f736f3a",
       "dependencies": [
         "tooling-loader",
         "package-root",
