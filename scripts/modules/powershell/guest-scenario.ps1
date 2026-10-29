@@ -76,6 +76,114 @@ function Get-ProductionLanguageSpec {
     }
 }
 
+function Select-ProductionMessageBoxOkCandidate {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Candidates)
+    $matches = @($Candidates | Where-Object {
+        $_.native_handle -gt 0 -and $_.native_parent_bound -eq $true -and
+        $_.native_control_id -eq 1 -and $_.native_class -ceq 'Button' -and
+        $_.enabled -eq $true
+    })
+    if ($matches.Count -gt 1) {
+        throw 'The exact MessageBox has more than one enabled native IDOK child.'
+    }
+    if ($matches.Count -eq 1) { return $matches[0] }
+    $null
+}
+
+function Find-ProductionMessageBoxOk {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+    Initialize-ProductionLanguageMenuReader
+    Assert-AutomationBinding -Element $Window -Process $Process `
+        -ExpectedSession $ExpectedSession -Label "$Label dialog" -RequireWindowHandle
+    if ($Window.Current.ClassName -cne '#32770') {
+        throw "$Label is not the exact native MessageBox dialog class."
+    }
+    $dialogHandle = [IntPtr]$Window.Current.NativeWindowHandle
+    $conditions = [Windows.Automation.AndCondition]::new([Windows.Automation.Condition[]]@(
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Process.Id),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Button)
+    ))
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $lastMetadata = @()
+    do {
+        Assert-AutomationBinding -Element $Window -Process $Process `
+            -ExpectedSession $ExpectedSession -Label "$Label dialog" -RequireWindowHandle
+        if ([IntPtr]$Window.Current.NativeWindowHandle -ne $dialogHandle) {
+            throw "$Label dialog HWND changed during native IDOK lookup."
+        }
+        $buttons = $Window.FindAll([Windows.Automation.TreeScope]::Descendants, $conditions)
+        if ($buttons.Count -gt 32) { throw "$Label has too many owned Button descendants." }
+        $candidates = [Collections.Generic.List[object]]::new()
+        $metadata = [Collections.Generic.List[object]]::new()
+        foreach ($button in $buttons) {
+            $handle = [IntPtr]$button.Current.NativeWindowHandle
+            $classText = [Text.StringBuilder]::new(64)
+            $nativeClass = if ($handle -ne [IntPtr]::Zero) {
+                [void][DarkReNamerVmNative]::GetClassName($handle, $classText, $classText.Capacity)
+                $classText.ToString()
+            } else { '' }
+            $id = if ($handle -ne [IntPtr]::Zero) {
+                [DarkReNamerLanguageMenuReader]::GetDlgCtrlID($handle)
+            } else { 0 }
+            $parentBound = $handle -ne [IntPtr]::Zero -and
+                [DarkReNamerLanguageMenuReader]::IsChild($dialogHandle, $handle)
+            $automationId = [string]$button.Current.AutomationId
+            if ($automationId.Length -gt 128) { $automationId = $automationId.Substring(0, 128) }
+            $candidate = [ordered]@{
+                element = $button
+                native_handle = [long]$handle
+                native_parent_bound = [bool]$parentBound
+                native_control_id = [int]$id
+                native_class = [string]$nativeClass
+                enabled = [bool]$button.Current.IsEnabled
+                automation_id = $automationId
+            }
+            $candidates.Add($candidate)
+            $metadata.Add([ordered]@{
+                native_handle = $candidate.native_handle
+                native_parent_bound = $candidate.native_parent_bound
+                native_control_id = $candidate.native_control_id
+                native_class = $candidate.native_class
+                enabled = $candidate.enabled
+                automation_id = $candidate.automation_id
+            })
+        }
+        $lastMetadata = $metadata.ToArray()
+        $selected = Select-ProductionMessageBoxOkCandidate -Candidates $candidates.ToArray()
+        if ($null -ne $selected) {
+            Assert-AutomationBinding -Element $selected.element -Process $Process `
+                -ExpectedSession $ExpectedSession -Label $Label -RequireWindowHandle
+            if (-not $selected.element.Current.IsEnabled -or
+                [IntPtr]$selected.element.Current.NativeWindowHandle -ne
+                    [IntPtr]$selected.native_handle -or
+                -not [DarkReNamerLanguageMenuReader]::IsChild($dialogHandle,
+                    [IntPtr]$selected.native_handle) -or
+                [DarkReNamerLanguageMenuReader]::GetDlgCtrlID(
+                    [IntPtr]$selected.native_handle) -ne 1) {
+                throw "$Label native IDOK binding changed before invocation."
+            }
+            return $selected
+        }
+        Start-Sleep -Milliseconds 100
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw "$Label was not found before the bound application left its session."
+        }
+    } while ((Get-Date) -lt $deadline)
+    $summary = ConvertTo-Json -InputObject @($lastMetadata) -Depth 3 -Compress
+    if ($summary.Length -gt 4096) { $summary = $summary.Substring(0, 4096) }
+    throw "$Label native IDOK=1 was not found before the bounded deadline; button metadata: $summary"
+}
+
 function Assert-ProductionApplyCopy {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
@@ -172,11 +280,10 @@ function Invoke-ProductionOccupiedDestinationCheck {
             $copy.IndexOf($labels.occupied, [StringComparison]::Ordinal) -lt 0) {
             throw "$Language occupied-destination refusal lost its localized safety reason."
         }
-        $ok = Find-UniqueAutomationElement -Root $blocked -Process $process -ExpectedSession $Session `
-            -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
-            -TimeoutSeconds $TimeoutSeconds -Label "$Language occupied-destination OK" `
-            -RequireEnabled -RequireWindowHandle
-        Invoke-AutomationControl -Element $ok -Label "$Language occupied-destination OK"
+        $ok = Find-ProductionMessageBoxOk -Window $blocked -Process $process `
+            -ExpectedSession $Session -TimeoutSeconds $TimeoutSeconds `
+            -Label "$Language occupied-destination OK"
+        Invoke-AutomationControl -Element $ok.element -Label "$Language occupied-destination OK"
         Wait-WindowClosed -Handle $blockedHandle -TimeoutSeconds $TimeoutSeconds `
             -Label "$Language occupied-destination refusal"
         Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
@@ -191,6 +298,11 @@ function Invoke-ProductionOccupiedDestinationCheck {
         [ordered]@{
             title = $labels.blocked_apply; reason = $labels.occupied
             bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+            ok_control = [ordered]@{
+                automation_id = $ok.automation_id; native_control_id = $ok.native_control_id
+                native_parent_bound = $ok.native_parent_bound; native_class = $ok.native_class
+                enabled = $ok.enabled
+            }
             source_unchanged = $true; destination_unchanged = $true
             source_before_sha256 = $sourceHash
             source_after_sha256 = Get-LowerSha256 -Path $SourcePath
@@ -1073,6 +1185,8 @@ public static class DarkReNamerLanguageMenuReader {
     [DllImport("user32.dll", SetLastError=true)] private static extern int GetMenuItemCount(IntPtr menu);
     [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuItemID(IntPtr menu, int position);
     [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuState(IntPtr menu, uint position, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool IsChild(IntPtr parent, IntPtr child);
+    [DllImport("user32.dll", SetLastError=true)] public static extern int GetDlgCtrlID(IntPtr control);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern int GetMenuStringW(IntPtr menu, uint position, StringBuilder text, int capacity, uint flags);
 
@@ -1484,11 +1598,10 @@ function Invoke-ProductionBlockedRecoveryCheck {
             -Label "$Language blocked recovery notice" `
             -ForegroundObservations $captureObservations
         Set-ProductionCaptureByteCount -Capture $noticeCapture -Root $OutputRoot
-        $ok = Find-UniqueAutomationElement -Root $notice -Process $process -ExpectedSession $Session `
-            -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
-            -TimeoutSeconds $TimeoutSeconds -Label "$Language recovery notice OK" `
-            -RequireEnabled -RequireWindowHandle
-        Invoke-AutomationControl -Element $ok -Label "$Language recovery notice OK"
+        $ok = Find-ProductionMessageBoxOk -Window $notice -Process $process `
+            -ExpectedSession $Session -TimeoutSeconds $TimeoutSeconds `
+            -Label "$Language recovery notice OK"
+        Invoke-AutomationControl -Element $ok.element -Label "$Language recovery notice OK"
         Wait-WindowClosed -Handle $noticeHandle -TimeoutSeconds $TimeoutSeconds `
             -Label "$Language blocked recovery notice"
         $apply = Find-UniqueAutomationElement -Root $main -Process $process -ExpectedSession $Session `
@@ -1522,6 +1635,11 @@ function Invoke-ProductionBlockedRecoveryCheck {
             hwnd = [long]$handle; title = $labels.recovery
             notice_hwnd = [long]$noticeHandle
             lock_guidance = $labels.recovery_locked
+            ok_control = [ordered]@{
+                automation_id = $ok.automation_id; native_control_id = $ok.native_control_id
+                native_parent_bound = $ok.native_parent_bound; native_class = $ok.native_class
+                enabled = $ok.enabled
+            }
             notice_bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
             notice_capture = $noticeCapture
             notice_capture_foreground = $captureObservations[0]

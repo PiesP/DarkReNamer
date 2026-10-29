@@ -231,6 +231,26 @@ try {
             throw "$language language acceptance catalog is incomplete."
         }
     }
+    $nativeOk = [ordered]@{
+        native_handle = 42; native_parent_bound = $true; native_control_id = 1
+        native_class = 'Button'; enabled = $true; automation_id = 'provider-specific'
+    }
+    $wrongId = [ordered]@{
+        native_handle = 43; native_parent_bound = $true; native_control_id = 0
+        native_class = 'Button'; enabled = $true; automation_id = '1'
+    }
+    $wrongParent = [ordered]@{
+        native_handle = 44; native_parent_bound = $false; native_control_id = 1
+        native_class = 'Button'; enabled = $true; automation_id = '1'
+    }
+    $selectedOk = Select-ProductionMessageBoxOkCandidate -Candidates @($wrongId, $nativeOk, $wrongParent)
+    if ($selectedOk.native_handle -ne 42 -or
+        $null -ne (Select-ProductionMessageBoxOkCandidate -Candidates @($wrongId, $wrongParent))) {
+        throw 'Native MessageBox IDOK selection accepted an unrelated child or AutomationId.'
+    }
+    Assert-Fails {
+        Select-ProductionMessageBoxOkCandidate -Candidates @($nativeOk, $nativeOk)
+    } 'more than one enabled native IDOK child'
     $preferred = Resolve-ProductionSystemLanguage -Tags @('fr-FR', 'ja-JP', 'ko-KR')
     if ($preferred.language -cne 'ja' -or $preferred.selected_tag -cne 'ja-JP') {
         throw 'System language resolution did not select the first supported UI tag.'

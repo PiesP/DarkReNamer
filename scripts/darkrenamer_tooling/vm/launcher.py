@@ -1188,6 +1188,18 @@ def verify_picker_checks(checks, gui):
                     raise ValueError('VM production picker observed model differs from its expected result.')
 
 
+def verify_native_messagebox_ok(record):
+    if (not isinstance(record, dict) or
+            type(record.get('native_control_id')) is not int or
+            record['native_control_id'] != 1 or
+            record.get('native_parent_bound') is not True or
+            record.get('native_class') != 'Button' or
+            record.get('enabled') is not True or
+            not isinstance(record.get('automation_id'), str) or
+            len(record['automation_id']) > 128):
+        raise ValueError('Native MessageBox OK control binding is incomplete.')
+
+
 def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None,
                     screenshot_prefix='', language='ko', require_occupied=False):
     if not isinstance(flow, dict):
@@ -1261,10 +1273,12 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
                 occupied.get('source_unchanged') is not True or
                 occupied.get('destination_unchanged') is not True or
                 occupied.get('journal_residue_count') != 0 or
+                not isinstance(occupied.get('ok_control'), dict) or
                 not isinstance(occupied.get('bounds'), dict) or
                 any(type(occupied['bounds'].get(key)) not in (int, float) or
                     occupied['bounds'][key] <= 0 for key in ('width', 'height'))):
             raise ValueError('VM production GUI flow did not prove localized no-overwrite refusal.')
+        verify_native_messagebox_ok(occupied['ok_control'])
         for subject in ('source', 'destination'):
             for suffix in ('sha256', 'file_identity_sha256'):
                 before = occupied.get(subject + '_before_' + suffix)
@@ -1577,10 +1591,12 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                     blocked.get('process_job_clean') is not True or
                     blocked.get('apply_enabled') is not False or
                     blocked.get('model_rows') != 0 or
+                    not isinstance(blocked.get('ok_control'), dict) or
                     not isinstance(blocked.get('notice_bounds'), dict) or
                     any(type(blocked['notice_bounds'].get(key)) not in (int, float) or
                         blocked['notice_bounds'][key] <= 0 for key in ('width', 'height'))):
                 raise ValueError('Localized blocked recovery or retained-journal evidence is incomplete.')
+            verify_native_messagebox_ok(blocked['ok_control'])
             capture = blocked.get('notice_capture')
             checked_language_capture(root, capture, language + '-blocked-recovery.png')
             capture_bytes += capture['bytes']
