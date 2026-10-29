@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "f89d6a7c13e07454e3b168434defb255e081f07a23ce903d7520c96399058fa4",
+      "sha256": "3908c0d6427c3b489186028e8b318f344dec8d6654b97365160cb628d9579637",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -518,7 +518,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "7dcb8dc1a91c476755bcda2e11a8f99e751737cab1e6140bb2de3dc3163cbc02",
+      "sha256": "6bab2ab3de6793b20ea784936388af9bbd584809b2ae2a9632a3d35e8144170f",
       "dependencies": []
     },
     {
