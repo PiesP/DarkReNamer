@@ -1562,6 +1562,86 @@ function Invoke-ProductionLanguageMenuChoice {
     }
 }
 
+function Get-ProductionJournalCheckpoint {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][long] $MinimumBytes,
+        [switch] $LiveJournal
+    )
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [IO.FileInfo] -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -lt $MinimumBytes -or $item.Length -gt 64MB) {
+        throw 'Retained journal is not one bounded ordinary file.'
+    }
+    $identityHash = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($item.FullName))
+    if (-not $LiveJournal) {
+        return [ordered]@{
+            bytes = [long]$item.Length
+            sha256 = Get-LowerSha256 -Path $item.FullName
+            file_identity_sha256 = $identityHash
+        }
+    }
+    $stream = $null
+    $probeShare = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+    try {
+        $stream = [IO.FileStream]::new($item.FullName, [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, $probeShare)
+        throw 'Live retained journal unexpectedly allowed a content read handle.'
+    }
+    catch [IO.IOException] {
+        if (($_.Exception.HResult -band 0xffff) -ne 32) {
+            throw 'Live retained journal content read failed for a reason other than sharing violation 32.'
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    [ordered]@{
+        bytes = [long]$item.Length
+        file_identity_sha256 = $identityHash
+        content_read_status = 'sharing-denied'
+        native_error = 32
+        probe_access = 'read'
+        probe_share_mode = 'read-write-delete'
+    }
+}
+
+function Assert-ProductionLiveJournalCheckpoint {
+    param([Parameter(Mandatory)][object] $Expected,
+          [Parameter(Mandatory)][object] $Actual)
+    if ($Actual.bytes -ne $Expected.bytes -or
+        $Actual.file_identity_sha256 -cne $Expected.file_identity_sha256 -or
+        $Actual.content_read_status -cne 'sharing-denied' -or $Actual.native_error -ne 32 -or
+        $Actual.probe_access -cne 'read' -or
+        $Actual.probe_share_mode -cne 'read-write-delete' -or
+        $Actual.Contains('sha256')) {
+        throw 'Live retained journal metadata or exclusive content lock changed.'
+    }
+}
+
+function Get-ProductionBlockedRecoveryJournalCheckpoint {
+    param(
+        [Parameter(Mandatory)][string] $JournalRoot,
+        [switch] $LiveJournal
+    )
+    $root = Get-Item -LiteralPath $JournalRoot -Force -ErrorAction Stop
+    $entries = @(Get-ChildItem -LiteralPath $JournalRoot -Force)
+    $active = @($entries | Where-Object Name -ceq 'active.drj')
+    $others = @($entries | Where-Object Name -cne 'active.drj')
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $active.Count -ne 1 -or $others.Count -gt 1 -or
+        ($others.Count -eq 1 -and ($others[0].Name -cne 'runtime.lock' -or
+            $others[0].PSIsContainer -or
+            ($others[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $others[0].Length -ne 0))) {
+        throw 'Blocked recovery journal inventory changed.'
+    }
+    Get-ProductionJournalCheckpoint -Path $active[0].FullName -MinimumBytes 1 `
+        -LiveJournal:$LiveJournal
+}
+
 function Invoke-ProductionBlockedRecoveryCheck {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1587,7 +1667,8 @@ function Invoke-ProductionBlockedRecoveryCheck {
     $activePath = Join-Path $journalRoot 'active.drj'
     $marker = [Text.Encoding]::ASCII.GetBytes('DarkReNamer bounded invalid active journal fixture')
     [IO.File]::WriteAllBytes($activePath, $marker)
-    $before = Get-LowerSha256 -Path $activePath
+    $beforeCheckpoint = Get-ProductionBlockedRecoveryJournalCheckpoint -JournalRoot $journalRoot
+    $before = $beforeCheckpoint.sha256
     $identity = [DarkReNamerVmNative]::GetFileIdentity($activePath)
     $owned = $null
     $passed = $false
@@ -1648,9 +1729,10 @@ function Invoke-ProductionBlockedRecoveryCheck {
             -RequireWindowHandle
         $rows = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
             [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
-        if ($apply.Current.IsEnabled -or $rows -ne 0 -or
-            (Get-LowerSha256 -Path $activePath) -cne $before -or
-            [DarkReNamerVmNative]::GetFileIdentity($activePath) -cne $identity) {
+        $liveCheckpoint = Get-ProductionBlockedRecoveryJournalCheckpoint `
+            -JournalRoot $journalRoot -LiveJournal
+        Assert-ProductionLiveJournalCheckpoint -Expected $beforeCheckpoint -Actual $liveCheckpoint
+        if ($apply.Current.IsEnabled -or $rows -ne 0) {
             throw "$Language blocked recovery changed the retained journal or unlocked Apply."
         }
         Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
@@ -1660,9 +1742,10 @@ function Invoke-ProductionBlockedRecoveryCheck {
             throw "$Language blocked recovery application did not close normally."
         }
         $job = Complete-AcceptanceOwnedProcessJob -Owned $owned
+        $afterCloseCheckpoint = Get-ProductionBlockedRecoveryJournalCheckpoint -JournalRoot $journalRoot
         if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed -or
-            (Get-LowerSha256 -Path $activePath) -cne $before -or
-            [DarkReNamerVmNative]::GetFileIdentity($activePath) -cne $identity) {
+            ($afterCloseCheckpoint | ConvertTo-Json -Compress) -cne
+                ($beforeCheckpoint | ConvertTo-Json -Compress)) {
             throw "$Language blocked recovery did not retain exact journal bytes on close."
         }
         $passed = $true
@@ -1683,6 +1766,9 @@ function Invoke-ProductionBlockedRecoveryCheck {
             notice_capture_foreground = $captureObservations[0]
             apply_enabled = $false; model_rows = [int]$rows
             journal_sha256 = $before; journal_unchanged = $true
+            journal_before = $beforeCheckpoint
+            journal_live = $liveCheckpoint
+            journal_after_close = $afterCloseCheckpoint
             normal_close = $true; process_job_clean = $true
         }
     }
@@ -1713,7 +1799,8 @@ function Invoke-ProductionBlockedRecoveryCheck {
 }
 
 function Get-ProductionValidActiveCheckpoint {
-    param([Parameter(Mandatory)][string] $FixtureRoot)
+    param([Parameter(Mandatory)][string] $FixtureRoot,
+          [switch] $LiveJournal)
     $work = Join-Path (Join-Path $FixtureRoot 'data') 'work'
     $workItem = Get-Item -LiteralPath $work -Force -ErrorAction Stop
     if (-not $workItem.PSIsContainer -or
@@ -1746,19 +1833,10 @@ function Get-ProductionValidActiveCheckpoint {
         (Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj'))) {
         throw 'Valid-active fixture has an unexpected journal inventory.'
     }
-    $active = Get-Item -LiteralPath (Join-Path $journalRoot 'active.drj') -Force -ErrorAction Stop
-    if ($active.PSIsContainer -or $active -isnot [IO.FileInfo] -or
-        ($active.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $active.Length -lt 24 -or $active.Length -gt 64MB) {
-        throw 'Valid-active journal is not one bounded ordinary file.'
-    }
     [ordered]@{
         files = $files
-        journal = [ordered]@{
-            bytes = [long]$active.Length
-            sha256 = Get-LowerSha256 -Path $active.FullName
-            file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($active.FullName))
-        }
+        journal = Get-ProductionJournalCheckpoint -Path (Join-Path $journalRoot 'active.drj') `
+            -MinimumBytes 24 -LiveJournal:$LiveJournal
     }
 }
 
@@ -1769,6 +1847,16 @@ function Assert-ProductionValidActiveCheckpoint {
         ($Actual | ConvertTo-Json -Depth 8 -Compress)) {
         throw 'Valid-active startup or default Cancel changed partial files or retained journal.'
     }
+}
+
+function Assert-ProductionValidActiveLiveCheckpoint {
+    param([Parameter(Mandatory)][object] $Expected,
+          [Parameter(Mandatory)][object] $Actual)
+    if (($Expected.files | ConvertTo-Json -Depth 8 -Compress) -cne
+        ($Actual.files | ConvertTo-Json -Depth 8 -Compress)) {
+        throw 'Valid-active live startup changed partial swap files.'
+    }
+    Assert-ProductionLiveJournalCheckpoint -Expected $Expected.journal -Actual $Actual.journal
 }
 
 function Invoke-ProductionValidActiveRecoveryCheck {
@@ -1942,13 +2030,13 @@ function Invoke-ProductionValidActiveRecoveryCheck {
                     $cancelBounds.Bottom -gt $noticeBounds.Bottom) {
                     throw 'Active recovery default Cancel is clipped or outside its dialog.'
                 }
-                $atStartup = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
-                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $atStartup
+                $atStartup = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot -LiveJournal
+                Assert-ProductionValidActiveLiveCheckpoint -Expected $partial -Actual $atStartup
                 Invoke-AutomationControl -Element $cancel -Label "$($step.language) recovery default Cancel"
                 Wait-WindowClosed -Handle $noticeHandle -TimeoutSeconds $TimeoutSeconds `
                     -Label "$($step.language) active recovery confirmation"
-                $afterCancel = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
-                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterCancel
+                $afterCancel = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot -LiveJournal
+                Assert-ProductionValidActiveLiveCheckpoint -Expected $partial -Actual $afterCancel
                 $apply = Find-UniqueAutomationElement -Root $main -Process $process `
                     -ExpectedSession $Session -AutomationId ([string]0x8003) `
                     -ControlType ([Windows.Automation.ControlType]::Button) `
@@ -1963,8 +2051,8 @@ function Invoke-ProductionValidActiveRecoveryCheck {
                 if ($apply.Current.IsEnabled) {
                     throw 'Language selection enabled Apply while valid-active recovery remained pending.'
                 }
-                $afterChoice = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
-                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterChoice
+                $afterChoice = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot -LiveJournal
+                Assert-ProductionValidActiveLiveCheckpoint -Expected $partial -Actual $afterChoice
                 Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
                     -MainWindowHandle $mainHandle -MainWindow $main `
                     -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `

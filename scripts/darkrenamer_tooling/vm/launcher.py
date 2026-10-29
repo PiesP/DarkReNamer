@@ -1358,6 +1358,28 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
     return True
 
 
+def verify_journal_read_boundary(before, live, after, minimum_bytes):
+    if (not isinstance(before, dict) or set(before) !=
+            {'bytes', 'sha256', 'file_identity_sha256'} or
+            type(before['bytes']) is not int or
+            not minimum_bytes <= before['bytes'] <= 64 * 1024 * 1024 or
+            any(not isinstance(before.get(key), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', before[key])
+                for key in ('sha256', 'file_identity_sha256')) or
+            after != before):
+        raise ValueError('Retained journal full before/after-close checkpoint is invalid.')
+    if (not isinstance(live, dict) or set(live) !=
+            {'bytes', 'file_identity_sha256', 'content_read_status', 'native_error',
+             'probe_access', 'probe_share_mode'} or
+            type(live.get('bytes')) is not int or live['bytes'] != before['bytes'] or
+            live.get('file_identity_sha256') != before['file_identity_sha256'] or
+            live.get('content_read_status') != 'sharing-denied' or
+            live.get('probe_access') != 'read' or
+            live.get('probe_share_mode') != 'read-write-delete' or
+            type(live.get('native_error')) is not int or live['native_error'] != 32):
+        raise ValueError('Live retained journal did not prove exclusive content lock and identity.')
+
+
 def verify_valid_active_recovery(root, manifest, record):
     if (not isinstance(record, dict) or record.get('schema_version') != 1 or
             record.get('status') != 'passed' or
@@ -1458,9 +1480,15 @@ def verify_valid_active_recovery(root, manifest, record):
                 not isinstance(row['startup_preference'].get('sha256'), str) or
                 not re.fullmatch(r'[0-9a-f]{64}', row['startup_preference']['sha256'])):
             raise ValueError('Valid-active recovery process, language, or Cancel binding is invalid.')
-        if any(row.get(key) != partial for key in
-               ('before', 'at_startup', 'after_cancel', 'after_choice', 'after_close')):
-            raise ValueError('Valid-active Cancel or normal close changed files or journal.')
+        if row.get('before') != partial or row.get('after_close') != partial:
+            raise ValueError('Valid-active full before/after-close checkpoints changed.')
+        for key in ('at_startup', 'after_cancel', 'after_choice'):
+            live_checkpoint = row.get(key)
+            if (not isinstance(live_checkpoint, dict) or
+                    set(live_checkpoint) != {'files', 'journal'} or
+                    live_checkpoint['files'] != files):
+                raise ValueError('Valid-active live partial file inventory changed.')
+            verify_journal_read_boundary(journal, live_checkpoint['journal'], journal, 24)
         notice_bounds, cancel_bounds = row.get('notice_bounds'), row.get('cancel_bounds')
         if (not isinstance(notice_bounds, dict) or not isinstance(cancel_bounds, dict) or
                 any(type(bounds.get(key)) not in (int, float) for bounds in
@@ -1600,6 +1628,14 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                         blocked['notice_bounds'][key] <= 0 for key in ('width', 'height'))):
                 raise ValueError('Localized blocked recovery or retained-journal evidence is incomplete.')
             verify_native_messagebox_ok(blocked['ok_control'])
+            journal_before = blocked.get('journal_before')
+            verify_journal_read_boundary(journal_before, blocked.get('journal_live'),
+                                         blocked.get('journal_after_close'), 1)
+            marker = b'DarkReNamer bounded invalid active journal fixture'
+            if (journal_before['bytes'] != len(marker) or
+                    journal_before['sha256'] != hashlib.sha256(marker).hexdigest() or
+                    blocked['journal_sha256'] != journal_before['sha256']):
+                raise ValueError('Blocked recovery journal differs from its owned corrupt fixture.')
             capture = blocked.get('notice_capture')
             checked_language_capture(root, capture, language + '-blocked-recovery.png')
             capture_bytes += capture['bytes']

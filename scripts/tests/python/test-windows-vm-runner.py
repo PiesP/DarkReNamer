@@ -167,6 +167,13 @@ class VmRunnerTests(unittest.TestCase):
                 choice['pending_file_after'] = copy.deepcopy(choice['pending_file_before'])
             blocked = None
             if index < 3:
+                marker = b'DarkReNamer bounded invalid active journal fixture'
+                journal_before = {'bytes': len(marker),
+                                  'sha256': hashlib.sha256(marker).hexdigest(),
+                                  'file_identity_sha256': 'd' * 64}
+                journal_live = {'bytes': len(marker), 'file_identity_sha256': 'd' * 64,
+                                'content_read_status': 'sharing-denied', 'native_error': 32,
+                                'probe_access': 'read', 'probe_share_mode': 'read-write-delete'}
                 title, guidance = {
                     'ko': ('DarkReNamer - 복구 상태', '새 적용은 잠겼습니다.'),
                     'en': ('DarkReNamer - Recovery status', 'Apply is locked.'),
@@ -182,7 +189,9 @@ class VmRunnerTests(unittest.TestCase):
                            'notice_hwnd': 900 + index,
                            'notice_bounds': {'width': 500, 'height': 300},
                            'apply_enabled': False, 'model_rows': 0,
-                           'journal_sha256': 'd' * 64, 'journal_unchanged': True,
+                           'journal_sha256': journal_before['sha256'], 'journal_unchanged': True,
+                           'journal_before': journal_before, 'journal_live': journal_live,
+                           'journal_after_close': copy.deepcopy(journal_before),
                            'normal_close': True, 'process_job_clean': True,
                            'notice_capture': self.language_capture(language + '-blocked-recovery.png'),
                            'notice_capture_foreground': self.foreground_observation(
@@ -274,6 +283,10 @@ class VmRunnerTests(unittest.TestCase):
         ]
         partial = {'files': files, 'journal': {'bytes': 128, 'sha256': 'a' * 64,
                                                'file_identity_sha256': 'b' * 64}}
+        live = {'files': copy.deepcopy(files),
+                'journal': {'bytes': 128, 'file_identity_sha256': 'b' * 64,
+                            'content_read_status': 'sharing-denied', 'native_error': 32,
+                            'probe_access': 'read', 'probe_share_mode': 'read-write-delete'}}
         rows = []
         for index, (language, preference, next_preference, title, question, guidance) in enumerate((
                 ('ko', 0, 2, 'DarkReNamer - 이전 변경 복구 확인',
@@ -308,8 +321,8 @@ class VmRunnerTests(unittest.TestCase):
                 'apply_locked_after_choice': True,
                 'notice_bounds': {'x': 100, 'y': 100, 'width': 540, 'height': 320},
                 'cancel_bounds': {'x': 520, 'y': 350, 'width': 80, 'height': 30},
-                'before': copy.deepcopy(partial), 'at_startup': copy.deepcopy(partial),
-                'after_cancel': copy.deepcopy(partial), 'after_choice': copy.deepcopy(partial),
+                'before': copy.deepcopy(partial), 'at_startup': copy.deepcopy(live),
+                'after_cancel': copy.deepcopy(live), 'after_choice': copy.deepcopy(live),
                 'after_close': copy.deepcopy(partial),
                 'choice': choice, 'normal_close': True, 'process_job_clean': True,
                 'notice_capture': self.language_capture(language + '-valid-active-recovery.png'),
@@ -393,6 +406,15 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['system_resolution'].update(selected_tag='en-US'),
             lambda row: row['selections'][-1]['startup_rail'].update(name='Add a name prefix...'),
             lambda row: row['selections'][1]['blocked_recovery'].update(journal_unchanged=False),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_live'].update(native_error=5),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_live'].update(
+                probe_share_mode='read-write'),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_live'].update(bytes=1),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_live'].update(
+                file_identity_sha256='0' * 64),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_live'].update(sha256='0' * 64),
+            lambda row: row['selections'][1]['blocked_recovery']['journal_after_close'].update(
+                sha256='0' * 64),
             lambda row: row['selections'][1]['blocked_recovery']['ok_control'].update(native_control_id=0),
             lambda row: row['selections'][1]['blocked_recovery']['ok_control'].update(native_control_id=-1),
             lambda row: row['selections'][1]['blocked_recovery']['ok_control'].update(native_control_id=True),
@@ -421,6 +443,12 @@ class VmRunnerTests(unittest.TestCase):
                 content_sha256='0' * 64),
             lambda row: row['valid_active_recovery']['observations'][1]['after_cancel']['journal'].update(
                 sha256='0' * 64),
+            lambda row: row['valid_active_recovery']['observations'][1]['after_cancel']['journal'].update(
+                native_error=5),
+            lambda row: row['valid_active_recovery']['observations'][1]['after_cancel']['journal'].update(
+                bytes=129),
+            lambda row: row['valid_active_recovery']['observations'][1]['after_cancel']['journal'].update(
+                file_identity_sha256='0' * 64),
             lambda row: row['valid_active_recovery']['observations'][2].update(
                 cancel_default_focused=False),
             lambda row: row['valid_active_recovery']['observations'][0]['notice_capture'].update(
