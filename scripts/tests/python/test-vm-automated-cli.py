@@ -111,7 +111,9 @@ class VmAutomatedCliTests(unittest.TestCase):
                 cli.validate(args)
 
     def test_wrong_trusted_source_or_candidate_fails(self):
-        for field, value in (("candidate_source_sha", "f" * 40), ("candidate_run_id", "13")):
+        for field, value in (("candidate_source_sha", "f" * 40),
+                             ("candidate_run_id", "13"),
+                             ("candidate_run_attempt", "2")):
             args = self.fixture.args()
             setattr(args, field, value)
             with self.subTest(field=field), self.assertRaises(EvidenceError):

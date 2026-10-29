@@ -29,6 +29,8 @@ HANDOFF_FILES = (
     'DarkReNamer.cdx.json',
     'DarkReNamer.exe',
     'DarkReNamer.pdb',
+    'DarkReNamer-support-windows-x64.zip',
+    'DarkReNamer-windows-x64.zip',
     'DISTRIBUTION.md',
     'LICENSE',
     'release-handoff.json',
@@ -151,10 +153,13 @@ def validate_candidate_provenance_json(handoff_path, run_path, artifact_path, ar
     run = read_json_strict(run_path)
     artifact = read_json_strict(artifact_path)
     if (not isinstance(handoff, dict) or set(handoff) != {
-            'schema_version', 'source_sha', 'workflow_run', 'executable'} or
-            type(handoff.get('schema_version')) is not int or handoff['schema_version'] != 1 or
+            'schema_version', 'source_sha', 'workflow_run', 'workflow_attempt',
+            'package_layout', 'executable'} or
+            type(handoff.get('schema_version')) is not int or handoff['schema_version'] != 2 or
             handoff.get('source_sha') != args.candidate_source_sha or
             handoff.get('workflow_run') != args.candidate_workflow_run or
+            handoff.get('workflow_attempt') != args.candidate_run_attempt or
+            handoff.get('package_layout') != 'portable-windows-x64-v1' or
             not isinstance(handoff.get('executable'), dict) or
             set(handoff['executable']) != {'filename', 'sha256'} or
             handoff['executable'].get('filename') != 'DarkReNamer.exe' or

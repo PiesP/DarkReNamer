@@ -126,7 +126,8 @@ finally {
 
 Assert-ObjectShape `
     -Object $provenance `
-    -Required @('schema_version', 'source_sha', 'workflow_run', 'executable') `
+    -Required @('schema_version', 'source_sha', 'workflow_run', 'workflow_attempt',
+        'package_layout', 'executable') `
     -Location 'release-handoff'
 Assert-ObjectShape `
     -Object $provenance.executable `
@@ -135,14 +136,22 @@ Assert-ObjectShape `
 
 if ($provenance.schema_version -is [string] -or
     $provenance.schema_version -is [bool] -or
-    [decimal] $provenance.schema_version -ne 1) {
-    throw 'release-handoff.schema_version must be the JSON number 1.'
+    [decimal] $provenance.schema_version -ne 2) {
+    throw 'release-handoff.schema_version must be the JSON number 2.'
 }
 if ($provenance.source_sha -isnot [string] -or $provenance.source_sha -cnotmatch '^[0-9a-f]{40}$') {
     throw 'release-handoff.source_sha must be a full lowercase 40-character Git SHA.'
 }
 if ($provenance.workflow_run -isnot [string] -or $provenance.workflow_run -notmatch '^[1-9][0-9]*$') {
     throw 'release-handoff.workflow_run must be a positive numeric GitHub Actions run ID.'
+}
+if ($provenance.workflow_attempt -isnot [string] -or
+    $provenance.workflow_attempt -notmatch '^[1-9][0-9]*$') {
+    throw 'release-handoff.workflow_attempt must be a positive numeric GitHub Actions attempt.'
+}
+if ($provenance.package_layout -isnot [string] -or
+    $provenance.package_layout -cne 'portable-windows-x64-v1') {
+    throw 'release-handoff.package_layout must identify the supported portable layout.'
 }
 if ($provenance.executable.filename -isnot [string] -or
     -not [string]::Equals($provenance.executable.filename, 'DarkReNamer.exe', [StringComparison]::Ordinal)) {
@@ -377,15 +386,8 @@ if (@($sbom.components).Count -eq 0) {
 }
 
 $expectedChecksumSubjects = @(
-    'DarkReNamer-debug-symbols.zip'
-    'DarkReNamer.cdx.json'
-    'DarkReNamer.exe'
-    'DISTRIBUTION.md'
-    'LICENSE'
-    'release-handoff.json'
-    'release-metrics.json'
-    'THIRD_PARTY_LICENSES.html'
-    'THIRD_PARTY_NOTICES.md'
+    'DarkReNamer-support-windows-x64.zip'
+    'DarkReNamer-windows-x64.zip'
 )
 $checksumPath = Join-Path $handoffPath 'SHA256SUMS.txt'
 $checksumLines = @(Get-Content -LiteralPath $checksumPath | Where-Object { $_.Length -ne 0 })
@@ -411,6 +413,34 @@ for ($index = 0; $index -lt $checksumLines.Count; $index++) {
     if ($actualHash -ne $expectedHash) {
         throw "Checksum mismatch for $name."
     }
+}
+
+$packageRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-package-check-$([Guid]::NewGuid().ToString('N'))"
+$null = New-Item -ItemType Directory -Path $packageRoot
+try {
+    foreach ($layout in 'User', 'Support') {
+        $packageName = if ($layout -ceq 'User') {
+            'DarkReNamer-windows-x64.zip'
+        } else { 'DarkReNamer-support-windows-x64.zip' }
+        $extractedRoot = Join-Path $packageRoot $layout
+        Expand-BoundedCandidateArchive `
+            -ArchivePath (Join-Path $handoffPath $packageName) `
+            -DestinationPath $extractedRoot -Layout $layout 6>$null
+        $packageNames = @(Get-CandidateArchiveNames -Layout $layout)
+        foreach ($name in $packageNames) {
+            $referencePath = if ($name -ceq 'RUN.txt') {
+                Join-Path $sourcePath 'scripts/release-run-instructions.txt'
+            } else { Join-Path $handoffPath $name }
+            if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath (Join-Path $extractedRoot $name) -Algorithm SHA256).Hash -cne
+                (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash) {
+                throw "Release package member differs from source-bound handoff: $packageName/$name"
+            }
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath $packageRoot -Recurse -Force
 }
 
 if ($PassThru) {

@@ -29,9 +29,10 @@ class PublicationTests(unittest.TestCase):
         self.statement = self.root / publication.VALIDATION_ASSET
         self.statement.write_bytes(b"hosted statement")
         self.release_metadata = self.root / "release.json"
-        for name in publication.CANDIDATE_ASSETS:
+        for name in publication.PROVENANCE_ASSETS:
             (self.candidate / name).write_bytes(name.encode())
-        (self.candidate / "DarkReNamer.pdb").write_bytes(b"private raw symbols")
+        for name in publication.HANDOFF_ASSETS - set(publication.PROVENANCE_ASSETS):
+            (self.candidate / name).write_bytes(name.encode())
         self.write_verified()
         self.write_public()
 
@@ -54,7 +55,7 @@ class PublicationTests(unittest.TestCase):
         }}
 
     def write_verified(self):
-        for index, name in enumerate(publication.CANDIDATE_ASSETS):
+        for index, name in enumerate(publication.PROVENANCE_ASSETS):
             (self.verified / f"{index}.json").write_text(json.dumps([self.row(name)]))
 
     def write_public(self):
@@ -78,11 +79,15 @@ class PublicationTests(unittest.TestCase):
         self.candidate_ok()
         self.public_ok()
         self.assertIn("SHA256SUMS.txt", publication.CANDIDATE_ASSETS)
-        self.assertIn("release-metrics.json", publication.CANDIDATE_ASSETS)
+        self.assertIn("DarkReNamer-windows-x64.zip", publication.CANDIDATE_ASSETS)
+        self.assertIn("release-metrics.json", publication.HANDOFF_ASSETS)
+        self.assertNotIn("DarkReNamer.exe", publication.CANDIDATE_ASSETS)
+        self.assertIn("DarkReNamer.exe", publication.PROVENANCE_ASSETS)
+        self.assertIn("DarkReNamer.cdx.json", publication.PROVENANCE_ASSETS)
         self.assertNotIn(publication.VALIDATION_ASSET, publication.CANDIDATE_ASSETS)
 
     def test_verified_multi_subject_handoff_includes_raw_pdb(self):
-        for index, name in enumerate(publication.CANDIDATE_ASSETS):
+        for index, name in enumerate(publication.PROVENANCE_ASSETS):
             row = self.row(name)
             row["verificationResult"]["statement"]["subject"] = [
                 {"name": subject, "digest": {
@@ -101,9 +106,15 @@ class PublicationTests(unittest.TestCase):
         self.candidate_ok()
 
     def test_recomputed_local_checksums_do_not_replace_auxiliary_provenance(self):
-        (self.candidate / "THIRD_PARTY_LICENSES.html").write_bytes(b"modified")
+        (self.candidate / "DarkReNamer-windows-x64.zip").write_bytes(b"modified")
         (self.candidate / "SHA256SUMS.txt").write_bytes(b"recomputed")
         with self.assertRaisesRegex(ValueError, "subject or predicate"):
+            self.candidate_ok()
+
+    def test_raw_executable_attestation_remains_required(self):
+        raw_index = publication.PROVENANCE_ASSETS.index("DarkReNamer.exe")
+        (self.verified / f"{raw_index}.json").unlink()
+        with self.assertRaisesRegex(ValueError, "output set"):
             self.candidate_ok()
 
     def test_missing_wrong_authority_predicate_and_subject_fail(self):

@@ -1104,9 +1104,11 @@ class VmRunnerTests(unittest.TestCase):
         exe.write_bytes(b'exact candidate bytes')
         executable_hash = hashlib.sha256(exe.read_bytes()).hexdigest()
         (handoff / 'release-handoff.json').write_text(json.dumps({
-            'schema_version': 1,
+            'schema_version': 2,
             'source_sha': 'a' * 40,
             'workflow_run': '10',
+            'workflow_attempt': '1',
+            'package_layout': 'portable-windows-x64-v1',
             'executable': {'filename': 'DarkReNamer.exe', 'sha256': executable_hash},
         }))
         run_metadata = self.root / ('run' + suffix + '.json')
@@ -2148,14 +2150,16 @@ class VmRunnerTests(unittest.TestCase):
     def test_candidate_prepare_rejects_boolean_numeric_provenance_fields(self):
         mutations = (
             ('handoff', 'schema_version', True),
+            ('handoff', 'schema_version', 1),
+            ('handoff', 'package_layout', 'legacy'),
             ('run', 'id', True),
             ('artifact', 'expired', 0),
         )
-        for metadata_kind, field, value in mutations:
+        for index, (metadata_kind, field, value) in enumerate(mutations):
             with self.subTest(metadata_kind=metadata_kind, field=field):
                 (repo, product_source, handoff, run_metadata,
                  artifact_metadata, args) = self.candidate_build_inputs(
-                     '-' + metadata_kind + '-' + field)
+                     f'-{index}-{metadata_kind}-{field}')
                 path = {
                     'handoff': handoff / 'release-handoff.json',
                     'run': run_metadata,

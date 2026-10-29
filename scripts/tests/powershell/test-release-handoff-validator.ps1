@@ -31,17 +31,37 @@ function Write-Checksums {
         [string] $HandoffRoot
     )
 
-    $subjects = @(
-        'DarkReNamer-debug-symbols.zip'
-        'DarkReNamer.cdx.json'
-        'DarkReNamer.exe'
-        'DISTRIBUTION.md'
-        'LICENSE'
-        'release-handoff.json'
-        'release-metrics.json'
-        'THIRD_PARTY_LICENSES.html'
-        'THIRD_PARTY_NOTICES.md'
-    )
+    foreach ($package in @(
+        @{ Name = 'DarkReNamer-windows-x64.zip'; Files = @('DarkReNamer.exe',
+            'LICENSE', 'release-handoff.json', 'RUN.txt', 'THIRD_PARTY_LICENSES.html',
+            'THIRD_PARTY_NOTICES.md') }
+        @{ Name = 'DarkReNamer-support-windows-x64.zip'; Files = @(
+            'DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json',
+            'DISTRIBUTION.md', 'release-handoff.json', 'release-metrics.json') }
+    )) {
+        $packagePath = Join-Path $HandoffRoot $package.Name
+        $stream = [IO.FileStream]::new($packagePath, [IO.FileMode]::Create,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+            try {
+                foreach ($name in $package.Files) {
+                    $source = if ($name -ceq 'RUN.txt') {
+                        Join-Path $script:sourceRoot 'scripts/release-run-instructions.txt'
+                    } else { Join-Path $HandoffRoot $name }
+                    $entry = $zip.CreateEntry($name, [IO.Compression.CompressionLevel]::Optimal)
+                    $entryStream = $entry.Open()
+                    $sourceStream = [IO.File]::OpenRead($source)
+                    try { $sourceStream.CopyTo($entryStream) }
+                    finally { $sourceStream.Dispose(); $entryStream.Dispose() }
+                }
+            }
+            finally { $zip.Dispose() }
+        }
+        finally { $stream.Dispose() }
+    }
+    $subjects = @('DarkReNamer-support-windows-x64.zip',
+        'DarkReNamer-windows-x64.zip')
     $lines = foreach ($name in $subjects) {
         $path = Join-Path $HandoffRoot $name
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -67,9 +87,11 @@ function Write-Provenance {
         $Sha256 = (Get-FileHash -LiteralPath (Join-Path $HandoffRoot $Filename) -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     $provenance = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = $SourceSha
         workflow_run = $WorkflowRun
+        workflow_attempt = '2'
+        package_layout = 'portable-windows-x64-v1'
         executable = [ordered]@{
             filename = $Filename
             sha256 = $Sha256
@@ -165,12 +187,15 @@ try {
     Write-Utf8NoBom `
         -Path (Join-Path $sourceRoot 'Cargo.lock') `
         -Content "version = 4`n`n[[package]]`nname = `"fixture-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"fixture-b`"`nversion = `"0.2.0`"`n"
+    $null = New-Item -ItemType Directory -Path (Join-Path $sourceRoot 'scripts')
+    Copy-Item -LiteralPath (Join-Path $toolingTestPaths.ScriptsRoot 'release-run-instructions.txt') `
+        -Destination (Join-Path $sourceRoot 'scripts/release-run-instructions.txt')
 
     & git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize source fixture repository.' }
     & git -C $sourceRoot config user.name 'DarkReNamer test'
     & git -C $sourceRoot config user.email 'darkrenamer-test@example.invalid'
-    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock
+    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock scripts/release-run-instructions.txt
     & git -C $sourceRoot commit --quiet -m 'test: initialize release source fixture'
     if ($LASTEXITCODE -ne 0) { throw 'Failed to commit source fixture repository.' }
     $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
@@ -236,7 +261,7 @@ try {
     }
     $validatedProvenance = $passThruOutput[0]
     if (($validatedProvenance.PSObject.Properties.Name -join ',') -cne
-        'schema_version,source_sha,workflow_run,executable') {
+        'schema_version,source_sha,workflow_run,workflow_attempt,package_layout,executable') {
         throw 'PassThru provenance fields do not match the validated handoff contract.'
     }
     if (($validatedProvenance.executable.PSObject.Properties.Name -join ',') -cne
@@ -246,13 +271,36 @@ try {
     $expectedExecutableHash = (Get-FileHash `
         -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') `
         -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($validatedProvenance.schema_version -ne 1 -or
+    if ($validatedProvenance.schema_version -ne 2 -or
         $validatedProvenance.source_sha -cne $sourceSha -or
         $validatedProvenance.workflow_run -cne '33257061299' -or
+        $validatedProvenance.workflow_attempt -cne '2' -or
+        $validatedProvenance.package_layout -cne 'portable-windows-x64-v1' -or
         $validatedProvenance.executable.filename -cne 'DarkReNamer.exe' -or
         $validatedProvenance.executable.sha256 -cne $expectedExecutableHash) {
         throw 'PassThru provenance values do not match the validated handoff.'
     }
+
+    $oldHandoff = Get-Content -LiteralPath (Join-Path $handoffRoot 'release-handoff.json') -Raw
+    $legacy = $oldHandoff | ConvertFrom-Json
+    $legacy.schema_version = 1
+    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'release-handoff.json') `
+        -Content (($legacy | ConvertTo-Json -Depth 4) + "`n")
+    Assert-ValidatorFails -ExpectedFragment 'schema_version must be the JSON number 2' `
+        -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'release-handoff.json') -Content $oldHandoff
+
+    $userZipPath = Join-Path $handoffRoot 'DarkReNamer-windows-x64.zip'
+    Copy-Item -LiteralPath (Join-Path $handoffRoot 'DarkReNamer-support-windows-x64.zip') `
+        -Destination $userZipPath -Force
+    $wrongUserZipHash = (Get-FileHash -LiteralPath $userZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $wrongChecksumLines = @(Get-Content -LiteralPath (Join-Path $handoffRoot 'SHA256SUMS.txt'))
+    $wrongChecksumLines[1] = "$wrongUserZipHash *DarkReNamer-windows-x64.zip"
+    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'SHA256SUMS.txt') `
+        -Content (($wrongChecksumLines -join "`n") + "`n")
+    Assert-ValidatorFails -ExpectedFragment 'Candidate ZIP directory' `
+        -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+    Write-Checksums -HandoffRoot $handoffRoot
 
     Remove-Item -LiteralPath (Join-Path $handoffRoot 'release-metrics.json')
     Assert-ValidatorFails `
@@ -491,7 +539,7 @@ try {
     $exeHash = (Get-FileHash -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Utf8NoBom `
         -Path (Join-Path $handoffRoot 'release-handoff.json') `
-        -Content "{`"schema_version`":1,`"source_sha`":`"$sourceSha`",`"source_sha`":`"$sourceSha`",`"workflow_run`":`"33257061299`",`"executable`":{`"filename`":`"DarkReNamer.exe`",`"sha256`":`"$exeHash`"}}`n"
+        -Content "{`"schema_version`":2,`"source_sha`":`"$sourceSha`",`"source_sha`":`"$sourceSha`",`"workflow_run`":`"33257061299`",`"workflow_attempt`":`"2`",`"package_layout`":`"portable-windows-x64-v1`",`"executable`":{`"filename`":`"DarkReNamer.exe`",`"sha256`":`"$exeHash`"}}`n"
     Assert-ValidatorFails `
         -ExpectedFragment 'contains a duplicate field: source_sha' `
         -SourceRoot $sourceRoot `
@@ -526,9 +574,11 @@ try {
         -HandoffRoot $handoffRoot
 
     $unsupported = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = $sourceSha
         workflow_run = '33257061299'
+        workflow_attempt = '2'
+        package_layout = 'portable-windows-x64-v1'
         executable = [ordered]@{
             filename = 'DarkReNamer.exe'
             sha256 = (Get-FileHash -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -591,7 +641,7 @@ try {
         -Path $thirdPartyLicensesPath `
         -Content ($thirdPartyLicenses + "tampered`n")
     Assert-ValidatorFails `
-        -ExpectedFragment 'Checksum mismatch for THIRD_PARTY_LICENSES.html' `
+        -ExpectedFragment 'Release package member differs from source-bound handoff' `
         -SourceRoot $sourceRoot `
         -HandoffRoot $handoffRoot
     Write-Utf8NoBom -Path $thirdPartyLicensesPath -Content $thirdPartyLicenses
@@ -624,7 +674,7 @@ try {
     }
 
     $checksums = Get-Content -LiteralPath $checksumPath -Raw
-    Write-Utf8NoBom -Path $checksumPath -Content ($checksums.Replace('*LICENSE', '*license'))
+    Write-Utf8NoBom -Path $checksumPath -Content ($checksums.Replace('*DarkReNamer-support-windows-x64.zip', '*darkrenamer-support-windows-x64.zip'))
     Assert-ValidatorFails -ExpectedFragment 'canonical sorted order' `
         -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
     Write-Checksums -HandoffRoot $handoffRoot

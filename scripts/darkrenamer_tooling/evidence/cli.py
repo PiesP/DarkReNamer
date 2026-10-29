@@ -66,10 +66,15 @@ def validate(args: argparse.Namespace) -> bytes:
     with _open_absolute_regular(handoff_path) as stream:
         handoff_bytes = stream.read(MAX_JSON_BYTES + 1)
     handoff = parse_bounded_json_bytes(handoff_bytes, label="independent handoff")
-    require_exact_keys(handoff, {'schema_version', 'source_sha', 'workflow_run', 'executable'}, 'Independent handoff')
-    require_int(handoff['schema_version'], 1, 1, 'Handoff schema')
-    require(handoff['source_sha'] == source_sha and str(handoff['workflow_run']) == args.candidate_run_id,
-            'Independent handoff source/run differs from the selected candidate.')
+    require_exact_keys(handoff, {'schema_version', 'source_sha', 'workflow_run',
+                                 'workflow_attempt', 'package_layout', 'executable'},
+                       'Independent handoff')
+    require_int(handoff['schema_version'], 2, 2, 'Handoff schema')
+    require(handoff['package_layout'] == 'portable-windows-x64-v1' and
+            handoff['source_sha'] == source_sha and
+            str(handoff['workflow_run']) == args.candidate_run_id and
+            str(handoff['workflow_attempt']) == args.candidate_run_attempt,
+            'Independent handoff layout/source/run differs from the selected candidate.')
     executable = require_exact_keys(handoff['executable'], {'filename', 'sha256'}, 'Independent executable')
     require(executable == {'filename': 'DarkReNamer.exe', 'sha256': sha(args.expected_exe_sha256, 64)},
             'Independent executable binding differs from the selected candidate.')
