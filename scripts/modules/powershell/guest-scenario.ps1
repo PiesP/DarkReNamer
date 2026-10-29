@@ -41,6 +41,9 @@ function Get-ProductionLanguageSpec {
             system = '시스템 언어'; question = '계획된 파일 변경을 적용하시겠습니까?'
             no_overwrite = '기존 파일을 덮어쓰지 않습니다.'
             recovery = 'DarkReNamer - 복구 상태'; recovery_locked = '새 적용은 잠겼습니다.'
+            recovery_confirm = 'DarkReNamer - 이전 변경 복구 확인'
+            recovery_question = '이전 실행에서 중단된 이름 변경을 복구하시겠습니까?'
+            recovery_detail = '복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.'
             blocked_apply = 'DarkReNamer - 적용 차단'; occupied = '대상 이름이 이미 사용 중입니다.'
             command = [int]0x9021; value = 1
         } }
@@ -51,6 +54,9 @@ function Get-ProductionLanguageSpec {
             system = 'System language'; question = 'Apply the planned file changes?'
             no_overwrite = 'Existing files will not be overwritten.'
             recovery = 'DarkReNamer - Recovery status'; recovery_locked = 'Apply is locked.'
+            recovery_confirm = 'DarkReNamer - Confirm recovery'
+            recovery_question = 'Recover name changes interrupted in the previous run?'
+            recovery_detail = 'Recover checks the retained journal and current file identities again before reversing changes as needed. Cancel changes no files and keeps recovery locked.'
             blocked_apply = 'DarkReNamer - Apply blocked'; occupied = 'The destination name is already in use.'
             command = [int]0x9022; value = 2
         } }
@@ -61,6 +67,9 @@ function Get-ProductionLanguageSpec {
             system = 'システム言語'; question = '計画されたファイル変更を適用しますか？'
             no_overwrite = '既存のファイルは上書きしません。'
             recovery = 'DarkReNamer - 復旧状態'; recovery_locked = '適用をロックしました。'
+            recovery_confirm = 'DarkReNamer - 復旧の確認'
+            recovery_question = '前回の実行で中断された名前変更を復旧しますか？'
+            recovery_detail = '復旧を選ぶと、保持されたジャーナルと現在のファイル識別情報を再検証して必要な逆方向の名前変更を行います。キャンセルするとファイルは変更されず、復旧ロックが維持されます。'
             blocked_apply = 'DarkReNamer - 適用をブロック'; occupied = '変更先の名前はすでに使用されています。'
             command = [int]0x9023; value = 3
         } }
@@ -1547,9 +1556,354 @@ function Invoke-ProductionBlockedRecoveryCheck {
     }
 }
 
+function Get-ProductionValidActiveCheckpoint {
+    param([Parameter(Mandatory)][string] $FixtureRoot)
+    $work = Join-Path (Join-Path $FixtureRoot 'data') 'work'
+    $workItem = Get-Item -LiteralPath $work -Force -ErrorAction Stop
+    if (-not $workItem.PSIsContainer -or
+        ($workItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Valid-active data root is not an ordinary owned directory.'
+    }
+    $items = @(Get-ChildItem -LiteralPath $work -Force | Sort-Object Name)
+    if ($items.Count -ne 3) { throw 'Valid-active swap fixture lost its three files.' }
+    $files = @($items | ForEach-Object {
+        if ($_.PSIsContainer -or $_ -isnot [IO.FileInfo] -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $_.Name.Length -gt 160 -or $_.Length -gt 64) {
+            throw 'Valid-active swap fixture has an unsafe file.'
+        }
+        [ordered]@{
+            name = [string]$_.Name
+            bytes = [long]$_.Length
+            content_sha256 = Get-LowerSha256 -Path $_.FullName
+            file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($_.FullName))
+        }
+    })
+    $journalRoot = Join-Path (Join-Path $FixtureRoot 'DarkReNamer') 'journal'
+    $entries = @(Get-ChildItem -LiteralPath $journalRoot -Force)
+    $others = @($entries | Where-Object Name -cne 'active.drj')
+    if ($others.Count -gt 1 -or
+        ($others.Count -eq 1 -and ($others[0].Name -cne 'runtime.lock' -or
+            $others[0].PSIsContainer -or $others[0].Length -ne 0 -or
+            ($others[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) -or
+        @($entries | Where-Object Name -ceq 'active.drj').Count -ne 1 -or
+        (Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj'))) {
+        throw 'Valid-active fixture has an unexpected journal inventory.'
+    }
+    $active = Get-Item -LiteralPath (Join-Path $journalRoot 'active.drj') -Force -ErrorAction Stop
+    if ($active.PSIsContainer -or $active -isnot [IO.FileInfo] -or
+        ($active.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $active.Length -lt 24 -or $active.Length -gt 64MB) {
+        throw 'Valid-active journal is not one bounded ordinary file.'
+    }
+    [ordered]@{
+        files = $files
+        journal = [ordered]@{
+            bytes = [long]$active.Length
+            sha256 = Get-LowerSha256 -Path $active.FullName
+            file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($active.FullName))
+        }
+    }
+}
+
+function Assert-ProductionValidActiveCheckpoint {
+    param([Parameter(Mandatory)][object] $Expected,
+          [Parameter(Mandatory)][object] $Actual)
+    if (($Expected | ConvertTo-Json -Depth 8 -Compress) -cne
+        ($Actual | ConvertTo-Json -Depth 8 -Compress)) {
+        throw 'Valid-active startup or default Cancel changed partial files or retained journal.'
+    }
+}
+
+function Invoke-ProductionValidActiveRecoveryCheck {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $TestBinary,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+    if ($TestBinary.name -cne 'darknamer_app' -or
+        $TestBinary.file -cnotmatch '^darknamer_app-[0-9a-f]{16}\.exe$') {
+        throw 'Valid-active crash child requires the manifest-bound app library test binary.'
+    }
+    $binaryPath = Join-Path $Root $TestBinary.file
+    Assert-OrdinaryFile -Path $binaryPath -Label 'valid-active crash child binary'
+    if ((Get-LowerSha256 -Path $binaryPath) -cne $TestBinary.sha256) {
+        throw 'Valid-active crash child differs from its verified bundle digest.'
+    }
+    $fixtureRoot = New-PrivateDirectory -Parent $env:TEMP -Leaf 'valid-active-language'
+    $dataRoot = New-PrivateDirectory -Parent $fixtureRoot -Leaf 'data'
+    $work = New-PrivateDirectory -Parent $dataRoot -Leaf 'work'
+    foreach ($item in @(
+        @{ name='a.txt'; content='entry-a' },
+        @{ name='b.txt'; content='entry-b' },
+        @{ name='sentinel.txt'; content='sentinel-work' }
+    )) {
+        [IO.File]::WriteAllBytes((Join-Path $work $item.name),
+            [Text.Encoding]::ASCII.GetBytes($item.content))
+    }
+    $originalContentHashes = @(@('a.txt', 'b.txt', 'sentinel.txt') |
+        ForEach-Object { Get-LowerSha256 -Path (Join-Path $work $_) } | Sort-Object)
+    $nonce = [Guid]::NewGuid().ToString('N')
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'fixture-nonce.txt'),
+        $nonce, [Text.UTF8Encoding]::new($false))
+    $originalLocalAppData = $env:LOCALAPPDATA
+    $childVariables = @(
+        'DARKRENAMER_TEST_CHILD_MODE', 'DARKRENAMER_TEST_CHILD_ROOT',
+        'DARKRENAMER_TEST_FIXTURE_NONCE', 'DARKRENAMER_TEST_GRAPH',
+        'DARKRENAMER_TEST_CRASH_POINT', 'DARKRENAMER_TEST_FORCE_ROLLBACK',
+        'DARKRENAMER_TEST_FAILURE_ROLLBACK', 'DARKRENAMER_TEST_RECOVERY_MODE'
+    )
+    $originalChildVariables = @{}
+    foreach ($name in $childVariables) {
+        $originalChildVariables[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $child = $null
+    $fullyVerified = $false
+    $observations = [Collections.Generic.List[object]]::new()
+    try {
+        $env:LOCALAPPDATA = $fixtureRoot
+        [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_CHILD_MODE', '1', 'Process')
+        [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_CHILD_ROOT', $fixtureRoot, 'Process')
+        [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_FIXTURE_NONCE', $nonce, 'Process')
+        [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_GRAPH', 'swap', 'Process')
+        [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_CRASH_POINT', 'forward-completed-0', 'Process')
+        foreach ($name in @('DARKRENAMER_TEST_FORCE_ROLLBACK',
+            'DARKRENAMER_TEST_FAILURE_ROLLBACK', 'DARKRENAMER_TEST_RECOVERY_MODE')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        $stdoutPath = Join-Path $fixtureRoot 'crash-child.stdout.txt'
+        $stderrPath = Join-Path $fixtureRoot 'crash-child.stderr.txt'
+        $arguments = '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1'
+        $child = Start-JobBoundProcess -FilePath $binaryPath -Arguments $arguments `
+            -WorkingDirectory $Root -StdoutPath $stdoutPath -StderrPath $stderrPath `
+            -SingleProcessOnly -AggregateOutputLimitBytes 65536
+        $childStart = [string]$child.process_start_time_utc_ticks
+        $childPid = [int]$child.process.Id
+        $wait = Wait-JobBoundProcessWithOutputLimit -State $child `
+            -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $TimeoutSeconds
+        if ($null -ne $wait.failure_reason -or $child.process.ExitCode -ne 86 -or
+            $child.job_had_survivors -or $child.job_forced_termination) {
+            throw 'Source-built crash child did not exit at the exact durable forward step.'
+        }
+        $job = Complete-AcceptanceOwnedProcessJob -Owned $child
+        if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed -or
+            $job.had_survivors -or $job.forced_termination) {
+            throw 'Source-built crash child Job did not close cleanly.'
+        }
+        $childRecord = [ordered]@{
+            test_name = 'windows::tests::crash_recovery_child'
+            test_file = $TestBinary.file; test_sha256 = $TestBinary.sha256
+            arguments = $arguments; graph = 'swap'; crash_point = 'forward-completed-0'
+            exit_code = 86; pid = $childPid; process_start_time_utc_ticks = $childStart
+            exit_semantics = 'expected-abrupt-crash-point'; single_process_job = $true
+            job_clean = $true; job_had_survivors = $false; job_forced_termination = $false
+        }
+        foreach ($name in $childVariables) {
+            [Environment]::SetEnvironmentVariable($name, $originalChildVariables[$name], 'Process')
+        }
+        $partial = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+        $contentHashes = @($partial.files | ForEach-Object { $_.content_sha256 } | Sort-Object)
+        $partialNames = @($partial.files | ForEach-Object { $_.name })
+        if (($contentHashes -join ',') -cne ($originalContentHashes -join ',') -or
+            @($partialNames | Where-Object { $_ -ceq 'sentinel.txt' }).Count -ne 1 -or
+            @($partialNames | Where-Object { $_ -cin @('a.txt', 'b.txt') }).Count -ne 1 -or
+            @($partialNames | Where-Object {
+                $_ -cmatch '^\.__darknamer_[0-9a-f]{16}_[0-9a-f]{32}_[0-9a-f]{8}_[0-9a-f]{2}\.tmp$'
+            }).Count -ne 1) {
+            throw 'Crash child did not leave an authentic partial swap file state.'
+        }
+        foreach ($step in @(
+            @{ language='ko'; preference=0; next='en' },
+            @{ language='en'; preference=2; next='ja' },
+            @{ language='ja'; preference=3; next=$null }
+        )) {
+            $owned = $null
+            try {
+                if ((Get-LowerSha256 -Path (Join-Path $Root $Application.file)) -cne $Application.sha256) {
+                    throw 'Valid-active application changed after source-bound preflight.'
+                }
+                $before = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $before
+                $owned = Start-JobBoundProcess -FilePath (Join-Path $Root $Application.file) `
+                    -Arguments '' -WorkingDirectory $Root -SingleProcessOnly
+                $process = $owned.process
+                $binding = Wait-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+                    -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `
+                    -TimeoutSeconds $TimeoutSeconds -Label "$($step.language) valid-active startup"
+                $main = $binding.element
+                $mainHandle = [IntPtr]$binding.handle
+                $labels = Get-ProductionLanguageSpec -Language $step.language
+                $notice = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $Session `
+                    -MainWindowHandle $mainHandle -Name $labels.recovery_confirm `
+                    -TimeoutSeconds $TimeoutSeconds -Label "$($step.language) active recovery confirmation"
+                $noticeHandle = [IntPtr]$notice.Current.NativeWindowHandle
+                $noticeBounds = $notice.Current.BoundingRectangle
+                if ($noticeBounds.Width -le 0 -or $noticeBounds.Height -le 0 -or
+                    $noticeBounds.Width -gt 16384 -or $noticeBounds.Height -gt 16384) {
+                    throw 'Active recovery confirmation has invalid window bounds.'
+                }
+                $saved = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+                if ($saved.value -ne $step.preference) {
+                    throw 'Valid-active startup did not reload its selected language.'
+                }
+                $children = $notice.FindAll([Windows.Automation.TreeScope]::Descendants,
+                    [Windows.Automation.Condition]::TrueCondition)
+                if ($children.Count -gt 512) { throw 'Active recovery confirmation tree exceeds its bound.' }
+                $names = @($children | Where-Object { $_.Current.ProcessId -eq $process.Id -and $_.Current.Name } |
+                    ForEach-Object { [string]$_.Current.Name })
+                $copy = [string]::Join("`n", $names)
+                if ($copy.Length -gt 32768 -or
+                    $copy.IndexOf($labels.recovery_question, [StringComparison]::Ordinal) -lt 0 -or
+                    $copy.IndexOf($labels.recovery_detail, [StringComparison]::Ordinal) -lt 0) {
+                    throw 'Active recovery confirmation lost its localized question or Cancel safety guidance.'
+                }
+                $cancel = Find-UniqueAutomationElement -Root $notice -Process $process `
+                    -ExpectedSession $Session -AutomationId 'CommandButton_2' `
+                    -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $TimeoutSeconds -Label "$($step.language) recovery default Cancel" `
+                    -RequireEnabled -RequireWindowHandle
+                $foreground = [Collections.Generic.List[object]]::new()
+                $capture = Save-WindowScreenshot -Window $notice -Process $process `
+                    -ExpectedSession $Session -Root $OutputRoot `
+                    -Leaf "$($step.language)-valid-active-recovery.png" `
+                    -Label "$($step.language) valid-active recovery confirmation" `
+                    -ForegroundObservations $foreground
+                Set-ProductionCaptureByteCount -Capture $capture -Root $OutputRoot
+                Assert-AutomationBinding -Element $cancel -Process $process `
+                    -ExpectedSession $Session -Label 'recovery default Cancel after foreground capture' `
+                    -RequireWindowHandle
+                if (-not $cancel.Current.HasKeyboardFocus) {
+                    throw 'Active recovery Cancel was not the default focused choice.'
+                }
+                $cancelBounds = $cancel.Current.BoundingRectangle
+                if ($cancelBounds.Width -le 0 -or $cancelBounds.Height -le 0 -or
+                    $cancelBounds.Left -lt $noticeBounds.Left -or
+                    $cancelBounds.Top -lt $noticeBounds.Top -or
+                    $cancelBounds.Right -gt $noticeBounds.Right -or
+                    $cancelBounds.Bottom -gt $noticeBounds.Bottom) {
+                    throw 'Active recovery default Cancel is clipped or outside its dialog.'
+                }
+                $atStartup = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $atStartup
+                Invoke-AutomationControl -Element $cancel -Label "$($step.language) recovery default Cancel"
+                Wait-WindowClosed -Handle $noticeHandle -TimeoutSeconds $TimeoutSeconds `
+                    -Label "$($step.language) active recovery confirmation"
+                $afterCancel = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterCancel
+                $apply = Find-UniqueAutomationElement -Root $main -Process $process `
+                    -ExpectedSession $Session -AutomationId ([string]0x8003) `
+                    -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $TimeoutSeconds -Label "$($step.language) recovery-locked Apply" `
+                    -RequireWindowHandle
+                if ($apply.Current.IsEnabled) { throw 'Default Cancel unlocked Apply.' }
+                $choice = if ($null -eq $step.next) { $null } else {
+                    Invoke-ProductionLanguageMenuChoice -Process $process -MainWindow $main `
+                        -Session $Session -CurrentLanguage $step.language `
+                        -NextPreference $step.next -TimeoutSeconds $TimeoutSeconds
+                }
+                $afterChoice = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterChoice
+                Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+                    -MainWindowHandle $mainHandle -MainWindow $main `
+                    -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `
+                    -Label "$($step.language) valid-active normal close"
+                if (-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0) {
+                    throw 'Valid-active application did not close normally after default Cancel.'
+                }
+                $job = Complete-AcceptanceOwnedProcessJob -Owned $owned
+                if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed) {
+                    throw 'Valid-active application Job did not close cleanly.'
+                }
+                $afterClose = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+                Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterClose
+                $observations.Add([ordered]@{
+                    language = $step.language; startup_preference = $saved
+                    pid = [int]$process.Id; session_id = [int]$Session
+                    process_start_time_utc_ticks = [string]$owned.process_start_time_utc_ticks
+                    main_hwnd = [long]$mainHandle; notice_hwnd = [long]$noticeHandle
+                    title = $labels.recovery_confirm; question = $labels.recovery_question
+                    cancel_guidance = $labels.recovery_detail
+                    notice_bounds = [ordered]@{ x=$noticeBounds.X; y=$noticeBounds.Y
+                        width=$noticeBounds.Width; height=$noticeBounds.Height }
+                    cancel_bounds = [ordered]@{ x=$cancelBounds.X; y=$cancelBounds.Y
+                        width=$cancelBounds.Width; height=$cancelBounds.Height }
+                    cancel_default_focused = $true; apply_locked_after_cancel = $true
+                    before = $before; at_startup = $atStartup; after_cancel = $afterCancel
+                    after_choice = $afterChoice; after_close = $afterClose
+                    choice = $choice; normal_close = $true; process_job_clean = $true
+                    notice_capture = $capture; notice_capture_foreground = $foreground[0]
+                })
+            }
+            finally {
+                if ($null -ne $owned) {
+                    try {
+                        if (-not $owned.job_closed) {
+                            $job = Complete-AcceptanceOwnedProcessJob -Owned $owned -StopActive
+                            if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed) {
+                                throw 'Valid-active owned process cleanup failed.'
+                            }
+                        }
+                    }
+                    finally { $owned.process.Dispose() }
+                }
+            }
+        }
+        $final = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
+        Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $final
+        $fullyVerified = $true
+        [ordered]@{
+            schema_version = 1; status = 'passed'; scope = 'authentic-crash-child-three-language-default-cancel'
+            child = $childRecord; partial = $partial; observations = $observations.ToArray()
+            final = $final
+            fixture_cleanup = 'verified-owned-root'
+        }
+    }
+    finally {
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        foreach ($name in $childVariables) {
+            try {
+                [Environment]::SetEnvironmentVariable($name, $originalChildVariables[$name], 'Process')
+            }
+            catch { $cleanupErrors.Add("$name restore: $($_.Exception.Message)") }
+        }
+        try { $env:LOCALAPPDATA = $originalLocalAppData }
+        catch { $cleanupErrors.Add("LOCALAPPDATA restore: $($_.Exception.Message)") }
+        if ($null -ne $child) {
+            try {
+                if (-not $child.job_closed) {
+                    $job = Complete-AcceptanceOwnedProcessJob -Owned $child -StopActive
+                    if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed) {
+                        throw 'Crash child owned Job cleanup failed.'
+                    }
+                }
+            }
+            catch { $cleanupErrors.Add($_.Exception.Message) }
+            finally {
+                try { $child.process.Dispose() }
+                catch { $cleanupErrors.Add($_.Exception.Message) }
+            }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            throw ('Valid-active environment or process cleanup failed: ' +
+                [string]::Join(' | ', $cleanupErrors))
+        }
+        if ($fullyVerified -and (Test-Path -LiteralPath $fixtureRoot)) {
+            Assert-OrdinaryDirectoryTree -Path $fixtureRoot
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                throw 'Valid-active fixture cleanup was incomplete.'
+            }
+        }
+    }
+}
+
 function Invoke-ProductionLanguageCycle {
     param(
         [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $TestBinary,
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $CaseRoot,
         [Parameter(Mandatory)][string] $OutputRoot,
@@ -1709,12 +2063,16 @@ function Invoke-ProductionLanguageCycle {
             }
         }
     }
+    $validActive = Invoke-ProductionValidActiveRecoveryCheck `
+        -Application $Application -TestBinary $TestBinary -Root $Root `
+        -OutputRoot $OutputRoot -Session $Session -TimeoutSeconds $TimeoutSeconds
     [ordered]@{
         schema_version = 1; status = 'passed'; scope = 'source-built-three-language-native-menu'
         application_sha256 = $Application.sha256
         selections = $observations.ToArray(); flows = $flows.ToArray()
         system_resolution = $systemResolution
         restored_preference = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+        valid_active_recovery = $validActive
     }
 }
 
@@ -2021,8 +2379,18 @@ function Invoke-GuiSmoke {
                 }
                 if (-not $RawEvidence) {
                     $row.failure_reason = 'production_language_checks_failed'
+                    $verifiedAgain = Resolve-VerifiedBundle -Root $Root `
+                        -InvokedScriptPath (Join-Path $Root 'windows-vm-guest.ps1')
+                    $appTests = @($verifiedAgain.manifest.test_binaries |
+                        Where-Object name -ceq 'darknamer_app')
+                    if ($verifiedAgain.manifest.schema_version -ne 1 -or
+                        $appTests.Count -ne 1 -or
+                        $verifiedAgain.manifest.application.sha256 -cne $Application.sha256) {
+                        throw 'Valid-active source test binary is not uniquely bound to the verified GUI bundle.'
+                    }
                     $row.language_checks = Invoke-ProductionLanguageCycle `
-                        -Application $Application -Root $Root -CaseRoot $caseRoot `
+                        -Application $Application -TestBinary $appTests[0] `
+                        -Root $Root -CaseRoot $caseRoot `
                         -OutputRoot $OutputRoot -Session $ExpectedSession `
                         -TimeoutSeconds $TimeoutSeconds
                 }

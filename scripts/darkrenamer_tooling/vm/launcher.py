@@ -1336,6 +1336,155 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
     return True
 
 
+def verify_valid_active_recovery(root, manifest, record):
+    if (not isinstance(record, dict) or record.get('schema_version') != 1 or
+            record.get('status') != 'passed' or
+            record.get('scope') != 'authentic-crash-child-three-language-default-cancel' or
+            record.get('fixture_cleanup') != 'verified-owned-root'):
+        raise ValueError('Valid-active multilingual recovery evidence is incomplete.')
+    tests = [row for row in manifest['test_binaries'] if row.get('name') == 'darknamer_app']
+    if len(tests) != 1 or not re.fullmatch(r'darknamer_app-[0-9a-f]{16}\.exe', tests[0]['file']):
+        raise ValueError('Valid-active crash child lacks a unique source-built app test binary.')
+    checked_artifact(root, tests[0])
+    child = record.get('child')
+    if (not isinstance(child, dict) or
+            child.get('test_file') != tests[0]['file'] or
+            child.get('test_sha256') != tests[0]['sha256'] or
+            child.get('test_name') != 'windows::tests::crash_recovery_child' or
+            child.get('arguments') != '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1' or
+            child.get('graph') != 'swap' or child.get('crash_point') != 'forward-completed-0' or
+            child.get('exit_code') != 86 or child.get('job_clean') is not True or
+            child.get('exit_semantics') != 'expected-abrupt-crash-point' or
+            child.get('single_process_job') is not True or
+            child.get('job_had_survivors') is not False or
+            child.get('job_forced_termination') is not False or
+            type(child.get('pid')) is not int or child['pid'] <= 0 or
+            not isinstance(child.get('process_start_time_utc_ticks'), str) or
+            not re.fullmatch(r'[1-9][0-9]{14,19}', child['process_start_time_utc_ticks'])):
+        raise ValueError('Valid-active crash child is not bound to its exact source and exit.')
+    partial = record.get('partial')
+    if not isinstance(partial, dict) or set(partial) != {'files', 'journal'}:
+        raise ValueError('Valid-active partial checkpoint is missing.')
+    files = partial['files']
+    if not isinstance(files, list) or len(files) != 3:
+        raise ValueError('Valid-active partial data inventory is invalid.')
+    expected_hashes = sorted(hashlib.sha256(value).hexdigest() for value in
+                             (b'entry-a', b'entry-b', b'sentinel-work'))
+    names = []
+    identities = []
+    for item in files:
+        if (not isinstance(item, dict) or set(item) !=
+                {'name', 'bytes', 'content_sha256', 'file_identity_sha256'} or
+                not isinstance(item['name'], str) or not 1 <= len(item['name']) <= 160 or
+                '\\' in item['name'] or '/' in item['name'] or item['name'] in ('.', '..') or
+                type(item['bytes']) is not int or not 1 <= item['bytes'] <= 64 or
+                any(not isinstance(item.get(key), str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', item[key])
+                    for key in ('content_sha256', 'file_identity_sha256'))):
+            raise ValueError('Valid-active partial file shape is invalid.')
+        names.append(item['name'])
+        identities.append(item['file_identity_sha256'])
+    temporary_names = [name for name in names if re.fullmatch(
+        r'\.__darknamer_[0-9a-f]{16}_[0-9a-f]{32}_[0-9a-f]{8}_[0-9a-f]{2}\.tmp', name)]
+    if (len(set(names)) != 3 or len(set(identities)) != 3 or
+            sorted(item['content_sha256'] for item in files) != expected_hashes or
+            'sentinel.txt' not in names or len(temporary_names) != 1 or
+            sum(name in ('a.txt', 'b.txt') for name in names) != 1):
+        raise ValueError('Valid-active child did not leave a unique partial swap.')
+    journal = partial['journal']
+    if (not isinstance(journal, dict) or set(journal) !=
+            {'bytes', 'sha256', 'file_identity_sha256'} or
+            type(journal['bytes']) is not int or not 24 <= journal['bytes'] <= 64 * 1024 * 1024 or
+            any(not isinstance(journal.get(key), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', journal[key])
+                for key in ('sha256', 'file_identity_sha256'))):
+        raise ValueError('Valid-active retained journal shape is invalid.')
+    if record.get('final') != partial:
+        raise ValueError('Valid-active final file or journal state changed.')
+    expected_copy = (
+        ('ko', 0, 2, 'DarkReNamer - 이전 변경 복구 확인',
+         '이전 실행에서 중단된 이름 변경을 복구하시겠습니까?',
+         '복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.'),
+        ('en', 2, 3, 'DarkReNamer - Confirm recovery',
+         'Recover name changes interrupted in the previous run?',
+         'Recover checks the retained journal and current file identities again before reversing changes as needed. Cancel changes no files and keeps recovery locked.'),
+        ('ja', 3, None, 'DarkReNamer - 復旧の確認',
+         '前回の実行で中断された名前変更を復旧しますか？',
+         '復旧を選ぶと、保持されたジャーナルと現在のファイル識別情報を再検証して必要な逆方向の名前変更を行います。キャンセルするとファイルは変更されず、復旧ロックが維持されます。'),
+    )
+    observations = record.get('observations')
+    if not isinstance(observations, list) or len(observations) != 3:
+        raise ValueError('Valid-active multilingual startup inventory is incomplete.')
+    capture_bytes = 0
+    for index, (row, (language, before, after, title, question, detail)) in enumerate(
+            zip(observations, expected_copy)):
+        if (not isinstance(row, dict) or row.get('language') != language or
+                tuple(row.get(key) for key in ('title', 'question', 'cancel_guidance')) !=
+                (title, question, detail) or
+                row.get('cancel_default_focused') is not True or
+                row.get('apply_locked_after_cancel') is not True or
+                row.get('normal_close') is not True or
+                row.get('process_job_clean') is not True or
+                any(type(row.get(key)) is not int or row[key] <= 0 for key in
+                    ('pid', 'session_id', 'main_hwnd', 'notice_hwnd')) or
+                row['pid'] == child['pid'] or row['main_hwnd'] == row['notice_hwnd'] or
+                not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', row['process_start_time_utc_ticks']) or
+                not isinstance(row.get('startup_preference'), dict) or
+                row['startup_preference'].get('value') != before or
+                not isinstance(row['startup_preference'].get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', row['startup_preference']['sha256'])):
+            raise ValueError('Valid-active recovery process, language, or Cancel binding is invalid.')
+        if any(row.get(key) != partial for key in
+               ('before', 'at_startup', 'after_cancel', 'after_choice', 'after_close')):
+            raise ValueError('Valid-active Cancel or normal close changed files or journal.')
+        notice_bounds, cancel_bounds = row.get('notice_bounds'), row.get('cancel_bounds')
+        if (not isinstance(notice_bounds, dict) or not isinstance(cancel_bounds, dict) or
+                any(type(bounds.get(key)) not in (int, float) for bounds in
+                    (notice_bounds, cancel_bounds) for key in ('x', 'y', 'width', 'height')) or
+                any(bounds[key] <= 0 for bounds in (notice_bounds, cancel_bounds)
+                    for key in ('width', 'height')) or
+                notice_bounds['width'] > 16384 or notice_bounds['height'] > 16384 or
+                cancel_bounds['x'] < notice_bounds['x'] or
+                cancel_bounds['y'] < notice_bounds['y'] or
+                cancel_bounds['x'] + cancel_bounds['width'] >
+                notice_bounds['x'] + notice_bounds['width'] or
+                cancel_bounds['y'] + cancel_bounds['height'] >
+                notice_bounds['y'] + notice_bounds['height']):
+            raise ValueError('Valid-active default Cancel bounds are clipped or invalid.')
+        capture = row.get('notice_capture')
+        checked_language_capture(root, capture, language + '-valid-active-recovery.png')
+        capture_bytes += capture['bytes']
+        verify_flow_foreground_observation(
+            row.get('notice_capture_foreground'),
+            {'process_id': row['pid'], 'session_id': row['session_id']},
+            language + ' valid-active recovery confirmation', '#32770')
+        if row['notice_capture_foreground']['target_hwnd'] != row['notice_hwnd']:
+            raise ValueError('Valid-active recovery capture targeted another dialog.')
+        choice = row.get('choice')
+        if after is None:
+            if choice is not None:
+                raise ValueError('Final valid-active language unexpectedly changed preference.')
+        elif (not isinstance(choice, dict) or choice.get('input') != 'native-menu-keyboard' or
+              any(choice.get(key) != row[binding] for key, binding in
+                  (('pid', 'pid'), ('session_id', 'session_id'), ('hwnd', 'main_hwnd'))) or
+              choice.get('model_rows_before') != 0 or choice.get('model_rows_after') != 0 or
+              choice.get('model_before') != {'rows': 0, 'cells': []} or
+              choice.get('model_after') != {'rows': 0, 'cells': []} or
+              not isinstance(choice.get('preference'), dict) or
+              choice['preference'].get('value') != after or
+              not isinstance(choice.get('before'), dict) or
+              choice['before'].get('checked_command') != 0x9020 + before or
+              not isinstance(choice.get('after'), dict) or
+              choice['after'].get('checked_command') != 0x9020 + after):
+            raise ValueError('Valid-active language choice did not preserve the recovery lock.')
+        if index > 0 and row['startup_preference'] != observations[index - 1]['choice']['preference']:
+            raise ValueError('Valid-active next startup did not reload its selected language.')
+    if len({row['pid'] for row in observations} | {child['pid']}) != 4:
+        raise ValueError('Valid-active recovery reused a supposedly closed process.')
+    return capture_bytes
+
+
 def verify_language_checks(root, manifest, checks, baseline_flow):
     if (not isinstance(checks, dict) or checks.get('schema_version') != 1 or
             checks.get('status') != 'passed' or
@@ -1514,6 +1663,10 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                 selections[1]['choice']['pending_file_before']['file_identity_sha256'] !=
                 flow['after_file_identity_sha256']):
             raise ValueError('Pending selection file does not match the applied flow outcome.')
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
+    capture_bytes += verify_valid_active_recovery(root, manifest,
+                                                  checks.get('valid_active_recovery'))
     if capture_bytes > 48 * 1024 * 1024:
         raise ValueError('Language capture inventory exceeds its total byte bound.')
     return True
