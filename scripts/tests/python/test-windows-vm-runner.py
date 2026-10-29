@@ -161,11 +161,22 @@ class VmRunnerTests(unittest.TestCase):
                                int(phase[5:]) if phase.startswith('down-') else
                                after if phase == 'pre-enter' else None)
                 states = [0x80 if position == highlighted else 0 for position in range(4)]
+                popups = [
+                    {'hwnd': 900 + index * 2 + popup, 'owner': hwnd,
+                     'process_id': pid, 'class': '#32768', 'visible': True,
+                     'bounds': {'left': 10 + popup * 200, 'top': 10,
+                                'right': 200 + popup * 200, 'bottom': 200}}
+                    for popup in range(1 if phase in ('alt-v', 'end') else 2)
+                ]
                 stages.append({'phase': phase, 'pid': pid, 'session_id': 2, 'hwnd': hwnd,
                                'thread_id': 500 + index, 'language_handle': 800 + index,
                                'menu_owner': hwnd,
                                'gui_flags': 0x4 if phase == 'alt-v' else 0x14,
                                'view_language_state': 0x80 if phase == 'end' else 0,
+                               'top_states': [0, 0, 0x80, 0, 0, 0],
+                               'view_states': [0] * 9 + [0x80 if phase == 'end' else 0],
+                               'popup_count': len(popups),
+                               'popups': popups,
                                'commands': list(range(0x9020, 0x9024)), 'states': states,
                                'highlighted_indices': ([] if highlighted is None else [highlighted])})
             choice = {'input': 'native-menu-keyboard', 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
@@ -328,6 +339,8 @@ class VmRunnerTests(unittest.TestCase):
                 for stage in choice['input_trace']:
                     stage.update(pid=pid, hwnd=main_hwnd, menu_owner=main_hwnd,
                                  thread_id=700 + index, language_handle=1200 + index)
+                    for popup in stage['popups']:
+                        popup.update(process_id=pid, owner=main_hwnd)
                 choice.pop('pending_file_before', None)
                 choice.pop('pending_file_after', None)
             rows.append({
@@ -422,6 +435,18 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['selections'][0]['choice']['input_trace'][-1].update(menu_owner=999),
             lambda row: row['selections'][0]['choice']['input_trace'][-1]['states'].__setitem__(2, 0),
             lambda row: row['selections'][0]['choice']['input_trace'][-1].update(gui_flags=0),
+            lambda row: row['selections'][0]['choice']['input_trace'][0].update(popups=[]),
+            lambda row: row['selections'][0]['choice']['input_trace'][0].update(popup_count=2),
+            lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0].update(
+                process_id=999),
+            lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0].update(
+                **{'class': '#32770'}),
+            lambda row: row['selections'][0]['choice']['input_trace'][1]['top_states'].__setitem__(2, 0),
+            lambda row: row['selections'][0]['choice']['input_trace'][1]['view_states'].__setitem__(9, 0),
+            lambda row: row['selections'][0]['choice']['input_trace'][-1]['popups'][1].update(
+                hwnd=row['selections'][0]['choice']['input_trace'][-1]['popups'][0]['hwnd']),
+            lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0]['bounds'].update(
+                right=5000),
             lambda row: row['selections'][0]['choice']['post_enter'][-1].update(preference=None),
             lambda row: row['selections'][1]['choice']['preference'].update(value=1),
             lambda row: row['flows'][0]['flow'].update(confirmed_destination_present=False),

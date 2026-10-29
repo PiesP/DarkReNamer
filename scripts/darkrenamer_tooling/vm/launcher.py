@@ -1554,10 +1554,36 @@ def verify_language_menu_input_trace(choice, target):
                 type(stage.get('gui_flags')) is not int or
                 stage['gui_flags'] & 0x4 != 0x4 or
                 type(stage.get('view_language_state')) is not int or
+                not isinstance(stage.get('top_states'), list) or len(stage['top_states']) != 6 or
+                not isinstance(stage.get('view_states'), list) or len(stage['view_states']) != 10 or
+                any(type(state) is not int or state < 0 for state in
+                    stage['top_states'] + stage['view_states']) or
+                stage['top_states'][2] & 0x80 == 0 or
+                stage['view_states'][9] != stage['view_language_state'] or
+                not isinstance(stage.get('popups'), list) or
+                type(stage.get('popup_count')) is not int or
+                stage['popup_count'] != len(stage['popups']) or
+                len(stage['popups']) != (1 if phase in ('alt-v', 'end') else 2) or
                 stage.get('commands') != list(range(0x9020, 0x9024)) or
                 not isinstance(stage.get('states'), list) or len(stage['states']) != 4 or
                 any(type(state) is not int or state < 0 for state in stage['states'])):
             raise ValueError('Real language menu stage lost process, owner, mode, or command binding.')
+        popup_handles = []
+        for popup in stage['popups']:
+            if not isinstance(popup, dict) or type(popup.get('hwnd')) is not int or popup['hwnd'] <= 0 or \
+                    type(popup.get('owner')) is not int or \
+                    type(popup.get('process_id')) is not int or popup['process_id'] != choice['pid'] or \
+                    popup.get('class') != '#32768' or popup.get('visible') is not True or \
+                    not isinstance(popup.get('bounds'), dict):
+                raise ValueError('Real language menu popup identity is invalid.')
+            bounds = popup['bounds']
+            if (any(type(bounds.get(key)) is not int for key in ('left', 'top', 'right', 'bottom')) or
+                    not 0 < bounds['right'] - bounds['left'] <= 4096 or
+                    not 0 < bounds['bottom'] - bounds['top'] <= 4096):
+                raise ValueError('Real language menu popup bounds are invalid.')
+            popup_handles.append(popup['hwnd'])
+        if len(set(popup_handles)) != len(popup_handles):
+            raise ValueError('Real language menu popups reuse a native window handle.')
         highlighted = [position for position, state in enumerate(stage['states'])
                        if state & 0x80]
         if stage.get('highlighted_indices') != highlighted:

@@ -2536,10 +2536,9 @@ $auditedInputSites = @{
     'Dismiss-AcceptanceMessage' = 1
     'Invoke-AcceptanceImportAndPrefix' = 1
     'Invoke-OwnedPickerAction' = 2
-    'Invoke-ProductionLanguageMenuChoice' = 6
 }
 $observedInputSites = @{}
-if ($sendKeys.Count -ne 10) { throw 'Recovery input sites changed without an ownership audit.' }
+if ($sendKeys.Count -ne 4) { throw 'Recovery input sites changed without an ownership audit.' }
 function Test-ProductionLanguageReadbackCallChain {
     param([Parameter(Mandatory)][Management.Automation.Language.Ast] $SourceAst)
     $choice = @($SourceAst.FindAll({ param($node)
@@ -2622,29 +2621,92 @@ foreach ($inputCall in $sendKeys) {
             "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
         )) { throw 'Picker keyboard input exceeds the reviewed address navigation.' }
     }
-    if ($owner.Name -ceq 'Invoke-ProductionLanguageMenuChoice') {
-        foreach ($fragment in @(
-            'Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow',
-            '[DarkReNamerVmNative]::GetForegroundWindow() -ne $handle',
-            'Get-ProductionLanguageChoiceObservation -Process $Process'
-        )) {
-            if ($owner.Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
-                throw "Language menu keyboard input lost its bound owner or durable readback: $fragment"
-            }
-        }
-        if ($inputCall.Extent.Text -cnotin @(
-            "[Windows.Forms.SendKeys]::SendWait('%v')",
-            "[Windows.Forms.SendKeys]::SendWait('{END}')",
-            "[Windows.Forms.SendKeys]::SendWait('{RIGHT}')",
-            "[Windows.Forms.SendKeys]::SendWait('{HOME}')",
-            "[Windows.Forms.SendKeys]::SendWait('{DOWN}')",
-            "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
-        )) { throw 'Language menu keyboard input exceeds the reviewed navigation.' }
-        if ([regex]::Matches($owner.Extent.Text,
-            'Assert-ProductionLanguageMenuForeground[^\r\n]*\r?\n\s*\[Windows\.Forms\.SendKeys\]::SendWait\(').Count -ne 6) {
-            throw 'Each language menu keyboard input must recheck the exact foreground owner.'
+}
+function Test-ProductionLanguageNativeInputAudit {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast] $SourceAst)
+    $choice = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionLanguageMenuChoice'
+    }, $true))
+    $sender = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Send-ProductionLanguageNativeInput'
+    }, $true))
+    $initializer = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Initialize-ProductionLanguageMenuReader'
+    }, $true))
+    if ($choice.Count -ne 1 -or $sender.Count -ne 1 -or $initializer.Count -ne 1) { return $false }
+    $calls = @($choice[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Send-ProductionLanguageNativeInput'
+    }, $true))
+    $actions = @('alt-v', 'end', 'right', 'home', 'down', 'enter')
+    if ($calls.Count -ne $actions.Count) { return $false }
+    for ($index = 0; $index -lt $actions.Count; $index++) {
+        $call = $calls[$index].Extent.Text
+        if ($call.IndexOf('-Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf('-MainWindow $MainWindow', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf('-Session $Session', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf("-Action '$($actions[$index])'", [StringComparison]::Ordinal) -lt 0) {
+            return $false
         }
     }
+    $senderText = $sender[0].Extent.Text
+    $choiceText = $choice[0].Extent.Text
+    $nativeText = $initializer[0].Extent.Text
+    if ($senderText.IndexOf("[ValidateSet('alt-v', 'end', 'right', 'home', 'down', 'enter')]", [StringComparison]::Ordinal) -lt 0 -or
+        [regex]::Matches($SourceAst.Extent.Text,
+            '\[DarkReNamerLanguageMenuReader\]::(?:KeyDown|KeyUp|Tap)\(').Count -ne 4) {
+        return $false
+    }
+    foreach ($fragment in @(
+        'Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session',
+        "[DarkReNamerLanguageMenuReader]::KeyDown([uint16]0x12)",
+        "[DarkReNamerLanguageMenuReader]::Tap([uint16]0x56)",
+        "[DarkReNamerLanguageMenuReader]::KeyUp([uint16]0x12)",
+        '[DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)',
+        "'end'   { 0x23 }", "'right' { 0x27 }", "'home'  { 0x24 }",
+        "'down'  { 0x28 }", "'enter' { 0x0D }"
+    )) {
+        if ($senderText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
+    }
+    if ($senderText.IndexOf('finally {', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Wait-ProductionLanguageMenuStage', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Get-ProductionLanguageChoiceObservation -Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('SendWait', [StringComparison]::Ordinal) -ge 0) { return $false }
+    foreach ($fragment in @(
+        '[StructLayout(LayoutKind.Sequential)] private struct KeyInput',
+        '[StructLayout(LayoutKind.Explicit)] private struct InputUnion',
+        '[StructLayout(LayoutKind.Sequential)] private struct Input',
+        '[FieldOffset(0)] public KeyInput Keyboard',
+        'private static extern uint SendInput(uint count, Input[] inputs, int size)',
+        'SendInput(1, new [] { input }, Marshal.SizeOf(typeof(Input))) != 1',
+        'throw new Win32Exception(Marshal.GetLastWin32Error())',
+        'public static void Tap(ushort virtualKey)',
+        'finally { KeyUp(virtualKey); }',
+        'TopStates = new uint[6], ViewStates = new uint[10]'
+    )) {
+        if ($nativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
+    }
+    $true
+}
+if (-not (Test-ProductionLanguageNativeInputAudit -SourceAst $fromFile)) {
+    throw 'Language menu native input lost its reviewed keys, foreground guard, or SendInput ABI.'
+}
+$unguardedLanguageSource = $recoveryModuleSource.Replace(
+    'Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session' + "`n" +
+    "    if (`$Action -ceq 'alt-v')", "if (`$Action -ceq 'alt-v')")
+if ($unguardedLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Language input guard negative fixture no longer matches the source.'
+}
+$unguardedTokens = $null
+$unguardedErrors = $null
+$unguardedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $unguardedLanguageSource, [ref]$unguardedTokens, [ref]$unguardedErrors)
+if ($unguardedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $unguardedAst)) {
+    throw 'Unguarded native language input unexpectedly passed the source audit.'
 }
 $languageForegroundGuards = @($fromFile.FindAll({
     param($node)
