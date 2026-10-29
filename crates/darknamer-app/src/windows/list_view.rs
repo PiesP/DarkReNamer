@@ -2731,6 +2731,7 @@ mod refresh_profile {
 
 #[cfg(test)]
 mod native_tests {
+    use super::super::command_dispatch::profile_runtime_sort_command;
     use super::super::visual_capture::{
         capture_window_pixels, write_window_bmp, write_window_bmp_single_print,
         write_window_bmp_single_print_clipped,
@@ -7718,6 +7719,387 @@ mod native_tests {
             assert_eq!(cache.issue(count - 1), PreviewRowIssue::None);
             assert!(cache.blocker_rows().is_empty());
         }
+    }
+
+    // This is an opt-in instrumented libtest diagnostic. Setup, reset, and
+    // destruction are outside every clock; a repetition is one fresh model.
+    #[test]
+    #[ignore = "manual Windows model diagnostic; run with --exact --ignored --nocapture"]
+    fn profile_runtime_model_baseline() -> Result<(), Box<dyn std::error::Error>> {
+        use darknamer_core::SortSemantics;
+
+        struct TestOle;
+        impl Drop for TestOle {
+            fn drop(&mut self) {
+                // SAFETY: paired successful initialization on this same thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+        // SAFETY: null is reserved; the guard balances successful initialization.
+        if unsafe { OleInitialize(null()) } < 0 {
+            return Err(io::Error::other("model diagnostic COM initialization failed").into());
+        }
+        let _ole = TestOle;
+
+        fn fixture(count: usize) -> LegacyList {
+            let mut model = LegacyList::new();
+            let rows = (0..count).map(|row| {
+                LegacyListItem::new_with_actual_size(
+                    format!(r"C:\model-fixture\항목-{row:05}-İ-ß.txt"),
+                    false,
+                    row as u32,
+                    row as u64 + (1_u64 << 32),
+                    133_497_936_000_000_000,
+                    133_497_936_000_000_000,
+                )
+            });
+            assert_eq!(model.append_batch_by(rows, compare_windows), Ok(count));
+            model
+        }
+
+        fn shuffled_fixture(count: usize) -> LegacyList {
+            let mut model = LegacyList::new();
+            let rows = (0..count).map(|row| {
+                LegacyListItem::new_with_actual_size(
+                    format!(r"C:\model-fixture\항목-{row:05}-İ-ß.txt"),
+                    false,
+                    row as u32,
+                    (1_u64 << 32) + ((row * 73) % count) as u64,
+                    133_497_936_000_000_000,
+                    133_497_936_000_000_000,
+                )
+            });
+            assert_eq!(model.append_batch_by(rows, compare_windows), Ok(count));
+            assert!(model.sort_by_with_semantics_changed(
+                LegacySortMode::SizeAscending,
+                SortSemantics::SafeActualSize,
+                compare_windows,
+            ));
+            model
+        }
+
+        fn preview_input(item: &LegacyListItem) -> PreviewRowInput<'_> {
+            PreviewRowInput {
+                parent: item.root_path(),
+                current: item.current_name(),
+                proposed: item.proposed_name(),
+                is_directory: item.is_directory(),
+                change: item.planned_change_kind(),
+            }
+        }
+
+        fn refresh_preview(cache: &mut PreviewIssueCache, model: &LegacyList) {
+            cache.refresh_by(
+                model.items().iter().map(preview_input),
+                preview_destination_key,
+            );
+        }
+
+        for count in [100_usize, 1_000, 10_000] {
+            for repetition in 1..=3 {
+                for distribution in ["unique", "collision_pairs", "large_collision_group"] {
+                    let mut model = fixture(count);
+                    let group_size = (count / 10).min(1_000);
+                    for row in 0..count {
+                        let proposal = match distribution {
+                            "collision_pairs" => format!("쌍-{:05}-İ.txt", row / 2),
+                            "large_collision_group" if row < group_size => "큰그룹-ß.txt".into(),
+                            _ => format!("새항목-{row:05}-İ-ß.txt"),
+                        };
+                        assert!(model.manual_change_changed(row, proposal)?);
+                    }
+                    let mut cache = PreviewIssueCache::default();
+                    let started = Instant::now();
+                    refresh_preview(&mut cache, &model);
+                    let elapsed_ns = started.elapsed().as_nanos();
+                    let expected_blockers = match distribution {
+                        "unique" => 0,
+                        "collision_pairs" => count,
+                        _ => group_size,
+                    };
+                    let expected_rows = (0..expected_blockers).collect::<Vec<_>>();
+                    let changed_rows = model
+                        .items()
+                        .iter()
+                        .filter(|item| item.planned_change_kind().is_changed())
+                        .count();
+                    assert_eq!(changed_rows, count);
+                    assert_eq!(cache.blocker_rows().as_ref(), expected_rows);
+                    for row in 0..count {
+                        assert_eq!(
+                            cache.issue(row),
+                            if distribution == "collision_pairs" || row < expected_blockers {
+                                PreviewRowIssue::DuplicateDestination
+                            } else {
+                                PreviewRowIssue::None
+                            },
+                            "{distribution} row {row}",
+                        );
+                    }
+                    println!(
+                        "{{\"kind\":\"runtime-model-baseline\",\"schema_version\":1,\"scope\":\"instrumented-windows-libtest\",\"icon_worker_attached\":false,\"operation\":\"preview_full\",\"distribution\":\"{distribution}\",\"rows\":{count},\"repetition\":{repetition},\"preview_cache_ns\":{elapsed_ns},\"affected_rows\":{count},\"changed_rows\":{changed_rows},\"blocker_rows\":{expected_blockers},\"functional_checks\":{count},\"status\":\"pass\"}}"
+                    );
+                }
+
+                for operation in [
+                    "unique_to_unique",
+                    "enter_collision",
+                    "leave_collision",
+                    "unchanged_windows_key",
+                    "large_group_leave",
+                ] {
+                    let mut model = fixture(count);
+                    let group_size = (count / 10).min(1_000);
+                    if operation == "leave_collision" {
+                        for row in [0, 1] {
+                            assert!(model.manual_change_changed(row, "쌍-İ.txt")?);
+                        }
+                    } else if operation == "large_group_leave" {
+                        for row in 0..group_size {
+                            assert!(model.manual_change_changed(row, "큰그룹-ß.txt")?);
+                        }
+                    } else if operation == "unchanged_windows_key" {
+                        assert!(model.manual_change_changed(0, "CASE-İ.txt")?);
+                    }
+                    let mut cache = PreviewIssueCache::default();
+                    refresh_preview(&mut cache, &model);
+                    let proposal = match operation {
+                        "unique_to_unique" => "고유-ß.txt".to_owned(),
+                        "enter_collision" => model.items()[1].proposed_name().to_string_lossy(),
+                        "leave_collision" | "large_group_leave" => "떠남-İ.txt".to_owned(),
+                        _ => "case-İ.TXT".to_owned(),
+                    };
+                    let started = Instant::now();
+                    assert!(model.manual_change_changed(0, proposal)?);
+                    let model_edit_ns = started.elapsed().as_nanos();
+                    let started = Instant::now();
+                    let update = cache.refresh_one_by(
+                        count,
+                        0,
+                        preview_input(&model.items()[0]),
+                        preview_destination_key,
+                    );
+                    assert!(update.is_some(), "fresh cache must accept one-row edit");
+                    let update = update.unwrap_or_default();
+                    let preview_cache_ns = started.elapsed().as_nanos();
+                    let expected_affected = match operation {
+                        "enter_collision" | "leave_collision" => 2,
+                        "large_group_leave" => group_size,
+                        _ => 1,
+                    };
+                    let expected_blockers = match operation {
+                        "enter_collision" => vec![0],
+                        "large_group_leave" => (1..group_size).collect(),
+                        _ => Vec::new(),
+                    };
+                    let expected_affected_rows = match operation {
+                        "enter_collision" | "leave_collision" => vec![0, 1],
+                        "large_group_leave" => (0..group_size).collect(),
+                        _ => vec![0],
+                    };
+                    assert_eq!(update.affected_rows.as_ref(), expected_affected_rows);
+                    assert_eq!(cache.blocker_rows().as_ref(), expected_blockers);
+                    let changed_rows = model
+                        .items()
+                        .iter()
+                        .filter(|item| item.planned_change_kind().is_changed())
+                        .count();
+                    assert_eq!(
+                        changed_rows,
+                        match operation {
+                            "leave_collision" => 2,
+                            "large_group_leave" => group_size,
+                            _ => 1,
+                        }
+                    );
+                    for row in 0..count {
+                        let expected = if expected_blockers.contains(&row) {
+                            PreviewRowIssue::DuplicateDestination
+                        } else {
+                            PreviewRowIssue::None
+                        };
+                        assert_eq!(cache.issue(row), expected, "{operation} row {row}");
+                    }
+                    println!(
+                        "{{\"kind\":\"runtime-model-baseline\",\"schema_version\":1,\"scope\":\"instrumented-windows-libtest\",\"icon_worker_attached\":false,\"operation\":\"preview_single_edit\",\"distribution\":\"{operation}\",\"rows\":{count},\"repetition\":{repetition},\"model_edit_ns\":{model_edit_ns},\"preview_cache_ns\":{preview_cache_ns},\"affected_rows\":{expected_affected},\"changed_rows\":{changed_rows},\"blocker_rows\":{},\"functional_checks\":{count},\"status\":\"pass\"}}",
+                        expected_blockers.len(),
+                    );
+                }
+
+                for distribution in ["sorted", "reverse", "shuffled", "equal_keys"] {
+                    let mut model = if distribution == "equal_keys" {
+                        let mut equal = LegacyList::new();
+                        let rows = (0..count).map(|row| {
+                            LegacyListItem::new_with_actual_size(
+                                format!(r"C:\model-fixture\folder-{row:05}\同名-İ.txt"),
+                                false,
+                                row as u32,
+                                row as u64 + (1_u64 << 32),
+                                0,
+                                0,
+                            )
+                        });
+                        assert_eq!(equal.append_batch_by(rows, compare_windows), Ok(count));
+                        equal
+                    } else if distribution == "shuffled" {
+                        shuffled_fixture(count)
+                    } else {
+                        fixture(count)
+                    };
+                    if distribution == "reverse" {
+                        model.sort_by_with_semantics_changed(
+                            LegacySortMode::NameDescending,
+                            SortSemantics::SafeActualSize,
+                            compare_windows,
+                        );
+                    }
+                    let before = model
+                        .items()
+                        .iter()
+                        .map(|item| item.source_path().clone())
+                        .collect::<Vec<_>>();
+                    let comparison_ns = std::cell::Cell::new(0_u128);
+                    let comparisons = std::cell::Cell::new(0_usize);
+                    let started = Instant::now();
+                    let changed = model.sort_by_with_semantics_changed(
+                        LegacySortMode::NameAscending,
+                        SortSemantics::SafeActualSize,
+                        |left, right| {
+                            let started = Instant::now();
+                            let order = compare_windows(left, right);
+                            let elapsed_ns = started.elapsed().as_nanos();
+                            comparison_ns.set(comparison_ns.get() + elapsed_ns);
+                            comparisons.set(comparisons.get() + 1);
+                            order
+                        },
+                    );
+                    let sort_inclusive_ns = started.elapsed().as_nanos();
+                    let after = model
+                        .items()
+                        .iter()
+                        .map(|item| item.source_path().clone())
+                        .collect::<Vec<_>>();
+                    assert_eq!(before.len(), after.len());
+                    assert_eq!(
+                        before.iter().collect::<std::collections::HashSet<_>>(),
+                        after.iter().collect::<std::collections::HashSet<_>>()
+                    );
+                    assert_eq!(changed, before != after);
+                    if distribution == "equal_keys" {
+                        assert_eq!(before, after, "equal-name ties must remain stable");
+                    } else {
+                        let expected = fixture(count)
+                            .items()
+                            .iter()
+                            .map(|item| item.source_path().clone())
+                            .collect::<Vec<_>>();
+                        assert_eq!(after, expected, "NameAscending order must be exact");
+                    }
+                    assert!(model.items().windows(2).all(|pair| compare_windows(
+                        pair[0].current_name(),
+                        pair[1].current_name()
+                    ) != std::cmp::Ordering::Greater));
+                    let compare_nested_ns = comparison_ns.get();
+                    assert!(compare_nested_ns <= sort_inclusive_ns);
+                    println!(
+                        "{{\"kind\":\"runtime-model-baseline\",\"schema_version\":1,\"scope\":\"instrumented-windows-libtest\",\"icon_worker_attached\":false,\"operation\":\"sort_model\",\"distribution\":\"{distribution}\",\"rows\":{count},\"repetition\":{repetition},\"sort_inclusive_ns\":{sort_inclusive_ns},\"compare_nested_ns\":{compare_nested_ns},\"comparisons\":{},\"selection\":\"none\",\"changed\":{changed},\"functional_checks\":{count},\"status\":\"pass\"}}",
+                        comparisons.get(),
+                    );
+                }
+
+                for distribution in ["sorted", "reverse", "shuffled", "equal_keys"] {
+                    let selections: &[&str] = if count == 10_000 && distribution == "shuffled" {
+                        &["none", "sparse", "broad"]
+                    } else {
+                        &["none", "sparse"]
+                    };
+                    for &selection in selections {
+                        let mut model = if distribution == "equal_keys" {
+                            let mut equal = LegacyList::new();
+                            let rows = (0..count).map(|row| {
+                                LegacyListItem::new_with_actual_size(
+                                    format!(r"C:\model-fixture\folder-{row:05}\同名-İ.txt"),
+                                    false,
+                                    row as u32,
+                                    row as u64 + (1_u64 << 32),
+                                    0,
+                                    0,
+                                )
+                            });
+                            assert_eq!(equal.append_batch_by(rows, compare_windows), Ok(count));
+                            equal
+                        } else if distribution == "shuffled" {
+                            shuffled_fixture(count)
+                        } else {
+                            fixture(count)
+                        };
+                        if distribution == "reverse" {
+                            model.sort_by_with_semantics_changed(
+                                LegacySortMode::NameDescending,
+                                SortSemantics::SafeActualSize,
+                                compare_windows,
+                            );
+                        }
+                        let mut app = RefreshTestApp::new()?;
+                        app.with_state(|state| {
+                            assert!(state.icon_shared.is_none());
+                            state.model = model;
+                            refresh_all_rows(state);
+                            assert!(state.preview_synchronization.is_synchronized());
+                            let selected = match selection {
+                                "none" => Vec::new(),
+                                "sparse" => vec![count / 4, count / 2, count * 3 / 4],
+                                _ => (0..count).step_by(2).collect(),
+                            };
+                            let focused = selected.get(selected.len() / 2).copied();
+                            let selected_paths = selected
+                                .iter()
+                                .map(|&row| state.model.items()[row].source_path().clone())
+                                .collect::<std::collections::HashSet<_>>();
+                            select_rows_with_focus(state.list_window, &selected, focused);
+                            assert_eq!(selected_indices(state.list_window), selected);
+                            let focused_path = focused_index(state.list_window)
+                                .map(|row| state.model.items()[row].source_path().clone());
+                            let before = state.model.items().iter().map(|item| item.source_path().clone()).collect::<Vec<_>>();
+                            let counters = profile_runtime_sort_command(app.owner, state);
+                            let after = state.model.items().iter().map(|item| item.source_path().clone()).collect::<Vec<_>>();
+                            let changed = before != after;
+                            assert_eq!(
+                                before.iter().collect::<std::collections::HashSet<_>>(),
+                                after.iter().collect::<std::collections::HashSet<_>>()
+                            );
+                            if distribution == "equal_keys" {
+                                assert_eq!(before, after, "equal-name ties must be stable");
+                            } else {
+                                let expected = fixture(count).items().iter().map(|item| item.source_path().clone()).collect::<Vec<_>>();
+                                assert_eq!(after, expected, "native sort command order");
+                            }
+                            let restored = selected_indices(state.list_window);
+                            let restored_paths = restored.iter().map(|&row| state.model.items()[row].source_path().clone()).collect::<std::collections::HashSet<_>>();
+                            assert_eq!(restored_paths, selected_paths, "selected source identities");
+                            let restored_focus = focused_index(state.list_window)
+                                .map(|row| state.model.items()[row].source_path().clone());
+                            assert_eq!(restored_focus, focused_path, "focused source identity");
+                            assert_native_refresh_values(state);
+                            assert!(counters.compare_nested_ns <= counters.sort_inclusive_ns);
+                            if changed {
+                                assert!(counters.native_refresh_ns > 0);
+                            }
+                            println!(
+                                "{{\"kind\":\"runtime-model-baseline\",\"schema_version\":1,\"scope\":\"instrumented-windows-libtest\",\"icon_worker_attached\":false,\"operation\":\"sort_command\",\"distribution\":\"{distribution}\",\"rows\":{count},\"repetition\":{repetition},\"selection\":\"{selection}\",\"selected_rows\":{},\"snapshot_ns\":{},\"sort_inclusive_ns\":{},\"compare_nested_ns\":{},\"comparisons\":{},\"token_remap_ns\":{},\"native_refresh_ns\":{},\"selection_restore_ns\":{},\"post_controls_ns\":{},\"changed\":{changed},\"functional_checks\":{},\"status\":\"pass\"}}",
+                                selected.len(), counters.snapshot_ns,
+                                counters.sort_inclusive_ns, counters.compare_nested_ns,
+                                counters.comparisons, counters.token_remap_ns,
+                                counters.native_refresh_ns, counters.selection_restore_ns,
+                                counters.post_controls_ns, count + selected.len() + 5,
+                            );
+                        })?;
+                        app.close()?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
