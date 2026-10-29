@@ -4580,6 +4580,17 @@ foreach ($call in $applicationStartCalls) {
         [void][IO.Directory]::CreateDirectory($directory)
         $directory
     }
+    $productionPrivateAppDirectory = ${function:New-ObserverAppearancePrivateAppDirectory}
+    $seedDirectoryProbe = [pscustomobject]@{ calls=0 }
+    function New-ObserverAppearancePrivateAppDirectory {
+        param($Parent)
+        $seedDirectoryProbe.calls++
+        & $productionPrivateAppDirectory -Parent $Parent
+    }
+    $expectedHex = @{
+        0='44524c414e4700000100000000000000526340fd'
+        2='44524c414e470000010000000200000030e5e75c'
+    }
     try {
         foreach ($value in @(0, 2)) {
             $local = Join-Path $root ([string]$value)
@@ -4589,11 +4600,30 @@ foreach ($call in $applicationStartCalls) {
             if ($record.value -ne $value -or $record.sha256 -cne $decoded.sha256) {
                 throw 'Runtime startup language record did not round-trip through the production decoder.'
             }
-            $path = Join-Path (Join-Path $local 'DarkReNamer') 'ui-language-v1'
+            $appRoot = Join-Path $local 'DarkReNamer'
+            if ($IsWindows) {
+                # Exercise the actual seed routine: an elevated observer must not
+                # leave an Administrators-owned application directory for its medium child.
+                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                Assert-ObserverAppearancePrivateAppDirectory -Path $appRoot -UserSid $userSid
+                $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($appRoot))
+                if ($security.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $userSid.Value -or
+                    -not $security.AreAccessRulesProtected) {
+                    throw 'Runtime language seed app directory is not owned by the product user with a protected DACL.'
+                }
+            }
+            $path = Join-Path $appRoot 'ui-language-v1'
             $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -ne 20 -or
+                [Convert]::ToHexString($bytes).ToLowerInvariant() -cne $expectedHex[$value]) {
+                throw 'Runtime language seed differs from the exact System or English product codec.'
+            }
             $bytes[12] = 3
             [IO.File]::WriteAllBytes($path, $bytes)
             Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $local } 'checksum'
+        }
+        if ($seedDirectoryProbe.calls -ne 2) {
+            throw 'Both runtime language seeds must use the production-owned app directory creator.'
         }
     }
     finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }

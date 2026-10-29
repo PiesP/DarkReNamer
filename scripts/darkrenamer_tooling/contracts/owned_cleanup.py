@@ -418,8 +418,9 @@ def _runtime_baseline_processes(original: dict, result: dict) -> None:
     require([(job["pid"], int(job["process_start_time_utc_ticks"])) for job in jobs] == identities and
             all(job["forced_termination"] is False and
                 job["active_processes_at_primary_exit"] == 0 for job in jobs) and
-            evidence["declared_processes"] == [
-                {"pid": pid, "start_time_utc_ticks": str(ticks)} for pid, ticks in identities] and
+            len(evidence["declared_processes"]) == 3 and
+            {(row["pid"], row["start_time_utc_ticks"]) for row in evidence["declared_processes"]} ==
+                {(pid, str(ticks)) for pid, ticks in identities} and
             jobs == evidence["process_job_cleanup"] and
             result.get("observer_lifecycle") == evidence["task_execution"]["observer_lifecycle"],
             "Runtime baseline cells, declared lifetimes, Jobs, or observer differ.")

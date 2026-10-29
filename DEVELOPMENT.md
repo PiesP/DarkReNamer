@@ -1644,6 +1644,17 @@ creation bracket, bound main window, empty list, enabled path-list import
 command, exact preference record hash, localized menu radio state, VM region,
 normal close, and owned process Job cleanup.
 
+Startup retains raw QPC frequency and launch-request, process-creation begin/end,
+exact main-window binding, and command-ready ticks. Main-window binding is the
+observer's completed native-plus-UIA identity check, not the HWND creation time.
+Separate launch/creation-bracket durations are reported for binding and command
+readiness, plus binding-to-ready duration. The command-ready endpoint includes
+foreground activation and empty-grid/import-menu observations. It precedes
+capture sizing, native-lifetime verification, region and appearance probes.
+The verifier checks raw boundary order and independently derives every reported
+three-decimal millisecond interval, allowing at most 0.00051 ms rounding error.
+Earlier failed attempts retain their original inclusive timing scope.
+
 Each cell requires an absent `ui-appearance-v1` record before launch, with
 the product's System appearance radio selected on its bound
 PID/HWND/session. Existing native probes observe the official UISettings

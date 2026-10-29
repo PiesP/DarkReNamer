@@ -5624,6 +5624,42 @@ def validate_runtime_appearance(environment: dict, process_id: int) -> dict:
     return observation
 
 
+RUNTIME_STARTUP_INTERVALS = {
+    "launch_request_to_main_bound_ms": ("launch_request_ticks", "main_window_bound_ticks"),
+    "process_start_to_main_bound_lower_ms": ("process_create_end_ticks", "main_window_bound_ticks"),
+    "process_start_to_main_bound_upper_ms": ("process_create_begin_ticks", "main_window_bound_ticks"),
+    "main_bound_to_ready_ms": ("main_window_bound_ticks", "command_ready_ticks"),
+    "launch_request_to_ready_ms": ("launch_request_ticks", "command_ready_ticks"),
+    "process_start_to_ready_lower_ms": ("process_create_end_ticks", "command_ready_ticks"),
+    "process_start_to_ready_upper_ms": ("process_create_begin_ticks", "command_ready_ticks"),
+}
+
+
+def validate_runtime_startup(value: object, label: str) -> dict:
+    startup = exact_keys(value, {"clock", *RUNTIME_STARTUP_INTERVALS,
+        "main_hwnd_bound", "empty_grid", "import_command_enabled"}, label)
+    ticks = ("launch_request_ticks", "process_create_begin_ticks", "process_create_end_ticks",
+             "main_window_bound_ticks", "command_ready_ticks")
+    clock = exact_keys(startup["clock"], {"qpc_frequency", *ticks}, f"{label}.clock")
+    for name, number in clock.items():
+        checked_int(number, 1, 2**63 - 1, f"{label}.clock.{name}")
+    require(all(clock[left] <= clock[right] for left, right in zip(ticks, ticks[1:])),
+            "Runtime baseline raw startup boundaries are inverted.")
+    for name, (begin, end) in RUNTIME_STARTUP_INTERVALS.items():
+        observed = runtime_ms(startup[name], f"{label}.{name}",
+                              minimum=0.001 if name == "launch_request_to_ready_ms" else 0)
+        expected = (clock[end] - clock[begin]) * 1000.0 / clock["qpc_frequency"]
+        # The producer rounds to three decimals. Compare with the unrounded
+        # endpoint delta so .NET/Python midpoint differences stay inside the rounding envelope.
+        require(0 <= expected <= 600000 and abs(observed - expected) <= 0.00051 and
+                abs(observed * 1000 - round(observed * 1000)) <= 0.000001,
+                f"Runtime baseline startup interval {name} differs from its raw QPC boundaries.")
+    require(all(startup[name] is True for name in
+                ("main_hwnd_bound", "empty_grid", "import_command_enabled")),
+            "Runtime baseline main window or command readiness observation is incomplete.")
+    return startup
+
+
 def validate_runtime_baseline_metrics(scenario: object) -> dict:
     scenario = exact_keys(scenario, {"mode", "plan", "system_resolution", "executable_sha256",
         "cells", "environment", "disk_unchanged", "journal_residue_count", "wakeups", "appearance"},
@@ -5693,17 +5729,8 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
                                   "parent": parent,
                                   "options": [system_label, "한국어", "English", "日本語"]}),
                 "Runtime baseline resolved menu radio or labels differ.")
-        startup = exact_keys(cell["startup"], {"launch_request_to_ready_ms",
-            "process_start_to_ready_lower_ms", "process_start_to_ready_upper_ms",
-            "main_hwnd_bound", "empty_grid", "import_command_enabled"},
-            f"runtime baseline {expected_id} startup")
-        request_ms = runtime_ms(startup["launch_request_to_ready_ms"], "startup request", minimum=0.001)
-        lower = runtime_ms(startup["process_start_to_ready_lower_ms"], "startup lower")
-        upper = runtime_ms(startup["process_start_to_ready_upper_ms"], "startup upper")
-        require(0 <= lower <= upper <= request_ms and
-                all(startup[name] is True for name in
-                    ("main_hwnd_bound", "empty_grid", "import_command_enabled")),
-                "Runtime baseline process creation bracket or readiness differs.")
+        startup = validate_runtime_startup(cell["startup"], f"runtime baseline {expected_id} startup")
+        request_ms = startup["launch_request_to_ready_ms"]
         environment = cell["environment"]
         region = exact_keys(nested(environment, "region"), {"culture", "ui_culture", "timezone"},
                             "runtime baseline region")
@@ -5849,8 +5876,13 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
     expected = [(cell["process_id"], cell["process_start_utc_ticks"])
                 for cell in scenario["cells"]]
     verify_process_job_cleanup(jobs, expected_processes=expected)
-    require(owned["declared_processes"] ==
-            [{"pid": pid, "start_time_utc_ticks": str(ticks)} for pid, ticks in expected] and
+    # The controller inventory is unordered; cells, lifecycles and Jobs retain launch order.
+    require([(job["pid"], job["process_start_time_utc_ticks"]) for job in jobs] ==
+            [(pid, str(ticks)) for pid, ticks in expected],
+            "Runtime baseline owned Jobs differ from launch order.")
+    require(len(owned["declared_processes"]) == 3 and
+            {(row["pid"], row["start_time_utc_ticks"]) for row in owned["declared_processes"]} ==
+            {(pid, str(ticks)) for pid, ticks in expected} and
             owned["task_execution"]["terminal"] is True and
             owned["task_execution"]["exit_code"] == 0 and
             postlaunch["target"]["process_id"] in {pid for pid, _ in expected},
