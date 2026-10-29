@@ -8253,8 +8253,10 @@ mod native_tests {
         assert!(cache.format(u64::MAX).is_empty());
         assert!(cache.last.is_none());
 
+        // A well-formed unknown tag may be accepted by NLS; invalid syntax
+        // forces both locale format queries to fail without changing settings.
         DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
-            *slot.borrow_mut() = Some((wide("not-a-locale"), utc));
+            *slot.borrow_mut() = Some((wide("@!/%"), utc));
         });
         let fallback = cache.format(value);
         assert!(!fallback.is_empty());
