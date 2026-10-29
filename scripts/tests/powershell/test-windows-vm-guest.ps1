@@ -204,6 +204,42 @@ $script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
 $testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $languageRoot = Join-Path $temporaryRoot 'language-record'
+    $languageDirectory = Join-Path $languageRoot 'DarkReNamer'
+    [void](New-Item -ItemType Directory -Path $languageDirectory -Force)
+    $languagePath = Join-Path $languageDirectory 'ui-language-v1'
+    $record = [Convert]::FromHexString('44524c414e470000010000000200000030e5e75c')
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    $decoded = Read-ProductionLanguagePreference -LocalAppData $languageRoot
+    if ($decoded.value -ne 2 -or $decoded.sha256 -cne (Get-Sha256 $languagePath)) {
+        throw 'Language preference fixture did not decode the fixed English record.'
+    }
+    $record[12] = 3
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } 'checksum'
+    $record[12] = 2
+    $record[0] = 0
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } 'header'
+    foreach ($language in @('ko', 'en', 'ja')) {
+        $labels = Get-ProductionLanguageSpec -Language $language
+        if ([string]::IsNullOrEmpty($labels.picker) -or
+            [string]::IsNullOrEmpty($labels.prefix) -or
+            [string]::IsNullOrEmpty($labels.apply) -or
+            [string]::IsNullOrEmpty($labels.menu) -or
+            [string]::IsNullOrEmpty($labels.rail)) {
+            throw "$language language acceptance catalog is incomplete."
+        }
+    }
+    $preferred = Resolve-ProductionSystemLanguage -Tags @('fr-FR', 'ja-JP', 'ko-KR')
+    if ($preferred.language -cne 'ja' -or $preferred.selected_tag -cne 'ja-JP') {
+        throw 'System language resolution did not select the first supported UI tag.'
+    }
+    $fallback = Resolve-ProductionSystemLanguage -Tags @('fr-FR')
+    if ($fallback.language -cne 'en' -or $null -ne $fallback.selected_tag) {
+        throw 'System language resolution did not use English after unsupported tags.'
+    }
+    Initialize-ProductionLanguageMenuReader
     $valid = New-Fixture -Name 'valid'
     Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
     $focused = New-Fixture -Name 'focused-selection'
