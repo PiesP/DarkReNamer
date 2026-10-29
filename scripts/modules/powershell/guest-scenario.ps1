@@ -361,6 +361,20 @@ function Set-ProductionCaptureByteCount {
     $Capture['bytes'] = [long]$item.Length
 }
 
+function Complete-ProductionLanguageFlowCaptureReferences {
+    param(
+        [Parameter(Mandatory)][object] $Flow,
+        [Parameter(Mandatory)][string] $Root
+    )
+    $captures = @($Flow.screenshots)
+    if ($captures.Count -ne 2) {
+        throw 'Language production flow requires both screenshot references.'
+    }
+    foreach ($capture in $captures) {
+        Set-ProductionCaptureByteCount -Capture $capture -Root $Root
+    }
+}
+
 function Invoke-ProductionRenameFlow {
     param(
         [Parameter(Mandatory)][object] $OwnedProcess,
@@ -731,6 +745,10 @@ function Invoke-ProductionRenameFlow {
             0
         }
         $flow.screenshots = $screenshots.ToArray()
+        if (-not $RawEvidence -and $Language -cne 'ko') {
+            $flow.failure_reason = 'language_capture_reference_failed'
+            Complete-ProductionLanguageFlowCaptureReferences -Flow $flow -Root $OutputRoot
+        }
         $flow.status = 'passed'
         $flow.failure_reason = $null
     }
