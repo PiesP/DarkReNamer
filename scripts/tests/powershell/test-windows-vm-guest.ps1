@@ -4822,8 +4822,115 @@ function Test-DrValidActiveLanguageCrashContract {
         $gui[0].Extent.Text.IndexOf('-TestBinary $appTests[0]', [StringComparison]::Ordinal) -lt 0) {
         throw 'GUI language cycle lost the manifest-verified source test binary.'
     }
+    foreach ($expected in @(
+        @{ name='Invoke-ProductionBlockedRecoveryCheck'; calls=1 },
+        @{ name='Invoke-ProductionLanguageCycle'; calls=1 },
+        @{ name='Invoke-ProductionValidActiveRecoveryCheck'; calls=2 }
+    )) {
+        $functions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $expected.name
+        }, $true))
+        if ($functions.Count -ne 1 -or
+            [regex]::Matches($functions[0].Extent.Text,
+                'process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned \$(?:owned|child)').Count -ne
+                $expected.calls) {
+            throw "Language process lifecycle binding is missing from $($expected.name)."
+        }
+    }
 }
 
 Test-DrValidActiveLanguageCrashContract
+
+function Test-DrProductionLanguageJobLedgerBinding {
+    $lifecycles = @(
+        for ($index = 1; $index -le 33; $index++) {
+            $owned = [pscustomobject]@{
+                process = [pscustomobject]@{ Id = [int](5000 + $index) }
+                process_start_time_utc_ticks = [string](638975000000000000L + $index)
+            }
+            $lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $owned
+            if ($lifecycle.pid -ne $owned.process.Id -or
+                $lifecycle.start_time_utc_ticks -cne $owned.process_start_time_utc_ticks) {
+                throw 'The actual production lifecycle factory detached from its owned process.'
+            }
+            $lifecycle
+        }
+    )
+    Assert-Fails {
+        Get-ProductionOwnedProcessLifecycle -Owned ([pscustomobject]@{
+            process = [pscustomobject]@{ Id = 5000 }
+            process_start_time_utc_ticks = 'invalid'
+        })
+    } 'lacks its owned PID or start time'
+    $jobs = @($lifecycles | ForEach-Object {
+        [ordered]@{
+            pid = $_.pid; process_start_time_utc_ticks = $_.start_time_utc_ticks
+            status = 'clean'; job_empty = $true; job_closed = $true
+            capture_complete = $true; had_survivors = $false
+            forced_termination = $false; error = $null
+            active_processes_at_primary_exit = 0; active_processes_at_close = 0
+            active_processes_at_stop = 0; active_process_ids_at_stop = @()
+            total_processes_at_stop = 1; primary_process_active_at_stop = $false
+            termination_exit_code = $null
+        }
+    })
+    $selections = @(
+        for ($index = 0; $index -lt 5; $index++) {
+            $row = [ordered]@{ process_lifecycle = $lifecycles[21 + $index] }
+            if ($index -lt 3) {
+                $row['blocked_recovery'] = [ordered]@{
+                    process_lifecycle = $lifecycles[26 + $index]
+                }
+            }
+            $row
+        }
+    )
+    $shape = [ordered]@{
+        tests = @(0..19 | ForEach-Object { [ordered]@{ process_lifecycle = $lifecycles[$_] } })
+        gui = [ordered]@{
+            process_lifecycle = $lifecycles[20]
+            language_checks = [ordered]@{
+                selections = $selections
+                valid_active_recovery = [ordered]@{
+                    child = [ordered]@{ process_lifecycle = $lifecycles[29] }
+                    observations = @(0..2 | ForEach-Object {
+                        [ordered]@{ process_lifecycle = $lifecycles[30 + $_] }
+                    })
+                }
+            }
+        }
+        process_job_cleanup = $jobs
+    }
+    $json = $shape | ConvertTo-Json -Depth 12 -Compress
+    $result = $json | ConvertFrom-Json -Depth 12
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result)) {
+        throw 'The actual controller rejected 33 clean source-bound language Jobs.'
+    }
+    foreach ($mutation in @('missing-reference', 'wrong-ticks', 'extra-row', 'forced')) {
+        $changed = $json | ConvertFrom-Json -Depth 12
+        switch ($mutation) {
+            missing-reference {
+                $changed.gui.language_checks.selections[0].PSObject.Properties.Remove('process_lifecycle')
+            }
+            wrong-ticks {
+                $changed.gui.language_checks.valid_active_recovery.child.process_lifecycle.start_time_utc_ticks =
+                    '638975000000000099'
+            }
+            extra-row {
+                $newRow = $changed.process_job_cleanup[0] | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+                $newRow.pid = 5999
+                $newRow.process_start_time_utc_ticks = '638975000000000099'
+                $changed.process_job_cleanup = @($changed.process_job_cleanup) + @($newRow)
+            }
+            forced { $changed.process_job_cleanup[0].forced_termination = $true }
+        }
+        if (Test-DrControllerProcessJobCleanupLedger -Result $changed) {
+            throw "The actual controller accepted $mutation in the language Job ledger."
+        }
+    }
+}
+
+Test-DrProductionLanguageJobLedgerBinding
 
 Write-Host 'Windows VM guest runner tests passed.'
