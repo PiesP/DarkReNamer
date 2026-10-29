@@ -3465,7 +3465,7 @@ function New-ObserverRuntimeLanguagePreference {
     param([Parameter(Mandatory)][string] $LocalAppData,
         [Parameter(Mandatory)][ValidateSet(0,2)][int] $Value)
 
-    $directory = New-PrivateDirectory -Parent $LocalAppData -Leaf 'DarkReNamer'
+    $directory = New-ObserverAppearancePrivateAppDirectory -Parent $LocalAppData
     $path = Join-Path $directory 'ui-language-v1'
     if (Test-Path -LiteralPath $path) { throw 'Runtime baseline language fixture is not fresh.' }
     $bytes = [byte[]]::new(20)
