@@ -3562,6 +3562,32 @@ function Assert-ObserverRuntimeSystemAppearanceMenu {
     }
 }
 
+function Wait-ObserverRuntimeMinimumIdle {
+    param([Parameter(Mandatory)][long] $StartTicks,
+        [Parameter(Mandatory)][int] $MinimumMilliseconds,
+        [Parameter(Mandatory)][datetime] $OverallDeadline,
+        [scriptblock] $GetTimestamp = { [Diagnostics.Stopwatch]::GetTimestamp() },
+        [scriptblock] $SleepMilliseconds = { param([int] $Milliseconds)
+            Start-Sleep -Milliseconds $Milliseconds })
+
+    $frequency = [long][Diagnostics.Stopwatch]::Frequency
+    $requiredTicks = [long][Math]::Ceiling($MinimumMilliseconds * [double]$frequency / 1000.0)
+    while ($true) {
+        if ((Get-Date) -ge $OverallDeadline) {
+            throw 'Runtime baseline exceeded its fixed scenario deadline.'
+        }
+        $now = [long](& $GetTimestamp)
+        $remainingTicks = $requiredTicks - ($now - $StartTicks)
+        if ($remainingTicks -le 0) { return $now }
+        $sleepMs = [int][Math]::Ceiling($remainingTicks * 1000.0 / $frequency)
+        $budgetMs = [int][Math]::Ceiling(($OverallDeadline - (Get-Date)).TotalMilliseconds)
+        if ($budgetMs -le 0) {
+            throw 'Runtime baseline exceeded its fixed scenario deadline.'
+        }
+        & $SleepMilliseconds ([Math]::Min($sleepMs, $budgetMs))
+    }
+}
+
 function Invoke-ObserverRuntimeBaselineScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -3744,9 +3770,10 @@ function Invoke-ObserverRuntimeBaselineScenario {
                         $application.process, [IntPtr]$application.main_handle)
                     $sampler.SetPhase('empty-idle')
                     $emptyStart = [Diagnostics.Stopwatch]::GetTimestamp()
-                    Start-Sleep -Seconds 30
+                    $emptyEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks $emptyStart `
+                        -MinimumMilliseconds 30000 -OverallDeadline $deadline
                     $cell.empty_idle = [ordered]@{ elapsed_ms=[Math]::Round(
-                        ([Diagnostics.Stopwatch]::GetTimestamp() - $emptyStart) * 1000.0 /
+                        ($emptyEnd - $emptyStart) * 1000.0 /
                         [Diagnostics.Stopwatch]::Frequency, 3); rows=0 }
                     $sampler.SetPhase('import-1000')
                     $import = Import-GuiRegressionPathList -Application $application -PathsFile $pathList `
@@ -3761,7 +3788,8 @@ function Invoke-ObserverRuntimeBaselineScenario {
                         -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
                     $sampler.SetPhase('populated-idle')
                     $populatedStart = [Diagnostics.Stopwatch]::GetTimestamp()
-                    Start-Sleep -Seconds 30
+                    [void](Wait-ObserverRuntimeMinimumIdle -StartTicks $populatedStart `
+                        -MinimumMilliseconds 30000 -OverallDeadline $deadline)
                     $afterIdleReceipt = Wait-ObserverIconSettlementPhase -Application $application `
                         -StartUtcTicks $cell.process_start_utc_ticks -OpenTicks $import.open_ticks `
                         -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
