@@ -1644,6 +1644,15 @@ creation bracket, bound main window, empty list, enabled path-list import
 command, exact preference record hash, localized menu radio state, VM region,
 normal close, and owned process Job cleanup.
 
+Each cell requires absent `ui-appearance-v1` records before launch and after
+normal exit, with the product's System appearance radio selected on its bound
+PID/HWND/session. Existing native probes observe the official UISettings
+foreground color and `SPI_GETHIGHCONTRAST` before launch, after readiness, and
+before close. The verifier derives Light from the same foreground luminance
+threshold used by the product and rejects dark, Forced Colors, missing probes,
+or appearance overrides. These observations do not change startup preferences
+or OS appearance settings; appearance probes are outside the startup clock.
+
 Only the first cell performs the workload: 30 seconds empty idle; one ordinary
 1,000-file import; the existing asynchronous status endpoint with a stable full
 icon generation; 30 seconds populated idle with the same settled generation;

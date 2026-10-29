@@ -5516,8 +5516,8 @@ def validate_runtime_samples(cell: dict) -> dict:
             "Runtime baseline phase summary is incomplete.")
     for index, phase in enumerate(RUNTIME_PHASES):
         expected = {"phase": phase, "sample_count": len(grouped[phase]),
-                    "max_sample_gap_ms": max((row["sample_gap_ms"] for row in grouped[phase]), default=0),
-                    "max_resource_collection_ms": max((row["resource_collection_ms"] for row in grouped[phase]), default=0)}
+                    "max_sample_gap_ms": max((row["sample_gap_ms"] for row in grouped[phase]), default=0.0),
+                    "max_resource_collection_ms": max((row["resource_collection_ms"] for row in grouped[phase]), default=0.0)}
         require(typed_equal(summary[index], expected),
                 "Runtime baseline phase summary differs from the raw samples.")
     resources = []
@@ -5536,6 +5536,49 @@ def validate_runtime_samples(cell: dict) -> dict:
     return {"sample_count": len(samples), "empty_idle_samples": len(grouped["empty-idle"]),
             "populated_idle_samples": len(grouped["populated-idle"]),
             "sampled_phase_resources": resources}
+
+
+def validate_runtime_appearance(environment: dict, process_id: int) -> dict:
+    observation = exact_keys(environment.get("appearance"),
+        {"preference_before", "preference_after", "pre_launch_resolution", "ready_resolution",
+         "pre_close_resolution", "ready_menu", "pre_close_menu"}, "runtime appearance")
+    require(observation["preference_before"] == observation["preference_after"] == "absent",
+            "Runtime baseline appearance preference override is present or unobserved.")
+    for phase in ("pre_launch_resolution", "ready_resolution", "pre_close_resolution"):
+        resolution = exact_keys(observation[phase],
+            {"query", "foreground_argb", "resolved_theme", "system_visual_style"},
+            f"runtime appearance {phase}")
+        color = resolution["foreground_argb"]
+        style = exact_keys(resolution["system_visual_style"],
+            {"theme_path_sha256", "theme_color", "theme_size", "forced_colors"},
+            f"runtime appearance {phase} visual style")
+        require(resolution["query"] ==
+                "UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST" and
+                type(color) is list and len(color) == 4 and
+                all(type(value) is int and 0 <= value <= 255 for value in color) and
+                color[0] == 255 and style["forced_colors"] is False and
+                resolution["resolved_theme"] == "light" and
+                color[1] * 299 + color[2] * 587 + color[3] * 114 < 128000 and
+                type(style["theme_path_sha256"]) is str and
+                SHA256.fullmatch(style["theme_path_sha256"]) is not None and
+                all(type(style[name]) is str and len(style[name]) <= 4096
+                    for name in ("theme_color", "theme_size")),
+                "Runtime baseline System appearance is not observed Light without Forced Colors.")
+    session = None
+    for phase in ("ready_menu", "pre_close_menu"):
+        menu = exact_keys(observation[phase], {"hwnd", "pid", "session_id", "menu_checked"},
+                          f"runtime appearance {phase}")
+        checked_int(menu["session_id"], 1, 0xffffffff, "runtime appearance menu session")
+        require(typed_equal(menu, {
+            "hwnd": nested(environment, "main_window", "hwnd"), "pid": process_id,
+            "session_id": menu["session_id"], "menu_checked": [
+                {"command_id": 0x9010, "checked": True},
+                {"command_id": 0x9011, "checked": False},
+                {"command_id": 0x9012, "checked": False}]}) and
+                (session is None or menu["session_id"] == session),
+                "Runtime baseline System appearance menu is not bound to its product window.")
+        session = menu["session_id"]
+    return observation
 
 
 def validate_runtime_baseline_metrics(scenario: object) -> dict:
@@ -5632,6 +5675,7 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
                 type(nested(environment, "main_window", "hwnd")) is int and
                 nested(environment, "main_window", "hwnd") > 0,
                 "Runtime baseline cell display or bound main HWND differs.")
+        validate_runtime_appearance(environment, cell["process_id"])
         if index:
             require(all(cell[name] is None for name in ("empty_idle", "import", "icon_settlement",
                 "populated_idle", "transforms", "samples", "phase_summary")),
@@ -5790,6 +5834,8 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
                 life["creation_filetime"] == cell["process_start_utc_ticks"] -
                     504911232000000000 and
                 life["session_id"] == owned["runner_session_id"] and
+                nested(cell["environment"], "appearance", "ready_menu", "session_id") ==
+                    owned["runner_session_id"] and
                 type(life["executable_path"]) is str and life["executable_path"] and
                 life["executable_sha256"] == artifacts["application"]["sha256"] and
                 life["start_observed"] is True and life["exit_observed"] is True and

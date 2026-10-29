@@ -3762,6 +3762,19 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                           'sha256': evidence.runtime_language_preference_hash(value)}
             cell_environment = deepcopy(environment)
             cell_environment['main_window']['process_id'] = pid
+            resolution = {'query': 'UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST',
+                'foreground_argb': [255, 0, 0, 0], 'resolved_theme': 'light',
+                'system_visual_style': {'theme_path_sha256': 'a' * 64,
+                    'theme_color': 'NormalColor', 'theme_size': 'NormalSize', 'forced_colors': False}}
+            appearance_menu = {'hwnd': cell_environment['main_window']['hwnd'],
+                'pid': pid, 'session_id': 2, 'menu_checked': [
+                    {'command_id': 0x9010, 'checked': True},
+                    {'command_id': 0x9011, 'checked': False},
+                    {'command_id': 0x9012, 'checked': False}]}
+            cell_environment['appearance'] = {'preference_before': 'absent', 'preference_after': 'absent',
+                'pre_launch_resolution': deepcopy(resolution), 'ready_resolution': deepcopy(resolution),
+                'pre_close_resolution': deepcopy(resolution), 'ready_menu': deepcopy(appearance_menu),
+                'pre_close_menu': deepcopy(appearance_menu)}
             cell = {'id': name, 'preference_kind': 'absent' if index == 0 else 'valid-saved',
                 'preference_value': value, 'resolved_language': 'ko' if index < 2 else 'en',
                 'process_id': pid, 'process_start_utc_ticks': ticks,
@@ -3821,7 +3834,7 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             'plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN),
             'system_resolution': {'language': 'ko', 'selected_tag': 'ko-KR',
                                   'preferred_tags': ['ko-KR', 'en-US']},
-            'executable_sha256': app_hash, 'cells': cells, 'environment': deepcopy(environment),
+            'executable_sha256': app_hash, 'cells': cells, 'environment': deepcopy(cells[0]['environment']),
             'disk_unchanged': True, 'journal_residue_count': 0,
             'wakeups': {'status': 'not_run', 'reason': 'no-supported-process-wakeup-counter'},
             'appearance': 'light'}
@@ -3888,6 +3901,73 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                 self.refresh_runtime(run)
                 with self.assertRaises(evidence.EvidenceError):
                     evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_zero_sample_short_phase_preserves_real_powershell_double_zero_summary(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        raw = json.loads(path.read_text())
+        cell = raw['assertions']['scenario']['cells'][0]
+        cell['samples'] = [row for row in cell['samples'] if row['phase'] != 'transform-no-op']
+        # A real sub-200ms phase can occur entirely between timer callbacks.
+        # Get-ObserverPerformancePhaseSummary emits [double]0 as JSON 0.0.
+        for summary in cell['phase_summary']:
+            rows = [row for row in cell['samples'] if row['phase'] == summary['phase']]
+            summary.update(sample_count=len(rows),
+                max_sample_gap_ms=max((row['sample_gap_ms'] for row in rows), default=0.0),
+                max_resource_collection_ms=max((row['resource_collection_ms'] for row in rows), default=0.0))
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        result = evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        self.assertEqual(result['metrics']['cells'][0]['sample_count'], 310)
+        self.assertNotIn('transform-no-op', [row['phase'] for row in
+            result['metrics']['cells'][0]['sampled_phase_resources']])
+        short = next(row for row in cell['phase_summary'] if row['phase'] == 'transform-no-op')
+        short['max_sample_gap_ms'] = False
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+
+    def test_rehashed_dark_forced_missing_override_and_unbound_appearance_fail(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutation in ('dark-before', 'dark-ready', 'forced-close', 'missing', 'missing-resolution',
+                         'override-before', 'override-after', 'wrong-pid', 'wrong-hwnd',
+                         'wrong-session', 'explicit-light', 'missing-radio'):
+            changed = json.loads(original)
+            cell = changed['assertions']['scenario']['cells'][1]
+            appearance = cell['environment']['appearance']
+            if mutation.startswith('dark'):
+                phase = 'pre_launch_resolution' if mutation == 'dark-before' else 'ready_resolution'
+                # Even a forged Light label cannot conceal the actual dark foreground.
+                appearance[phase]['foreground_argb'] = [255, 245, 245, 245]
+            elif mutation == 'forced-close':
+                appearance['pre_close_resolution']['system_visual_style']['forced_colors'] = True
+            elif mutation == 'missing':
+                del cell['environment']['appearance']
+            elif mutation == 'missing-resolution':
+                del appearance['ready_resolution']
+            elif mutation.startswith('override'):
+                appearance['preference_before' if mutation == 'override-before' else 'preference_after'] = 'present'
+            elif mutation == 'wrong-pid':
+                appearance['ready_menu']['pid'] += 1
+            elif mutation == 'wrong-hwnd':
+                appearance['pre_close_menu']['hwnd'] += 1
+            elif mutation == 'wrong-session':
+                appearance['ready_menu']['session_id'] = 3
+                appearance['pre_close_menu']['session_id'] = 3
+            elif mutation == 'explicit-light':
+                appearance['ready_menu']['menu_checked'][0]['checked'] = False
+                appearance['ready_menu']['menu_checked'][1]['checked'] = True
+            else:
+                del appearance['ready_menu']['menu_checked']
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
         path.write_bytes(original)
         self.refresh_runtime(run)
 
