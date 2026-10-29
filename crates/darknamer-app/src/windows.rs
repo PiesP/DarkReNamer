@@ -755,6 +755,8 @@ struct AppState {
     recovery_locked: bool,
     column_preferences_path: PathBuf,
     appearance_preferences_path: PathBuf,
+    column_preferences_authorized: bool,
+    appearance_preferences_authorized: bool,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
@@ -835,14 +837,16 @@ impl AppState {
                     UiStatus::with_transient(status)
                 }
             });
+        let column_preferences_authorized = loaded_columns.failure.is_none();
+        let appearance_preferences_authorized = loaded_appearance.failure.is_none();
         if let Some(error) = loaded_columns.failure {
             ui_status.set_transient(format!(
-                "열 표시 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
+                "열 표시 설정을 불러오지 못해 안전한 기본값을 사용하며 이번 실행에서는 저장하지 않습니다: {error}"
             ));
         }
         if let Some(error) = loaded_appearance.failure {
             ui_status.set_transient(format!(
-                "모양 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
+                "모양 설정을 불러오지 못해 안전한 기본값을 사용하며 이번 실행에서는 저장하지 않습니다: {error}"
             ));
         }
         let column_states = loaded_columns.columns;
@@ -880,6 +884,8 @@ impl AppState {
             recovery_locked: runtime.recovery_locked,
             column_preferences_path,
             appearance_preferences_path,
+            column_preferences_authorized,
+            appearance_preferences_authorized,
             journal_root: runtime.root,
             _runtime_lock: runtime.runtime_lock,
             active_journal: runtime.active_journal,
@@ -1158,6 +1164,13 @@ impl AppState {
     }
 
     fn persist_column_preferences(&mut self) {
+        if !self.column_preferences_authorized {
+            self.set_transient_status(
+                "열 표시 설정을 읽지 못해 이번 실행에서는 저장하지 않습니다. 다시 시작해 주세요."
+                    .to_owned(),
+            );
+            return;
+        }
         let result = self
             .preference_persistence
             .submit_columns(self.column_states);
@@ -1169,6 +1182,13 @@ impl AppState {
     }
 
     fn persist_appearance_preferences(&mut self) {
+        if !self.appearance_preferences_authorized {
+            self.set_transient_status(
+                "모양 설정을 읽지 못해 이번 실행에서는 저장하지 않습니다. 다시 시작해 주세요."
+                    .to_owned(),
+            );
+            return;
+        }
         let result = self
             .preference_persistence
             .submit_appearance(self.appearance);
@@ -1427,6 +1447,29 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_preferences_survive_message_loop_failure_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+        let columns_path = path_for_journal_root(runtime.root.path());
+        let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+        drop(runtime);
+        std::fs::write(&columns_path, b"invalid columns")?;
+        std::fs::write(&appearance_path, b"invalid appearance")?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        start_preferences_writers(null_mut(), &mut state);
+        state.persist_column_preferences();
+        state.persist_appearance_preferences();
+        state
+            .preference_persistence
+            .shutdown_and_join(state.column_states, state.appearance);
+        assert!(state.preference_persistence.is_joined());
+        assert_eq!(std::fs::read(columns_path)?, b"invalid columns");
+        assert_eq!(std::fs::read(appearance_path)?, b"invalid appearance");
+        Ok(())
+    }
 
     #[test]
     fn startup_reloads_both_final_settings_after_writer_retirement()

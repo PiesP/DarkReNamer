@@ -53,6 +53,20 @@ These are authoring defaults; the [safety model](SAFETY.md),
   comparable [performance samples](#fixed-performance-sample). Reviewed
   allocation removal alone does not establish an application-level speedup.
 
+### Preference read authority
+
+Column and appearance files have independent write authority. A successful read
+or a genuinely absent file permits that file's writer; an initial read error
+uses safe display defaults but starts no writer for that file for the session.
+Edits and resets still affect the current UI, but are not persisted, and the UI
+reports that limitation. There is no in-session retry or reset that restores
+write authority: restart retries the read, and edits from the blocked session
+are discarded. The other file remains independently writable. Both normal close
+and message-loop failure retire all writers that were started. This preserves
+unread bytes across every save path while keeping existing bounded coalescing,
+latest final snapshots, atomic replacement and failure reporting for authorized
+writers.
+
 ### Foreground worker ownership
 
 `AppState` owns four optional foreground workers: admission, import, planning,
