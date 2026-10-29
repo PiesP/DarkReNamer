@@ -6,6 +6,8 @@
 pub mod admission;
 #[cfg(any(windows, test))]
 mod apply_progress;
+/// Embedded application UI languages and next-startup preference selection.
+pub mod i18n;
 // Pure UI responsibilities remain portable and keep their public crate-root paths.
 #[cfg(any(windows, test))]
 mod appearance_model;
