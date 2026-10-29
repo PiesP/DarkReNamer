@@ -186,7 +186,8 @@ function Test-DrControllerOwnedFailureModeSupported {
     if ($AcceptanceMode -cin @('current-dpi', 'full-context', 'standard', 'text-scale',
             'tooltip')) { return $true }
     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
-        'first-clear-observation', 'picker-identity-observation') -and
+        'first-clear-observation', 'picker-identity-observation',
+        'custom-input-identity-observation') -and
         $TextScalePercent -eq 100 -and -not $HighContrast
 }
 
@@ -344,7 +345,8 @@ function New-DrControllerOwnedPerformancePredelete {
         $preservation.profile_sha256 -cne $ProfileSha256 -or
         $original.status -cne 'failed' -or $original.task_kind -cne 'ui' -or
         $original.owned_cleanup_failure_context.acceptance_mode -cnotin
-            @('performance-sample','picker-identity-observation') -or
+            @('performance-sample','picker-identity-observation',
+              'custom-input-identity-observation') -or
         $original.owned_cleanup_failure_context.source_sha -cne $SourceSha -or
         $original.owned_cleanup_failure_context.bundle.sha256 -cne $BundleSha256 -or
         $original.owned_cleanup_failure_context.root_records.guest.file_id -cne
@@ -399,9 +401,10 @@ function New-DrControllerOwnedPerformancePredelete {
         ConvertFrom-Json -ErrorAction Stop
     $runId = [string]$input.run_id
     $pickerRun = $runId -ceq 'picker-identity-observation-v1-1366x768-96-text100'
+    $customRun = $runId -ceq 'custom-input-identity-observation-v1-1366x768-96-text100'
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
-    if (-not $pickerRun -and -not $performanceRun) {
+    if (-not $pickerRun -and -not $customRun -and -not $performanceRun) {
         throw 'Owned diagnostic frozen run ID differs.'
     }
     if (
@@ -409,7 +412,9 @@ function New-DrControllerOwnedPerformancePredelete {
         $input.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
         $input.acceptance_profile_sha256 -cne $ProfileSha256 -or
         $input.acceptance_profile.sha256 -cne $ProfileSha256 -or
-        $input.request.mode -cne $(if ($pickerRun) { 'picker-identity-observation' } else { 'performance-sample' }) -or
+        $input.request.mode -cne $(if ($pickerRun) { 'picker-identity-observation' }
+            elseif ($customRun) { 'custom-input-identity-observation' }
+            else { 'performance-sample' }) -or
         ($pickerRun -and ($input.request.picker_identity_plan.PSObject.Properties.Name.Count -ne 8 -or
             (@($input.request.picker_identity_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
                 'command_timeout_ms,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,picker_settle_ms,sample_interval_ms' -or
@@ -423,6 +428,24 @@ function New-DrControllerOwnedPerformancePredelete {
             $input.request.picker_identity_plan.picker_settle_ms -ne 350 -or
             $input.request.picker_identity_plan.full_performance_sample -isnot [bool] -or
             $input.request.picker_identity_plan.full_performance_sample -or
+            $null -ne $input.request.PSObject.Properties['performance_plan'])) -or
+        ($customRun -and ($input.request.custom_input_plan.PSObject.Properties.Name.Count -ne 12 -or
+            (@($input.request.custom_input_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
+                'cancelled_prefix,command_timeout_ms,confirmed_prefix,controlled_hidden_ms,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,prompt_count,prompt_settle_ms,sample_interval_ms' -or
+            $input.request.custom_input_plan.ordinary_rows.Count -ne 1 -or
+            $input.request.custom_input_plan.ordinary_rows[0] -ne 100 -or
+            $input.request.custom_input_plan.idle_ms -ne 1000 -or
+            $input.request.custom_input_plan.sample_interval_ms -ne 200 -or
+            $input.request.custom_input_plan.maximum_seconds -ne 120 -or
+            $input.request.custom_input_plan.command_timeout_ms -ne 5000 -or
+            $input.request.custom_input_plan.fixture_file_limit -ne 100 -or
+            $input.request.custom_input_plan.prompt_settle_ms -ne 350 -or
+            $input.request.custom_input_plan.controlled_hidden_ms -ne 700 -or
+            $input.request.custom_input_plan.confirmed_prefix -cne 'confirmed-' -or
+            $input.request.custom_input_plan.cancelled_prefix -cne 'cancelled-' -or
+            $input.request.custom_input_plan.prompt_count -ne 2 -or
+            $input.request.custom_input_plan.full_performance_sample -isnot [bool] -or
+            $input.request.custom_input_plan.full_performance_sample -or
             $null -ne $input.request.PSObject.Properties['performance_plan'])) -or
         ($performanceRun -and $input.request.performance_plan.long_path_order -cne $columnOrder) -or
         $original.owned_cleanup_failure_context.acceptance_mode -cne $input.request.mode -or
@@ -617,7 +640,8 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     $predelete.kind -cne 'owned_performance_predelete_restoration' -or
                     $predelete.run_name -cne $name -or
                     ($predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -and
-                     $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100') -or
+                     $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100' -and
+                     $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100') -or
                     $predelete.vm_id -cne $actualVmId -or
                     $predelete.nonce -cne $expectedNonce -or
                     $predelete.desktop_lease_id -cne $expectedLeaseId -or
@@ -1431,7 +1455,7 @@ function Invoke-DrWindowsVmController {
     [string] $FocusedRefreshCase,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1518,10 +1542,11 @@ if ($refreshProfile -or $FocusedRefreshTests) { $coreTestOutputAggregateMaximumB
 
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
 $ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
-    $AcceptanceMode -cin @('performance-sample','picker-identity-observation')
+    $AcceptanceMode -cin @('performance-sample','picker-identity-observation',
+        'custom-input-identity-observation')
 if ($ownedPerformance -and ((($AcceptanceMode -ceq 'performance-sample') -and
     ($TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 1200)) -or
-    (($AcceptanceMode -ceq 'picker-identity-observation') -and
+    (($AcceptanceMode -cin @('picker-identity-observation','custom-input-identity-observation')) -and
     ($TestTimeoutSeconds -ne 120 -or $SuiteTimeoutSeconds -ne 240)) -or
     $AcceptanceProfileSha256 -cne
         '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f')) {
@@ -7140,7 +7165,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 }
                 if ($taskSelection.kind -ceq 'ui' -and
                     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
-                        'first-clear-observation', 'picker-identity-observation')) {
+                        'first-clear-observation', 'picker-identity-observation',
+                        'custom-input-identity-observation')) {
                     $transport['owned_cleanup_failure_context']['acceptance_text_scale_percent'] =
                         [int]$AcceptanceTextScalePercent
                 }

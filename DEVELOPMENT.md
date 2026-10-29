@@ -1171,7 +1171,8 @@ Read and freeze `application.sha256` from its `bundle.json`, then pass
 `--prepared-bundle-root /absolute/private/native-bundle` and
 `--expected-prepared-application-sha256` with that digest to each performance
 invocation. Prepared reuse is restricted to declared performance,
-first-clear-observation, picker-identity-observation, and icon-settlement diagnostics; the runner verifies
+first-clear-observation, picker-identity-observation, custom-input-identity-observation,
+and icon-settlement diagnostics; the runner verifies
 the clean source, executable, test binaries and trusted native tooling closure
 before contacting the VM. Each attempt retains its own authenticated inputs and
 prepared-bundle provenance. The fixed workload observes 30 seconds of empty idle,
@@ -1293,6 +1294,62 @@ and pre-retirement reproduction source remain in
 The historical reader retains its exact recorded tooling-tree requirement;
 validate old receipts from their recorded tooling revision. That single
 observation cannot replace the fixed performance sample or a release verdict.
+
+### Focused custom input identity observation
+
+Run the source-bound custom input diagnostic with the same clean committed source,
+prepared native bundle, executable SHA pin, and revision-3 V2 profile used for
+the focused picker control:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic custom-input-identity-observation \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --prepared-bundle-root /absolute/private/verified-native-bundle \
+  --expected-prepared-application-sha256 <native-executed-application-sha256> \
+  --connection-profile /absolute/private/connection-profile.json \
+  --output-root /absolute/private/new-custom-input-observation
+```
+
+The fixed run imports 100 ordinary files through the native picker control,
+then opens the real `DarkReNamerInputWindow` twice. It confirms `confirmed-`,
+verifies the proposal, resets it, enters `cancelled-`, cancels, and verifies that
+the proposal stays reset. The first prompt is deliberately hidden for 700 ms
+and restored before confirmation; the native visibility request is bounded to
+five seconds and checks the same PID, thread, class, direct owner, and disabled
+main window before and after. Each visible prompt remains open for a declared
+350 ms. The sampler records source-selected schema-3 raw and accepted popup identities,
+class, PID, thread, direct owner, owner chain, visibility, lookup status, and
+failure predicates in the same probe brackets. The verifier requires a bound
+`owned-hidden-inactive` custom sample during the controlled interval, a visible
+sample after restoration, visible samples during both prompt intervals, and a
+retired popup after cancellation. The controlled interval tests the policy; it
+does not claim to observe a naturally timed creation or retirement transition.
+If `GetLastActivePopup` does not expose the hidden prompt, the run remains a
+preserved failure. The native picker is an independent control in the same run;
+the custom prompt does not inherit picker class handling.
+
+The observer has a 120-second and 650-sample limit, the controller has
+120-second task and 240-second suite limits, and collection is capped at 32 MiB
+and one screenshot. The V2 owned-resource, managed-desktop, failed first-record,
+and pre-delete restoration requirements also apply. This focused diagnostic
+checks each probe's native status/error pair and QPC-derived response time.
+After the sampler stops, screenshot, fixture readback, journal readback, normal
+close, or native exit errors retain completed samples and a bounded
+`post_stop_failure` stage, separate from `sampler_failure`. Observer and
+controller cleanup failures retain the original status and independent owned
+cleanup proof; none become accepted observations. If conversion of stopped
+native samples fails, the receipt instead records
+`sample_transfer_failure` with a bounded reported raw count and final probe
+tick. No converted samples or sampler failure are inferred from that report;
+the independent verifier marks sample coverage unverified and still requires
+the original failed status and owned cleanup proof before classifying the
+rejected attempt. This focused diagnostic does not execute the complete
+performance workload. Run and verify one complete
+`performance-sample` after it; a failed or partial record cannot qualify the
+full workload. Schema-2 receipts retain their prior `#32770`-only hidden-popup
+meaning, while schema 3 additionally recognizes the exact custom input class
+under the same native identity and lookup guards.
 
 ### First-clear failure observation
 

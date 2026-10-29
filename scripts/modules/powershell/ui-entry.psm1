@@ -46,7 +46,7 @@ function Invoke-DrWindowsVmAcceptance {
     [switch] $Clipboard,
     [switch] $HighContrast,
     [switch] $RestoreHighContrastOnly,
-    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'icon-settlement')]
+    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement')]
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,

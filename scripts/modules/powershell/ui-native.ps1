@@ -1586,6 +1586,9 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     [DllImport("user32.dll", SetLastError=true)]
     private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll", SetLastError=true)]
     private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
         IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
     [DllImport("user32.dll", SetLastError=true)]
@@ -1613,6 +1616,43 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
 
     public static string ClassifyProbe(bool responsive, int errorCode) {
         return responsive ? "success" : errorCode == 1460 ? "timeout" : "failure_unknown";
+    }
+
+    public long SetBoundCustomPromptVisibility(IntPtr prompt, bool visible, int maximumMilliseconds) {
+        if (prompt == IntPtr.Zero || prompt == window || maximumMilliseconds < 1 ||
+            maximumMilliseconds > 5000)
+            throw new InvalidOperationException("Custom prompt visibility request is unbounded.");
+        CheckBoundCustomPrompt(prompt, false);
+        if (!ShowWindowAsync(prompt, visible ? 8 : 0))
+            throw new InvalidOperationException("Custom prompt visibility request failed.");
+        long deadline = System.Diagnostics.Stopwatch.GetTimestamp() +
+            maximumMilliseconds * System.Diagnostics.Stopwatch.Frequency / 1000;
+        do {
+            CheckBoundCustomPrompt(prompt, false);
+            if (IsWindowVisible(prompt) == visible) {
+                CheckBoundCustomPrompt(prompt, true);
+                return System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+            System.Threading.Thread.Sleep(20);
+        } while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline);
+        throw new InvalidOperationException("Custom prompt visibility request timed out.");
+    }
+
+    private void CheckBoundCustomPrompt(IntPtr prompt, bool requireLastActive) {
+        lock (gate) {
+            var main = CaptureMain();
+            uint promptPid;
+            uint thread = GetWindowThreadProcessId(prompt, out promptPid);
+            var name = new System.Text.StringBuilder(128);
+            int length = GetClassNameW(prompt, name, name.Capacity);
+            if (main.Lookup != "complete" || main.ProcessId != (uint)process.Id ||
+                main.ProcessStartUtcTicks != startTicks || main.ThreadId != mainThreadId ||
+                main.Class != mainClass || main.Enabled || thread != mainThreadId ||
+                promptPid != (uint)process.Id || length == 0 ||
+                name.ToString() != "DarkReNamerInputWindow" || GetWindow(prompt, 4) != window ||
+                (requireLastActive && GetLastActivePopup(window) != prompt))
+                throw new InvalidOperationException("Controlled custom prompt identity changed.");
+        }
     }
 
     private DarkReNamerMainDiagnostic CaptureMain() {
@@ -1719,7 +1759,9 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             // A bound hidden dialog is inactive at this instant; it is not an active probe target.
             knownHiddenInactive = !mainEnabled && faults.Count == 1 && faults[0] == "hidden" &&
                 diagnostic.ThreadLookup == "complete" && diagnostic.ClassLookup == "complete" &&
-                diagnostic.PopupClass == "#32770" && diagnostic.OwnerLookup == "returned" &&
+                (diagnostic.PopupClass == "#32770" ||
+                 diagnostic.PopupClass == "DarkReNamerInputWindow") &&
+                diagnostic.OwnerLookup == "returned" &&
                 chain.Count == 1 && chain[0] == window.ToInt64();
             if ((!diagnostic.PopupVisible && mainEnabled) || knownHiddenInactive) {
                 popup = window;
@@ -1773,7 +1815,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private void Sample(object ignored) {
         if (!System.Threading.Monitor.TryEnter(gate)) return;
         var diagnostic = new DarkReNamerSamplerFailure {
-            SchemaVersion = 2, Phase = phase,
+            SchemaVersion = 3, Phase = phase,
             SampleBeginTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
             QpcFrequency = System.Diagnostics.Stopwatch.Frequency
         };

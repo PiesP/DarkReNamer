@@ -736,12 +736,12 @@ $samplerFailure
 $performanceSampler
 "@
 $defaultFailure = [DarkReNamerSamplerFailure]::new()
-$defaultFailure.SchemaVersion = 2
+$defaultFailure.SchemaVersion = 3
 $defaultFailure.Phase = 'ordinary-100'
 $defaultFailure.ErrorType = 'InvalidOperationException'
 $defaultFailure.Message = 'Sampler active owned popup identity changed.'
 $defaultFailure.QpcFrequency = 10000000
-Assert-Equal (Convert-ObserverSamplerFailure -Failure $defaultFailure).schema_version 2 `
+Assert-Equal (Convert-ObserverSamplerFailure -Failure $defaultFailure).schema_version 3 `
     'Default full sampler failure retains current diagnostic schema'
 $defaultFailure.SchemaVersion = 1
 Assert-Fails { Convert-ObserverSamplerFailure -Failure $defaultFailure } 'source-selected producer'

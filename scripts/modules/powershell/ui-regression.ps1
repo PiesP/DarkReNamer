@@ -346,6 +346,29 @@ function Assert-GuiRegressionInvocationBinding {
             throw 'Picker identity observation differs from its fixed immutable plan.'
         }
     }
+    elseif ($RegressionMode -ceq 'custom-input-identity-observation') {
+        $expectedPlan = [ordered]@{ ordinary_rows=@(100); idle_ms=1000; sample_interval_ms=200;
+            maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;
+            prompt_settle_ms=350; controlled_hidden_ms=700;
+            confirmed_prefix='confirmed-'; cancelled_prefix='cancelled-';
+            prompt_count=2; full_performance_sample=$false }
+        $actualPlan = $ManifestInput.request.PSObject.Properties['custom_input_plan']
+        if ($null -eq $actualPlan -or
+            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+            $ManifestInput.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100' -or
+            $ManifestInput.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
+            $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
+            $ManifestInput.acceptance_profile_sha256 -cne
+                '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f' -or
+            $ManifestInput.acceptance_profile.sha256 -cne $ManifestInput.acceptance_profile_sha256 -or
+            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
+            $ManifestInput.request.desktop.width -ne 1366 -or
+            $ManifestInput.request.desktop.height -ne 768 -or
+            $ManifestInput.request.desktop.dpi -ne 96) {
+            throw 'Custom input observation differs from its fixed immutable plan.'
+        }
+    }
     elseif ($RegressionMode -ceq 'first-clear-observation') {
         $expectedPlan = [ordered]@{ ordinary_rows=@(100,1000,10000); idle_seconds=30;
             sample_interval_ms=200; maximum_seconds=600; clear_command_id=32782;
@@ -405,6 +428,10 @@ function Assert-GuiRegressionInvocationBinding {
     if ($RegressionMode -cne 'picker-identity-observation' -and
         $null -ne $ManifestInput.request.PSObject.Properties['picker_identity_plan']) {
         throw 'Picker identity plan is restricted to its diagnostic.'
+    }
+    if ($RegressionMode -cne 'custom-input-identity-observation' -and
+        $null -ne $ManifestInput.request.PSObject.Properties['custom_input_plan']) {
+        throw 'Custom input plan is restricted to its diagnostic.'
     }
     if ($RegressionMode -ceq 'appearance-pair') {
         if ($null -eq $requestedContrast -or $requestedContrast.Value -isnot [bool] -or
@@ -732,7 +759,9 @@ function Invoke-GuiRegressionAcceptance {
     $ownedPerformanceRun = ($RegressionMode -ceq 'performance-sample' -and
         [string]$manifestInput.run_id -clike 'performance-sample-v2-owned-r3-1366x768-96-text100-*') -or
         ($RegressionMode -ceq 'picker-identity-observation' -and
-        [string]$manifestInput.run_id -ceq 'picker-identity-observation-v1-1366x768-96-text100')
+        [string]$manifestInput.run_id -ceq 'picker-identity-observation-v1-1366x768-96-text100') -or
+        ($RegressionMode -ceq 'custom-input-identity-observation' -and
+        [string]$manifestInput.run_id -ceq 'custom-input-identity-observation-v1-1366x768-96-text100')
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     Initialize-TrustedResultWriter `
         -Root $resolved.root `
@@ -841,7 +870,7 @@ function Invoke-GuiRegressionAcceptance {
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations
             }
-            elseif ($RegressionMode -in @('performance-sample', 'first-clear-observation', 'picker-identity-observation')) {
+            elseif ($RegressionMode -in @('performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation')) {
                 $scenarioSink = [ordered]@{}
                 $observations.scenario = $scenarioSink
                 $result.assertions.scenario = $scenarioSink
@@ -854,10 +883,11 @@ function Invoke-GuiRegressionAcceptance {
                     -EvidenceRoot $resolved.output_root `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -LongPathOrder $(if ($RegressionMode -in @('first-clear-observation','picker-identity-observation')) {
+                    -LongPathOrder $(if ($RegressionMode -in @('first-clear-observation','picker-identity-observation','custom-input-identity-observation')) {
                         'hidden-visible' } else { [string]$manifestInput.request.performance_plan.long_path_order }) `
                     -ObserveFirstClear:($RegressionMode -eq 'first-clear-observation') `
                     -ObservePicker:($RegressionMode -eq 'picker-identity-observation') `
+                    -ObserveCustomInput:($RegressionMode -eq 'custom-input-identity-observation') `
                     -OwnedPerformance:$ownedPerformanceRun `
                     -Captures $captures `
                     -ProcessLifecycleObservations $processLifecycleObservations `
@@ -926,8 +956,8 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
@@ -940,6 +970,9 @@ function Invoke-GuiRegressionAcceptance {
         }
         elseif ($RegressionMode -eq 'picker-identity-observation') {
             $result.assertions['scope'] = 'picker-identity-observation-v1'
+        }
+        elseif ($RegressionMode -eq 'custom-input-identity-observation') {
+            $result.assertions['scope'] = 'custom-input-identity-observation-v1'
         }
         elseif ($RegressionMode -eq 'icon-settlement') {
             $result.assertions['scope'] = if ($manifestInput.request.endpoint_method -ceq

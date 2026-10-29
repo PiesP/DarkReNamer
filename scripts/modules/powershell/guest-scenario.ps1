@@ -828,6 +828,17 @@ function Set-GuiSmokeFailureDetail {
         message = $message
         native_error = $nativeError
     }
+    # Keep the bounded post-selection evidence separate from the message prefix.
+    # Otherwise the menu input trace can consume the entire message allowance.
+    $diagnosticException = $exception
+    for ($depth = 0; $null -ne $diagnosticException -and $depth -lt 4; $depth++) {
+        if ($diagnosticException.Data.Contains('DarkReNamerLanguageMenuFailure')) {
+            $detail['language_menu_failure'] =
+                $diagnosticException.Data['DarkReNamerLanguageMenuFailure']
+            break
+        }
+        $diagnosticException = $diagnosticException.InnerException
+    }
     if ($null -eq $Row['error_detail']) {
         $Row['error_detail'] = $detail
     }
@@ -1934,7 +1945,21 @@ function Invoke-ProductionLanguageMenuChoice {
             status_before = $statusBefore; post_enter = $postEnter.ToArray()
         } | ConvertTo-Json -Depth 7 -Compress
         if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0, 8192) }
-        throw "Language preference was not durably saved after the real menu selection: $diagnostic"
+        $failure = [InvalidOperationException]::new(
+            "Language preference was not durably saved after the real menu selection: $diagnostic")
+        $failure.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{
+            schema_version = 1
+            stage = 'durable-preference-acknowledgement'
+            target_command = [int]$target
+            expected_preference = [int]($target - 0x9020)
+            status_before = $statusBefore
+            input_trace_count = $trace.Count
+            pre_enter = if ($trace.Count -gt 0) { $trace[$trace.Count - 1] } else { $null }
+            post_enter_count = $postEnter.Count
+            first_post_enter = if ($postEnter.Count -gt 0) { $postEnter[0] } else { $null }
+            last_post_enter = if ($postEnter.Count -gt 0) { $postEnter[$postEnter.Count - 1] } else { $null }
+        }
+        throw $failure
     }
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {

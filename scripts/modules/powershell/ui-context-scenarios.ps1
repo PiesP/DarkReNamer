@@ -1,5 +1,5 @@
 ﻿$script:PerformanceResponseTimelineSchemaVersion = 1
-$script:PickerFailureSchemaVersion = 2
+$script:PickerFailureSchemaVersion = 3
 
 function Get-ObserverContextConfirmationReachability {
     param(
@@ -1732,21 +1732,23 @@ function Invoke-ObserverPerformanceSampleScenario {
         [ValidateSet('hidden-visible','visible-hidden')][string] $LongPathOrder = 'hidden-visible',
         [switch] $ObserveFirstClear,
         [switch] $ObservePicker,
+        [switch] $ObserveCustomInput,
         [switch] $OwnedPerformance,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
         [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
         [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
 
     if ([int][bool]$ObserveFirstClear +
-        [int][bool]$ObservePicker -gt 1) {
+        [int][bool]$ObservePicker + [int][bool]$ObserveCustomInput -gt 1) {
         throw 'Focused performance modes are mutually exclusive.'
     }
     if ($OwnedPerformance -and $ObserveFirstClear) {
         throw 'Owned performance lifetime applies only to a reviewed owned workload.'
     }
-    if ($ObservePicker -and -not $OwnedPerformance) {
-        throw 'Focused picker requires the owned-resource lifetime contract.'
+    if (($ObservePicker -or $ObserveCustomInput) -and -not $OwnedPerformance) {
+        throw 'Focused popup observation requires the owned-resource lifetime contract.'
     }
+    $focusedPopup = $ObservePicker -or $ObserveCustomInput
     $scenarioClock = if ($ObserveFirstClear) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
     $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'performance-fixture'
     $shortFixture = Resolve-JobBoundShortPath -Path $fixture
@@ -1759,12 +1761,12 @@ function Invoke-ObserverPerformanceSampleScenario {
     $ordinaryPaths = [Collections.Generic.List[string]]::new()
     $longPaths = [Collections.Generic.List[string]]::new()
     $extensionPaths = [Collections.Generic.List[string]]::new()
-    foreach ($index in 0..$(if ($ObservePicker) { 99 } else { 9999 })) {
+    foreach ($index in 0..$(if ($focusedPopup) { 99 } else { 9999 })) {
         $path = Join-Path $ordinary ('ordinary-{0:D5}.txt' -f $index)
         [IO.File]::WriteAllText($path, ('issue24-ordinary-{0:D5}' -f $index), [Text.Encoding]::ASCII)
         $ordinaryPaths.Add($path)
     }
-    if (-not $ObservePicker) { foreach ($index in 0..999) {
+    if (-not $focusedPopup) { foreach ($index in 0..999) {
         $path = Join-Path $longRoot ('long-{0:D4}.txt' -f $index)
         [IO.File]::WriteAllText($path, ('issue24-long-{0:D4}' -f $index), [Text.Encoding]::ASCII)
         $longPaths.Add($path)
@@ -1775,15 +1777,15 @@ function Invoke-ObserverPerformanceSampleScenario {
         $extensionPaths.Add($extensionPath)
     } }
     $paths100 = New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 100)) -Leaf 'performance-100.txt'
-    $paths900 = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(100, 900)) -Leaf 'performance-900.txt' }
-    $paths2250 = if ($ObservePicker) { @() } else { @(0..3 | ForEach-Object {
+    $paths900 = if ($focusedPopup) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(100, 900)) -Leaf 'performance-900.txt' }
+    $paths2250 = if ($focusedPopup) { @() } else { @(0..3 | ForEach-Object {
         New-ObserverPathList -RuntimeRoot $RuntimeRoot `
             -Paths ([string[]]$ordinaryPaths.GetRange(1000 + 2250 * $_, 2250)) `
             -Leaf ('performance-2250-{0}.txt' -f $_)
     }) }
-    $pathsLong = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$longPaths.ToArray()) -Leaf 'performance-long.txt' }
-    $pathsExtensions = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$extensionPaths.ToArray()) -Leaf 'performance-extensions.txt' }
-    $pathsCycle = if ($ObservePicker) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 1000)) -Leaf 'performance-cycle.txt' }
+    $pathsLong = if ($focusedPopup) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$longPaths.ToArray()) -Leaf 'performance-long.txt' }
+    $pathsExtensions = if ($focusedPopup) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$extensionPaths.ToArray()) -Leaf 'performance-extensions.txt' }
+    $pathsCycle = if ($focusedPopup) { $null } else { New-ObserverPathList -RuntimeRoot $RuntimeRoot -Paths ([string[]]$ordinaryPaths.GetRange(0, 1000)) -Leaf 'performance-cycle.txt' }
     $applicationPath = Join-Path $Verified.root $Verified.application.file
     if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
         throw 'Performance application differs from the staged executable.'
@@ -1802,12 +1804,21 @@ function Invoke-ObserverPerformanceSampleScenario {
     $nativeLifetimeCheckpoints = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
+    $postStopStage = $null
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-        elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
-    if ($ObservePicker) {
+        elseif ($ObservePicker) { 'picker-identity-observation' }
+        elseif ($ObserveCustomInput) { 'custom-input-identity-observation' }
+        else { 'performance-sample' }
+    if ($focusedPopup) {
         $ObservationSink['popup_diagnostic_schema_version'] = $script:PickerFailureSchemaVersion
     }
-    $ObservationSink['plan'] = if ($ObservePicker) {
+    $ObservationSink['plan'] = if ($ObserveCustomInput) {
+        [ordered]@{ ordinary_rows=@(100); idle_ms=1000; sample_interval_ms=200;
+            maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;
+            prompt_settle_ms=350; controlled_hidden_ms=700;
+            confirmed_prefix='confirmed-'; cancelled_prefix='cancelled-';
+            prompt_count=2; full_performance_sample=$false }
+    } elseif ($ObservePicker) {
         [ordered]@{ ordinary_rows=@(100); idle_ms=1000; picker_settle_ms=350; sample_interval_ms=200;
             maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;
             full_performance_sample=$false }
@@ -1890,7 +1901,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         if (@($hiddenWidths | Where-Object { $_ -ne 0 }).Count -ne 0) {
             throw 'Performance auxiliary columns were not hidden at clean start.'
         }
-        $sampler = if ($ObservePicker) {
+        $sampler = if ($focusedPopup) {
             [DarkReNamerPerformanceSampler]::new($application.process, [IntPtr]$application.main_handle,
                 120000, 650)
         } else {
@@ -1901,13 +1912,13 @@ function Invoke-ObserverPerformanceSampleScenario {
                 [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
             $nativeLifetimeCheckpoints.Add([ordered]@{ phase='idle'; creation_filetime=[long]$check[0] })
         }
-        if ($ObservePicker) { Start-Sleep -Milliseconds 1000 } else { Start-Sleep -Seconds 30 }
-        if (-not $ObservePicker) {
+        if ($focusedPopup) { Start-Sleep -Milliseconds 1000 } else { Start-Sleep -Seconds 30 }
+        if (-not $focusedPopup) {
             [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
                 -Window $application.main -Process $application.process -ExpectedSession $SessionId `
                 -Root $EvidenceRoot -Leaf 'performance-empty.png' -Label 'performance empty idle'))
         }
-        foreach ($stage in $(if ($ObservePicker) {
+        foreach ($stage in $(if ($focusedPopup) {
                 @([ordered]@{ id='ordinary-100'; file=$paths100; rows=100 })
             } else { @(
                 [ordered]@{ id='ordinary-100'; file=$paths100; rows=100 },
@@ -1915,11 +1926,133 @@ function Invoke-ObserverPerformanceSampleScenario {
             $sampler.SetPhase($stage.id)
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
-                -PickerSettleMilliseconds $(if ($ObservePicker) { 350 } else { 0 }) `
+                -PickerSettleMilliseconds $(if ($focusedPopup) { 350 } else { 0 }) `
                 -TimelineEvents $activeTimelineEvents -TimelineOperation $stage.id
             $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
                 command_ready_after_rows_ms=$timing.command_ready_after_rows_ms;
                 rows=$stage.rows; observed_rows=[int]$grid.pattern.Current.RowCount })
+            if ($ObserveCustomInput) {
+                $prefixControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $WaitSeconds -Label 'focused custom input command' -RequireEnabled -RequireWindowHandle
+                $sampler.SetPhase('custom-confirm')
+                $confirmed = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'confirmed-' `
+                    -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt' `
+                    -Command $prefixControl -PromptSettleMilliseconds 350 `
+                    -ControlledHiddenMilliseconds 700 -Sampler $sampler -TimelineEvents $activeTimelineEvents
+                $ObservationSink['controlled_hidden_input'] = $confirmed.hidden_control
+                if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'confirmed-ordinary-00000.txt') {
+                    throw 'Focused confirmed input did not update the preview.'
+                }
+                $resetControl = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '32781' -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $WaitSeconds -Label 'focused input reset command' -RequireEnabled -RequireWindowHandle
+                Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId `
+                    -WaitSeconds $WaitSeconds -Control $resetControl
+                if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
+                    throw 'Focused input reset did not restore the preview.'
+                }
+                $sampler.SetPhase('custom-cancel')
+                Assert-ObserverCommandButton -Control $prefixControl -Application $application `
+                    -SessionId $SessionId -AutomationId '32773'
+                $cancelRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                $cancelInvoke = Start-AutomationControlInvoke -OwnedProcess $application.owned `
+                    -Element $prefixControl -Label 'focused custom cancel command'
+                $cancelPrompt = Wait-UniqueAutomationWindow -Process $application.process -ExpectedSession $SessionId `
+                    -Owner $application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds `
+                    -Label 'focused custom cancel prompt'
+                $cancelFoundTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                $cancelHandle = [IntPtr]$cancelPrompt.Current.NativeWindowHandle
+                $cancelClass = [string]$cancelPrompt.Current.ClassName
+                if ($cancelClass -cne 'DarkReNamerInputWindow' -or
+                    [bool]$cancelPrompt.Current.IsOffscreen -or -not [bool]$cancelPrompt.Current.IsEnabled) {
+                    throw 'Focused cancellation prompt class or visible/enabled state differs.'
+                }
+                $cancelEdit = Find-UniqueAutomationElement -Root $cancelPrompt -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) `
+                    -TimeoutSeconds $WaitSeconds -Label 'focused custom cancel edit' -RequireWindowHandle
+                Set-AutomationControlValue -Element $cancelEdit -Value 'cancelled-' -Label 'focused custom cancel edit'
+                Start-Sleep -Milliseconds 350
+                $cancel = Find-UniqueAutomationElement -Root $cancelPrompt -Process $application.process `
+                    -ExpectedSession $SessionId -AutomationId '2' -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $WaitSeconds -Label 'focused custom Cancel' -RequireEnabled -RequireWindowHandle
+                $cancelInvokeTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                Invoke-AutomationControl -Element $cancel -Label 'focused custom Cancel'
+                Wait-WindowClosed -Handle $cancelHandle -TimeoutSeconds $WaitSeconds -Label 'focused custom prompt'
+                $cancelClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                Complete-AutomationControlInvoke -State $cancelInvoke -TimeoutSeconds $WaitSeconds
+                Start-Sleep -Milliseconds 400
+                if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-00000.txt') {
+                    throw 'Focused cancelled input changed the preview.'
+                }
+                foreach ($boundary in @(
+                    @('prompt_request', $cancelRequestTicks, 0),
+                    @('prompt_found', $cancelFoundTicks, $cancelHandle.ToInt64()),
+                    @('cancel_invoke', $cancelInvokeTicks, $cancelHandle.ToInt64()),
+                    @('prompt_closed', $cancelClosedTicks, $cancelHandle.ToInt64()))) {
+                    $timelineEvents.Add([ordered]@{ operation='custom-cancel'; step=[string]$boundary[0];
+                        ticks=[long]$boundary[1]; window_handle=[long]$boundary[2] })
+                }
+                $sampler.SetPhase('post')
+                $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                    [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$false)
+                $nativeLifetimeCheckpoints.Add([ordered]@{ phase='post'; creation_filetime=[long]$check[0] })
+                Start-Sleep -Milliseconds 400
+                $samples = @($sampler.Stop())
+                $sampler = $null
+                try {
+                    $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline -Picker)
+                }
+                catch {
+                    [void]$ObservationSink.Remove('samples')
+                    $ObservationSink['sample_transfer_failure'] = [ordered]@{
+                        schema_version=1; stage='convert-stopped-samples';
+                        reported_raw_sample_count=$samples.Count;
+                        reported_last_probe_end_ticks=[long]$samples[-1].ProbeEndTicks }
+                    throw
+                }
+                $postStopStage = 'capture'
+                [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+                    -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+                    -Root $EvidenceRoot -Leaf 'custom-100-after.png' -Label 'focused custom input rows'))
+                $ObservationSink['custom_input'] = [ordered]@{
+                    expected_rows=100; observed_rows=[int]$grid.pattern.Current.RowCount;
+                    import_command_ready=$true; picker_closed=$true; fixture_files=100;
+                    confirmed_prompt_handle=[long]$confirmed.prompt_handle;
+                    confirmed_prompt_class=[string]$confirmed.prompt_class;
+                    confirmed_prompt_visible=[bool]$confirmed.prompt_visible;
+                    confirmed_prompt_enabled=[bool]$confirmed.prompt_enabled;
+                    confirmed_preview='confirmed-ordinary-00000.txt';
+                    cancelled_prompt_handle=$cancelHandle.ToInt64();
+                    cancelled_prompt_class=$cancelClass;
+                    cancelled_prompt_visible=$true; cancelled_prompt_enabled=$true;
+                    cancelled_preview='ordinary-00000.txt';
+                    confirmed_then_reset=$true; cancellation_retired=$true }
+                $postStopStage = 'fixture-readback'
+                $ObservationSink['disk_unchanged'] = $false
+                if (@(Get-ChildItem -LiteralPath $ordinary -File -Force).Count -ne 100) {
+                    throw 'Focused custom fixture file count changed on disk.'
+                }
+                foreach ($index in 0..99) {
+                    if ([IO.File]::ReadAllText($ordinaryPaths[$index], [Text.Encoding]::ASCII) -cne
+                        ('issue24-ordinary-{0:D5}' -f $index)) {
+                        throw 'Focused custom fixture content changed on disk.'
+                    }
+                }
+                $ObservationSink['disk_unchanged'] = $true
+                $postStopStage = 'journal-readback'
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+                $ObservationSink['journal_residue_count'] = 0
+                $postStopStage = 'normal-close'
+                $ObservationSink['normal_exit_code'] = Close-AcceptanceApplication `
+                    -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+                $postStopStage = 'native-exit'
+                $terminal = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                    [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$true)
+                $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
+                $ObservationSink['appearance'] = 'light'
+                return $ObservationSink
+            }
             if ($ObservePicker) {
                 $sampler.SetPhase('post')
                 $check = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
@@ -2084,12 +2217,12 @@ function Invoke-ObserverPerformanceSampleScenario {
                 if ($null -ne $sampler) {
                     try {
                         $ObservationSink['partial_samples'] = @(
-                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$focusedPopup)
                     }
                     catch {
                         $ObservationSink['partial_sampling_error'] = $_.Exception.GetType().Name
                         $ObservationSink['partial_samples'] = @(
-                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
+                            Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$focusedPopup)
                     }
                     finally { $sampler = $null }
                 }
@@ -2260,7 +2393,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         Start-Sleep -Milliseconds 400
         $samples = @($sampler.Stop())
         $sampler = $null
-        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled -Picker:$ObservePicker)
+        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline:$timelineEnabled -Picker:$focusedPopup)
         $phaseOrder = @('empty-idle','ordinary-100','ordinary-1000','ordinary-10000',
             'single-row','full-preview') + $(if ($ObserveFirstClear) { @() }
                 else { @($longModes) + @('extensions','cycle-1','cycle-2','cycle-3') }) + @('post')
@@ -2296,19 +2429,31 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['normal_exit_code'] = $exitCode
         $ObservationSink['appearance'] = 'light'
         $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
-            elseif ($ObservePicker) { 'picker-identity-observation' } else { 'performance-sample' }
+            elseif ($ObservePicker) { 'picker-identity-observation' }
+            elseif ($ObserveCustomInput) { 'custom-input-identity-observation' }
+            else { 'performance-sample' }
         return $ObservationSink
+    }
+    catch {
+        if ($ObserveCustomInput -and $null -eq $sampler -and $null -ne $postStopStage -and
+            $ObservationSink.Contains('samples')) {
+            $retained = @($ObservationSink['samples'])
+            $ObservationSink['post_stop_failure'] = [ordered]@{
+                schema_version=1; stage=$postStopStage; sample_count=$retained.Count;
+                last_probe_end_ticks=[long]$retained[-1].probe_end_ticks }
+        }
+        throw
     }
     finally {
         if ($null -ne $sampler) {
             try {
                 $ObservationSink['partial_samples'] = @(
-                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -Timeline:$timelineEnabled -Picker:$focusedPopup)
             }
             catch {
                 $ObservationSink['partial_sampling_error'] = $_.Exception.Message
                 $ObservationSink['partial_samples'] = @(
-                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$ObservePicker)
+                    Convert-ObserverPerformanceSampleRows -Samples @($sampler.ReadStoppedSamples()) -Timeline:$timelineEnabled -Picker:$focusedPopup)
             }
             $failure = $sampler.ReadFailureDiagnostic()
             if ($null -ne $failure) {
@@ -2316,7 +2461,18 @@ function Invoke-ObserverPerformanceSampleScenario {
             }
         }
         if ($null -ne $application) {
-            Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+            try { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned }
+            catch {
+                if ($ObserveCustomInput -and $null -eq $sampler -and
+                    $ObservationSink.Contains('samples') -and
+                    -not $ObservationSink.Contains('post_stop_failure')) {
+                    $retained = @($ObservationSink['samples'])
+                    $ObservationSink['post_stop_failure'] = [ordered]@{
+                        schema_version=1; stage='owned-dispose'; sample_count=$retained.Count;
+                        last_probe_end_ticks=[long]$retained[-1].probe_end_ticks }
+                }
+                throw
+            }
         }
     }
 }
