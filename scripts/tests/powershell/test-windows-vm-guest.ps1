@@ -463,6 +463,37 @@ try {
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
     } 'fixed focused native selection is invalid'
+    $virtual = New-Fixture -Name 'virtual-execution-selection'
+    $virtual.manifest.test_binaries[0].name = 'rename_windows_backend'
+    $virtual.manifest.diagnostic = [ordered]@{
+        kind = 'virtual-execution'
+        test_profile = 'release'
+        test_name = 'benchmark_durable_production_path'
+        count = 100
+        iteration = 1
+        media = 'virtual'
+        evidence_class = 'virtual-execution'
+        scope = 'vm-durable'
+        variant = 'baseline'
+        topology = 'same-parent'
+    }
+    Save-Manifest $virtual
+    Invoke-TestGuest -EntryPointPath $virtual.runner -BundleRoot $virtual.root -ExpectedSessionId 1 -ValidateOnly
+    foreach ($mutation in @(
+        @{ name = 'evidence_class'; value = 'directional-hosted' },
+        @{ name = 'scope'; value = 'planning-only' },
+        @{ name = 'variant'; value = 'validation-skip-estimate' },
+        @{ name = 'count'; value = 99 },
+        @{ name = 'iteration'; value = 6 }
+    )) {
+        $original = $virtual.manifest.diagnostic[$mutation.name]
+        $virtual.manifest.diagnostic[$mutation.name] = $mutation.value
+        Save-Manifest $virtual
+        Assert-Fails {
+            Invoke-TestGuest -EntryPointPath $virtual.runner -BundleRoot $virtual.root -ExpectedSessionId 1 -ValidateOnly
+        } 'virtual execution selection is invalid'
+        $virtual.manifest.diagnostic[$mutation.name] = $original
+    }
     $refreshFocused = New-Fixture -Name 'focused-refresh-selection'
     $refreshFocused.manifest.test_binaries[0].name = 'darknamer_app'
     $refreshFocused.manifest.diagnostic = [ordered]@{
@@ -4281,6 +4312,21 @@ Invoke-DrTestPowerShellModuleScope `
     $refreshSummary = Read-RustTestSummary `
         -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
         -Stderr '' -RefreshProfile
+    $virtualSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;' `
+        -Stderr '' -VirtualExecution
+    if ($virtualSummary.passed -ne 1 -or $virtualSummary.filtered -ne 350) {
+        throw 'Virtual execution did not accept the exact ignored test summary.'
+    }
+    foreach ($invalid in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalid -Stderr '' -VirtualExecution
+        } 'must select exactly one ignored test'
+    }
     if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
         throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
     }

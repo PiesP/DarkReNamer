@@ -56,6 +56,7 @@ TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES = 64 * 1024 * 1024
 REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES = 32 * 1024 * 1024
 REFRESH_PROFILE_TEST = 'windows::list_view::native_tests::profile_refresh_stages'
+VIRTUAL_EXECUTION_TEST = 'benchmark_durable_production_path'
 FOCUSED_ICON_FILTER = 'windows::list_view::native_tests::icon_worker_'
 FOCUSED_ICON_CASES = (
     'bootstrap_and_miss_keep_ui_responsive',
@@ -314,6 +315,10 @@ def argument_parser():
                         help='Select one fixed native icon worker case for a diagnostic run.')
     parser.add_argument('--focused-refresh-case', choices=FOCUSED_REFRESH_CASES,
                         help='Select one fixed native refresh case for a diagnostic run.')
+    parser.add_argument('--virtual-execution-count', type=int, choices=(100, 1000, 10000),
+                        help='Run one source-bound durable VM rename series at the selected file count.')
+    parser.add_argument('--virtual-execution-iteration', type=int, choices=range(6),
+                        help='Use 0 for warmup or 1..5 for a recorded VM execution iteration.')
     return parser
 
 
@@ -343,6 +348,15 @@ def parse_arguments(argv=None):
         parser.error('--focused-refresh-case requires --focused-refresh-tests.')
     if args.focused_icon_tests and args.focused_refresh_tests:
         parser.error('Only one fixed focused native test selector may be used.')
+    if (args.virtual_execution_count is None) != (args.virtual_execution_iteration is None):
+        parser.error('Virtual execution requires both count and iteration.')
+    if args.virtual_execution_count is not None:
+        if (args.profile_refresh_stages or args.focused_icon_tests or args.focused_refresh_tests or
+                args.native_test_profile or args.candidate_mode or args.task_kind != 'core' or
+                args.acceptance_profile_id != V2_PROFILE_ID or args.prepare_only or
+                supplied('--test-timeout-seconds') or args.expected_vm_id is None):
+            parser.error('Virtual execution requires source-built v2 core mode and exact VM identity.')
+        args.test_timeout_seconds = 1200
     if args.focused_icon_tests or args.focused_refresh_tests:
         label = 'Focused icon tests' if args.focused_icon_tests else 'Focused refresh tests'
         if (args.profile_refresh_stages or not args.native_test_profile or
@@ -427,6 +441,8 @@ def parse_arguments(argv=None):
         parser.error('UI observer options require --task-kind ui.')
     if args.profile_refresh_stages and (ui_options or recovery_options or args.prepare_only):
         parser.error('The refresh diagnostic does not accept observer or prepare-only options.')
+    if args.virtual_execution_count is not None and (ui_options or recovery_options):
+        parser.error('Virtual execution does not accept UI or recovery observer options.')
     if (args.focused_icon_tests or args.focused_refresh_tests) and (ui_options or recovery_options):
         parser.error('Focused native tests do not accept observer options.')
     if args.candidate_mode:
@@ -583,6 +599,9 @@ def controller_task_arguments(root, args, path_converter=str):
         arguments += ['-FocusedRefreshTests']
         if args.focused_refresh_case:
             arguments += ['-FocusedRefreshCase', args.focused_refresh_case]
+    if getattr(args, 'virtual_execution_count', None) is not None:
+        arguments += ['-VirtualExecutionCount', str(args.virtual_execution_count),
+                      '-VirtualExecutionIteration', str(args.virtual_execution_iteration)]
     if getattr(args, 'acceptance_profile_id', V1_PROFILE_ID) == V2_PROFILE_ID:
         digest = getattr(args, 'acceptance_profile_sha256', None)
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
@@ -631,8 +650,9 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     ]
     if (getattr(args, 'profile_refresh_stages', False) or
             getattr(args, 'focused_icon_tests', False) or
-            getattr(args, 'focused_refresh_tests', False)):
-        common += ['-SuiteTimeoutSeconds', '600']
+            getattr(args, 'focused_refresh_tests', False) or
+            getattr(args, 'virtual_execution_count', None) is not None):
+        common += ['-SuiteTimeoutSeconds', str(args.test_timeout_seconds)]
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
     if args.expected_vm_id:
@@ -655,9 +675,11 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
         + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
-        + (' -SuiteTimeoutSeconds 600' if (getattr(args, 'profile_refresh_stages', False) or
-                                           getattr(args, 'focused_icon_tests', False) or
-                                           getattr(args, 'focused_refresh_tests', False)) else '')
+        + (' -SuiteTimeoutSeconds ' + str(args.test_timeout_seconds)
+           if (getattr(args, 'profile_refresh_stages', False) or
+               getattr(args, 'focused_icon_tests', False) or
+               getattr(args, 'focused_refresh_tests', False) or
+               getattr(args, 'virtual_execution_count', None) is not None) else '')
         + ''.join(' ' + (value if value.startswith('-') else psquote(value))
                   for value in task_arguments)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
@@ -888,9 +910,10 @@ def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
 
 def run_controller(root, args, defaults=None, pwsh=None):
     output = root if args.task_kind == 'core' else root / 'observer-output'
-    suite_timeout = (600 if (getattr(args, 'profile_refresh_stages', False) or
+    suite_timeout = (args.test_timeout_seconds if (getattr(args, 'profile_refresh_stages', False) or
                             getattr(args, 'focused_icon_tests', False) or
-                            getattr(args, 'focused_refresh_tests', False))
+                            getattr(args, 'focused_refresh_tests', False) or
+                            getattr(args, 'virtual_execution_count', None) is not None)
                      else CONTROLLER_SUITE_TIMEOUT_SECONDS)
     completed, desktop = run_managed_controller(
         root, args,
@@ -904,7 +927,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
     if (desktop and args.task_kind == 'core' and
             not getattr(args, 'profile_refresh_stages', False) and
             not getattr(args, 'focused_icon_tests', False) and
-            not getattr(args, 'focused_refresh_tests', False)):
+            not getattr(args, 'focused_refresh_tests', False) and
+            getattr(args, 'virtual_execution_count', None) is None):
         result = read_json_strict(root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
         if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
             raise ValueError('Production window DPI differs from the requested RDP scale.')
@@ -2313,7 +2337,7 @@ def build_candidate_bundle(repo, root, args, tooling=None):
 
 
 def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_profile=None,
-                 focused_case=None, focused_kind='icon'):
+                 focused_case=None, focused_kind='icon', virtual_execution=None):
     repo = Path(repo)
     root = Path(root)
     if (refresh_profile and focused_profile is not None) or focused_profile not in (None, 'debug', 'release'):
@@ -2324,6 +2348,12 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
     focused_filter = FOCUSED_ICON_FILTER if focused_kind == 'icon' else FOCUSED_REFRESH_FILTER
     if focused_case is not None and (focused_profile is None or focused_case not in focused_cases):
         raise ValueError('Focused native selection must name one fixed case.')
+    if virtual_execution is not None:
+        if refresh_profile or focused_profile is not None or focused_case is not None or \
+                not isinstance(virtual_execution, tuple) or len(virtual_execution) != 2 or \
+                virtual_execution[0] not in (100, 1000, 10000) or \
+                type(virtual_execution[1]) is not int or not 0 <= virtual_execution[1] <= 5:
+            raise ValueError('Virtual execution requires one fixed count and iteration.')
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
         raise RuntimeError('Commit or preserve checkout changes before VM verification; results must bind a clean source SHA.')
     source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
@@ -2341,10 +2371,11 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         target_root = Path(target_directory).resolve(strict=True)
         env['CARGO_TARGET_DIR'] = str(target_root)
         command = ['cargo', 'xwin', 'test']
-        if refresh_profile or focused_profile:
-            if refresh_profile or focused_profile == 'release':
+        if refresh_profile or focused_profile or virtual_execution:
+            if refresh_profile or focused_profile == 'release' or virtual_execution:
                 command.append('--release')
-            command += ['-p', 'darknamer-app', '--lib']
+            command += ['-p', 'darknamer-app']
+            command += ['--test', 'rename_windows_backend'] if virtual_execution else ['--lib']
         else:
             command += ['--workspace', '--all-targets']
         command += ['--all-features', '--locked', '--target', TARGET,
@@ -2354,8 +2385,9 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
             subprocess.run(command, cwd=repo, env=env, stdout=stream, check=True)
         with messages_path.open() as stream:
             artifacts = test_artifacts(stream)
-        if (refresh_profile or focused_profile) and (len(artifacts) != 1 or artifacts[0]['name'] != 'darknamer_app'):
-            raise RuntimeError('Selected icon tests must produce one app library test binary.')
+        if (refresh_profile or focused_profile or virtual_execution) and (len(artifacts) != 1 or artifacts[0]['name'] !=
+                ('rename_windows_backend' if virtual_execution else 'darknamer_app')):
+            raise RuntimeError('Selected native diagnostic must produce one expected test binary.')
         for row in artifacts:
             row['path'] = str(build_output_file(
                 target_root, row['path'], 'Windows test executable ' + row['file']))
@@ -2429,6 +2461,14 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         else:
             manifest['diagnostic']['test_names'] = [
                 focused_filter + case for case in focused_cases]
+    elif virtual_execution:
+        manifest['diagnostic'] = {
+            'kind': 'virtual-execution', 'test_profile': 'release',
+            'test_name': VIRTUAL_EXECUTION_TEST, 'count': virtual_execution[0],
+            'iteration': virtual_execution[1], 'media': 'virtual',
+            'evidence_class': 'virtual-execution', 'scope': 'vm-durable',
+            'variant': 'baseline', 'topology': 'same-parent',
+        }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     if tooling is not None:
         stage_verified_tooling(tooling, root)
@@ -2663,6 +2703,176 @@ def verify_focused_refresh_result(root, manifest, result, transport_kind,
                                   expected_vm_id, profile_sha256):
     return verify_focused_native_result(root, manifest, result, transport_kind,
                                         expected_vm_id, profile_sha256, kind='refresh')
+
+
+def verify_virtual_execution_lines(output, *, source_sha, count, iteration):
+    """Reject incomplete or relabeled durable VM benchmark output.
+
+    The caller must also bind this text to the exact test binary, libtest result,
+    medium-token job and cleaned VM transport. Neither producer line is a VM
+    identity or process-lifecycle attestation by itself.
+    """
+    prefix = 'darkrenamer_benchmark_virtual_v1,'
+    lines = [line.removeprefix(prefix).strip() for line in output.splitlines()
+             if line.startswith(prefix)]
+    if len(lines) != 2:
+        raise ValueError('Virtual execution requires started and completed v1 records.')
+    parsed = []
+    for line in lines:
+        fields = {}
+        for pair in line.split(','):
+            key, sep, value = pair.partition('=')
+            if not sep or not key or not value or key in fields:
+                raise ValueError('Virtual execution record has a missing or duplicate field.')
+            fields[key] = value
+        parsed.append(fields)
+    started, completed = parsed
+    common = {
+        'schema_version': '1', 'media': 'virtual',
+        'evidence_class': 'virtual-execution', 'scope': 'vm-durable',
+        'source_sha': source_sha, 'count': str(count), 'topology': 'same-parent',
+        'variant': 'baseline', 'iteration': str(iteration),
+        'recorded': str(iteration != 0).lower(),
+    }
+    if (set(started) != set(common) | {'status'} or started.get('status') != 'started' or
+            any(started.get(key) != value for key, value in common.items())):
+        raise ValueError('Virtual execution start record differs from the fixed selector.')
+    expected_keys = set(common) | {
+        'status', 'instrumentation_revision', 'setup_us', 'planning_us', 'preflight_us',
+        'execution_us', 'verification_us', 'cleanup_us', 'attempted_files',
+        'successful_files', 'failed_files', 'verified_files', 'backend_rename_calls',
+        'backend_rename_us', 'journal_begin_calls', 'journal_begin_us',
+        'journal_prepared_calls', 'journal_prepared_us', 'journal_completed_calls',
+        'journal_completed_us', 'journal_not_applied_calls', 'journal_not_applied_us',
+        'journal_terminal_calls', 'journal_terminal_us', 'journal_removed',
+        'fixture_removed',
+    }
+    if (set(completed) != expected_keys or completed.get('status') != 'completed' or
+            completed.get('instrumentation_revision') != 'vm-durable-v1' or
+            completed.get('journal_removed') != 'true' or
+            completed.get('fixture_removed') != 'true' or
+            any(completed.get(key) != value for key, value in common.items())):
+        raise ValueError('Virtual execution completion record is incomplete or mislabeled.')
+    numeric = expected_keys - set(common) - {
+        'status', 'instrumentation_revision', 'journal_removed', 'fixture_removed'
+    }
+    values = {}
+    for key in numeric:
+        value = completed[key]
+        if not re.fullmatch(r'0|[1-9][0-9]*', value):
+            raise ValueError('Virtual execution metric is not a bounded decimal integer.')
+        values[key] = int(value)
+        if values[key] > (1_200_000_000 if key.endswith('_us') else 10_000):
+            raise ValueError('Virtual execution metric exceeds its supported bound.')
+    counts = {
+        'attempted_files': count, 'successful_files': count,
+        'failed_files': 0, 'verified_files': count,
+        'backend_rename_calls': count, 'journal_begin_calls': 1,
+        'journal_prepared_calls': count, 'journal_completed_calls': count,
+        'journal_not_applied_calls': 0, 'journal_terminal_calls': 1,
+    }
+    if any(values[key] != expected for key, expected in counts.items()) or values['execution_us'] == 0:
+        raise ValueError('Virtual execution did not complete the declared durable workload.')
+    return {'schema_version': 1, **common, **values,
+            'instrumentation_revision': 'vm-durable-v1',
+            'journal_removed': True, 'fixture_removed': True}
+
+
+def verify_virtual_execution_job(row, jobs):
+    lifecycle = row.get('process_lifecycle')
+    if (not isinstance(lifecycle, dict) or
+            set(lifecycle) != {'pid', 'start_time_utc_ticks'} or
+            type(lifecycle['pid']) is not int or lifecycle['pid'] <= 0 or
+            not isinstance(lifecycle['start_time_utc_ticks'], str) or
+            not re.fullmatch(r'[1-9][0-9]{14,18}', lifecycle['start_time_utc_ticks']) or
+            not isinstance(jobs, list) or len(jobs) != 1 or not isinstance(jobs[0], dict) or
+            type(jobs[0].get('pid')) is not int or
+            jobs[0]['pid'] != lifecycle['pid'] or
+            jobs[0].get('process_start_time_utc_ticks') != lifecycle['start_time_utc_ticks'] or
+            jobs[0].get('status') != 'clean' or jobs[0].get('job_empty') is not True or
+            jobs[0].get('job_closed') is not True or
+            jobs[0].get('capture_complete') is not True or
+            jobs[0].get('had_survivors') is not False or
+            jobs[0].get('forced_termination') is not False or
+            type(jobs[0].get('active_processes_at_close')) is not int or
+            jobs[0]['active_processes_at_close'] != 0):
+        raise ValueError('Virtual execution has no clean, exact process Job receipt.')
+
+
+def verify_virtual_execution_result(root, manifest, result, transport_kind,
+                                    expected_vm_id, profile_sha256):
+    root = Path(root)
+    diagnostic = manifest.get('diagnostic')
+    if (not isinstance(diagnostic, dict) or set(diagnostic) != {
+            'kind', 'test_profile', 'test_name', 'count', 'iteration', 'media',
+            'evidence_class', 'scope', 'variant', 'topology'} or
+            diagnostic.get('kind') != 'virtual-execution' or
+            diagnostic.get('test_profile') != 'release' or
+            diagnostic.get('test_name') != VIRTUAL_EXECUTION_TEST or
+            type(diagnostic.get('count')) is not int or
+            diagnostic['count'] not in (100, 1000, 10000) or
+            type(diagnostic.get('iteration')) is not int or
+            not 0 <= diagnostic['iteration'] <= 5 or
+            any(diagnostic.get(key) != expected for key, expected in {
+                'media': 'virtual', 'evidence_class': 'virtual-execution',
+                'scope': 'vm-durable', 'variant': 'baseline',
+                'topology': 'same-parent'}.items()) or
+            len(manifest.get('test_binaries', [])) != 1 or
+            manifest['test_binaries'][0].get('name') != 'rename_windows_backend'):
+        raise ValueError('The source-bound virtual execution bundle is invalid.')
+    if (type(result.get('schema_version')) is not int or result['schema_version'] != 1 or
+            any(result.get(key) != manifest[key] for key in
+                ('source_sha', 'source_state', 'target')) or
+            result.get('diagnostic') != diagnostic or result.get('gui') is not None or
+            result.get('status') != 'passed'):
+        raise ValueError('Virtual execution result differs from its fixed selection.')
+    rows = result.get('tests')
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError('Virtual execution requires one test binary result.')
+    row = rows[0]
+    binary = manifest['test_binaries'][0]
+    if (row.get('file') != binary['file'] or row.get('sha256') != binary['sha256'] or
+            row.get('test_name') != VIRTUAL_EXECUTION_TEST or row.get('status') != 'passed' or
+            row.get('job_cleanup') is not True or row.get('exit_code') != 0 or
+            row.get('failure_reason') is not None or
+            [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
+        raise ValueError('Virtual execution test did not finish with clean job ownership.')
+    verify_virtual_execution_job(row, result.get('process_job_cleanup'))
+    for record in (binary, manifest['application'], manifest['runner']):
+        if checked_artifact(root, record).stat().st_size != record['bytes']:
+            raise ValueError('Virtual execution output size differs from its record.')
+    total_output = 0
+    for channel in ('stdout', 'stderr'):
+        record = row.get(channel)
+        if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
+                record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES):
+            raise ValueError('Virtual execution output is missing or exceeds its channel bound.')
+        checked_artifact(root, record)
+        total_output += record['bytes']
+    if total_output > TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES:
+        raise ValueError('Virtual execution output exceeds its aggregate bound.')
+    output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
+    summary = re.findall(
+        r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; '
+        r'\d+ measured; (\d+) filtered out;', output, re.MULTILINE)
+    names = re.findall(r'(?m)^test (\S+) \.\.\. ', output)
+    if (len(summary) != 1 or summary[0][:4] != ('ok', '1', '0', '0') or
+            int(summary[0][4]) < 1 or names != [VIRTUAL_EXECUTION_TEST]):
+        raise ValueError('Virtual execution did not run the exact ignored benchmark.')
+    metrics = verify_virtual_execution_lines(
+        output, source_sha=manifest['source_sha'], count=diagnostic['count'],
+        iteration=diagnostic['iteration'])
+    transport = result.get('transport')
+    if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
+            transport.get('status') != 'collected' or transport.get('guest_cleanup') is not True):
+        raise ValueError('Virtual execution transport did not finish cleanly.')
+    verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
+                              profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
+    _verify_v2_result_owned_binding(result, transport)
+    verify_transport_binding(transport, transport_kind, expected_vm_id)
+    return {'status': 'passed', 'test_binary_sha256': binary['sha256'],
+            'stdout_sha256': row['stdout']['sha256'], 'metrics': metrics}
 
 
 def verify_focused_native_result(root, manifest, result, transport_kind,
@@ -3000,6 +3210,28 @@ def main(repo, argv=None, tooling=None):
         return 0
     if args.profile_refresh_stages:
         return run_refresh_profile(repo, args, tooling)
+    if args.virtual_execution_count is not None:
+        root, defaults, pwsh = prepare_transport(repo, args)
+        manifest = build_bundle(
+            repo, root, tooling,
+            virtual_execution=(args.virtual_execution_count, args.virtual_execution_iteration))
+        args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
+        print('Executing durable VM benchmark; evidence=' + str(root), flush=True)
+        transport_ok = True
+        try:
+            run_controller(root, args, defaults, pwsh)
+        except subprocess.CalledProcessError:
+            transport_ok = False
+        result_path = root / 'result.json'
+        if not result_path.is_file():
+            raise RuntimeError('The virtual execution returned no test result; inspect retained transport evidence.')
+        result = read_json_strict(result_path, maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
+        observed = verify_virtual_execution_result(
+            root, manifest, result, 'ssh' if args.ssh_host else 'powershell_direct',
+            args.expected_vm_id, args.acceptance_profile_sha256)
+        print(('PASS' if transport_ok else 'FAIL') + ': durable virtual execution; ' +
+              str(args.virtual_execution_count) + ' verified files', flush=True)
+        return 0 if transport_ok and observed['status'] == 'passed' else 1
     if args.focused_icon_tests or args.focused_refresh_tests:
         focused_kind = 'icon' if args.focused_icon_tests else 'refresh'
         focused_case = args.focused_icon_case if args.focused_icon_tests else args.focused_refresh_case

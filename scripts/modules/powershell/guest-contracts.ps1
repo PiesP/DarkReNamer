@@ -310,6 +310,25 @@ function Resolve-VerifiedBundle {
                     throw 'bundle.json fixed refresh diagnostic is invalid.'
                 }
             }
+            elseif ($diagnostic.Value.kind -ceq 'virtual-execution') {
+                Assert-ExactProperties -Value $diagnostic.Value -Names @(
+                    'kind', 'test_profile', 'test_name', 'count', 'iteration', 'media',
+                    'evidence_class', 'scope', 'variant', 'topology'
+                ) -Label 'bundle.json diagnostic'
+                if ($diagnostic.Value.test_profile -cne 'release' -or
+                    $diagnostic.Value.test_name -cne 'benchmark_durable_production_path' -or
+                    $diagnostic.Value.count -isnot [long] -or
+                    $diagnostic.Value.count -notin @(100, 1000, 10000) -or
+                    $diagnostic.Value.iteration -isnot [long] -or
+                    $diagnostic.Value.iteration -lt 0 -or $diagnostic.Value.iteration -gt 5 -or
+                    $diagnostic.Value.media -cne 'virtual' -or
+                    $diagnostic.Value.evidence_class -cne 'virtual-execution' -or
+                    $diagnostic.Value.scope -cne 'vm-durable' -or
+                    $diagnostic.Value.variant -cne 'baseline' -or
+                    $diagnostic.Value.topology -cne 'same-parent') {
+                    throw 'bundle.json virtual execution selection is invalid.'
+                }
+            }
             elseif ($diagnostic.Value.kind -cin @('focused-icon-tests', 'focused-refresh-tests')) {
                 $selectedCase = $diagnostic.Value.PSObject.Properties['test_name']
                 Assert-ExactProperties -Value $diagnostic.Value -Names (@(
@@ -356,8 +375,11 @@ function Resolve-VerifiedBundle {
                 }
             }
             else { throw 'bundle.json diagnostic kind is invalid.' }
-            if ($testBinaryRows.Count -ne 1 -or $testBinaryRows[0].name -cne 'darknamer_app') {
-                throw 'bundle.json selected native tests require one app library binary.'
+            $expectedTarget = if ($diagnostic.Value.kind -ceq 'virtual-execution') {
+                'rename_windows_backend'
+            } else { 'darknamer_app' }
+            if ($testBinaryRows.Count -ne 1 -or $testBinaryRows[0].name -cne $expectedTarget) {
+                throw 'bundle.json selected native tests require one exact test binary.'
             }
         }
         $candidateArtifacts = @()
