@@ -212,6 +212,16 @@ pub(super) fn with_production_popup_window_for_test<R>(
     owner_draw: bool,
     action: impl FnOnce(HWND) -> io::Result<R>,
 ) -> io::Result<R> {
+    with_production_test_window(journal_root, owner_draw, true, action)
+}
+
+#[cfg(test)]
+fn with_production_test_window<R>(
+    journal_root: &Path,
+    owner_draw: bool,
+    customize: bool,
+    action: impl FnOnce(HWND) -> io::Result<R>,
+) -> io::Result<R> {
     // SAFETY: null is the required reserved value and OleGuard balances every
     // successful initialization on this same dedicated UI test thread.
     let ole_status = unsafe { OleInitialize(null()) };
@@ -261,9 +271,11 @@ pub(super) fn with_production_popup_window_for_test<R>(
     }
 
     let mut state = AppState::new(runtime);
-    state.column_states[3].set_visible(true);
-    state.shown_columns = shown_columns(&state.column_states);
-    state.appearance.theme = AppThemeMode::Dark;
+    if customize {
+        state.column_states[3].set_visible(true);
+        state.shown_columns = shown_columns(&state.column_states);
+        state.appearance.theme = AppThemeMode::Dark;
+    }
     let state: *mut AppStateSlot = CallbackState::into_raw(state);
     let mut adopted = false;
     let mut init = WindowInit {
@@ -2025,6 +2037,81 @@ mod tests {
     use std::sync::mpsc::{Sender, channel, sync_channel};
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
+
+    #[test]
+    fn preference_read_failure_before_close_baseline() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::preferences::{
+            appearance_path_for_journal_root, path_for_journal_root, save, save_appearance,
+        };
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
+
+        for fail_columns in [true, false] {
+            let dir = tempfile::tempdir()?;
+            let runtime = initialize_safe_runtime_at(dir.path())?;
+            let columns_path = path_for_journal_root(runtime.root.path());
+            let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+            drop(runtime);
+            let mut columns = crate::default_column_states();
+            columns[0].record_user_resize(320, BASE_DPI);
+            let appearance = UiAppearance {
+                theme: AppThemeMode::Light,
+                ..UiAppearance::default()
+            };
+            save(&columns_path, &columns)?;
+            save_appearance(&appearance_path, appearance)?;
+            let path = if fail_columns {
+                &columns_path
+            } else {
+                &appearance_path
+            };
+            let original = fs::read(path)?;
+            let obstruction = fs::OpenOptions::new().read(true).share_mode(0).open(path)?;
+            with_production_test_window(dir.path(), false, false, |window| {
+                let state =
+                    try_app_state(window).ok_or_else(|| io::Error::other("missing state"))?;
+                if fail_columns {
+                    assert_eq!(state.state().column_states, crate::default_column_states());
+                } else {
+                    assert_eq!(state.state().appearance, UiAppearance::default());
+                }
+                drop(state);
+                drop(obstruction);
+                // SAFETY: the live test window receives the ordinary production close message.
+                unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                // SAFETY: the message storage is initialized and belongs to this UI thread.
+                while unsafe { IsWindow(window) } != 0 && Instant::now() < deadline {
+                    let mut message = MSG::default();
+                    while unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                        unsafe {
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if unsafe { IsWindow(window) } != 0 {
+                    return Err(io::Error::other("production close did not retire"));
+                }
+                Ok(())
+            })?;
+            let after = fs::read(path)?;
+            println!(
+                "failed file: {}; before: {:02x?}; after: {:02x?}",
+                if fail_columns {
+                    "columns"
+                } else {
+                    "appearance"
+                },
+                original,
+                after
+            );
+            assert_ne!(after, original, "baseline must reproduce replacement");
+        }
+        Ok(())
+    }
 
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
     const LIST_INFOTIP_MODAL_SUBCLASS_ID: usize = 0xD4B5;
