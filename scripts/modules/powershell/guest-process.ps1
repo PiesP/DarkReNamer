@@ -2074,9 +2074,14 @@ function Invoke-WithIsolatedEnvironment {
         'DARKRENAMER_BENCH_COUNT', 'DARKRENAMER_BENCH_ITERATION',
         'DARKRENAMER_BENCH_SOURCE_SHA'
     )
+    $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
     $original = @{}
     foreach ($name in $names) {
-        $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        $present = $currentEnvironment.Contains($name)
+        $original[$name] = [ordered]@{
+            present = $present
+            value = if ($present) { [string]$currentEnvironment[$name] } else { $null }
+        }
     }
     try {
         [Environment]::SetEnvironmentVariable('TEMP', $temporary, 'Process')
@@ -2090,15 +2095,15 @@ function Invoke-WithIsolatedEnvironment {
             'DARKRENAMER_REFRESH_PROFILE_ORDER', $RefreshProfileOrder, 'Process'
         )
         $benchmarkValues = @{
-            'DARKRENAMER_BENCH_ROOT' = $null
-            'DARKRENAMER_BENCH_ROOT_PRIVATE' = $null
-            'DARKRENAMER_BENCH_EVIDENCE_CLASS' = $null
-            'DARKRENAMER_BENCH_MEDIA' = $null
-            'DARKRENAMER_BENCH_VARIANT' = $null
-            'DARKRENAMER_BENCH_TOPOLOGY' = $null
-            'DARKRENAMER_BENCH_COUNT' = $null
-            'DARKRENAMER_BENCH_ITERATION' = $null
-            'DARKRENAMER_BENCH_SOURCE_SHA' = $null
+            'DARKRENAMER_BENCH_ROOT' = [NullString]::Value
+            'DARKRENAMER_BENCH_ROOT_PRIVATE' = [NullString]::Value
+            'DARKRENAMER_BENCH_EVIDENCE_CLASS' = [NullString]::Value
+            'DARKRENAMER_BENCH_MEDIA' = [NullString]::Value
+            'DARKRENAMER_BENCH_VARIANT' = [NullString]::Value
+            'DARKRENAMER_BENCH_TOPOLOGY' = [NullString]::Value
+            'DARKRENAMER_BENCH_COUNT' = [NullString]::Value
+            'DARKRENAMER_BENCH_ITERATION' = [NullString]::Value
+            'DARKRENAMER_BENCH_SOURCE_SHA' = [NullString]::Value
         }
         if ($VirtualExecutionCount) {
             if ($VirtualExecutionSourceSha -cnotmatch '^[0-9a-f]{40}$') {
@@ -2120,8 +2125,27 @@ function Invoke-WithIsolatedEnvironment {
         & $Action
     }
     finally {
+        $restoreErrors = [Collections.Generic.List[string]]::new()
         foreach ($name in $names) {
-            [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process')
+            try {
+                $value = if ($original[$name].present) {
+                    $original[$name].value
+                } else {
+                    [NullString]::Value
+                }
+                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+                $restored = [Environment]::GetEnvironmentVariables('Process')
+                if ($restored.Contains($name) -ne $original[$name].present -or
+                    ($original[$name].present -and
+                        [string]$restored[$name] -cne $original[$name].value)) {
+                    throw 'The original presence or value was not restored.'
+                }
+            }
+            catch { $restoreErrors.Add("$name restore: $($_.Exception.Message)") }
+        }
+        if ($restoreErrors.Count -gt 0) {
+            throw ('Isolated environment restoration failed: ' +
+                [string]::Join(' | ', $restoreErrors))
         }
     }
 }

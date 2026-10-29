@@ -2655,6 +2655,91 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     finally {
         Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalCrashEnvironment
     }
+    $benchNames = @(
+        'DARKRENAMER_BENCH_ROOT', 'DARKRENAMER_BENCH_ROOT_PRIVATE',
+        'DARKRENAMER_BENCH_EVIDENCE_CLASS', 'DARKRENAMER_BENCH_MEDIA',
+        'DARKRENAMER_BENCH_VARIANT', 'DARKRENAMER_BENCH_TOPOLOGY',
+        'DARKRENAMER_BENCH_COUNT', 'DARKRENAMER_BENCH_ITERATION',
+        'DARKRENAMER_BENCH_SOURCE_SHA'
+    )
+    $originalBenchEnvironment = [Environment]::GetEnvironmentVariables('Process')
+    try {
+        for ($index = 0; $index -lt $benchNames.Count; $index++) {
+            switch ($index % 3) {
+                0 { [Environment]::SetEnvironmentVariable($benchNames[$index], [NullString]::Value, 'Process') }
+                1 { [Environment]::SetEnvironmentVariable($benchNames[$index], '', 'Process') }
+                2 { [Environment]::SetEnvironmentVariable($benchNames[$index], "fixture-$index", 'Process') }
+            }
+        }
+        $fixtureBenchEnvironment = [Environment]::GetEnvironmentVariables('Process')
+        if ($fixtureBenchEnvironment.Contains($benchNames[0]) -or
+            -not $fixtureBenchEnvironment.Contains($benchNames[2]) -or
+            $fixtureBenchEnvironment[$benchNames[2]] -cne 'fixture-2') {
+            throw 'The BENCH environment fixture lacks absent and populated states.'
+        }
+        $emptySupported = $fixtureBenchEnvironment.Contains($benchNames[1])
+        if ($emptySupported -and [string]$fixtureBenchEnvironment[$benchNames[1]] -cne '') {
+            throw 'The BENCH environment fixture did not retain an empty value.'
+        }
+        $assertBenchRestored = {
+            $restored = [Environment]::GetEnvironmentVariables('Process')
+            foreach ($name in $benchNames) {
+                if ($restored.Contains($name) -ne $fixtureBenchEnvironment.Contains($name) -or
+                    ($fixtureBenchEnvironment.Contains($name) -and
+                        [string]$restored[$name] -cne [string]$fixtureBenchEnvironment[$name])) {
+                    throw "The BENCH variable $name was not restored after isolation."
+                }
+            }
+        }
+        $failureRoot = Join-Path $valid.root 'bench-env-failure'
+        [void](New-Item -ItemType Directory -Path $failureRoot)
+        Assert-Fails {
+            Invoke-WithIsolatedEnvironment -RuntimeRoot $failureRoot -Action {
+                $isolated = [Environment]::GetEnvironmentVariables('Process')
+                foreach ($name in $benchNames) {
+                    if ($isolated.Contains($name)) {
+                        throw "BENCH variable $name leaked into an ordinary test."
+                    }
+                }
+                throw 'intentional BENCH action failure'
+            }
+        } 'intentional BENCH action failure'
+        & $assertBenchRestored
+
+        $virtualRoot = Join-Path $valid.root 'bench-env-virtual'
+        [void](New-Item -ItemType Directory -Path $virtualRoot)
+        Invoke-WithIsolatedEnvironment `
+            -RuntimeRoot $virtualRoot -VirtualExecutionCount 100 -VirtualExecutionIteration 0 `
+            -VirtualExecutionSourceSha ('a' * 40) -Action {
+                $isolated = [Environment]::GetEnvironmentVariables('Process')
+                $expected = @{
+                    'DARKRENAMER_BENCH_ROOT' = (Join-Path $virtualRoot 'temp')
+                    'DARKRENAMER_BENCH_ROOT_PRIVATE' = '1'
+                    'DARKRENAMER_BENCH_EVIDENCE_CLASS' = 'virtual-execution'
+                    'DARKRENAMER_BENCH_MEDIA' = 'virtual'
+                    'DARKRENAMER_BENCH_VARIANT' = 'baseline'
+                    'DARKRENAMER_BENCH_TOPOLOGY' = 'same-parent'
+                    'DARKRENAMER_BENCH_COUNT' = '100'
+                    'DARKRENAMER_BENCH_ITERATION' = '0'
+                    'DARKRENAMER_BENCH_SOURCE_SHA' = ('a' * 40)
+                }
+                foreach ($name in $benchNames) {
+                    if (-not $isolated.Contains($name) -or
+                        [string]$isolated[$name] -cne $expected[$name]) {
+                        throw "Virtual execution did not isolate BENCH variable $name."
+                    }
+                }
+            }
+        & $assertBenchRestored
+    }
+    finally {
+        foreach ($name in $benchNames) {
+            $value = if ($originalBenchEnvironment.Contains($name)) {
+                [string]$originalBenchEnvironment[$name]
+            } else { [NullString]::Value }
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+        }
+    }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
     [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
