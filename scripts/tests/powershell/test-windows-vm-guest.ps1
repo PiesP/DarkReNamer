@@ -269,14 +269,33 @@ try {
         -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
         throw 'Bound native language target stage was rejected.'
     }
-    if ((Get-ProductionLanguageHighlightedIndex -Stage $menuStage) -ne 2) {
-        throw 'Bound native language highlight was not decoded.'
-    }
+    $menuStage.phase = 'language-open'
+    $menuStage.view_language_state = [long]0x80
+    $menuStage.view_states[9] = 0x80
+    $menuStage.states = @(0, 0, 0, 0)
     $menuStage.highlighted_indices = @()
-    if ((Get-ProductionLanguageHighlightedIndex -Stage $menuStage -AllowNone) -ne -1) {
-        throw 'Empty native language highlight was not identified before first Down.'
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 0 -RequireViewLanguageHighlight) {
+        throw 'Transient unhighlighted System item was accepted as ready for Down.'
     }
-    Assert-Fails { Get-ProductionLanguageHighlightedIndex -Stage $menuStage } 'no unique enabled'
+    $menuStage.states[0] = 0x80
+    $menuStage.highlighted_indices = @(0)
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 0 -RequireViewLanguageHighlight)) {
+        throw 'Selected System item was not accepted as ready for Down.'
+    }
+    $menuStage.phase = 'down-1'
+    $menuStage.states[0] = 0
+    $menuStage.states[1] = 0x80
+    $menuStage.highlighted_indices = @(1)
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 1)) {
+        throw 'First Down did not accept the selected Korean item.'
+    }
+    $menuStage.phase = 'pre-enter'
+    $menuStage.view_language_state = [long]0
+    $menuStage.view_states[9] = 0
+    $menuStage.states = @(0, 0, 0x80, 0)
     $menuStage.highlighted_indices = @(2)
     Assert-ProductionLanguagePopupContinuity -Open $menuStage -Stage $menuStage
     $changedPopup = [ordered]@{
