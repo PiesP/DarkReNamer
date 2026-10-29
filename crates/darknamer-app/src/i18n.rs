@@ -111,18 +111,10 @@ pub fn current_language() -> Language {
     if let Some(language) = TEST_LANGUAGE.with(std::cell::Cell::get) {
         return language;
     }
-    STARTUP_LANGUAGE.get().copied().unwrap_or({
-        // Existing unit fixtures describe the legacy Korean UI. Test overrides
-        // are thread-local, so parallel language assertions cannot race.
-        #[cfg(test)]
-        {
-            Language::Korean
-        }
-        #[cfg(not(test))]
-        {
-            Language::English
-        }
-    })
+    // Pre-start callers of the existing Korean presentation APIs retain their
+    // historical default. Native startup always resolves and initializes the
+    // actual preference before formatting app-owned diagnostics.
+    STARTUP_LANGUAGE.get().copied().unwrap_or(Language::Korean)
 }
 
 #[cfg(test)]
