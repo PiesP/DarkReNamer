@@ -961,6 +961,7 @@ impl RenameBackend for ScriptedValidationBackend {
 enum BenchmarkEvidenceClass {
     Physical,
     DirectionalHosted,
+    VirtualExecution,
 }
 
 impl BenchmarkEvidenceClass {
@@ -968,8 +969,9 @@ impl BenchmarkEvidenceClass {
         match value {
             EnvironmentInput::Missing | EnvironmentInput::Unicode("physical") => Ok(Self::Physical),
             EnvironmentInput::Unicode("directional-hosted") => Ok(Self::DirectionalHosted),
+            EnvironmentInput::Unicode("virtual-execution") => Ok(Self::VirtualExecution),
             EnvironmentInput::Unicode(_) => Err(std::io::Error::other(
-                "DARKRENAMER_BENCH_EVIDENCE_CLASS must be physical or directional-hosted",
+                "DARKRENAMER_BENCH_EVIDENCE_CLASS must be physical, directional-hosted, or virtual-execution",
             )),
             EnvironmentInput::NonUnicode => Err(std::io::Error::other(
                 "DARKRENAMER_BENCH_EVIDENCE_CLASS must be valid Unicode",
@@ -987,31 +989,46 @@ impl BenchmarkEvidenceClass {
 
     fn validate_media(self, media: &str) -> Result<(), std::io::Error> {
         match (self, media) {
-            (Self::Physical, "ssd" | "hdd") | (Self::DirectionalHosted, "virtual") => Ok(()),
+            (Self::Physical, "ssd" | "hdd")
+            | (Self::DirectionalHosted | Self::VirtualExecution, "virtual") => Ok(()),
             (Self::Physical, _) => Err(std::io::Error::other(
                 "physical evidence requires DARKRENAMER_BENCH_MEDIA=ssd or hdd",
             )),
             (Self::DirectionalHosted, _) => Err(std::io::Error::other(
                 "directional-hosted evidence requires DARKRENAMER_BENCH_MEDIA=virtual",
             )),
+            (Self::VirtualExecution, _) => Err(std::io::Error::other(
+                "virtual-execution evidence requires DARKRENAMER_BENCH_MEDIA=virtual",
+            )),
         }
+    }
+
+    fn validate_variant(self, variant: BenchmarkVariant) -> Result<(), std::io::Error> {
+        if self == Self::VirtualExecution && variant != BenchmarkVariant::Baseline {
+            return Err(std::io::Error::other(
+                "virtual-execution evidence requires DARKRENAMER_BENCH_VARIANT=baseline",
+            ));
+        }
+        Ok(())
     }
 
     const fn as_str(self) -> &'static str {
         match self {
             Self::Physical => "physical",
             Self::DirectionalHosted => "directional-hosted",
+            Self::VirtualExecution => "virtual-execution",
         }
     }
 
     const fn runs_execution(self) -> bool {
-        matches!(self, Self::Physical)
+        matches!(self, Self::Physical | Self::VirtualExecution)
     }
 
     const fn scope(self) -> &'static str {
         match self {
             Self::Physical => "durable",
             Self::DirectionalHosted => "planning-only",
+            Self::VirtualExecution => "vm-durable",
         }
     }
 }
@@ -1055,6 +1072,7 @@ impl BenchmarkIteration {
 }
 
 const BENCHMARK_INSTRUMENTATION_REVISION: &str = "parent-validation-v1";
+const VIRTUAL_BENCHMARK_INSTRUMENTATION_REVISION: &str = "vm-durable-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BenchmarkSourceSha(String);
@@ -1244,6 +1262,63 @@ struct DurableBenchmarkMetrics {
     execution: Duration,
     backend: BackendMetrics,
     journal: JournalMetrics,
+}
+
+// This line is emitted only after the fixture and journal have been verified and
+// removed. The independent VM reader must require exactly one completed v1 line
+// and reject a started-only attempt or an older planning-only summary.
+fn virtual_execution_receipt(
+    metadata: BenchmarkMetadata<'_>,
+    setup: Duration,
+    planning: Duration,
+    preflight: Duration,
+    execution: &DurableBenchmarkMetrics,
+    verification: Duration,
+    cleanup: Duration,
+) -> String {
+    format!(
+        "darkrenamer_benchmark_virtual_v1,schema_version=1,status=completed,media={},\
+         evidence_class={},scope={},source_sha={},instrumentation_revision={},\
+         count={},topology={},variant={},iteration={},recorded={},\
+         setup_us={},planning_us={},preflight_us={},execution_us={},verification_us={},cleanup_us={},\
+         attempted_files={},successful_files={},failed_files=0,verified_files={},\
+         backend_rename_calls={},backend_rename_us={},\
+         journal_begin_calls={},journal_begin_us={},journal_prepared_calls={},journal_prepared_us={},\
+         journal_completed_calls={},journal_completed_us={},journal_not_applied_calls={},\
+         journal_not_applied_us={},journal_terminal_calls={},journal_terminal_us={},\
+         journal_removed=true,fixture_removed=true",
+        metadata.media,
+        metadata.evidence_class.as_str(),
+        metadata.evidence_class.scope(),
+        metadata.source_sha,
+        metadata.instrumentation_revision,
+        metadata.count,
+        metadata.topology.as_str(),
+        metadata.variant.as_str(),
+        metadata.iteration.value(),
+        metadata.iteration.recorded(),
+        setup.as_micros(),
+        planning.as_micros(),
+        preflight.as_micros(),
+        execution.execution.as_micros(),
+        verification.as_micros(),
+        cleanup.as_micros(),
+        metadata.count,
+        metadata.count,
+        metadata.count,
+        execution.backend.rename.calls,
+        execution.backend.rename.micros(),
+        execution.journal.begin.calls,
+        execution.journal.begin.micros(),
+        execution.journal.prepared.calls,
+        execution.journal.prepared.micros(),
+        execution.journal.completed.calls,
+        execution.journal.completed.micros(),
+        execution.journal.not_applied.calls,
+        execution.journal.not_applied.micros(),
+        execution.journal.terminal.calls,
+        execution.journal.terminal.micros(),
+    )
 }
 
 fn print_benchmark_summary(
@@ -2718,6 +2793,84 @@ fn benchmark_source_sha_parser_and_output_metadata_are_strict()
 }
 
 #[test]
+fn virtual_execution_receipt_has_a_distinct_complete_schema()
+-> Result<(), Box<dyn std::error::Error>> {
+    let metadata = BenchmarkMetadata {
+        media: "virtual",
+        count: 100,
+        topology: BenchmarkTopology::Same,
+        variant: BenchmarkVariant::Baseline,
+        evidence_class: BenchmarkEvidenceClass::VirtualExecution,
+        iteration: BenchmarkIteration(0),
+        source_sha: "0123456789abcdef0123456789abcdef01234567",
+        instrumentation_revision: VIRTUAL_BENCHMARK_INSTRUMENTATION_REVISION,
+    };
+    let mut backend = BackendMetrics::default();
+    backend.rename.calls = 100;
+    backend.rename.elapsed = Duration::from_micros(500);
+    let mut journal = JournalMetrics::default();
+    journal.begin.calls = 1;
+    journal.prepared.calls = 100;
+    journal.completed.calls = 100;
+    journal.terminal.calls = 1;
+    let durable = DurableBenchmarkMetrics {
+        execution: Duration::from_millis(25),
+        backend,
+        journal,
+    };
+    let line = virtual_execution_receipt(
+        metadata,
+        Duration::from_millis(10),
+        Duration::from_millis(11),
+        Duration::from_millis(12),
+        &durable,
+        Duration::from_millis(13),
+        Duration::from_millis(14),
+    );
+    let mut fields = std::collections::BTreeMap::new();
+    let mut parts = line.split(',');
+    assert_eq!(parts.next(), Some("darkrenamer_benchmark_virtual_v1"));
+    for pair in parts {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| std::io::Error::other("receipt field lacks key or value"))?;
+        assert!(
+            fields.insert(key, value).is_none(),
+            "duplicate receipt field"
+        );
+    }
+    for (key, expected) in [
+        ("schema_version", "1"),
+        ("status", "completed"),
+        ("evidence_class", "virtual-execution"),
+        ("scope", "vm-durable"),
+        ("instrumentation_revision", "vm-durable-v1"),
+        ("recorded", "false"),
+        ("setup_us", "10000"),
+        ("planning_us", "11000"),
+        ("preflight_us", "12000"),
+        ("execution_us", "25000"),
+        ("verification_us", "13000"),
+        ("cleanup_us", "14000"),
+        ("attempted_files", "100"),
+        ("successful_files", "100"),
+        ("failed_files", "0"),
+        ("verified_files", "100"),
+        ("backend_rename_calls", "100"),
+        ("backend_rename_us", "500"),
+        ("journal_begin_calls", "1"),
+        ("journal_prepared_calls", "100"),
+        ("journal_completed_calls", "100"),
+        ("journal_terminal_calls", "1"),
+        ("journal_removed", "true"),
+        ("fixture_removed", "true"),
+    ] {
+        assert_eq!(fields.get(key).copied(), Some(expected), "{key}");
+    }
+    Ok(())
+}
+
+#[test]
 fn validation_skip_estimate_never_caches_failed_or_structurally_invalid_paths() {
     let failed = ValidationMemoBackend::new(ScriptedValidationBackend::new(true));
     let valid_path = LegacyText::from("C:\\work\\file.txt");
@@ -2862,6 +3015,10 @@ fn benchmark_evidence_class_parser_and_media_pairings_are_strict() {
         BenchmarkEvidenceClass::parse(EnvironmentInput::Unicode("directional-hosted")).ok(),
         Some(BenchmarkEvidenceClass::DirectionalHosted)
     );
+    assert_eq!(
+        BenchmarkEvidenceClass::parse(EnvironmentInput::Unicode("virtual-execution")).ok(),
+        Some(BenchmarkEvidenceClass::VirtualExecution)
+    );
     assert!(BenchmarkEvidenceClass::parse(EnvironmentInput::Unicode("directional")).is_err());
     assert!(BenchmarkEvidenceClass::parse(EnvironmentInput::NonUnicode).is_err());
 
@@ -2895,12 +3052,44 @@ fn benchmark_evidence_class_parser_and_media_pairings_are_strict() {
             .validate_media("hdd")
             .is_err()
     );
+    assert!(
+        BenchmarkEvidenceClass::VirtualExecution
+            .validate_media("virtual")
+            .is_ok()
+    );
+    for unsupported_media in ["ssd", "hdd", "hosted", ""] {
+        assert!(
+            BenchmarkEvidenceClass::VirtualExecution
+                .validate_media(unsupported_media)
+                .is_err()
+        );
+    }
+    assert!(
+        BenchmarkEvidenceClass::VirtualExecution
+            .validate_variant(BenchmarkVariant::Baseline)
+            .is_ok()
+    );
+    assert!(
+        BenchmarkEvidenceClass::VirtualExecution
+            .validate_variant(BenchmarkVariant::ValidationSkipEstimate)
+            .is_err()
+    );
+    assert!(
+        BenchmarkEvidenceClass::DirectionalHosted
+            .validate_variant(BenchmarkVariant::ValidationSkipEstimate)
+            .is_ok()
+    );
     assert!(BenchmarkEvidenceClass::Physical.runs_execution());
     assert!(!BenchmarkEvidenceClass::DirectionalHosted.runs_execution());
+    assert!(BenchmarkEvidenceClass::VirtualExecution.runs_execution());
     assert_eq!(BenchmarkEvidenceClass::Physical.scope(), "durable");
     assert_eq!(
         BenchmarkEvidenceClass::DirectionalHosted.scope(),
         "planning-only"
+    );
+    assert_eq!(
+        BenchmarkEvidenceClass::VirtualExecution.scope(),
+        "vm-durable"
     );
 }
 
@@ -3061,18 +3250,18 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
     let iteration = BenchmarkIteration::from_environment()?;
     let topology = BenchmarkTopology::from_environment()?;
     let variant = BenchmarkVariant::from_environment()?;
+    evidence_class.validate_variant(variant)?;
     let source_sha = BenchmarkSourceSha::from_environment()?;
     // This explicit operator acknowledgment is a defensive fixture precondition,
     // not proof that the selected root's ACL excludes other users or processes.
     private_root_acknowledged_from_environment()?;
-    if evidence_class == BenchmarkEvidenceClass::Physical
+    if evidence_class.runs_execution()
         && process_is_elevated()
             .map_err(|_| std::io::Error::other("failed to query benchmark process elevation"))?
     {
-        return Err(std::io::Error::other(
-            "the physical-volume benchmark must run without elevation",
-        )
-        .into());
+        return Err(
+            std::io::Error::other("the durable benchmark must run without elevation").into(),
+        );
     }
     // Directional hosted evidence may be elevated only because the workflow supplies
     // an ephemeral runner-owned root; the explicit private-root acknowledgment and
@@ -3084,7 +3273,7 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
         .into());
     }
     let benchmark_root_handle = JournalRoot::open(&benchmark_root)?;
-
+    let setup_started = Instant::now();
     let fixture = tempfile::Builder::new()
         .prefix("darkrenamer-benchmark-")
         .tempdir_in(&benchmark_root)?;
@@ -3098,6 +3287,7 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
     let parents = prepare_benchmark_parents(fixture.path(), topology, count)?;
     let mut intents = Vec::with_capacity(count);
     let mut fixture_paths = Vec::with_capacity(count);
+    let verifier_backend = WindowsRenameBackend;
     for (index, parent) in parents.into_iter().enumerate() {
         let source = parent.join(format!("source-{index:05}.txt"));
         let destination = parent.join(format!("renamed-{index:05}.txt"));
@@ -3108,8 +3298,22 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
             &parent,
             &format!("renamed-{index:05}.txt"),
         ));
-        fixture_paths.push((source, destination));
+        let identity = if evidence_class.runs_execution() {
+            let initial = verifier_backend.observe(&legacy_path(&source))?;
+            let identity = initial
+                .entry
+                .ok_or_else(|| std::io::Error::other("benchmark source identity missing"))?
+                .identity;
+            let vacant = verifier_backend.observe(&legacy_path(&destination))?;
+            assert!(vacant.entry.is_none(), "benchmark destination is occupied");
+            assert_eq!(initial.parent, vacant.parent);
+            Some(identity)
+        } else {
+            None
+        };
+        fixture_paths.push((source, destination, identity));
     }
+    let setup = setup_started.elapsed();
 
     let backend = BenchmarkBackend::new(variant);
     let planning_started = Instant::now();
@@ -3124,6 +3328,20 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
     let preflight = preflight_started.elapsed();
     let preflight_backend = backend.take_metrics();
 
+    if evidence_class == BenchmarkEvidenceClass::VirtualExecution {
+        println!(
+            "darkrenamer_benchmark_virtual_v1,schema_version=1,status=started,media=virtual,\
+             evidence_class=virtual-execution,scope=vm-durable,source_sha={},count={},topology={},\
+             variant=baseline,iteration={},recorded={}",
+            source_sha.as_str(),
+            count,
+            topology.as_str(),
+            iteration.value(),
+            iteration.recorded(),
+        );
+    }
+    let mut verification = Duration::ZERO;
+    let mut journal_cleanup = Duration::ZERO;
     let durable = if evidence_class.runs_execution() {
         let id = plan.id();
         let revision = plan.revision();
@@ -3137,32 +3355,60 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
         let execution = execution_started.elapsed();
         let execution_backend = backend.take_metrics();
         let execution_journal = journal.take_metrics();
+        let verification_started = Instant::now();
         assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
         assert!(journal.inner().is_terminal());
+        assert_eq!(execution_backend.rename.calls, count);
+        assert_eq!(execution_journal.begin.calls, 1);
+        assert_eq!(execution_journal.prepared.calls, count);
+        assert_eq!(execution_journal.completed.calls, count);
+        assert_eq!(execution_journal.not_applied.calls, 0);
+        assert_eq!(execution_journal.terminal.calls, 1);
+        for (source, destination, original_identity) in &fixture_paths {
+            assert!(!source.exists());
+            assert_eq!(fs::read(destination)?, b"benchmark");
+            let observed = verifier_backend.observe(&legacy_path(destination))?;
+            assert_eq!(
+                observed
+                    .entry
+                    .ok_or_else(|| std::io::Error::other("benchmark destination identity missing"))?
+                    .identity,
+                original_identity.ok_or_else(|| {
+                    std::io::Error::other("initial benchmark source identity missing")
+                })?
+            );
+        }
+        verification = verification_started.elapsed();
+        let journal_cleanup_started = Instant::now();
         journal.inner_mut().mark_delete_if_safe()?;
         drop(journal);
         drop(fixture_root);
-
-        for (source, destination) in &fixture_paths {
-            assert!(destination.is_file());
-            assert!(!source.exists());
-        }
+        assert!(!fixture.path().join("candidate.drj").exists());
+        assert!(!fixture.path().join("active.drj").exists());
+        journal_cleanup = journal_cleanup_started.elapsed();
         Some(DurableBenchmarkMetrics {
             execution,
             backend: execution_backend,
             journal: execution_journal,
         })
     } else {
-        for (source, destination) in &fixture_paths {
+        for (source, destination, _) in &fixture_paths {
             assert!(source.is_file());
             assert!(!destination.exists());
         }
         None
     };
+    let cleanup_started = Instant::now();
     drop(benchmark_root_handle);
+    let fixture_path = fixture.path().to_path_buf();
     fixture
         .close()
         .map_err(|_| std::io::Error::other("failed to clean up the benchmark fixture"))?;
+    assert!(
+        !fixture_path.exists(),
+        "benchmark fixture remains after cleanup"
+    );
+    let cleanup = journal_cleanup + cleanup_started.elapsed();
 
     let metadata = BenchmarkMetadata {
         media: media.as_str(),
@@ -3172,7 +3418,11 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
         evidence_class,
         iteration,
         source_sha: source_sha.as_str(),
-        instrumentation_revision: BENCHMARK_INSTRUMENTATION_REVISION,
+        instrumentation_revision: if evidence_class == BenchmarkEvidenceClass::VirtualExecution {
+            VIRTUAL_BENCHMARK_INSTRUMENTATION_REVISION
+        } else {
+            BENCHMARK_INSTRUMENTATION_REVISION
+        },
     };
     print_benchmark_summary(metadata, planning, preflight, durable.as_ref());
     print_backend_metrics(metadata, "planning", planning_backend);
@@ -3180,6 +3430,20 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
     if let Some(durable) = durable {
         print_backend_metrics(metadata, "execution", durable.backend);
         print_journal_metrics(metadata, durable.journal);
+        if evidence_class == BenchmarkEvidenceClass::VirtualExecution {
+            println!(
+                "{}",
+                virtual_execution_receipt(
+                    metadata,
+                    setup,
+                    planning,
+                    preflight,
+                    &durable,
+                    verification,
+                    cleanup,
+                )
+            );
+        }
     }
     Ok(())
 }

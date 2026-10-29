@@ -19,6 +19,8 @@ param(
     [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
         'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
     [string] $FocusedRefreshCase,
+    [ValidateSet(100, 1000, 10000)][int] $VirtualExecutionCount,
+    [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
 
     [string] $OutputRoot,
 

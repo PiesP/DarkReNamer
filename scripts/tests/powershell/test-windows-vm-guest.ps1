@@ -463,6 +463,37 @@ try {
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
     } 'fixed focused native selection is invalid'
+    $virtual = New-Fixture -Name 'virtual-execution-selection'
+    $virtual.manifest.test_binaries[0].name = 'rename_windows_backend'
+    $virtual.manifest.diagnostic = [ordered]@{
+        kind = 'virtual-execution'
+        test_profile = 'release'
+        test_name = 'benchmark_durable_production_path'
+        count = 100
+        iteration = 1
+        media = 'virtual'
+        evidence_class = 'virtual-execution'
+        scope = 'vm-durable'
+        variant = 'baseline'
+        topology = 'same-parent'
+    }
+    Save-Manifest $virtual
+    Invoke-TestGuest -EntryPointPath $virtual.runner -BundleRoot $virtual.root -ExpectedSessionId 1 -ValidateOnly
+    foreach ($mutation in @(
+        @{ name = 'evidence_class'; value = 'directional-hosted' },
+        @{ name = 'scope'; value = 'planning-only' },
+        @{ name = 'variant'; value = 'validation-skip-estimate' },
+        @{ name = 'count'; value = 99 },
+        @{ name = 'iteration'; value = 6 }
+    )) {
+        $original = $virtual.manifest.diagnostic[$mutation.name]
+        $virtual.manifest.diagnostic[$mutation.name] = $mutation.value
+        Save-Manifest $virtual
+        Assert-Fails {
+            Invoke-TestGuest -EntryPointPath $virtual.runner -BundleRoot $virtual.root -ExpectedSessionId 1 -ValidateOnly
+        } 'virtual execution selection is invalid'
+        $virtual.manifest.diagnostic[$mutation.name] = $original
+    }
     $refreshFocused = New-Fixture -Name 'focused-refresh-selection'
     $refreshFocused.manifest.test_binaries[0].name = 'darknamer_app'
     $refreshFocused.manifest.diagnostic = [ordered]@{
@@ -2651,6 +2682,91 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     finally {
         Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalCrashEnvironment
     }
+    $benchNames = @(
+        'DARKRENAMER_BENCH_ROOT', 'DARKRENAMER_BENCH_ROOT_PRIVATE',
+        'DARKRENAMER_BENCH_EVIDENCE_CLASS', 'DARKRENAMER_BENCH_MEDIA',
+        'DARKRENAMER_BENCH_VARIANT', 'DARKRENAMER_BENCH_TOPOLOGY',
+        'DARKRENAMER_BENCH_COUNT', 'DARKRENAMER_BENCH_ITERATION',
+        'DARKRENAMER_BENCH_SOURCE_SHA'
+    )
+    $originalBenchEnvironment = [Environment]::GetEnvironmentVariables('Process')
+    try {
+        for ($index = 0; $index -lt $benchNames.Count; $index++) {
+            switch ($index % 3) {
+                0 { [Environment]::SetEnvironmentVariable($benchNames[$index], [NullString]::Value, 'Process') }
+                1 { [Environment]::SetEnvironmentVariable($benchNames[$index], '', 'Process') }
+                2 { [Environment]::SetEnvironmentVariable($benchNames[$index], "fixture-$index", 'Process') }
+            }
+        }
+        $fixtureBenchEnvironment = [Environment]::GetEnvironmentVariables('Process')
+        if ($fixtureBenchEnvironment.Contains($benchNames[0]) -or
+            -not $fixtureBenchEnvironment.Contains($benchNames[2]) -or
+            $fixtureBenchEnvironment[$benchNames[2]] -cne 'fixture-2') {
+            throw 'The BENCH environment fixture lacks absent and populated states.'
+        }
+        $emptySupported = $fixtureBenchEnvironment.Contains($benchNames[1])
+        if ($emptySupported -and [string]$fixtureBenchEnvironment[$benchNames[1]] -cne '') {
+            throw 'The BENCH environment fixture did not retain an empty value.'
+        }
+        $assertBenchRestored = {
+            $restored = [Environment]::GetEnvironmentVariables('Process')
+            foreach ($name in $benchNames) {
+                if ($restored.Contains($name) -ne $fixtureBenchEnvironment.Contains($name) -or
+                    ($fixtureBenchEnvironment.Contains($name) -and
+                        [string]$restored[$name] -cne [string]$fixtureBenchEnvironment[$name])) {
+                    throw "The BENCH variable $name was not restored after isolation."
+                }
+            }
+        }
+        $failureRoot = Join-Path $valid.root 'bench-env-failure'
+        [void](New-Item -ItemType Directory -Path $failureRoot)
+        Assert-Fails {
+            Invoke-WithIsolatedEnvironment -RuntimeRoot $failureRoot -Action {
+                $isolated = [Environment]::GetEnvironmentVariables('Process')
+                foreach ($name in $benchNames) {
+                    if ($isolated.Contains($name)) {
+                        throw "BENCH variable $name leaked into an ordinary test."
+                    }
+                }
+                throw 'intentional BENCH action failure'
+            }
+        } 'intentional BENCH action failure'
+        & $assertBenchRestored
+
+        $virtualRoot = Join-Path $valid.root 'bench-env-virtual'
+        [void](New-Item -ItemType Directory -Path $virtualRoot)
+        Invoke-WithIsolatedEnvironment `
+            -RuntimeRoot $virtualRoot -VirtualExecutionCount 100 -VirtualExecutionIteration 0 `
+            -VirtualExecutionSourceSha ('a' * 40) -Action {
+                $isolated = [Environment]::GetEnvironmentVariables('Process')
+                $expected = @{
+                    'DARKRENAMER_BENCH_ROOT' = (Join-Path $virtualRoot 'temp')
+                    'DARKRENAMER_BENCH_ROOT_PRIVATE' = '1'
+                    'DARKRENAMER_BENCH_EVIDENCE_CLASS' = 'virtual-execution'
+                    'DARKRENAMER_BENCH_MEDIA' = 'virtual'
+                    'DARKRENAMER_BENCH_VARIANT' = 'baseline'
+                    'DARKRENAMER_BENCH_TOPOLOGY' = 'same-parent'
+                    'DARKRENAMER_BENCH_COUNT' = '100'
+                    'DARKRENAMER_BENCH_ITERATION' = '0'
+                    'DARKRENAMER_BENCH_SOURCE_SHA' = ('a' * 40)
+                }
+                foreach ($name in $benchNames) {
+                    if (-not $isolated.Contains($name) -or
+                        [string]$isolated[$name] -cne $expected[$name]) {
+                        throw "Virtual execution did not isolate BENCH variable $name."
+                    }
+                }
+            }
+        & $assertBenchRestored
+    }
+    finally {
+        foreach ($name in $benchNames) {
+            $value = if ($originalBenchEnvironment.Contains($name)) {
+                [string]$originalBenchEnvironment[$name]
+            } else { [NullString]::Value }
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+        }
+    }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
     [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
@@ -4101,17 +4217,23 @@ Invoke-DrTestPowerShellModuleScope `
                 [string] $FocusedIconCase,
                 [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
                     'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
-                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes,
+                [int] $VirtualExecutionCount, [int] $VirtualExecutionIteration,
+                [string] $VirtualExecutionSourceSha
             )
             [pscustomobject]@{
                 focused = [bool]$FocusedIconTests
                 has_case = $PSBoundParameters.ContainsKey('FocusedIconCase')
                 case = $FocusedIconCase
+                virtual_count = $VirtualExecutionCount
+                virtual_iteration = $VirtualExecutionIteration
+                virtual_source = $VirtualExecutionSourceSha
             }
         }
         $verified = [pscustomobject]@{
             root = $focusedBindingRoot
             tests = @([pscustomobject]@{ file = 'not-launched.exe' })
+            manifest = [pscustomobject]@{ source_sha = ('a' * 40) }
         }
         $testInvocations = @([pscustomobject]@{
             test = $verified.tests[0]
@@ -4124,6 +4246,8 @@ Invoke-DrTestPowerShellModuleScope `
         $RefreshProfileOrder = ''
         $FocusedIconTests = $true
         $FocusedRefreshTests = $false
+        $VirtualExecutionCount = 0
+        $VirtualExecutionIteration = 0
         $testOutputBudgetBytes = [long]0
         $caseTimeoutSeconds = 600
         $focusedCaseArguments = @{ FocusedIconCase = 'close_and_forced_destroy_retire' }
@@ -4134,6 +4258,15 @@ Invoke-DrTestPowerShellModuleScope `
         }
         $focusedCaseArguments = @{ FocusedIconCase = 'arbitrary_test' }
         Assert-Fails { & $guestCall } 'Cannot validate argument'
+        $focusedCaseArguments = @{}
+        $FocusedIconTests = $false
+        $VirtualExecutionCount = 100
+        $virtualCall = & $guestCall
+        if ($virtualCall.virtual_count -ne 100 -or $virtualCall.virtual_iteration -ne 0 -or
+            $virtualCall.virtual_source -cne ('a' * 40)) {
+            throw 'The actual guest call must bind count, warmup iteration zero and frozen source.'
+        }
+        $VirtualExecutionCount = 0
     }
     finally {
         Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
@@ -4163,7 +4296,9 @@ Invoke-DrTestPowerShellModuleScope `
                 [string] $FocusedIconCase,
                 [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
                     'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
-                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes,
+                [int] $VirtualExecutionCount, [int] $VirtualExecutionIteration,
+                [string] $VirtualExecutionSourceSha
             )
             $script:focusedLoopCalls.Add([pscustomobject]@{
                 index = $Index
@@ -4197,6 +4332,7 @@ Invoke-DrTestPowerShellModuleScope `
             root = $focusedBindingRoot
             tests = @([pscustomobject]@{ file = 'one-frozen.exe'; sha256 = ('a' * 64) })
             manifest = [pscustomobject]@{
+                source_sha = ('a' * 40)
                 diagnostic = [pscustomobject]@{ test_names = $focusedNames }
             }
         }
@@ -4308,6 +4444,21 @@ Invoke-DrTestPowerShellModuleScope `
     $refreshSummary = Read-RustTestSummary `
         -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
         -Stderr '' -RefreshProfile
+    $virtualSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;' `
+        -Stderr '' -VirtualExecution
+    if ($virtualSummary.passed -ne 1 -or $virtualSummary.filtered -ne 350) {
+        throw 'Virtual execution did not accept the exact ignored test summary.'
+    }
+    foreach ($invalid in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 350 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalid -Stderr '' -VirtualExecution
+        } 'must select exactly one ignored test'
+    }
     if ($refreshSummary.passed -ne 1 -or $refreshSummary.filtered -ne 2) {
         throw 'The fixed refresh diagnostic did not accept its exact filtered summary.'
     }

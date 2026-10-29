@@ -729,6 +729,43 @@ native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
+### Virtual durable execution diagnostic
+
+Measure actual backend renames and durable journal writes on the prepared VM
+with an explicit source-built, non-elevated execution selection:
+
+```bash
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host "$DARKRENAMER_VM_SSH_HOST" \
+  --expected-vm-id "$DARKRENAMER_VM_ID" \
+  --virtual-execution-count 100 \
+  --virtual-execution-iteration 1 \
+  --output /absolute/private/new-virtual-execution-100-1
+```
+
+Resolve the configured SSH alias and guest GUID before running the command.
+Counts are restricted to 100, 1,000 and 10,000; iterations are 0 through 5,
+with zero explicitly recorded as warmup. Declare the count, iteration order
+and fresh output roots before a series. Each invocation builds one exact-source
+release backend test executable and runs only the ignored production-path
+benchmark, with a 1,200-second deadline and the V2 owned-resource contract.
+The maintained launcher owns the private fixture root and isolated environment.
+
+This selection fixes `evidence_class=virtual-execution`, `media=virtual`,
+`scope=vm-durable`, the baseline backend and same-parent topology. The existing
+physical class and hosted planning workflow retain their original meanings.
+Planning, preflight, fixture setup, execution, outcome verification and cleanup
+have separate microsecond measurements. Backend and journal timings are nested
+within execution and must not be added to it again. Source/binary identities,
+operation counts, libtest transcripts and Job/controller cleanup are retained.
+Completion requires unchanged contents and NTFS identities at the expected
+destinations, a terminal removed journal and fixture removal.
+
+Keep failed attempts and expected failure-path tests separate from successful
+throughput. These instrumented virtual-storage results do not establish GUI
+Apply latency, physical SSD/HDD performance, power-loss durability or release
+acceptance. The validation-skip estimator is not an execution candidate.
+
 ### ListView refresh stage diagnostic
 
 On the prepared VM, run the fixed native refresh diagnostic from a clean,

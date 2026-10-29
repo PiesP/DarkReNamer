@@ -23,6 +23,26 @@ from darkrenamer_tooling.vm import launcher as vm
 
 class VmRunnerTests(unittest.TestCase):
     @staticmethod
+    def virtual_execution_output(count=100, iteration=1):
+        common = ('schema_version=1,media=virtual,evidence_class=virtual-execution,'
+                  'scope=vm-durable,source_sha=' + 'a' * 40 +
+                  f',count={count},topology=same-parent,variant=baseline,'
+                  f'iteration={iteration},recorded={str(iteration != 0).lower()}')
+        started = 'darkrenamer_benchmark_virtual_v1,status=started,' + common
+        completed = (
+            'darkrenamer_benchmark_virtual_v1,status=completed,' + common +
+            ',instrumentation_revision=vm-durable-v1,setup_us=1000,planning_us=2000,'
+            'preflight_us=3000,execution_us=4000,verification_us=5000,cleanup_us=6000,'
+            f'attempted_files={count},successful_files={count},failed_files=0,'
+            f'verified_files={count},backend_rename_calls={count},backend_rename_us=700,'
+            f'journal_begin_calls=1,journal_begin_us=10,journal_prepared_calls={count},'
+            f'journal_prepared_us=800,journal_completed_calls={count},'
+            'journal_completed_us=900,journal_not_applied_calls=0,journal_not_applied_us=0,'
+            'journal_terminal_calls=1,journal_terminal_us=10,'
+            'journal_removed=true,fixture_removed=true')
+        return started + '\n' + completed + '\n'
+
+    @staticmethod
     def png_bytes(width=64, height=48):
         def chunk(kind, data):
             return struct.pack('>I', len(data)) + kind + data + struct.pack(
@@ -862,6 +882,123 @@ class VmRunnerTests(unittest.TestCase):
         ):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 vm.parse_arguments(invalid)
+
+    def test_virtual_execution_cli_is_bound_to_source_vm_and_one_workload(self):
+        base = ['--ssh-host', 'prepared-vm', '--expected-vm-id',
+                '18338a47-f647-45c4-98b8-6107331e2602']
+        selected = vm.parse_arguments(base + [
+            '--virtual-execution-count', '1000', '--virtual-execution-iteration', '0'])
+        self.assertEqual(selected.test_timeout_seconds, 1200)
+        selected.acceptance_profile_sha256 = 'a' * 64
+        options = vm.controller_task_arguments(self.root, selected)
+        self.assertEqual(options[options.index('-VirtualExecutionCount') + 1], '1000')
+        self.assertEqual(options[options.index('-VirtualExecutionIteration') + 1], '0')
+        command = vm.controller_invocation(self.root, selected, pwsh='pwsh')
+        self.assertEqual(command[command.index('-SuiteTimeoutSeconds') + 1], '1200')
+        for invalid in (
+            ['--virtual-execution-count', '100'],
+            ['--virtual-execution-iteration', '1'],
+            ['--virtual-execution-count', '99', '--virtual-execution-iteration', '1'],
+            ['--virtual-execution-count', '100', '--virtual-execution-iteration', '6'],
+            ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1',
+             '--acceptance-profile-id', vm.V1_PROFILE_ID],
+            ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1',
+             '--profile-refresh-stages'],
+            ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1',
+             '--focused-refresh-tests', '--native-test-profile', 'release'],
+            ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1',
+             '--test-timeout-seconds', '1200'],
+        ):
+            with self.subTest(invalid=invalid), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                vm.parse_arguments(base + invalid)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                '--virtual-execution-count', '100',
+                                '--virtual-execution-iteration', '1'])
+
+    def test_virtual_execution_receipt_rejects_incomplete_or_reclassified_runs(self):
+        output = self.virtual_execution_output()
+        observed = vm.verify_virtual_execution_lines(
+            output, source_sha='a' * 40, count=100, iteration=1)
+        self.assertEqual(observed['backend_rename_calls'], 100)
+        self.assertEqual(observed['journal_prepared_calls'], 100)
+        for invalid in (
+            output.splitlines()[0] + '\n',
+            output.replace('schema_version=1', 'schema_version=0', 1),
+            output.replace('vm-durable', 'planning-only', 1),
+            output.replace('virtual-execution', 'directional-hosted', 1),
+            output.replace('successful_files=100', 'successful_files=99'),
+            output.replace('journal_completed_calls=100', 'journal_completed_calls=99'),
+            output.replace('backend_rename_calls=100', 'backend_rename_calls=0'),
+            output.replace('journal_removed=true', 'journal_removed=false'),
+            output.replace('cleanup_us=6000,', ''),
+            output + output.splitlines()[1] + '\n',
+        ):
+            with self.subTest(invalid=invalid[-100:]), self.assertRaises(ValueError):
+                vm.verify_virtual_execution_lines(
+                    invalid, source_sha='a' * 40, count=100, iteration=1)
+
+    def test_virtual_execution_job_requires_exact_clean_process_lifetime(self):
+        row = {'process_lifecycle': {
+            'pid': 1234, 'start_time_utc_ticks': '638975000000000000'}}
+        job = {'pid': 1234, 'process_start_time_utc_ticks': '638975000000000000',
+               'status': 'clean', 'job_empty': True, 'job_closed': True,
+               'capture_complete': True, 'had_survivors': False,
+               'forced_termination': False, 'active_processes_at_close': 0}
+        vm.verify_virtual_execution_job(row, [job])
+        for mutation in ({'pid': 4321}, {'forced_termination': True},
+                         {'capture_complete': False}, {'active_processes_at_close': 1}):
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'process Job'):
+                vm.verify_virtual_execution_job(row, [job | mutation])
+        with self.assertRaisesRegex(ValueError, 'process Job'):
+            vm.verify_virtual_execution_job(row, [])
+
+    def test_virtual_execution_result_accepts_real_bundle_shape_and_libtest_prefix(self):
+        binary = dict(self.artifact('rename_windows_backend-0123456789abcdef.exe', b'backend test'),
+                      name='rename_windows_backend')
+        runner = self.artifact('windows-vm-guest.ps1', b'guest runner')
+        diagnostic = {
+            'kind': 'virtual-execution', 'test_profile': 'release',
+            'test_name': vm.VIRTUAL_EXECUTION_TEST, 'count': 100, 'iteration': 1,
+            'media': 'virtual', 'evidence_class': 'virtual-execution',
+            'scope': 'vm-durable', 'variant': 'baseline', 'topology': 'same-parent'}
+        manifest = dict(self.manifest, test_binaries=[binary], runner=runner,
+                        diagnostic=diagnostic)
+        output = ('running 1 test\ntest ' + vm.VIRTUAL_EXECUTION_TEST + ' ... ' +
+                  self.virtual_execution_output() + 'ok\n\n' +
+                  'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                  '41 filtered out; finished in 0.1s\n')
+        stdout = self.output_artifact('virtual.stdout.txt', output.encode())
+        stderr = self.output_artifact('virtual.stderr.txt', b'')
+        row = dict(binary, test_name=vm.VIRTUAL_EXECUTION_TEST, status='passed',
+                   job_cleanup=True, exit_code=0, failure_reason=None,
+                   passed=1, failed=0, ignored=0, stdout=stdout, stderr=stderr,
+                   process_lifecycle={'pid': 1234, 'start_time_utc_ticks': '638975000000000000'})
+        job = {'pid': 1234, 'process_start_time_utc_ticks': '638975000000000000',
+               'status': 'clean', 'job_empty': True, 'job_closed': True,
+               'capture_complete': True, 'had_survivors': False,
+               'forced_termination': False, 'active_processes_at_close': 0}
+        result = dict(manifest, status='passed', gui=None, tests=[row],
+                      process_job_cleanup=[job], transport={
+                          'task_kind': 'core', 'status': 'collected',
+                          'guest_cleanup': True, 'raw_cleanup': {}})
+        with mock.patch.object(vm, 'verify_controller_cleanup'), \
+             mock.patch.object(vm, 'verify_current_anchor_from_bundle'), \
+             mock.patch.object(vm, '_verify_v2_result_owned_binding'), \
+             mock.patch.object(vm, 'verify_transport_binding'):
+            observed = vm.verify_virtual_execution_result(
+                self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+            self.assertEqual(observed['metrics']['verified_files'], 100)
+            row['passed'] = True
+            with self.assertRaisesRegex(ValueError, 'test did not finish'):
+                vm.verify_virtual_execution_result(
+                    self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+            row['passed'] = 1
+            stdout['bytes'] -= 1
+            with self.assertRaisesRegex(ValueError, 'transcript size'):
+                vm.verify_virtual_execution_result(
+                    self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
 
     def test_focused_icon_cli_selects_one_profile_and_fixed_vm_bounds(self):
         for profile in ('debug', 'release'):
@@ -2322,7 +2459,7 @@ class VmRunnerTests(unittest.TestCase):
                             target_permissions=None, reported_artifact_path=None,
                             reported_metadata_target=None, focused_profile=None,
                             focused_case=None, focused_kind='icon',
-                            commands=None):
+                            virtual_execution=None, commands=None):
         outputs = outputs if outputs is not None else {}
         target_directories = target_directories if target_directories is not None else []
         target_permissions = target_permissions if target_permissions is not None else []
@@ -2334,14 +2471,15 @@ class VmRunnerTests(unittest.TestCase):
             target_directories.append(target_root)
             target_permissions.append(stat.S_IMODE(target_root.stat().st_mode))
             if command[1:3] == ['xwin', 'test']:
-                profile = 'release' if focused_profile == 'release' else 'debug'
+                profile = 'release' if focused_profile == 'release' or virtual_execution else 'debug'
                 artifact = target_root / vm.TARGET / profile / 'deps' / 'suite.exe'
                 artifact.parent.mkdir(parents=True)
                 artifact.write_bytes(b'test executable bytes')
                 outputs['test'] = artifact
                 compiler_artifact = {
                     'reason': 'compiler-artifact', 'profile': {'test': True},
-                    'target': {'name': 'darknamer_app' if focused_profile else 'suite'},
+                    'target': {'name': ('rename_windows_backend' if virtual_execution else
+                                        'darknamer_app' if focused_profile else 'suite')},
                     'executable': str(reported_artifact_path or artifact),
                 }
                 kwargs['stdout'].write(json.dumps(compiler_artifact) + '\n')
@@ -2369,7 +2507,26 @@ class VmRunnerTests(unittest.TestCase):
         with mock.patch.object(vm.subprocess, 'run', side_effect=run), \
              mock.patch.object(vm.subprocess, 'check_output', side_effect=check_output):
             return vm.build_bundle(repo, output, focused_profile=focused_profile,
-                                   focused_case=focused_case, focused_kind=focused_kind)
+                                   focused_case=focused_case, focused_kind=focused_kind,
+                                   virtual_execution=virtual_execution)
+
+    def test_virtual_execution_bundle_builds_one_release_backend_binary(self):
+        repo, target, _, _, _ = self.source_build_inputs('-virtual-execution')
+        commands = []
+        manifest = self.build_source_bundle(
+            repo, target, self.root / 'virtual-execution-bundle',
+            virtual_execution=(1000, 2), commands=commands)
+        self.assertEqual(manifest['diagnostic'], {
+            'kind': 'virtual-execution', 'test_profile': 'release',
+            'test_name': vm.VIRTUAL_EXECUTION_TEST, 'count': 1000,
+            'iteration': 2, 'media': 'virtual', 'evidence_class': 'virtual-execution',
+            'scope': 'vm-durable', 'variant': 'baseline', 'topology': 'same-parent'})
+        self.assertEqual([row['name'] for row in manifest['test_binaries']],
+                         ['rename_windows_backend'])
+        self.assertIn('--release', commands[0])
+        self.assertEqual(commands[0][commands[0].index('--test') + 1],
+                         'rename_windows_backend')
+        self.assertNotIn('--workspace', commands[0])
 
     def test_focused_icon_bundle_builds_only_selected_app_library_profile(self):
         for profile in ('debug', 'release'):
