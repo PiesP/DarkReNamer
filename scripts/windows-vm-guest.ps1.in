@@ -11,6 +11,7 @@ param(
     [int] $TestTimeoutSeconds = 300,
 
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $ProfileRuntimeModel,
     [switch] $FocusedIconTests,
     [switch] $FocusedRefreshTests,
     [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',

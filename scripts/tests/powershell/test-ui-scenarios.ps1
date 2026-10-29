@@ -96,6 +96,64 @@ namespace Windows.Automation {
 namespace UIAutomationClientsideProviders { public class UIAutomationClientSideProviders {} }
 '@
 
+# The clock ends after the empty grid/import command observations, before
+# observer capture sizing, native-lifetime verification and environment probes.
+$runtimeSource = ${function:Invoke-ObserverRuntimeBaselineScenario}.ToString()
+$gridAt = $runtimeSource.IndexOf('$grid = Get-ObserverGrid')
+$commandAt = $runtimeSource.IndexOf('::IsMenuCommandEnabled(')
+$readyAt = $runtimeSource.IndexOf('$readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()')
+$clockAt = $runtimeSource.IndexOf('$cell.startup = [ordered]@{')
+$resizeAt = $runtimeSource.IndexOf('Ensure-AcceptanceMainWindowCaptureSize')
+$environmentAt = $runtimeSource.IndexOf('$environment = Get-ObserverEnvironmentMetadata')
+$lifetimeAt = $runtimeSource.IndexOf('$nativeLifetime = ')
+if ($gridAt -lt 0 -or $commandAt -le $gridAt -or $readyAt -le $commandAt -or
+    $clockAt -le $readyAt -or $resizeAt -le $clockAt -or $environmentAt -le $resizeAt -or
+    $lifetimeAt -le $clockAt) {
+    throw 'Runtime ready clock includes capture sizing or environment work, or omits command readiness.'
+}
+
+$idleCalls = [regex]::Matches($runtimeSource,
+    'Wait-ObserverRuntimeMinimumIdle -StartTicks \$\w+Start\s+`\s*-MinimumMilliseconds 30000 -OverallDeadline \$deadline')
+Assert-Equal $idleCalls.Count 2 'Runtime empty and populated idle deadline calls'
+$frequency = [long][Diagnostics.Stopwatch]::Frequency
+$requiredTicks = [long][Math]::Ceiling(30000.0 * $frequency / 1000.0)
+$script:idleTicks = 123456L
+$script:idleSleeps = [Collections.Generic.List[int]]::new()
+$script:idleSteps = [Collections.Generic.Queue[long]]::new()
+$firstEarlyTicks = [long][Math]::Ceiling(29998.532 * $frequency / 1000.0)
+$script:idleSteps.Enqueue($firstEarlyTicks)
+$script:idleSteps.Enqueue($requiredTicks - $firstEarlyTicks - 1)
+$script:idleSteps.Enqueue(1L)
+$idleEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks $script:idleTicks `
+    -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddMinutes(1) `
+    -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+        param([int] $Milliseconds)
+        if ($Milliseconds -le 0) { throw 'Runtime idle requested a nonpositive sleep.' }
+        $script:idleSleeps.Add($Milliseconds)
+        $script:idleTicks += $script:idleSteps.Dequeue()
+    }
+Assert-Equal $idleEnd (123456L + $requiredTicks) 'Runtime idle waits through multiple early returns'
+Assert-Equal $script:idleSleeps.Count 3 'Runtime idle rechecks the monotonic deadline'
+Assert-Equal $script:idleSleeps[0] 30000 'Runtime idle first waits for the full remaining interval'
+Assert-Equal $script:idleSteps.Count 0 'Runtime idle consumed simulated early returns'
+$script:idleSleeps.Clear()
+$idleEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks 123456L `
+    -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddMinutes(1) `
+    -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+        param([int] $Milliseconds)
+        throw 'Runtime idle slept after reaching the exact deadline.'
+    }
+Assert-Equal $idleEnd (123456L + $requiredTicks) 'Runtime idle accepts exact deadline without sleeping'
+Assert-Equal $script:idleSleeps.Count 0 'Runtime idle has no extra wake after exact deadline'
+Assert-Fails {
+    Wait-ObserverRuntimeMinimumIdle -StartTicks 123456L `
+        -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddSeconds(-1) `
+        -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+            param([int] $Milliseconds)
+            throw 'Runtime idle slept after the scenario deadline.'
+        }
+} 'fixed scenario deadline'
+
 $process = [Diagnostics.Process]::GetCurrentProcess()
 $window = [Windows.Automation.AutomationElement]::new()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-scenarios-' + [guid]::NewGuid().ToString('N'))
@@ -115,6 +173,84 @@ try {
         [DarkReNamerVmAcceptanceNative]::Foreground = [byte[]]@(255, $case[1], $case[1], $case[1])
         $resolved = Get-ObserverResolvedSystemAppearance
         Assert-Equal $resolved.resolved_theme $case[2] 'Observed foreground and Forced Colors theme precedence'
+    }
+    foreach ($case in @(@(0, 0, $true), @(0, 245, $false), @(1, 0, $false))) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $case[0]
+        [DarkReNamerVmAcceptanceNative]::Foreground = [byte[]]@(255, $case[1], $case[1], $case[1])
+        if ($case[2]) {
+            $light = Get-ObserverRuntimeLightAppearance
+            Assert-Equal $light.resolved_theme 'light' 'Runtime actual official foreground resolves Light'
+            Assert-Equal $light.system_visual_style.forced_colors $false 'Runtime Forced Colors is inactive'
+        }
+        else { Assert-Fails { Get-ObserverRuntimeLightAppearance } 'requires observed System Light' }
+    }
+    $runtimeMenu = [ordered]@{ menu_checked=@(
+        [ordered]@{command_id=0x9010;checked=$true},
+        [ordered]@{command_id=0x9011;checked=$false},
+        [ordered]@{command_id=0x9012;checked=$false}) }
+    Assert-ObserverRuntimeSystemAppearanceMenu -Menu $runtimeMenu
+    $runtimeMenu.menu_checked[0].checked=$false
+    $runtimeMenu.menu_checked[1].checked=$true
+    Assert-Fails { Assert-ObserverRuntimeSystemAppearanceMenu -Menu $runtimeMenu } 'fresh System selection'
+    $appearancePath = Join-Path $root 'runtime-ui-appearance-v1'
+    $defaultAppearanceBytes = [Convert]::FromHexString('4452415050520000010800000000010101010000e950f7f9')
+    [IO.File]::WriteAllBytes($appearancePath, $defaultAppearanceBytes)
+    $defaultAppearance = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+    Assert-Equal $defaultAppearance.sha256 'b4371b6a8cb9748700ca1b99c7bd6afdac28f08a53365031a70fc690b0b6d5b8' 'Default System product record hash'
+    Assert-Equal $defaultAppearance.bytes_hex ([Convert]::ToHexString($defaultAppearanceBytes).ToLowerInvariant()) 'Retained exact persisted bytes'
+    Assert-ObserverRuntimeDefaultAppearancePreference -Record $defaultAppearance
+    # Exact production golden from preferences.rs::both_formats_keep_independent_golden_bytes.
+    $darkGolden = [byte[]]@(68,82,65,80,80,82,0,0,1,8,0,0,2,2,2,0,1,0,0,0,254,181,216,140)
+    [IO.File]::WriteAllBytes($appearancePath, $darkGolden)
+    $darkAppearance = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+    Assert-Equal $darkAppearance.value.theme 2 'Product Dark golden theme decoder parity'
+    Assert-Equal $darkAppearance.value.density 2 'Product Dark golden density decoder parity'
+    Assert-Equal $darkAppearance.value.show_separators $false 'Product Dark golden flag decoder parity'
+    Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $darkAppearance } 'default System snapshot'
+    foreach ($case in @(@(0,0),@(8,2),@(9,9),@(10,1),@(11,1),@(12,3),@(13,4),@(14,3),
+                        @(15,2),@(16,2),@(17,2),@(18,1),@(19,1))) {
+        $bad = [byte[]]$defaultAppearanceBytes.Clone()
+        $bad[$case[0]] = [byte]$case[1]
+        $hash = [uint32]2166136261
+        foreach ($index in 0..19) {
+            $hash = [uint32]((([uint64]($hash -bxor [uint32]$bad[$index])) *
+                [uint64]16777619) -band [uint64]4294967295)
+        }
+        [BitConverter]::GetBytes($hash).CopyTo($bad, 20)
+        [IO.File]::WriteAllBytes($appearancePath, $bad)
+        Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'Runtime appearance preference'
+    }
+    foreach ($case in @(@(12,1),@(12,2),@(13,1),@(14,2),@(15,0),@(16,0),@(17,0))) {
+        $bad = [byte[]]$defaultAppearanceBytes.Clone()
+        $bad[$case[0]] = [byte]$case[1]
+        $hash = [uint32]2166136261
+        foreach ($index in 0..19) {
+            $hash = [uint32]((([uint64]($hash -bxor [uint32]$bad[$index])) *
+                [uint64]16777619) -band [uint64]4294967295)
+        }
+        [BitConverter]::GetBytes($hash).CopyTo($bad, 20)
+        [IO.File]::WriteAllBytes($appearancePath, $bad)
+        $nonDefault = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+        Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $nonDefault } 'default System snapshot'
+    }
+    [IO.File]::WriteAllBytes($appearancePath, [byte[]]$defaultAppearanceBytes[0..22])
+    Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'length'
+    $bad = [byte[]]$defaultAppearanceBytes.Clone()
+    $bad[23] = $bad[23] -bxor 1
+    [IO.File]::WriteAllBytes($appearancePath, $bad)
+    Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'checksum'
+    $defaultAppearance.value.theme = $false
+    Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $defaultAppearance } 'default System snapshot'
+    $emptyPhase = @(Get-ObserverPerformancePhaseSummary -Samples @() -PhaseOrder @('transform-no-op'))
+    Assert-Equal $emptyPhase[0].sample_count 0 'Unsampled short phase has no fabricated timer callback'
+    if ($emptyPhase[0].max_sample_gap_ms -isnot [double] -or
+        $emptyPhase[0].max_resource_collection_ms -isnot [double]) {
+        throw 'Unsampled short phase lost real double zero summary values.'
+    }
+    $emptyJson = $emptyPhase[0] | ConvertTo-Json -Compress
+    if ($emptyJson -cnotmatch '"max_sample_gap_ms":0.0' -or
+        $emptyJson -cnotmatch '"max_resource_collection_ms":0.0') {
+        throw 'Unsampled short phase JSON does not retain the producer double zero shape.'
     }
     [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
     & {

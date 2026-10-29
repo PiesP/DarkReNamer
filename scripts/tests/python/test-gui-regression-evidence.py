@@ -3707,5 +3707,519 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
                 evidence.validate_input_manifest(run, SOURCE)
 
 
+class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
+    owned_run = PerformanceSampleEvidenceTests.owned_run
+    sample_scenario = PerformanceSampleEvidenceTests.sample_scenario
+    refresh_owned = PerformanceSampleEvidenceTests.refresh_owned
+
+    @staticmethod
+    def saved_default_appearance():
+        # Product DRAPPR v1: UiAppearance::DEFAULT + little-endian FNV-1a checksum.
+        raw = bytes.fromhex('4452415050520000010800000000010101010000e950f7f9')
+        return {'status': 'valid-saved', 'bytes': 24, 'bytes_hex': raw.hex(),
+            'sha256': 'b4371b6a8cb9748700ca1b99c7bd6afdac28f08a53365031a70fc690b0b6d5b8',
+            'value': {'theme': 0, 'density': 0, 'emphasis': 1, 'show_separators': True,
+                      'show_preview_tint': True, 'show_empty_safety': True}}
+
+    @staticmethod
+    def rechecksum_appearance(raw):
+        result = bytearray(raw)
+        checksum = 2166136261
+        for byte in result[:20]:
+            checksum = ((checksum ^ byte) * 16777619) & 0xffffffff
+        result[20:] = checksum.to_bytes(4, 'little')
+        return bytes(result)
+
+    def refresh_runtime(self, run):
+        self.refresh_owned(run)
+        path = run / 'output/run-result.json'
+        result = json.loads(path.read_text())
+        result['diagnostic'] = evidence.RUNTIME_BASELINE_MODE
+        write_json(path, result)
+
+    def runtime_run(self):
+        run, profile_sha = self.owned_run()
+        run = run.rename(self.root / evidence.RUNTIME_BASELINE_RUN_ID)
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['run_id'] = run.name
+        manifest['request'] = {'mode': evidence.RUNTIME_BASELINE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'runtime_baseline_plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN)}
+        app_hash = manifest['artifacts']['application']['sha256']
+        manifest['prepared_bundle'] = {'origin': 'external-prepared-source-built-bundle',
+            'bundle_manifest_sha256': manifest['bundle_manifest']['sha256'],
+            'application_sha256': app_hash}
+        manifest['command'] = ['python3', '-I', 'scripts/run-gui-regression.py',
+            '--output-root', '<external-output-root>', '--connection-profile',
+            '<private-connection-profile>', '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+            '--prepared-bundle-root', '<external-prepared-bundle-root>',
+            '--expected-prepared-application-sha256', app_hash,
+            '--acceptance-profile-id', evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        for leaf in ('cleanup.json', 'platform-preflight.json', 'platform-postlaunch.json',
+                     'acceptance-observations.json'):
+            path = output / leaf
+            document = json.loads(path.read_text())
+            document['run_id'] = run.name
+            write_json(path, document)
+        (output / 'performance-empty.png').rename(output / 'runtime-baseline-populated.png')
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        environment = raw['assertions']['scenario']['environment']
+        environment['physical_screen'].update(width=1366, height=768, right=1366, bottom=768)
+        environment['region'] = {'culture': 'ko-KR', 'ui_culture': 'ko-KR',
+                                 'timezone': 'Korea Standard Time'}
+        cells, jobs, lives = [], [], []
+        for index, name in enumerate(evidence.RUNTIME_BASELINE_PLAN['startup_cells']):
+            ticks = 638965440000000000 + index * 1000000000
+            pid = (8224, 956, 17280)[index]
+            value = 0 if index < 2 else 2
+            preference = {'status': 'valid-saved', 'value': value,
+                          'sha256': evidence.runtime_language_preference_hash(value)}
+            cell_environment = deepcopy(environment)
+            cell_environment['main_window']['process_id'] = pid
+            resolution = {'query': 'UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST',
+                'foreground_argb': [255, 0, 0, 0], 'resolved_theme': 'light',
+                'system_visual_style': {'theme_path_sha256': 'a' * 64,
+                    'theme_color': 'NormalColor', 'theme_size': 'NormalSize', 'forced_colors': False}}
+            appearance_menu = {'hwnd': cell_environment['main_window']['hwnd'],
+                'pid': pid, 'session_id': 2, 'menu_checked': [
+                    {'command_id': 0x9010, 'checked': True},
+                    {'command_id': 0x9011, 'checked': False},
+                    {'command_id': 0x9012, 'checked': False}]}
+            cell_environment['appearance'] = {'preference_before': 'absent',
+                'preference_after': self.saved_default_appearance(),
+                'pre_launch_resolution': deepcopy(resolution), 'ready_resolution': deepcopy(resolution),
+                'pre_close_resolution': deepcopy(resolution), 'ready_menu': deepcopy(appearance_menu),
+                'pre_close_menu': deepcopy(appearance_menu)}
+            cell = {'id': name, 'preference_kind': 'absent' if index == 0 else 'valid-saved',
+                'preference_value': value, 'resolved_language': 'ko' if index < 2 else 'en',
+                'process_id': pid, 'process_start_utc_ticks': ticks,
+                'startup': {'clock': {
+                    'qpc_frequency': 10000000,
+                    'launch_request_ticks': 1000000000 + index * 1000000000,
+                    'process_create_begin_ticks': 1000100000 + index * 1000000000,
+                    'process_create_end_ticks': 1000200000 + index * 1000000000,
+                    'main_window_bound_ticks': 1001000000 + index * 1000000000,
+                    'command_ready_ticks': 1002000000 + index * 1000000000},
+                    'launch_request_to_main_bound_ms': 100.0,
+                    'process_start_to_main_bound_lower_ms': 80.0,
+                    'process_start_to_main_bound_upper_ms': 90.0,
+                    'main_bound_to_ready_ms': 100.0,
+                    'launch_request_to_ready_ms': 200.0,
+                    'process_start_to_ready_lower_ms': 180.0,
+                    'process_start_to_ready_upper_ms': 190.0,
+                    'main_hwnd_bound': True, 'empty_grid': True, 'import_command_enabled': True},
+                'preference_before': {'status': 'absent', 'value': None, 'sha256': None}
+                                     if index == 0 else deepcopy(preference),
+                'preference_after': {'status': 'absent', 'value': None, 'sha256': None}
+                                    if index == 0 else deepcopy(preference),
+                'menu': {'parent': '언어(&L) · 다음 실행부터' if index < 2 else '&Language · next startup',
+                         'options': ['시스템 언어' if index < 2 else 'System language',
+                                     '한국어', 'English', '日本語'], 'checked_command': 0x9020 + value},
+                'empty_idle': None, 'import': None, 'icon_settlement': None,
+                'populated_idle': None, 'transforms': None, 'samples': None, 'phase_summary': None,
+                'normal_exit_code': 0, 'disk_unchanged': True, 'journal_residue_count': 0,
+                'environment': cell_environment}
+            cells.append(cell)
+            job = deepcopy(raw['process_job_cleanup'][0])
+            job.update(pid=pid, process_start_time_utc_ticks=str(ticks))
+            jobs.append(job)
+            life = deepcopy(raw['process_lifecycles'][0])
+            life['process_lifecycle'].update(pid=pid, start_time_utc_ticks=str(ticks),
+                creation_filetime=ticks - 504911232000000000)
+            lives.append(life)
+        rows = []
+        for phase in evidence.RUNTIME_PHASES:
+            for _ in range(150 if phase in {'empty-idle', 'populated-idle'} else 2):
+                elapsed = len(rows) * 200
+                rows.append({'phase': phase, 'elapsed_ms': elapsed, 'cpu_ms': elapsed // 4,
+                    'private_bytes': 10000000, 'working_set_bytes': 20000000,
+                    'threads': 4, 'handles': 100, 'gdi_objects': 20, 'ui_response_ms': 2.0,
+                    'probe_status': 'success', 'probe_error_code': 0,
+                    'resource_collection_ms': 3.0, 'sample_gap_ms': 0 if not rows else 200.0})
+        terminal = IconSettlementEvidenceTests.status(2)
+        receipt = {'data_ready_ms': 25.0, 'icon_settled_observed_ms': 125.0,
+            'first_status': IconSettlementEvidenceTests.status(2, settled=False, pending=2),
+            'settled_status': deepcopy(terminal), 'confirmation_status': deepcopy(terminal),
+            'poll_count': 3, 'unstable_query_attempts': 0, 'sampled_peak_pending': 2,
+            'sampled_peak_unresolved_rows': 0}
+        cells[0].update(empty_idle={'elapsed_ms': 30000.0, 'rows': 0},
+            populated_idle={'elapsed_ms': 30100.0, 'rows': 1000, 'end_status': terminal},
+            icon_settlement=receipt, samples=rows)
+        cells[0]['import'] = {'rows': 1000, 'observed_rows': 1000, 'data_ready_ms': 25.0,
+                              'command_ready_after_rows_ms': 2.0}
+        cells[0]['phase_summary'] = [{'phase': phase,
+            'sample_count': sum(row['phase'] == phase for row in rows),
+            'max_sample_gap_ms': 200.0, 'max_resource_collection_ms': 3.0}
+            for phase in evidence.RUNTIME_PHASES]
+        cells[0]['transforms'] = [{'id': name, 'source': 'ordinary-0000.txt',
+            'proposal': target, 'reset': 'ordinary-0000.txt', 'edit_elapsed_ms': 100.0,
+            'reset_elapsed_ms': 50.0 if name != 'no-op' else 0, 'reset_required': name != 'no-op'}
+            for name, target in [('grow', 'expanded-ordinary-0000.txt'), ('shrink', 'x.txt'),
+                                 ('no-op', 'ordinary-0000.txt')]]
+        scenario = {'mode': evidence.RUNTIME_BASELINE_MODE,
+            'plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN),
+            'system_resolution': {'language': 'ko', 'selected_tag': 'ko-KR',
+                                  'preferred_tags': ['ko-KR', 'en-US']},
+            'executable_sha256': app_hash, 'cells': cells, 'environment': deepcopy(cells[0]['environment']),
+            'disk_unchanged': True, 'journal_residue_count': 0,
+            'wakeups': {'status': 'not_run', 'reason': 'no-supported-process-wakeup-counter'},
+            'appearance': 'light'}
+        raw['assertions'] = {'overall': 'passed', 'scope': 'runtime-baseline-production-v1',
+                             'scenario': scenario}
+        raw.update(process_lifecycles=lives, process_job_cleanup=jobs,
+            keyboard={'status': 'not_run'}, accessibility={'status': 'not_run'},
+            screenshots=[{'file': 'runtime-baseline-populated.png',
+                'sha256': digest((output / 'runtime-baseline-populated.png').read_bytes())}])
+        write_json(raw_path, raw)
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport['raw_cleanup'] = clean_controller_cleanup_v3(profile_sha256=profile_sha,
+            process_jobs=jobs, source_sha=SOURCE,
+            bundle_sha256=manifest['bundle_manifest']['sha256'])
+        # The controller canonicalizes inventory identities, independently of launch order.
+        declared = transport['raw_cleanup']['owned_resource_evidence']['declared_processes']
+        declared.sort(key=lambda row: f"{row['pid']}|{row['start_time_utc_ticks']}")
+        write_json(transport_path, transport)
+        postlaunch_path = output / 'platform-postlaunch.json'
+        postlaunch = json.loads(postlaunch_path.read_text())
+        postlaunch['target']['process_id'] = cells[0]['process_id']
+        postlaunch['identity_observation']['target_process_id'] = cells[0]['process_id']
+        write_json(postlaunch_path, postlaunch)
+        self.refresh_runtime(run)
+        return run
+
+    def test_complete_producer_shape_three_process_runtime_evidence(self):
+        run = self.runtime_run()
+        result = evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        self.assertEqual(len(result['metrics']['cells']), 3)
+        self.assertEqual(result['metrics']['cells'][0]['populated_idle_samples'], 150)
+        self.assertEqual(result['performance_batch'], 'not-run')
+        profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+        with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=profile)), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(evidence.main(SCRIPT_ROOT.parent, ['--result-root', str(self.root),
+                '--expected-source-sha', SOURCE, '--run', run.name,
+                '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+                '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'measured')
+
+    def test_canonical_inventory_is_unordered_but_cells_lifecycles_and_jobs_are_ordered(self):
+        run = self.runtime_run()
+        output = run / 'output'
+        raw_path, transport_path = output / 'acceptance-result.json', output / 'transport.json'
+        original_raw, original_transport = raw_path.read_bytes(), transport_path.read_bytes()
+        raw, transport = json.loads(original_raw), json.loads(original_transport)
+        owned = transport['raw_cleanup']['owned_resource_evidence']
+        self.assertEqual([cell['process_id'] for cell in raw['assertions']['scenario']['cells']],
+                         [8224, 956, 17280])
+        self.assertEqual([row['pid'] for row in owned['declared_processes']], [17280, 8224, 956])
+        evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        mutations = ('duplicate', 'missing', 'foreign', 'ticks', 'boolean-pid', 'integer-ticks',
+                     'reordered-cells', 'reordered-lifecycles', 'reordered-jobs')
+        for mutation in mutations:
+            raw, transport = json.loads(original_raw), json.loads(original_transport)
+            owned = transport['raw_cleanup']['owned_resource_evidence']
+            declared = owned['declared_processes']
+            if mutation == 'duplicate': declared[1] = deepcopy(declared[0])
+            elif mutation == 'missing': declared.pop()
+            elif mutation == 'foreign': declared[0]['pid'] = 27182
+            elif mutation == 'ticks': declared[0]['start_time_utc_ticks'] = str(int(declared[0]['start_time_utc_ticks']) + 1)
+            elif mutation == 'boolean-pid': declared[0]['pid'] = True
+            elif mutation == 'integer-ticks': declared[0]['start_time_utc_ticks'] = int(declared[0]['start_time_utc_ticks'])
+            elif mutation == 'reordered-cells': raw['assertions']['scenario']['cells'].reverse()
+            elif mutation == 'reordered-lifecycles': raw['process_lifecycles'].reverse()
+            else:
+                raw['process_job_cleanup'].reverse()
+                owned['process_job_cleanup'].reverse()
+            write_json(raw_path, raw)
+            write_json(transport_path, transport)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        raw_path.write_bytes(original_raw)
+        transport_path.write_bytes(original_transport)
+        self.refresh_runtime(run)
+
+    def test_rehashed_missing_endpoints_wrong_language_samples_and_exit_fail(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutate in (
+            lambda r: r['assertions']['scenario']['cells'][0].__setitem__('icon_settlement', None),
+            lambda r: r['assertions']['scenario']['cells'][0].__setitem__('populated_idle', None),
+            lambda r: r['assertions']['scenario']['cells'][1].__setitem__('resolved_language', 'en'),
+            lambda r: r['assertions']['scenario']['cells'][2]['menu'].__setitem__('parent', '언어'),
+            lambda r: r['assertions']['scenario']['cells'][0]['samples'][1].__setitem__('cpu_ms', True),
+            lambda r: r['assertions']['scenario']['cells'][0]['samples'][1].__setitem__('elapsed_ms', 0),
+            lambda r: r['assertions']['scenario']['cells'][0]['startup'].__setitem__('launch_request_to_ready_ms', float('nan')),
+            lambda r: r['assertions']['scenario']['cells'][1]['preference_before'].__setitem__('sha256', 'f' * 64),
+            lambda r: r['assertions']['scenario']['cells'][1]['preference_before'].__setitem__('value', False),
+            lambda r: r['assertions']['scenario']['cells'][2]['environment']['region'].__setitem__('culture', 'en-US'),
+            lambda r: r['assertions']['scenario']['cells'][0]['empty_idle'].__setitem__('rows', False),
+            lambda r: r['assertions']['scenario']['cells'][0]['transforms'][2].__setitem__('reset_elapsed_ms', False),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('exit_method', 'forced-termination'),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('executable_path', r'C:\other\DarkReNamer.exe'),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('creation_filetime', True),
+            lambda r: r['assertions']['scenario']['system_resolution'].__setitem__('preferred_tags', ['en-US', 'ko-KR']),
+            lambda r: r.__setitem__('process_job_cleanup', r['process_job_cleanup'][:2]),
+            lambda r: r['assertions']['scenario']['cells'].__setitem__(1,
+                deepcopy(r['assertions']['scenario']['cells'][0])),
+        ):
+            with self.subTest(mutate=mutate):
+                changed = json.loads(original)
+                mutate(changed)
+                write_json(path, changed)
+                self.refresh_runtime(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_runtime_startup_rounding_uses_raw_qpc_and_preserves_distinct_endpoints(self):
+        run = self.runtime_run()
+        raw = json.loads((run / 'output/acceptance-result.json').read_text())
+        for cell in raw['assertions']['scenario']['cells']:
+            startup = cell['startup']
+            evidence.validate_runtime_startup(startup, 'fixture startup')
+            self.assertEqual(startup['launch_request_to_main_bound_ms'], 100.0)
+            self.assertEqual(startup['main_bound_to_ready_ms'], 100.0)
+        startup = deepcopy(raw['assertions']['scenario']['cells'][0]['startup'])
+        startup['clock']['command_ready_ticks'] += 5
+        # A half-microsecond boundary may round differently in .NET/Python.
+        for value in (200.0, 200.001):
+            startup['launch_request_to_ready_ms'] = value
+            evidence.validate_runtime_startup(startup, 'midpoint startup')
+        startup['launch_request_to_ready_ms'] = 200.002
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_startup(startup, 'outside midpoint startup')
+
+    def test_rehashed_raw_startup_clock_rejects_missing_types_order_and_derived_corruption(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        mutations = []
+        raw = json.loads(original)
+        clock = raw['assertions']['scenario']['cells'][1]['startup']['clock']
+        for name in clock:
+            mutations.append((f'missing-{name}', lambda s, key=name: s['clock'].pop(key)))
+            for bad in (False, 0, -1, 2**63, float(clock[name])):
+                mutations.append((f'{name}-{bad!r}',
+                    lambda s, key=name, value=bad: s['clock'].__setitem__(key, value)))
+        boundaries = ('launch_request_ticks', 'process_create_begin_ticks', 'process_create_end_ticks',
+                      'main_window_bound_ticks', 'command_ready_ticks')
+        for earlier, later in zip(boundaries, boundaries[1:]):
+            mutations.append((f'inverted-{earlier}-{later}',
+                lambda s, left=earlier, right=later: s['clock'].__setitem__(right, s['clock'][left] - 1)))
+        for name in evidence.RUNTIME_STARTUP_INTERVALS:
+            mutations.extend(((f'missing-{name}', lambda s, key=name: s.pop(key)),
+                (f'plus-.001-{name}', lambda s, key=name: s.__setitem__(key, s[key] + 0.001)),
+                (f'bool-{name}', lambda s, key=name: s.__setitem__(key, True))))
+        mutations.append(('main-bound-flag', lambda s: s.__setitem__('main_hwnd_bound', 1)))
+        for name, mutate in mutations:
+            changed = json.loads(original)
+            mutate(changed['assertions']['scenario']['cells'][1]['startup'])
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_rehashed_duplicate_raw_qpc_field_is_rejected(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_text()
+        target = '"qpc_frequency": 10000000'
+        self.assertIn(target, original)
+        changed = original.replace(target, target + ', "qpc_frequency": 10000000', 1).encode()
+        path.write_bytes(changed)
+        collection_path = run / 'collection.json'
+        collection = json.loads(collection_path.read_text())
+        for row in collection['files']:
+            if row['relative_path'] == path.name:
+                row.update(bytes=len(changed), sha256=digest(changed))
+        write_json(collection_path, collection)
+        result_path = run / 'output/run-result.json'
+        result = json.loads(result_path.read_text())
+        result.update(collection_sha256=digest(collection_path.read_bytes()),
+                      observer_result_sha256=digest(changed))
+        write_json(result_path, result)
+        with self.assertRaisesRegex(evidence.EvidenceError, 'duplicate field: qpc_frequency'):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+
+    def test_product_appearance_golden_codec_and_strict_default_snapshot(self):
+        record = self.saved_default_appearance()
+        raw = bytes.fromhex(record['bytes_hex'])
+        self.assertEqual(evidence.decode_runtime_appearance_preference(raw), record['value'])
+        self.assertEqual(digest(raw), record['sha256'])
+        evidence.validate_runtime_appearance_preference(record)
+        evidence.validate_runtime_appearance_preference('absent')
+        # Exact golden bytes from preferences.rs::both_formats_keep_independent_golden_bytes.
+        dark = bytes([68, 82, 65, 80, 80, 82, 0, 0, 1, 8, 0, 0,
+                      2, 2, 2, 0, 1, 0, 0, 0, 254, 181, 216, 140])
+        self.assertEqual(evidence.decode_runtime_appearance_preference(dark),
+            {'theme': 2, 'density': 2, 'emphasis': 2, 'show_separators': False,
+             'show_preview_tint': True, 'show_empty_safety': False})
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_appearance_preference({**record, 'bytes_hex': dark.hex(),
+                'sha256': digest(dark), 'value': evidence.decode_runtime_appearance_preference(dark)})
+        for offset, value in ((0, 0), (8, 2), (9, 9), (10, 1), (11, 1), (12, 3),
+                              (13, 4), (14, 3), (15, 2), (16, 2), (17, 2), (18, 1), (19, 1)):
+            changed = bytearray(raw)
+            changed[offset] = value
+            with self.subTest(offset=offset), self.assertRaises(evidence.EvidenceError):
+                evidence.decode_runtime_appearance_preference(self.rechecksum_appearance(changed))
+        for changed in (raw[:-1], raw + b'\0', raw[:-1] + bytes([raw[-1] ^ 1])):
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.decode_runtime_appearance_preference(changed)
+
+    def test_rehashed_saved_appearance_rejects_explicit_theme_flags_hash_and_bool(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutation in ('light', 'dark', 'density', 'emphasis', 'separators', 'tint', 'safety',
+                         'checksum', 'reserved', 'hash', 'bool-enum', 'int-flag', 'bool-length'):
+            changed = json.loads(original)
+            record = changed['assertions']['scenario']['cells'][1]['environment']['appearance']['preference_after']
+            raw = bytearray.fromhex(record['bytes_hex'])
+            if mutation in ('light', 'dark', 'density', 'emphasis', 'separators', 'tint', 'safety', 'reserved'):
+                offset, value = {'light': (12, 1), 'dark': (12, 2), 'density': (13, 1),
+                    'emphasis': (14, 2), 'separators': (15, 0), 'tint': (16, 0),
+                    'safety': (17, 0), 'reserved': (18, 1)}[mutation]
+                raw[offset] = value
+                raw = self.rechecksum_appearance(raw)
+                if mutation != 'reserved':
+                    record['value'] = evidence.decode_runtime_appearance_preference(raw)
+                record.update(bytes_hex=raw.hex(), sha256=digest(raw))
+            elif mutation == 'checksum':
+                raw[-1] ^= 1
+                record.update(bytes_hex=raw.hex(), sha256=digest(raw))
+            elif mutation == 'hash':
+                record['sha256'] = 'f' * 64
+            elif mutation == 'bool-enum':
+                record['value']['theme'] = False
+            elif mutation == 'int-flag':
+                record['value']['show_separators'] = 1
+            else:
+                record['bytes'] = True
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        changed = json.loads(original)
+        changed['assertions']['scenario']['cells'][2]['environment']['appearance']['preference_after'] = 'absent'
+        write_json(path, changed)
+        self.refresh_runtime(run)
+        self.assertEqual(len(evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)['metrics']['cells']), 3)
+
+    def test_zero_sample_short_phase_preserves_real_powershell_double_zero_summary(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        raw = json.loads(path.read_text())
+        cell = raw['assertions']['scenario']['cells'][0]
+        cell['samples'] = [row for row in cell['samples'] if row['phase'] != 'transform-no-op']
+        # A real sub-200ms phase can occur entirely between timer callbacks.
+        # Get-ObserverPerformancePhaseSummary emits [double]0 as JSON 0.0.
+        for summary in cell['phase_summary']:
+            rows = [row for row in cell['samples'] if row['phase'] == summary['phase']]
+            summary.update(sample_count=len(rows),
+                max_sample_gap_ms=max((row['sample_gap_ms'] for row in rows), default=0.0),
+                max_resource_collection_ms=max((row['resource_collection_ms'] for row in rows), default=0.0))
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        result = evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        self.assertEqual(result['metrics']['cells'][0]['sample_count'], 310)
+        self.assertNotIn('transform-no-op', [row['phase'] for row in
+            result['metrics']['cells'][0]['sampled_phase_resources']])
+        short = next(row for row in cell['phase_summary'] if row['phase'] == 'transform-no-op')
+        short['max_sample_gap_ms'] = False
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+
+    def test_rehashed_dark_forced_missing_override_and_unbound_appearance_fail(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutation in ('dark-before', 'dark-ready', 'forced-close', 'missing', 'missing-resolution',
+                         'override-before', 'override-after', 'wrong-pid', 'wrong-hwnd',
+                         'wrong-session', 'explicit-light', 'missing-radio'):
+            changed = json.loads(original)
+            cell = changed['assertions']['scenario']['cells'][1]
+            appearance = cell['environment']['appearance']
+            if mutation.startswith('dark'):
+                phase = 'pre_launch_resolution' if mutation == 'dark-before' else 'ready_resolution'
+                # Even a forged Light label cannot conceal the actual dark foreground.
+                appearance[phase]['foreground_argb'] = [255, 245, 245, 245]
+            elif mutation == 'forced-close':
+                appearance['pre_close_resolution']['system_visual_style']['forced_colors'] = True
+            elif mutation == 'missing':
+                del cell['environment']['appearance']
+            elif mutation == 'missing-resolution':
+                del appearance['ready_resolution']
+            elif mutation.startswith('override'):
+                appearance['preference_before' if mutation == 'override-before' else 'preference_after'] = 'present'
+            elif mutation == 'wrong-pid':
+                appearance['ready_menu']['pid'] += 1
+            elif mutation == 'wrong-hwnd':
+                appearance['pre_close_menu']['hwnd'] += 1
+            elif mutation == 'wrong-session':
+                appearance['ready_menu']['session_id'] = 3
+                appearance['pre_close_menu']['session_id'] = 3
+            elif mutation == 'explicit-light':
+                appearance['ready_menu']['menu_checked'][0]['checked'] = False
+                appearance['ready_menu']['menu_checked'][1]['checked'] = True
+            else:
+                del appearance['ready_menu']['menu_checked']
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_runtime_cli_requires_one_fixed_run_and_diagnostic_only_plan(self):
+        base = ['--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+                '--acceptance-profile-id', evidence.V2_PROFILE_ID]
+        for extra in (['--run', evidence.RUNTIME_BASELINE_RUN_ID, '--require-complete-set'],
+                      ['--run', evidence.RUNTIME_BASELINE_RUN_ID, '--configuration-set', 'focused'],
+                      ['--run', evidence.PICKER_RUN_ID]):
+            with self.subTest(extra=extra), self.assertRaises(evidence.EvidenceError):
+                evidence.main(SCRIPT_ROOT.parent, base + extra)
+        request = {'mode': evidence.RUNTIME_BASELINE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'runtime_baseline_plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN)}
+        for plan in ('performance_plan', 'settlement_plan', 'picker_identity_plan'):
+            changed = {**request, plan: {}}
+            with self.subTest(plan=plan), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_request(changed)
+
+    def test_manifest_hash_plan_and_incomplete_cleanup_fail_closed(self):
+        run = self.runtime_run()
+        for relative, mutate in (
+            ('input-manifest.json', lambda d: d['prepared_bundle'].__setitem__('application_sha256', 'f' * 64)),
+            ('input-manifest.json', lambda d: d['request']['runtime_baseline_plan'].__setitem__('idle_seconds', 29)),
+            ('input-manifest.json', lambda d: d['request']['runtime_baseline_plan'].__setitem__('idle_seconds', True)),
+            ('output/desktop-stop-response.json', lambda d: d.__setitem__('lifecycleStatus', 'pending')),
+            ('output/transport.json', lambda d: d['raw_cleanup']['owned_resource_evidence']['process_job_cleanup'][2].__setitem__('job_closed', False)),
+        ):
+            path = run / relative
+            original = path.read_bytes()
+            changed = json.loads(original)
+            mutate(changed)
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(relative=relative, mutate=mutate), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+            path.write_bytes(original)
+            self.refresh_runtime(run)
+
+
 if __name__ == "__main__":
     unittest.main()

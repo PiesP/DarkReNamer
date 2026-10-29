@@ -191,6 +191,7 @@ function Start-AcceptanceApplication {
             main = $null
             main_handle = [IntPtr]::Zero
             launch_ticks = $launchTicks
+            main_bound_ticks = $null
             process_lifecycle = $null
         }
         $application.process_lifecycle = New-AcceptanceProcessLifecycle `
@@ -213,6 +214,7 @@ function Start-AcceptanceApplication {
             -ExpectedTitle 'DarkReNamer' `
             -TimeoutSeconds $WaitSeconds `
             -Label $Label
+        $application.main_bound_ticks = [Diagnostics.Stopwatch]::GetTimestamp()
         $window = $binding.element
         $mainHandle = [IntPtr]$binding.handle
         $window.SetFocus()

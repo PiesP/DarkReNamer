@@ -310,6 +310,20 @@ function Resolve-VerifiedBundle {
                     throw 'bundle.json fixed refresh diagnostic is invalid.'
                 }
             }
+            elseif ($diagnostic.Value.kind -ceq 'runtime-model-baseline') {
+                Assert-ExactProperties -Value $diagnostic.Value -Names @(
+                    'kind', 'test_profile', 'test_name', 'scope', 'schema_version', 'records'
+                ) -Label 'bundle.json diagnostic'
+                if ($diagnostic.Value.test_profile -cne 'release' -or
+                    $diagnostic.Value.test_name -cne 'windows::list_view::native_tests::profile_runtime_model_baseline' -or
+                    $diagnostic.Value.scope -cne 'instrumented-windows-libtest' -or
+                    $diagnostic.Value.schema_version -isnot [long] -or
+                    $diagnostic.Value.schema_version -ne 1 -or
+                    $diagnostic.Value.records -isnot [long] -or
+                    $diagnostic.Value.records -ne 183) {
+                    throw 'bundle.json runtime model selection is invalid.'
+                }
+            }
             elseif ($diagnostic.Value.kind -ceq 'virtual-execution') {
                 Assert-ExactProperties -Value $diagnostic.Value -Names @(
                     'kind', 'test_profile', 'test_name', 'count', 'iteration', 'media',

@@ -325,6 +325,29 @@ function Assert-GuiRegressionInvocationBinding {
             throw 'Performance sample differs from its fixed immutable plan.'
         }
     }
+    elseif ($RegressionMode -ceq 'runtime-baseline') {
+        $expectedPlan = [ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
+            idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
+            icon_poll_interval_ms=100; maximum_seconds=600;
+            transform_cases=@('grow','shrink','no-op') }
+        $actualPlan = $ManifestInput.request.PSObject.Properties['runtime_baseline_plan']
+        if ($null -eq $actualPlan -or
+            ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+            @($ManifestInput.request.PSObject.Properties.Name).Count -ne 5 -or
+            $ManifestInput.run_id -cne 'runtime-baseline-v1-1366x768-96-text100' -or
+            $ManifestInput.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
+            $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
+            $ManifestInput.acceptance_profile_sha256 -cne
+                '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f' -or
+            $ManifestInput.acceptance_profile.sha256 -cne $ManifestInput.acceptance_profile_sha256 -or
+            $Appearance -cne 'light' -or $TextScalePercent -ne 100 -or
+            $ManifestInput.request.desktop.width -ne 1366 -or
+            $ManifestInput.request.desktop.height -ne 768 -or
+            $ManifestInput.request.desktop.dpi -ne 96) {
+            throw 'Runtime baseline differs from its fixed immutable plan.'
+        }
+    }
     elseif ($RegressionMode -ceq 'picker-identity-observation') {
         $expectedPlan = [ordered]@{ ordinary_rows=@(100); idle_ms=1000; picker_settle_ms=350;
             sample_interval_ms=200; maximum_seconds=120; command_timeout_ms=5000;
@@ -432,6 +455,10 @@ function Assert-GuiRegressionInvocationBinding {
     if ($RegressionMode -cne 'custom-input-identity-observation' -and
         $null -ne $ManifestInput.request.PSObject.Properties['custom_input_plan']) {
         throw 'Custom input plan is restricted to its diagnostic.'
+    }
+    if ($RegressionMode -cne 'runtime-baseline' -and
+        $null -ne $ManifestInput.request.PSObject.Properties['runtime_baseline_plan']) {
+        throw 'Runtime baseline plan is restricted to its diagnostic.'
     }
     if ($RegressionMode -ceq 'appearance-pair') {
         if ($null -eq $requestedContrast -or $requestedContrast.Value -isnot [bool] -or
@@ -761,7 +788,9 @@ function Invoke-GuiRegressionAcceptance {
         ($RegressionMode -ceq 'picker-identity-observation' -and
         [string]$manifestInput.run_id -ceq 'picker-identity-observation-v1-1366x768-96-text100') -or
         ($RegressionMode -ceq 'custom-input-identity-observation' -and
-        [string]$manifestInput.run_id -ceq 'custom-input-identity-observation-v1-1366x768-96-text100')
+        [string]$manifestInput.run_id -ceq 'custom-input-identity-observation-v1-1366x768-96-text100') -or
+        ($RegressionMode -ceq 'runtime-baseline' -and
+        [string]$manifestInput.run_id -ceq 'runtime-baseline-v1-1366x768-96-text100')
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     Initialize-TrustedResultWriter `
         -Root $resolved.root `
@@ -893,6 +922,20 @@ function Invoke-GuiRegressionAcceptance {
                     -ProcessLifecycleObservations $processLifecycleObservations `
                     -ObservationSink $scenarioSink
             }
+            elseif ($RegressionMode -eq 'runtime-baseline') {
+                $scenarioSink = [ordered]@{}
+                $observations.scenario = $scenarioSink
+                $result.assertions.scenario = $scenarioSink
+                $scenario = Invoke-ObserverRuntimeBaselineScenario `
+                    -Verified $verified `
+                    -RuntimeRoot $effectiveRuntimeRoot `
+                    -EvidenceRoot $resolved.output_root `
+                    -SessionId $session `
+                    -WaitSeconds $TimeoutSeconds `
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations `
+                    -ObservationSink $scenarioSink
+            }
             elseif ($RegressionMode -eq 'icon-settlement') {
                 $scenarioSink = [ordered]@{}
                 $observations.scenario = $scenarioSink
@@ -956,8 +999,8 @@ function Invoke-GuiRegressionAcceptance {
                 $result['high_contrast'] = [ordered]@{ requested = $true; restoration = 'verified'; snapshot = $snapshot }
             }
         }
-        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
-        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement')) { 'not_run' } else { 'passed' }
+        $result.keyboard.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement','runtime-baseline')) { 'not_run' } else { 'passed' }
+        $result.accessibility.status = if ($RegressionMode -in @('appearance-pair','performance-sample','first-clear-observation','picker-identity-observation','custom-input-identity-observation','icon-settlement','runtime-baseline')) { 'not_run' } else { 'passed' }
         $result.capture.status = 'passed'
         if ($RegressionMode -eq 'appearance-pair') {
             $result.assertions['scope'] = 'appearance-pair-main-and-interactions-v3'
@@ -973,6 +1016,9 @@ function Invoke-GuiRegressionAcceptance {
         }
         elseif ($RegressionMode -eq 'custom-input-identity-observation') {
             $result.assertions['scope'] = 'custom-input-identity-observation-v1'
+        }
+        elseif ($RegressionMode -eq 'runtime-baseline') {
+            $result.assertions['scope'] = 'runtime-baseline-production-v1'
         }
         elseif ($RegressionMode -eq 'icon-settlement') {
             $result.assertions['scope'] = if ($manifestInput.request.endpoint_method -ceq

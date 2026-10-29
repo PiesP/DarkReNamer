@@ -96,6 +96,43 @@ try {
         throw 'Measured fixture fields do not match the exact PE and symbol inputs.'
     }
 
+    $identityOutput = Join-Path $testRoot 'identity.json'
+    & $measurer -ExecutablePath $executable -PdbPath $pdb `
+        -OutputPath $identityOutput -IdentityOnly
+    $identity = Get-Content -LiteralPath $identityOutput -Raw | ConvertFrom-Json
+    if ($identity.executable.sha256 -cne $expectedExecutableHash -or
+        $identity.debug_symbols.pdb_sha256 -cne $expectedPdbHash -or
+        $identity.debug_symbols.guid -cne $measurement.debug_symbols.guid -or
+        $identity.debug_symbols.age -ne $measurement.debug_symbols.age -or
+        $identity.pe.subsystem -cne 'windows-gui' -or
+        $identity.debug_symbols.PSObject.Properties.Name -contains 'zip_sha256') {
+        throw 'Identity-only measurement differs from matching PE/PDB fixture.'
+    }
+    $consoleExecutable = Join-Path $testRoot 'suite.exe'
+    $consoleBytes = New-PeFixture
+    Set-UInt16LittleEndian -Bytes $consoleBytes -Offset 0xdc -Value 3
+    Write-Bytes -Path $consoleExecutable -Bytes $consoleBytes
+    $consoleOutput = Join-Path $testRoot 'console-identity.json'
+    & $measurer -ExecutablePath $consoleExecutable -PdbPath $pdb `
+        -OutputPath $consoleOutput -IdentityOnly
+    if ((Get-Content -LiteralPath $consoleOutput -Raw | ConvertFrom-Json).pe.subsystem -cne 'windows-console') {
+        throw 'Identity-only measurement rejected the matching console test binary.'
+    }
+    $mismatchedIdentity = Join-Path $testRoot 'identity-mismatch.json'
+    $differentIdentityPdb = Join-Path $testRoot 'identity-different.pdb'
+    Write-Bytes -Path $differentIdentityPdb -Bytes (New-PdbFixture -Age 2)
+    try {
+        & $measurer -ExecutablePath $consoleExecutable -PdbPath $differentIdentityPdb `
+            -OutputPath $mismatchedIdentity -IdentityOnly
+        throw 'Identity-only measurement accepted mismatched PE/PDB GUID and age.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*PDB GUID and age do not match*') { throw }
+    }
+    if (Test-Path -LiteralPath $mismatchedIdentity) {
+        throw 'Mismatched PE/PDB identity emitted a receipt.'
+    }
+
     Assert-MeasurerFails `
         -ExpectedFragment 'OutputPath already exists' `
         -ExecutablePath $executable -PdbPath $pdb -SymbolsPath $symbols -OutputPath $output

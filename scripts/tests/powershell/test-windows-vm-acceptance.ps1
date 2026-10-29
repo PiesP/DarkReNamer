@@ -3461,6 +3461,63 @@ try {
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
     } 'fixed immutable plan'
+    $candidateRuntimeInput = $candidateRegressionInput | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+    $candidateRuntimeInput | Add-Member -NotePropertyName run_id `
+        -NotePropertyValue 'runtime-baseline-v1-1366x768-96-text100'
+    $candidateRuntimeInput | Add-Member -NotePropertyName acceptance_profile_id `
+        -NotePropertyValue 'vm-automated-v2-owned-resources'
+    $runtimeProfileSha = '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f'
+    $candidateRuntimeInput | Add-Member -NotePropertyName acceptance_profile_sha256 `
+        -NotePropertyValue $runtimeProfileSha
+    $candidateRuntimeInput | Add-Member -NotePropertyName acceptance_profile `
+        -NotePropertyValue ([pscustomobject]@{ sha256=$runtimeProfileSha })
+    $candidateRuntimeInput.request.mode = 'runtime-baseline'
+    $candidateRuntimeInput.request.text_scale_percent = [long]100
+    $candidateRuntimeInput.request.PSObject.Properties.Remove('layout_variant')
+    $candidateRuntimeInput.request.desktop.width = [long]1366
+    $candidateRuntimeInput.request.desktop.height = [long]768
+    $candidateRuntimeInput.request | Add-Member -NotePropertyName runtime_baseline_plan `
+        -NotePropertyValue ([ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
+            idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
+            icon_poll_interval_ms=100; maximum_seconds=600;
+            transform_cases=@('grow','shrink','no-op') })
+    $savedRuntimeProfile = $script:VmAcceptanceProfileId
+    try {
+        $script:VmAcceptanceProfileId = 'vm-automated-v2-owned-resources'
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+            -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+        $runtimeManifestBytes = [IO.File]::ReadAllBytes($candidateRegressionInputPath)
+        try {
+            Write-Utf8Json -Path $candidateRegressionInputPath -Value $candidateRuntimeInput
+            & $candidateValid.acceptance -BundleRoot $candidateValid.bundle_root `
+                -ExpectedSessionId 1 -OutputRoot $candidateValid.output_root `
+                -ExpectedScriptSha256 $candidateValid.acceptance_sha256 `
+                -RegressionMode runtime-baseline -InputManifestPath $candidateRegressionInputPath `
+                -AcceptanceProfileId vm-automated-v2-owned-resources `
+                -Appearance light -TextScalePercent 100 -ValidateOnly
+        }
+        finally { [IO.File]::WriteAllBytes($candidateRegressionInputPath, $runtimeManifestBytes) }
+        foreach ($invalid in @(29, $true)) {
+            $candidateRuntimeInput.request.runtime_baseline_plan.idle_seconds = $invalid
+            Assert-Fails {
+                Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+                    -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
+                    -Appearance light -TextScalePercent 100 -HighContrast $false `
+                    -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+            } 'fixed immutable plan'
+        }
+        $candidateRuntimeInput.request.runtime_baseline_plan.idle_seconds = 30
+        $candidateRuntimeInput.request.mode = 'standard'
+        Assert-Fails {
+            Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+                -Verified $candidateRegressionResolved -RegressionMode standard `
+                -Appearance light -TextScalePercent 100 -HighContrast $false `
+                -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+        } 'Runtime baseline plan is restricted'
+    }
+    finally { $script:VmAcceptanceProfileId = $savedRuntimeProfile }
     $candidateFirstClearInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     $candidateFirstClearInput | Add-Member -NotePropertyName run_id `
         -NotePropertyValue 'first-clear-observation-v1-1366x768-96-text100'
@@ -3997,6 +4054,7 @@ $expectedApplicationStartSites = @(
     'Invoke-ObserverPerformanceSampleScenario|performance sample application'
     'Invoke-ObserverAppearancePairScenario|appearance pair application'
     'Invoke-ObserverIconSettlementScenario|icon settlement application'
+    'Invoke-ObserverRuntimeBaselineScenario|runtime baseline application'
 )
 $actualApplicationStartSites = foreach ($call in $applicationStartCalls) {
     $owner = $call.Parent
@@ -4509,4 +4567,64 @@ foreach ($call in $applicationStartCalls) {
     & $checkFocusedResults
     $result.tests[0].test_name = $focusedNames[1]
     Assert-Fails -Action { & $checkFocusedResults } -Expected 'Focused native case result differs'
+}
+
+# Seeded System/English records must pass the production decoder before launch.
+& {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-runtime-language-' +
+        [guid]::NewGuid().ToString('N'))
+    function New-PrivateDirectory {
+        param($Parent, $Leaf)
+        $directory = Join-Path $Parent $Leaf
+        if (Test-Path -LiteralPath $directory) { throw 'Fixture directory is not fresh.' }
+        [void][IO.Directory]::CreateDirectory($directory)
+        $directory
+    }
+    $productionPrivateAppDirectory = ${function:New-ObserverAppearancePrivateAppDirectory}
+    $seedDirectoryProbe = [pscustomobject]@{ calls=0 }
+    function New-ObserverAppearancePrivateAppDirectory {
+        param($Parent)
+        $seedDirectoryProbe.calls++
+        & $productionPrivateAppDirectory -Parent $Parent
+    }
+    $expectedHex = @{
+        0='44524c414e4700000100000000000000526340fd'
+        2='44524c414e470000010000000200000030e5e75c'
+    }
+    try {
+        foreach ($value in @(0, 2)) {
+            $local = Join-Path $root ([string]$value)
+            [void][IO.Directory]::CreateDirectory($local)
+            $record = New-ObserverRuntimeLanguagePreference -LocalAppData $local -Value $value
+            $decoded = Read-ProductionLanguagePreference -LocalAppData $local
+            if ($record.value -ne $value -or $record.sha256 -cne $decoded.sha256) {
+                throw 'Runtime startup language record did not round-trip through the production decoder.'
+            }
+            $appRoot = Join-Path $local 'DarkReNamer'
+            if ($IsWindows) {
+                # Exercise the actual seed routine: an elevated observer must not
+                # leave an Administrators-owned application directory for its medium child.
+                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                Assert-ObserverAppearancePrivateAppDirectory -Path $appRoot -UserSid $userSid
+                $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($appRoot))
+                if ($security.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $userSid.Value -or
+                    -not $security.AreAccessRulesProtected) {
+                    throw 'Runtime language seed app directory is not owned by the product user with a protected DACL.'
+                }
+            }
+            $path = Join-Path $appRoot 'ui-language-v1'
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -ne 20 -or
+                [Convert]::ToHexString($bytes).ToLowerInvariant() -cne $expectedHex[$value]) {
+                throw 'Runtime language seed differs from the exact System or English product codec.'
+            }
+            $bytes[12] = 3
+            [IO.File]::WriteAllBytes($path, $bytes)
+            Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $local } 'checksum'
+        }
+        if ($seedDirectoryProbe.calls -ne 2) {
+            throw 'Both runtime language seeds must use the production-owned app directory creator.'
+        }
+    }
+    finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 }

@@ -56,6 +56,9 @@ TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES = 4 * 1024 * 1024
 TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES = 64 * 1024 * 1024
 REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES = 32 * 1024 * 1024
 REFRESH_PROFILE_TEST = 'windows::list_view::native_tests::profile_refresh_stages'
+RUNTIME_MODEL_TEST = 'windows::list_view::native_tests::profile_runtime_model_baseline'
+RUNTIME_MODEL_KIND = 'runtime-model-baseline'
+RUNTIME_MODEL_SCOPE = 'instrumented-windows-libtest'
 VIRTUAL_EXECUTION_TEST = 'benchmark_durable_production_path'
 FOCUSED_ICON_FILTER = 'windows::list_view::native_tests::icon_worker_'
 FOCUSED_ICON_CASES = (
@@ -272,6 +275,8 @@ def argument_parser():
     parser.add_argument('--desktop-height', type=int,
                         help='Request a managed RDP desktop height; requires --desktop-width.')
     parser.add_argument('--output', type=Path, help='New external directory for the bundle, logs, and screenshots.')
+    parser.add_argument('--private-symbol-output', type=Path,
+                        help='New external directory for matching source-built EXE/PDB pairs and a private receipt.')
     parser.add_argument('--prepare-only', action='store_true',
                         help='Build a clean source-bound bundle without contacting the VM.')
     parser.add_argument('--candidate-handoff-root', type=Path,
@@ -305,6 +310,8 @@ def argument_parser():
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
     parser.add_argument('--profile-refresh-stages', action='store_true',
                         help='Run the fixed two-pass optimized ListView refresh diagnostic.')
+    parser.add_argument('--profile-runtime-model', action='store_true',
+                        help='Run the fixed Windows preview and sort model baseline diagnostic.')
     parser.add_argument('--focused-icon-tests', action='store_true',
                         help='Run only the fixed native icon-worker functional tests.')
     parser.add_argument('--focused-refresh-tests', action='store_true',
@@ -340,6 +347,12 @@ def parse_arguments(argv=None):
             value is not None for value in candidate_values):
         parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
     args.candidate_mode = all(value is not None for value in candidate_values)
+    if args.private_symbol_output is not None and args.candidate_mode:
+        parser.error('--private-symbol-output requires source-built mode, not exact-candidate mode.')
+    if sum(bool(value) for value in (args.profile_refresh_stages, args.profile_runtime_model,
+                                      args.focused_icon_tests, args.focused_refresh_tests,
+                                      args.virtual_execution_count is not None)) > 1:
+        parser.error('Only one fixed native diagnostic selector may be used.')
     if args.native_test_profile and not (args.focused_icon_tests or args.focused_refresh_tests):
         parser.error('--native-test-profile requires one focused native test selector.')
     if args.focused_icon_case and not args.focused_icon_tests:
@@ -351,7 +364,8 @@ def parse_arguments(argv=None):
     if (args.virtual_execution_count is None) != (args.virtual_execution_iteration is None):
         parser.error('Virtual execution requires both count and iteration.')
     if args.virtual_execution_count is not None:
-        if (args.profile_refresh_stages or args.focused_icon_tests or args.focused_refresh_tests or
+        if (args.profile_refresh_stages or args.profile_runtime_model or
+                args.focused_icon_tests or args.focused_refresh_tests or
                 args.native_test_profile or args.candidate_mode or args.task_kind != 'core' or
                 args.acceptance_profile_id != V2_PROFILE_ID or args.prepare_only or
                 supplied('--test-timeout-seconds') or args.expected_vm_id is None):
@@ -359,7 +373,7 @@ def parse_arguments(argv=None):
         args.test_timeout_seconds = 1200
     if args.focused_icon_tests or args.focused_refresh_tests:
         label = 'Focused icon tests' if args.focused_icon_tests else 'Focused refresh tests'
-        if (args.profile_refresh_stages or not args.native_test_profile or
+        if (args.profile_refresh_stages or args.profile_runtime_model or not args.native_test_profile or
                 args.candidate_mode or args.task_kind != 'core' or
                 args.acceptance_profile_id != V2_PROFILE_ID or
                 supplied('--test-timeout-seconds') or args.prepare_only):
@@ -383,6 +397,20 @@ def parse_arguments(argv=None):
                 (supplied('--desktop-height') and args.desktop_height != 768)):
             parser.error('The refresh diagnostic requires the prepared 1366x768 96-DPI RDP desktop.')
         args.test_timeout_seconds = 600
+        args.desktop_scale = 100
+        args.desktop_width = 1366
+        args.desktop_height = 768
+    if args.profile_runtime_model:
+        if (args.candidate_mode or args.task_kind != 'core' or args.prepare_only or
+                args.acceptance_profile_id != V2_PROFILE_ID or args.expected_vm_id is None or
+                supplied('--test-timeout-seconds')):
+            parser.error('Runtime model baseline requires source-built core v2 mode, exact VM identity and its fixed timeout.')
+        if (args.desktop_mode != 'rdp' or
+                (supplied('--desktop-scale') and args.desktop_scale != 100) or
+                (supplied('--desktop-width') and args.desktop_width != 1366) or
+                (supplied('--desktop-height') and args.desktop_height != 768)):
+            parser.error('Runtime model baseline requires the prepared 1366x768 96-DPI RDP desktop.')
+        args.test_timeout_seconds = 1200
         args.desktop_scale = 100
         args.desktop_width = 1366
         args.desktop_height = 768
@@ -439,6 +467,8 @@ def parse_arguments(argv=None):
         parser.error('recovery observer options require --task-kind recovery.')
     if args.task_kind != 'ui' and ui_options:
         parser.error('UI observer options require --task-kind ui.')
+    if args.profile_runtime_model and (ui_options or recovery_options):
+        parser.error('Runtime model baseline does not accept observer options.')
     if args.profile_refresh_stages and (ui_options or recovery_options or args.prepare_only):
         parser.error('The refresh diagnostic does not accept observer or prepare-only options.')
     if args.virtual_execution_count is not None and (ui_options or recovery_options):
@@ -546,6 +576,36 @@ def resolve_prepare_output_root(repo, requested):
     return target
 
 
+def resolve_private_symbol_output(repo, bundle_root, requested):
+    target = resolve_prepare_output_root(repo, requested)
+    bundle = Path(bundle_root).resolve()
+    if target == bundle or target.is_relative_to(bundle) or bundle.is_relative_to(target):
+        raise ValueError('Private symbol output must be outside the bundle root.')
+    return target
+
+
+def verify_private_symbol_root(root):
+    if os.name == 'posix':
+        info = root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o700):
+            raise RuntimeError('Private symbol output must be an owned mode-0700 directory.')
+
+
+def measure_private_binary(script, executable, pdb, output):
+    subprocess.run([
+        require_pwsh74(), '-NoProfile', '-NonInteractive', '-File', str(script),
+        '-ExecutablePath', str(executable), '-PdbPath', str(pdb),
+        '-OutputPath', str(output), '-IdentityOnly',
+    ], check=True, env=host_tools.child_environment())
+    measurement = read_json_strict(output, maximum_bytes=1024 * 1024)
+    if (measurement.get('schema_version') != 1 or
+            measurement.get('executable', {}).get('sha256') != sha256(executable) or
+            measurement.get('debug_symbols', {}).get('pdb_sha256') != sha256(pdb)):
+        raise RuntimeError('Private symbol measurement differs from copied EXE/PDB bytes.')
+    return measurement
+
+
 def prepare_transport(repo, args):
     if args.ssh_host:
         pwsh = require_pwsh74()
@@ -591,6 +651,8 @@ def controller_task_arguments(root, args, path_converter=str):
     arguments = ['-TaskKind', args.task_kind]
     if getattr(args, 'profile_refresh_stages', False):
         arguments += ['-RefreshProfileOrder', args.refresh_profile_order]
+    if getattr(args, 'profile_runtime_model', False):
+        arguments += ['-ProfileRuntimeModel']
     if getattr(args, 'focused_icon_tests', False):
         arguments += ['-FocusedIconTests']
         if args.focused_icon_case:
@@ -649,6 +711,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         *controller_task_arguments(root, args),
     ]
     if (getattr(args, 'profile_refresh_stages', False) or
+            getattr(args, 'profile_runtime_model', False) or
             getattr(args, 'focused_icon_tests', False) or
             getattr(args, 'focused_refresh_tests', False) or
             getattr(args, 'virtual_execution_count', None) is not None):
@@ -677,6 +740,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
         + (' -SuiteTimeoutSeconds ' + str(args.test_timeout_seconds)
            if (getattr(args, 'profile_refresh_stages', False) or
+               getattr(args, 'profile_runtime_model', False) or
                getattr(args, 'focused_icon_tests', False) or
                getattr(args, 'focused_refresh_tests', False) or
                getattr(args, 'virtual_execution_count', None) is not None) else '')
@@ -911,6 +975,7 @@ def run_managed_controller(root, args, command_for_desktop, *, output, cwd,
 def run_controller(root, args, defaults=None, pwsh=None):
     output = root if args.task_kind == 'core' else root / 'observer-output'
     suite_timeout = (args.test_timeout_seconds if (getattr(args, 'profile_refresh_stages', False) or
+                            getattr(args, 'profile_runtime_model', False) or
                             getattr(args, 'focused_icon_tests', False) or
                             getattr(args, 'focused_refresh_tests', False) or
                             getattr(args, 'virtual_execution_count', None) is not None)
@@ -926,6 +991,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
         raise subprocess.CalledProcessError(completed.returncode, completed.args)
     if (desktop and args.task_kind == 'core' and
             not getattr(args, 'profile_refresh_stages', False) and
+            not getattr(args, 'profile_runtime_model', False) and
             not getattr(args, 'focused_icon_tests', False) and
             not getattr(args, 'focused_refresh_tests', False) and
             getattr(args, 'virtual_execution_count', None) is None):
@@ -2337,10 +2403,14 @@ def build_candidate_bundle(repo, root, args, tooling=None):
 
 
 def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_profile=None,
-                 focused_case=None, focused_kind='icon', virtual_execution=None):
+                 focused_case=None, focused_kind='icon', virtual_execution=None,
+                 runtime_model=False, private_symbol_output=None):
     repo = Path(repo)
     root = Path(root)
-    if (refresh_profile and focused_profile is not None) or focused_profile not in (None, 'debug', 'release'):
+    private_root = (resolve_private_symbol_output(repo, root, private_symbol_output)
+                    if private_symbol_output is not None else None)
+    if (refresh_profile and focused_profile is not None) or focused_profile not in (None, 'debug', 'release') or \
+            (runtime_model and (refresh_profile or focused_profile is not None or virtual_execution is not None)):
         raise ValueError('A source-built bundle accepts one fixed native selector.')
     if focused_kind not in ('icon', 'refresh'):
         raise ValueError('Unknown focused native test selector.')
@@ -2371,8 +2441,8 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         target_root = Path(target_directory).resolve(strict=True)
         env['CARGO_TARGET_DIR'] = str(target_root)
         command = ['cargo', 'xwin', 'test']
-        if refresh_profile or focused_profile or virtual_execution:
-            if refresh_profile or focused_profile == 'release' or virtual_execution:
+        if refresh_profile or runtime_model or focused_profile or virtual_execution:
+            if refresh_profile or runtime_model or focused_profile == 'release' or virtual_execution:
                 command.append('--release')
             command += ['-p', 'darknamer-app']
             command += ['--test', 'rename_windows_backend'] if virtual_execution else ['--lib']
@@ -2385,7 +2455,7 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
             subprocess.run(command, cwd=repo, env=env, stdout=stream, check=True)
         with messages_path.open() as stream:
             artifacts = test_artifacts(stream)
-        if (refresh_profile or focused_profile or virtual_execution) and (len(artifacts) != 1 or artifacts[0]['name'] !=
+        if (refresh_profile or runtime_model or focused_profile or virtual_execution) and (len(artifacts) != 1 or artifacts[0]['name'] !=
                 ('rename_windows_backend' if virtual_execution else 'darknamer_app')):
             raise RuntimeError('Selected native diagnostic must produce one expected test binary.')
         for row in artifacts:
@@ -2410,6 +2480,23 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
             **{'script:' + name: repo / 'scripts' / name for name in script_names},
         }
         frozen = {name: sha256(path) for name, path in sources.items()}
+        private_pairs = []
+        if private_root is not None:
+            selected = [('application', application)] + [
+                ('test:' + row['file'], Path(row['path'])) for row in artifacts]
+            for role, executable in selected:
+                pdb_path = executable.with_suffix('.pdb')
+                if not pdb_path.is_file():
+                    raise RuntimeError(role + ' PDB is missing from the fresh Cargo target directory.')
+                pdb = build_output_file(target_root, pdb_path, role + ' PDB')
+                private_pairs.append((role, executable, pdb))
+            private_root.mkdir(mode=0o700)
+            verify_private_symbol_root(private_root)
+            for role, executable, pdb in private_pairs:
+                private_exe = private_root / executable.name
+                private_pdb = private_root / pdb.name
+                copy_frozen_file(executable, private_exe, sha256(executable), role + ' private executable')
+                copy_frozen_file(pdb, private_pdb, sha256(pdb), role + ' private PDB')
         bundle_files = {}
         for row in artifacts:
             key = 'test:' + row['file']
@@ -2445,7 +2532,13 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
             'sha256': frozen['script:windows-vm-guest.ps1'],
         },
     }
-    if refresh_profile:
+    if runtime_model:
+        manifest['diagnostic'] = {
+            'kind': RUNTIME_MODEL_KIND, 'test_profile': 'release',
+            'test_name': RUNTIME_MODEL_TEST, 'scope': RUNTIME_MODEL_SCOPE,
+            'schema_version': 1, 'records': 183,
+        }
+    elif refresh_profile:
         manifest['diagnostic'] = {
             'kind': 'profile-refresh-stages', 'test_profile': 'release',
             'test_name': REFRESH_PROFILE_TEST,
@@ -2470,6 +2563,43 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
             'variant': 'baseline', 'topology': 'same-parent',
         }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
+    if private_root is not None:
+        measurements = []
+        measure_script = repo / 'scripts' / 'measure-windows-binary.ps1'
+        measure_digest = sha256(measure_script)
+        for role, executable, pdb in private_pairs:
+            measurement_file = private_root / (executable.name + '.measurement.json')
+            measurement = measure_private_binary(
+                measure_script, private_root / executable.name,
+                private_root / pdb.name, measurement_file)
+            expected = (manifest['application']['sha256'] if role == 'application' else
+                        next(row['sha256'] for row in manifest['test_binaries']
+                             if role == 'test:' + row['file']))
+            if measurement['executable']['sha256'] != expected:
+                raise RuntimeError('Private executable differs from source-built bundle.')
+            measurements.append({'role': role, 'exe': executable.name, 'pdb': pdb.name,
+                                 'measurement': measurement_file.name,
+                                 'executable_sha256': expected,
+                                 'pdb_sha256': measurement['debug_symbols']['pdb_sha256'],
+                                 'codeview_guid': measurement['debug_symbols']['guid'],
+                                 'codeview_age': measurement['debug_symbols']['age']})
+        if (sha256(measure_script) != measure_digest or
+                subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() != source_sha or
+                subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip()):
+            raise RuntimeError('Checkout or measurement script changed during private symbol measurement.')
+        verify_private_symbol_root(private_root)
+        receipt = {
+            'schema_version': 1, 'source_sha': source_sha, 'source_state': 'clean',
+            'build_kind': 'cargo-xwin-source-built',
+            'target': TARGET, 'application_profile': 'release',
+            'test_profile': ('release' if refresh_profile or runtime_model or focused_profile == 'release' else 'debug'),
+            'cargo_lock_sha256': frozen['cargo_lock'],
+            'rust_toolchain_sha256': sha256(repo / 'rust-toolchain.toml'),
+            'measurement_script_sha256': measure_digest,
+            'bundle_manifest_sha256': sha256(root / 'bundle.json'),
+            'binaries': measurements,
+        }
+        (private_root / 'private-symbols.json').write_text(json.dumps(receipt, indent=2) + '\n')
     if tooling is not None:
         stage_verified_tooling(tooling, root)
     return manifest
@@ -2703,6 +2833,198 @@ def verify_focused_refresh_result(root, manifest, result, transport_kind,
                                   expected_vm_id, profile_sha256):
     return verify_focused_native_result(root, manifest, result, transport_kind,
                                         expected_vm_id, profile_sha256, kind='refresh')
+
+
+def runtime_model_case_inventory():
+    cases = []
+    for rows in (100, 1000, 10000):
+        for repetition in (1, 2, 3):
+            for distribution in ('unique', 'collision_pairs', 'large_collision_group'):
+                cases.append(('preview_full', distribution, rows, repetition, None))
+            for distribution in ('unique_to_unique', 'enter_collision',
+                                 'leave_collision', 'unchanged_windows_key',
+                                 'large_group_leave'):
+                cases.append(('preview_single_edit', distribution, rows, repetition, None))
+            for distribution in ('sorted', 'reverse', 'shuffled', 'equal_keys'):
+                cases.append(('sort_model', distribution, rows, repetition, 'none'))
+            for distribution in ('sorted', 'reverse', 'shuffled', 'equal_keys'):
+                for selection in (('none', 'sparse', 'broad') if rows == 10000 and
+                                  distribution == 'shuffled' else ('none', 'sparse')):
+                    cases.append(('sort_command', distribution, rows, repetition, selection))
+    assert len(cases) == 183
+    return cases
+
+
+def verify_runtime_model_records(output):
+    base = {'kind', 'schema_version', 'scope', 'icon_worker_attached',
+            'operation', 'distribution', 'rows', 'repetition', 'status',
+            'functional_checks'}
+    fields = {
+        'preview_full': ({'preview_cache_ns', 'affected_rows', 'changed_rows', 'blocker_rows'},
+                         {'preview_cache_ns', 'affected_rows', 'changed_rows', 'blocker_rows'}),
+        'preview_single_edit': ({'model_edit_ns', 'preview_cache_ns', 'affected_rows',
+                                 'changed_rows', 'blocker_rows'},
+                                {'model_edit_ns', 'preview_cache_ns', 'affected_rows',
+                                 'changed_rows', 'blocker_rows'}),
+        'sort_model': ({'sort_inclusive_ns', 'compare_nested_ns', 'comparisons',
+                        'selection', 'changed'},
+                       {'sort_inclusive_ns', 'compare_nested_ns', 'comparisons'}),
+        'sort_command': ({'selection', 'selected_rows', 'snapshot_ns',
+                          'sort_inclusive_ns', 'compare_nested_ns', 'comparisons',
+                          'token_remap_ns', 'native_refresh_ns',
+                          'selection_restore_ns', 'post_controls_ns', 'changed'},
+                         {'selected_rows', 'snapshot_ns', 'sort_inclusive_ns',
+                          'compare_nested_ns', 'comparisons', 'token_remap_ns',
+                          'native_refresh_ns', 'selection_restore_ns',
+                          'post_controls_ns'}),
+    }
+    def unique_object(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError('Runtime model record has duplicate JSON field: ' + name)
+            result[name] = value
+        return result
+    prefix = 'test ' + RUNTIME_MODEL_TEST + ' ... '
+    records = []
+    for line in output.splitlines():
+        payload = line[len(prefix):] if line.startswith(prefix) else line
+        if not payload.startswith('{'):
+            continue
+        try:
+            record = json.loads(payload, object_pairs_hook=unique_object)
+        except json.JSONDecodeError as error:
+            raise ValueError('Runtime model emitted malformed JSON.') from error
+        if not isinstance(record, dict) or record.get('kind') != RUNTIME_MODEL_KIND:
+            raise ValueError('Runtime model emitted an unexpected JSON record.')
+        operation = record.get('operation')
+        if operation not in fields:
+            raise ValueError('Runtime model emitted an unknown operation.')
+        extra, numbers = fields[operation]
+        if (set(record) != base | extra or
+                type(record.get('schema_version')) is not int or
+                record['schema_version'] != 1 or
+                record.get('scope') != RUNTIME_MODEL_SCOPE or
+                record.get('icon_worker_attached') is not False or
+                record.get('status') != 'pass' or
+                type(record.get('rows')) is not int or
+                type(record.get('repetition')) is not int or
+                type(record.get('functional_checks')) is not int or
+                record['functional_checks'] <= 0 or
+                any(type(record.get(key)) is not int or record[key] < 0
+                    for key in numbers) or
+                (operation.startswith('sort') and type(record.get('changed')) is not bool)):
+            raise ValueError('Runtime model record has invalid schema or counters.')
+        rows, distribution = record['rows'], record['distribution']
+        group = min(rows // 10, 1000)
+        if operation == 'preview_full':
+            expected_blockers = (0 if distribution == 'unique' else
+                                 rows if distribution == 'collision_pairs' else group)
+            valid = (record['affected_rows'] == rows and
+                     record['changed_rows'] == rows and
+                     record['blocker_rows'] == expected_blockers and
+                     record['functional_checks'] == rows)
+        elif operation == 'preview_single_edit':
+            affected = (2 if distribution in ('enter_collision', 'leave_collision') else
+                        group if distribution == 'large_group_leave' else 1)
+            changed = (2 if distribution == 'leave_collision' else
+                       group if distribution == 'large_group_leave' else 1)
+            blockers = (1 if distribution == 'enter_collision' else
+                        group - 1 if distribution == 'large_group_leave' else 0)
+            valid = (record['affected_rows'] == affected and
+                     record['changed_rows'] == changed and
+                     record['blocker_rows'] == blockers and
+                     record['functional_checks'] == rows)
+        else:
+            valid = (record['compare_nested_ns'] <= record['sort_inclusive_ns'] and
+                     record['changed'] is (distribution not in ('sorted', 'equal_keys')))
+            if operation == 'sort_model':
+                valid = valid and record['selection'] == 'none' and record['functional_checks'] == rows
+            else:
+                selected = (0 if record['selection'] == 'none' else
+                            3 if record['selection'] == 'sparse' else rows // 2)
+                valid = valid and record['selected_rows'] == selected and \
+                    record['functional_checks'] == rows + selected + 5
+                if record['changed']:
+                    valid = valid and record['native_refresh_ns'] > 0
+        if not valid:
+            raise ValueError('Runtime model functional cardinality or nested timing is invalid.')
+        records.append(record)
+    expected = runtime_model_case_inventory()
+    observed = [(item['operation'], item['distribution'], item['rows'],
+                 item['repetition'], item.get('selection')) for item in records]
+    if observed != expected:
+        raise ValueError('Runtime model inventory is missing, duplicated, extra, or out of order.')
+    return records
+
+
+def verify_runtime_model_result(root, manifest, result, transport_kind,
+                                expected_vm_id, profile_sha256):
+    root = Path(root)
+    diagnostic = {'kind': RUNTIME_MODEL_KIND, 'test_profile': 'release',
+                  'test_name': RUNTIME_MODEL_TEST, 'scope': RUNTIME_MODEL_SCOPE,
+                  'schema_version': 1, 'records': 183}
+    if (manifest.get('diagnostic') != diagnostic or
+            len(manifest.get('test_binaries', [])) != 1 or
+            manifest['test_binaries'][0].get('name') != 'darknamer_app'):
+        raise ValueError('Runtime model source-built bundle selection is invalid.')
+    if (type(result.get('schema_version')) is not int or result['schema_version'] != 1 or
+            any(result.get(key) != manifest[key] for key in
+                ('source_sha', 'source_state', 'target')) or
+            result.get('diagnostic') != diagnostic or result.get('gui') is not None or
+            result.get('status') != 'passed'):
+        raise ValueError('Runtime model result selection is invalid.')
+    rows = result.get('tests')
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError('Runtime model requires one exact native test result.')
+    row = rows[0]
+    binary = manifest['test_binaries'][0]
+    if (row.get('file') != binary['file'] or row.get('sha256') != binary['sha256'] or
+            row.get('test_name') != RUNTIME_MODEL_TEST or row.get('status') != 'passed' or
+            row.get('job_cleanup') is not True or type(row.get('exit_code')) is not int or
+            row['exit_code'] != 0 or row.get('failure_reason') is not None or
+            any(type(row.get(key)) is not int for key in ('passed', 'failed', 'ignored')) or
+            [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
+        raise ValueError('Runtime model test status, counts, or binary identity is invalid.')
+    verify_virtual_execution_job(row, result.get('process_job_cleanup'))
+    for record in (binary, manifest['application'], manifest['runner']):
+        checked_artifact(root, record)
+    output_bytes = 0
+    for channel in ('stdout', 'stderr'):
+        record = row.get(channel)
+        if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
+                record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES or
+                output_bytes > REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES - record['bytes']):
+            raise ValueError('Runtime model output is missing or exceeds its bound.')
+        path = checked_artifact(root, record)
+        if path.stat().st_size != record['bytes']:
+            raise ValueError('Runtime model transcript size differs from its record.')
+        output_bytes += record['bytes']
+    output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
+    summary = re.findall(
+        r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; '
+        r'\d+ measured; (\d+) filtered out;', output, re.MULTILINE)
+    names = re.findall(r'(?m)^test (\S+) \.\.\. ', output)
+    if (len(summary) != 1 or summary[0][:4] != ('ok', '1', '0', '0') or
+            int(summary[0][4]) < 1 or names != [RUNTIME_MODEL_TEST] or
+            re.search(r'(?m)^ok\r?$', output) is None):
+        raise ValueError('Runtime model did not run the exact ignored test.')
+    records = verify_runtime_model_records(output)
+    transport = result.get('transport')
+    if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
+            transport.get('status') != 'collected' or transport.get('guest_cleanup') is not True):
+        raise ValueError('Runtime model transport did not finish cleanly.')
+    verify_controller_cleanup(transport.get('raw_cleanup'), profile_id=V2_PROFILE_ID,
+                              profile_sha256=profile_sha256)
+    verify_current_anchor_from_bundle(root, manifest, transport)
+    _verify_v2_result_owned_binding(result, transport)
+    verify_transport_binding(transport, transport_kind, expected_vm_id)
+    return {'status': 'passed', 'source_sha': manifest['source_sha'],
+            'test_binary_sha256': binary['sha256'], 'test_profile': 'release',
+            'stdout_file': row['stdout']['file'], 'stdout_sha256': row['stdout']['sha256'],
+            'stderr_sha256': row['stderr']['sha256'], 'output_bytes': output_bytes,
+            'filtered_out': int(summary[0][4]), 'records': len(records),
+            'samples': records}
 
 
 def verify_virtual_execution_lines(output, *, source_sha, count, iteration):
@@ -2985,7 +3307,8 @@ def run_refresh_profile(repo, args, tooling):
     root = resolve_prepare_output_root(repo, root)
     root.mkdir(mode=0o700)
     prepared = root / 'bundle'
-    manifest = build_bundle(repo, prepared, tooling, refresh_profile=True)
+    manifest = build_bundle(repo, prepared, tooling, refresh_profile=True,
+                            private_symbol_output=args.private_symbol_output)
     frozen = {path.relative_to(prepared): sha256(path) for path in prepared.rglob('*')
               if path.is_file() and not path.is_symlink()}
     if any(path.is_symlink() for path in prepared.rglob('*')):
@@ -3202,7 +3525,8 @@ def main(repo, argv=None, tooling=None):
     if args.prepare_only:
         root = resolve_prepare_output_root(repo, args.output)
         manifest = (build_candidate_bundle(repo, root, args, tooling) if args.candidate_mode
-                    else build_bundle(repo, root, tooling))
+                    else build_bundle(repo, root, tooling,
+                                      private_symbol_output=args.private_symbol_output))
         application = application_record(manifest)
         print(json.dumps({
             'status': 'prepared',
@@ -3215,6 +3539,30 @@ def main(repo, argv=None, tooling=None):
         return 0
     if args.profile_refresh_stages:
         return run_refresh_profile(repo, args, tooling)
+    if args.profile_runtime_model:
+        root, defaults, pwsh = prepare_transport(repo, args)
+        manifest = build_bundle(repo, root, tooling, runtime_model=True,
+                                private_symbol_output=args.private_symbol_output)
+        args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
+        print('Executing fixed Windows model baseline; evidence=' + str(root), flush=True)
+        transport_ok = True
+        try:
+            run_controller(root, args, defaults, pwsh)
+        except subprocess.CalledProcessError:
+            transport_ok = False
+        result_path = root / 'result.json'
+        if not result_path.is_file():
+            raise RuntimeError('Runtime model baseline returned no result; inspect retained evidence.')
+        result = read_json_strict(result_path, maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
+        observed = verify_runtime_model_result(
+            root, manifest, result, 'ssh' if args.ssh_host else 'powershell_direct',
+            args.expected_vm_id, args.acceptance_profile_sha256)
+        if not transport_ok:
+            raise RuntimeError('Runtime model controller failed after collection; inspect retained transport evidence.')
+        (root / 'validation-result.json').write_text(json.dumps(observed, indent=2) + '\n')
+        print('PASS: runtime model baseline; ' +
+              str(observed['records']) + ' verified records', flush=True)
+        return 0
     if args.virtual_execution_count is not None:
         root, defaults, pwsh = prepare_transport(repo, args)
         manifest = build_bundle(
@@ -3243,7 +3591,8 @@ def main(repo, argv=None, tooling=None):
         root, defaults, pwsh = prepare_transport(repo, args)
         manifest = build_bundle(repo, root, tooling,
                                 focused_profile=args.native_test_profile,
-                                focused_case=focused_case, focused_kind=focused_kind)
+                                focused_case=focused_case, focused_kind=focused_kind,
+                                private_symbol_output=args.private_symbol_output)
         args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
         print('Executing fixed ' + args.native_test_profile + ' ' + focused_kind + ' ' +
               (focused_case or 'suite') +
@@ -3267,7 +3616,8 @@ def main(repo, argv=None, tooling=None):
         return 0 if transport_ok and observed['status'] == 'passed' else 1
     root, defaults, pwsh = prepare_transport(repo, args)
     manifest = (build_candidate_bundle(repo, root, args, tooling) if args.candidate_mode
-                else build_bundle(repo, root, tooling))
+                else build_bundle(repo, root, tooling,
+                                  private_symbol_output=args.private_symbol_output))
     args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
     observer_inputs = prepare_observer_inputs(root, manifest, args)
     if args.candidate_mode:
