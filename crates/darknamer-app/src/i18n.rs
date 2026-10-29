@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 
 #[cfg(windows)]
 pub(crate) mod native_ui;
-#[cfg(windows)]
 pub(crate) mod runtime;
 
 pub(crate) const LANGUAGE_SYSTEM: u16 = 0x9020;

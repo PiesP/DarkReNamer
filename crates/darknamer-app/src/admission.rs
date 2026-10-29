@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 use darknamer_core::{LegacyListItem, LegacyText};
 
+use crate::i18n::runtime::{
+    admission_added, admission_added_skipped, admission_codes, admission_summary,
+};
 use crate::rename::EntryIdentity;
 
 /// Hard limit applied before inspecting further candidate metadata.
@@ -116,7 +119,7 @@ pub fn read_bounded_import(mut reader: impl Read) -> io::Result<Vec<u8>> {
     if bytes.len() > MAX_IMPORT_BYTES {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "import text exceeds byte limit",
+            crate::i18n::runtime::Text::ImportTextLimit.get(),
         ))
     } else {
         Ok(bytes)
@@ -292,7 +295,7 @@ pub enum AdmissionReadError {
 
 impl fmt::Display for AdmissionCancelled {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("source admission was cancelled")
+        formatter.write_str(crate::i18n::runtime::Text::AdmissionCancelled.get())
     }
 }
 
@@ -301,7 +304,9 @@ impl std::error::Error for AdmissionCancelled {}
 impl fmt::Display for AdmissionReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("directory admission was cancelled"),
+            Self::Cancelled => {
+                formatter.write_str(crate::i18n::runtime::Text::DirectoryAdmissionCancelled.get())
+            }
             Self::Adapter(error) => write!(
                 formatter,
                 "directory admission {:?} failed with code {:?}",
@@ -403,13 +408,13 @@ impl AdmissionReport {
     #[must_use]
     pub fn status_summary_korean(&self, appended: usize) -> String {
         if self.issues.is_empty() {
-            format!("파일 {appended}개를 추가했습니다.")
+            admission_added(appended)
         } else {
-            format!("파일 {appended}개 추가 · {}개 제외", self.issues.len())
+            admission_added_skipped(appended, self.issues.len())
         }
     }
 
-    /// Returns the detailed Korean summary used by the exclusion dialog.
+    /// Returns the detailed summary used by the exclusion dialog.
     #[must_use]
     pub fn summary_korean(&self, appended: usize) -> String {
         let count = |kind| {
@@ -418,8 +423,7 @@ impl AdmissionReport {
                 .filter(|issue| issue.kind == kind)
                 .count()
         };
-        let mut summary = format!(
-            "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 개수 한도 {}, 반복폴더 {}, 깊이 {}, 경로 용량 {})",
+        let mut summary = admission_summary(
             appended,
             self.issues.len(),
             count(AdmissionIssueKind::RelativePath),
@@ -442,7 +446,7 @@ impl AdmissionReport {
                 .map(|(operation, code)| format!("{operation:?}:{code}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            summary.push_str(&format!(" 코드 {codes}"));
+            summary.push_str(&admission_codes(&codes));
         }
         summary
     }

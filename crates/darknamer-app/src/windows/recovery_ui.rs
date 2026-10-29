@@ -11,6 +11,7 @@ use crate::DISCARD_CONFIRM_BUTTON_ID;
 use crate::DestructivePromptChoice;
 use crate::RECOVER_CONFIRM_BUTTON_ID;
 use crate::destructive_prompt_choice;
+use crate::i18n::runtime::{self as rt, Text as RT};
 use crate::rename::FileJournal;
 use crate::rename::JournalOpenFailure;
 use crate::rename::RecoveryOutcome;
@@ -37,19 +38,18 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
         return;
     }
     let detail = state.active_journal.as_ref().map_or_else(
-        || "보존된 active 저널 정보가 없습니다.".to_owned(),
+        || RT::NoRetainedActive.get().to_owned(),
         |journal| {
-            format!(
-                "저널: {}\n크기: {} bytes\n레코드: {}개",
-                journal.path().display(),
+            rt::journal_details(
+                &journal.path().display(),
                 journal.byte_len(),
-                journal.records().len()
+                journal.records().len(),
             )
         },
     );
     let buttons = [TaskDialogButtonSpec {
         id: RECOVER_CONFIRM_BUTTON_ID,
-        text: "이전 변경 복구",
+        text: RT::RecoverPrevious.get(),
     }];
     state.mutation_locked = true;
     state.confirmation_pending = true;
@@ -59,9 +59,9 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
     let answer = task_dialog(
         owner,
         TaskDialogSpec {
-            title: "DarkReNamer - 이전 변경 복구 확인",
-            main_instruction: "이전 실행에서 중단된 이름 변경을 복구하시겠습니까?",
-            content: "복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.",
+            title: RT::RecoveryConfirmTitle.get(),
+            main_instruction: RT::RecoveryConfirmQuestion.get(),
+            content: RT::RecoveryConfirmDetail.get(),
             expanded_information: Some(&detail),
             buttons: &buttons,
             warning: true,
@@ -88,8 +88,8 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
             drop(state_lease);
             message(
                 owner,
-                &format!("안전 확인 대화상자를 열지 못해 복구를 시작하지 않았습니다: {error}"),
-                "DarkReNamer - 복구 보류",
+                &rt::recovery_dialog_failed(&error),
+                RT::RecoveryDeferredTitle.get(),
             );
             return;
         }
@@ -103,8 +103,8 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
         drop(state_lease);
         message(
             owner,
-            "확인 중 복구 상태가 변경되어 어떤 파일도 변경하지 않았습니다.",
-            "DarkReNamer - 복구 거부",
+            RT::RecoveryStateChanged.get(),
+            RT::RecoveryRejectedTitle.get(),
         );
         return;
     }
@@ -113,9 +113,9 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
     update_controls(state);
     drop(state_lease);
     let caption = if presentation.completed {
-        "DarkReNamer - 복구 완료"
+        RT::RecoveryCompletedTitle.get()
     } else {
-        "DarkReNamer - 복구 확인 필요"
+        RT::RecoveryNeedsReviewTitle.get()
     };
     message(owner, &presentation.status, caption);
 }
@@ -123,13 +123,13 @@ pub(super) fn confirm_startup_recovery(owner: HWND) {
 pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRecoveryPresentation {
     if !state.can_confirm_active_recovery() {
         return ActiveRecoveryPresentation {
-            status: "현재 상태에서는 active 저널 복구를 시작할 수 없습니다.".to_owned(),
+            status: RT::RecoveryCannotStart.get().to_owned(),
             completed: false,
         };
     }
     let Some(mut journal) = state.active_journal.take() else {
         return ActiveRecoveryPresentation {
-            status: "복구할 active 저널이 없습니다.".to_owned(),
+            status: RT::NoActiveToRecover.get().to_owned(),
             completed: false,
         };
     };
@@ -140,16 +140,16 @@ pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRe
             let cleanup_failed = cleanup.error.is_some();
             let recovered = matches!(outcome, RecoveryOutcome::Recovered { .. });
             let mut status = if recovered && cleanup_failed {
-                "이전 변경을 검증하고 복구했지만 저널 정리가 완료되지 않았습니다.".to_owned()
+                RT::RecoveredButCleanupFailed.get().to_owned()
             } else if recovered {
-                "이전 변경을 안전하게 복구하고 저널을 정리했습니다.".to_owned()
+                RT::RecoveredAndCleaned.get().to_owned()
             } else if cleanup_failed {
-                "파일 상태를 안전하게 확인했지만 완료된 저널을 정리하지 못했습니다.".to_owned()
+                RT::VerifiedButCleanupFailed.get().to_owned()
             } else {
-                "파일 상태를 안전하게 확인하고 완료된 저널을 정리했습니다.".to_owned()
+                RT::VerifiedAndCleaned.get().to_owned()
             };
             if let Some(error) = cleanup.error {
-                status.push_str(&format!(" 저널 삭제 실패: {error}"));
+                status.push_str(&rt::journal_cleanup_failed(&error));
             }
             state.active_journal = cleanup.retained;
             state.recovery_locked = cleanup_failed
@@ -168,9 +168,7 @@ pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRe
             }
         }
         RecoveryOutcome::Blocked { reason, .. } => {
-            let status = format!(
-                "현재 파일 상태와 저널을 대조한 결과 복구가 차단되었습니다: {reason:?}. active 저널을 보존하고 새 적용을 잠급니다."
-            );
+            let status = rt::recovery_blocked(&reason);
             state.active_journal = Some(journal);
             state.recovery_locked = true;
             state.ui_status.set_recovery(status.clone());
@@ -180,9 +178,7 @@ pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRe
             }
         }
         RecoveryOutcome::RecoveryRequired { reason, .. } => {
-            let status = format!(
-                "복구를 완료하지 못했습니다: {reason:?}. active 저널을 보존하고 새 적용을 잠급니다."
-            );
+            let status = rt::recovery_incomplete(&reason);
             state.active_journal = Some(journal);
             state.recovery_locked = true;
             state.ui_status.set_recovery(status.clone());
@@ -269,8 +265,8 @@ pub(super) fn prepare_recovery_export(
     if !state.can_export_recovery_journal() {
         message(
             owner,
-            "보존된 저널 핸들이 없어 원본을 안전하게 복사할 수 없습니다.",
-            "DarkReNamer - 진단 내보내기 불가",
+            RT::NoRetainedHandle.get(),
+            RT::RecoveryExportUnavailableTitle.get(),
         );
         return None;
     }
@@ -311,9 +307,7 @@ pub(super) fn run_prepared_recovery_export(
             disposition,
             PreparedTaskDialogDisposition::Accepted | PreparedTaskDialogDisposition::Rejected
         ) {
-            state.set_transient_status(
-                "진단 내보내기 창이 열린 동안 복구 상태가 바뀌어 원본을 복사하지 않았습니다.",
-            );
+            state.set_transient_status(RT::RecoveryExportStateChanged.get());
         }
         return;
     }
@@ -350,9 +344,7 @@ fn perform_recovery_export(
         let role = blocked.role();
         let Some(evidence) = blocked.evidence_mut() else {
             failures = failures.saturating_add(1);
-            results.push(format!(
-                "건너뜀: {role:?} 저널은 retained handle을 확보하지 못했습니다."
-            ));
+            results.push(rt::export_skipped_no_handle(&role));
             continue;
         };
         let name = match role {
@@ -368,14 +360,14 @@ fn perform_recovery_export(
             Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
             Err(error) => {
                 failures = failures.saturating_add(1);
-                results.push(format!("실패: {} ({error})", path.display()));
+                results.push(rt::export_failed(&path.display(), &error));
             }
         }
     }
     let caption = if failures == 0 {
-        "DarkReNamer - 진단 내보내기 완료"
+        RT::RecoveryExportCompleteTitle.get()
     } else {
-        "DarkReNamer - 진단 내보내기 일부 실패"
+        RT::RecoveryExportPartialTitle.get()
     };
     RecoveryExportPresentation {
         text: results.join("\n"),
@@ -399,7 +391,7 @@ pub(super) fn export_valid_journal(
         Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
         Err(error) => {
             *failures = failures.saturating_add(1);
-            results.push(format!("실패: {} ({error})", path.display()));
+            results.push(rt::export_failed(&path.display(), &error));
         }
     }
 }
@@ -419,8 +411,8 @@ pub(super) fn prepare_discard_staged_journal(
     if !state.can_discard_staged_intent() {
         message(
             owner,
-            "현재 상태에서는 활성화 전 저널을 폐기할 수 없습니다. 복구 상태를 다시 확인해 주세요.",
-            "DarkReNamer - 폐기 거부",
+            RT::DiscardNotAllowed.get(),
+            RT::DiscardRejectedTitle.get(),
         );
         return None;
     }
@@ -428,26 +420,24 @@ pub(super) fn prepare_discard_staged_journal(
     let journal_path = staged.path().to_path_buf();
     let journal_bytes = staged.byte_len();
     let journal_records = staged.records().to_vec();
-    let detail = format!(
-        "저널: {}\n크기: {} bytes\n레코드: {}개",
-        journal_path.display(),
+    let detail = rt::journal_details(
+        &journal_path.display(),
         journal_bytes,
-        journal_records.len()
+        journal_records.len(),
     );
     let session = begin_prepared_task_dialog(state)?;
     update_controls(state);
     Some(PreparedDiscardTaskDialog {
         session,
         spec: PreparedTaskDialogSpec {
-            title: "DarkReNamer - 활성화 전 계획 폐기".to_owned(),
-            main_instruction: "활성화 전 실행 계획을 폐기하시겠습니까?".to_owned(),
-            content: "파일 변경은 시작되지 않았습니다. 폐기하면 새 적용을 다시 사용할 수 있습니다."
-                .to_owned(),
+            title: RT::DiscardConfirmTitle.get().to_owned(),
+            main_instruction: RT::DiscardConfirmQuestion.get().to_owned(),
+            content: RT::DiscardConfirmDetail.get().to_owned(),
             expanded_information: Some(detail),
             text_details: None,
             buttons: vec![PreparedTaskDialogButton {
                 id: DISCARD_CONFIRM_BUTTON_ID,
-                text: "계획 폐기".to_owned(),
+                text: RT::DiscardButton.get().to_owned(),
             }],
             warning: true,
         },
@@ -484,8 +474,8 @@ pub(super) fn run_prepared_discard_task_dialog(
         if disposition == PreparedTaskDialogDisposition::Rejected {
             message(
                 owner,
-                "확인 중 복구 상태가 변경되어 폐기를 중단했습니다.",
-                "DarkReNamer - 폐기 거부",
+                RT::DiscardStateChanged.get(),
+                RT::DiscardRejectedTitle.get(),
             );
         }
         return;
@@ -495,8 +485,8 @@ pub(super) fn run_prepared_discard_task_dialog(
         Err(error) => {
             message(
                 owner,
-                &format!("안전 확인 대화상자를 열지 못해 폐기를 취소했습니다: {error}"),
-                "DarkReNamer - 폐기 취소",
+                &rt::discard_dialog_failed(&error),
+                RT::DiscardCancelledTitle.get(),
             );
             return;
         }
@@ -514,13 +504,17 @@ pub(super) fn run_prepared_discard_task_dialog(
     if !state.can_discard_staged_intent() || !journal_matches {
         message(
             owner,
-            "확인 중 복구 상태가 변경되어 폐기를 중단했습니다.",
-            "DarkReNamer - 폐기 거부",
+            RT::DiscardStateChanged.get(),
+            RT::DiscardRejectedTitle.get(),
         );
         return;
     }
     let Some(mut staged) = state.staged_journal.take() else {
-        message(owner, "폐기할 저널이 없습니다.", "DarkReNamer - 폐기 거부");
+        message(
+            owner,
+            RT::NoJournalToDiscard.get(),
+            RT::DiscardRejectedTitle.get(),
+        );
         return;
     };
     if let Err(error) = staged.mark_unactivated_intent_delete() {
@@ -528,8 +522,8 @@ pub(super) fn run_prepared_discard_task_dialog(
         state.recovery_locked = true;
         message(
             owner,
-            &format!("활성화 전 저널을 폐기하지 못했습니다: {error}"),
-            "DarkReNamer - 폐기 실패",
+            &rt::discard_journal_failed(&error),
+            RT::DiscardFailedTitle.get(),
         );
         update_controls(state);
         return;
@@ -539,18 +533,16 @@ pub(super) fn run_prepared_discard_task_dialog(
     if state.recovery_locked {
         message(
             owner,
-            "저널 폐기 후 다른 복구 상태가 관찰되어 적용 잠금을 유지합니다.",
-            "DarkReNamer - 복구 상태 확인 필요",
+            RT::OtherRecoveryAfterDiscard.get(),
+            RT::RecoveryStateReviewTitle.get(),
         );
     } else {
         state.clear_recovery_status();
-        state.set_transient_status(
-            "활성화 전 실행 계획을 폐기했습니다. 파일은 변경되지 않았습니다.",
-        );
+        state.set_transient_status(RT::DiscardedNoChange.get());
         message(
             owner,
-            "활성화 전 실행 계획을 폐기했습니다. 파일은 변경되지 않았으며 새 적용을 사용할 수 있습니다.",
-            "DarkReNamer - 폐기 완료",
+            RT::DiscardedApplyAvailable.get(),
+            RT::DiscardCompleteTitle.get(),
         );
     }
     update_controls(state);
@@ -600,35 +592,31 @@ pub(super) fn rediscover_after_staged_discard(state: &mut AppState) {
 pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
     let mut lines = Vec::new();
     if state.collision_observed {
-        lines.push(
-            "상태: active와 candidate가 동시에 관찰되어 자동 복구와 폐기를 중단했습니다."
-                .to_owned(),
-        );
+        lines.push(RT::RecoveryCollisionStatus.get().to_owned());
     } else if state.recovery_locked {
-        lines.push("상태: 복구 잠금".to_owned());
+        lines.push(RT::RecoveryLockedStatus.get().to_owned());
     } else {
-        lines.push("상태: 복구 저널 없음".to_owned());
+        lines.push(RT::NoRecoveryJournalStatus.get().to_owned());
     }
     if let Some(journal) = state.active_journal.as_ref() {
-        lines.push(format!(
-            "Active: {} ({} bytes, {} records)",
-            journal.path().display(),
+        lines.push(rt::recovery_active_detail(
+            &journal.path().display(),
             journal.byte_len(),
-            journal.records().len()
+            journal.records().len(),
         ));
     }
     if let Some(journal) = state.staged_journal.as_ref() {
         let kind = if journal.is_complete_intent_candidate() {
-            "완전한 Intent-only"
+            RT::CompleteIntentOnly.get()
         } else if journal.is_physically_empty_candidate() {
-            "빈 candidate"
+            RT::EmptyCandidate.get()
         } else {
-            "폐기할 수 없는 candidate"
+            RT::UndiscardableCandidate.get()
         };
-        lines.push(format!(
-            "Candidate: {} ({} bytes, {kind})",
-            journal.path().display(),
-            journal.byte_len()
+        lines.push(rt::recovery_candidate_detail(
+            &journal.path().display(),
+            journal.byte_len(),
+            kind,
         ));
     }
     lines.extend(
@@ -638,14 +626,14 @@ pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
             .map(StartupJournalBlock::status_korean),
     );
     if state.can_export_recovery_journal() {
-        lines.push("가능한 작업: 복구 데이터 내보내기".to_owned());
+        lines.push(RT::ExportRecoveryAvailable.get().to_owned());
     }
     if state.can_confirm_active_recovery() {
-        lines.push("시작 시 확인 가능: 이전 변경의 명시적 복구".to_owned());
-        lines.push(crate::ACTIVE_RECOVERY_STATUS_GUIDANCE.to_owned());
+        lines.push(RT::ConfirmRecoveryAvailable.get().to_owned());
+        lines.push(crate::active_recovery_status_guidance().to_owned());
     }
     if state.can_discard_staged_intent() {
-        lines.push("가능한 작업: 시작되지 않은 작업 기록 삭제".to_owned());
+        lines.push(RT::DiscardUnusedJournalAvailable.get().to_owned());
     }
-    message(owner, &lines.join("\n"), "DarkReNamer - 복구 상태");
+    message(owner, &lines.join("\n"), RT::RecoveryStatusTitle.get());
 }
