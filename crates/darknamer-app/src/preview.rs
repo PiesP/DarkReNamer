@@ -149,7 +149,7 @@ pub(crate) fn preview_status_label(
 pub(crate) fn preview_issue_description(issue: PreviewRowIssue) -> Option<String> {
     match issue {
         PreviewRowIssue::InvalidName(error) => Some(crate::i18n::common::bad_name_advice(
-            &(windows_leaf_name_error_korean(error)),
+            &(windows_leaf_name_error_message(error)),
         )),
         PreviewRowIssue::DuplicateDestination => {
             Some(crate::i18n::common::Text::CollisionAdvice.get().to_owned())
@@ -566,7 +566,7 @@ fn resolved_preview_issue(
 }
 
 #[must_use]
-pub(crate) fn windows_leaf_name_error_korean(error: WindowsLeafNameError) -> &'static str {
+pub(crate) fn windows_leaf_name_error_message(error: WindowsLeafNameError) -> &'static str {
     match error {
         WindowsLeafNameError::Empty => crate::i18n::common::Text::NameEmpty.get(),
         WindowsLeafNameError::ContainsNul => crate::i18n::common::Text::NameNul.get(),
@@ -1442,7 +1442,7 @@ mod tests {
             PreviewRowIssue::InvalidName(WindowsLeafNameError::TrailingDotOrSpace)
         );
         assert_eq!(
-            windows_leaf_name_error_korean(WindowsLeafNameError::TrailingDotOrSpace),
+            windows_leaf_name_error_message(WindowsLeafNameError::TrailingDotOrSpace),
             "점 또는 공백으로 끝남"
         );
     }

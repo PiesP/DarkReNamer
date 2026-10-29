@@ -233,7 +233,7 @@ Manual edits and imported names use the same boundary as prefix, suffix,
 replacement, extension, parent-folder, digit-padding, and sequence commands.
 The canonical values and error variants live in
 `crates/darknamer-core/src/lib.rs`; Windows command error mapping lives in
-`proposal_mutation_error_korean`.
+`proposal_mutation_error_message`.
 
 ## Transaction states
 

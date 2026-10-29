@@ -114,12 +114,12 @@ pub fn plan_error_korean(error: &PlanError) -> (String, Vec<usize>) {
     let reasons = error
         .issues()
         .iter()
-        .map(|issue| plan_issue_korean(&issue.kind))
+        .map(|issue| plan_issue_message(&issue.kind))
         .collect::<Vec<_>>();
     (reasons.join("\n"), rows)
 }
 
-fn plan_issue_korean(kind: &PlanIssueKind) -> String {
+fn plan_issue_message(kind: &PlanIssueKind) -> String {
     match kind {
         PlanIssueKind::RelativeSource | PlanIssueKind::RelativeDestinationParent => {
             RuntimeText::RelativePath.get().to_owned()
@@ -151,7 +151,7 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
         PlanIssueKind::UnsupportedFilesystem => RuntimeText::UnsupportedFilesystem.get().to_owned(),
         PlanIssueKind::Backend => RuntimeText::BackendPlan.get().to_owned(),
         PlanIssueKind::BackendFailure(error) => {
-            backend_error_korean(RuntimeText::PlanInspection.get(), *error)
+            backend_error_message(RuntimeText::PlanInspection.get(), *error)
         }
     }
 }
@@ -162,7 +162,7 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
     match error.kind {
         ExecuteErrorKind::Cancelled => RuntimeText::CancelledBeforeMutation.get().to_owned(),
         ExecuteErrorKind::Backend(backend) => {
-            backend_error_korean(RuntimeText::ExecutionPreparation.get(), backend)
+            backend_error_message(RuntimeText::ExecutionPreparation.get(), backend)
         }
         ExecuteErrorKind::Journal(journal) => text::journal_prepare_failed(journal.code),
         ExecuteErrorKind::JournalCapacity(capacity) => journal_capacity_error_korean(capacity),
@@ -199,7 +199,7 @@ pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
             failure: ExecutionFailure::Cancelled { .. },
         } => RuntimeText::CancelledAndRestored.get().to_owned(),
         ExecutionOutcome::RolledBack { failure } => {
-            text::restored_after_failure(&failure_korean(*failure))
+            text::restored_after_failure(&failure_message(*failure))
         }
         ExecutionOutcome::RecoveryRequired {
             failure: ExecutionFailure::Cancelled { .. },
@@ -208,7 +208,7 @@ pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
             .get()
             .to_owned(),
         ExecutionOutcome::RecoveryRequired { failure, .. } => {
-            text::recovery_required_after_failure(&failure_korean(*failure))
+            text::recovery_required_after_failure(&failure_message(*failure))
         }
     }
 }
@@ -238,17 +238,17 @@ pub const fn execution_outcome_presentation(
     }
 }
 
-fn failure_korean(failure: ExecutionFailure) -> String {
+fn failure_message(failure: ExecutionFailure) -> String {
     match failure {
         ExecutionFailure::Cancelled { .. } => RuntimeText::MutationCancelled.get().to_owned(),
         ExecutionFailure::Backend { error, .. } => {
-            backend_error_korean(RuntimeText::FileMutation.get(), error)
+            backend_error_message(RuntimeText::FileMutation.get(), error)
         }
         ExecutionFailure::Journal { error, .. } => text::journal_code(error.code),
     }
 }
 
-fn backend_error_korean(context: &str, error: BackendError) -> String {
+fn backend_error_message(context: &str, error: BackendError) -> String {
     text::backend_failure(context, &error.operation, error.code)
 }
 

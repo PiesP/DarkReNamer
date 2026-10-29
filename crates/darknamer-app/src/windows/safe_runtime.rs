@@ -77,7 +77,7 @@ impl StartupJournalBlock {
         }
     }
 
-    pub(super) fn status_korean(&self) -> String {
+    pub(super) fn status_text(&self) -> String {
         match self {
             Self::Evidence { role, evidence } => {
                 let failure = evidence.failure();
@@ -256,7 +256,7 @@ fn startup_locked_status(
 ) -> Option<String> {
     let mut parts = blocked_journals
         .iter()
-        .map(StartupJournalBlock::status_korean)
+        .map(StartupJournalBlock::status_text)
         .collect::<Vec<_>>();
     if let Some(journal) = staged_journal {
         parts.push(text::staged_journal_found(&journal.path().display()));
@@ -275,7 +275,7 @@ fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal
 fn append_blocked_status(status: &mut String, blocked_journals: &[StartupJournalBlock]) {
     for blocked in blocked_journals {
         status.push(' ');
-        status.push_str(&blocked.status_korean());
+        status.push_str(&blocked.status_text());
     }
 }
 

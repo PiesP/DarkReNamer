@@ -70,7 +70,7 @@ mod text_io;
 mod visual_capture;
 mod worker;
 
-fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str {
+fn proposal_mutation_error_message(error: ProposalMutationError) -> &'static str {
     match error {
         ProposalMutationError::InvalidInput(LegacyInputError::NonPositiveWidth) => {
             crate::i18n::common::Text::InvalidWidth.get()
@@ -86,7 +86,9 @@ fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str 
     }
 }
 
-fn destination_parent_mutation_error_korean(error: DestinationParentMutationError) -> &'static str {
+fn destination_parent_mutation_error_message(
+    error: DestinationParentMutationError,
+) -> &'static str {
     match error {
         DestinationParentMutationError::ParentBudgetExceeded { .. }
         | DestinationParentMutationError::AggregateBudgetExceeded { .. }
@@ -1598,7 +1600,7 @@ mod tests {
 
     #[test]
     fn destination_parent_errors_keep_the_model_unchanged_and_give_a_retry_action() {
-        let budget = destination_parent_mutation_error_korean(
+        let budget = destination_parent_mutation_error_message(
             DestinationParentMutationError::ParentBudgetExceeded {
                 requested_units: 33_000,
                 maximum_units: 32_767,
@@ -1607,7 +1609,7 @@ mod tests {
         assert!(budget.contains("목록은 변경되지 않았습니다"));
         assert!(budget.contains("더 짧은 경로"));
 
-        let aggregate = destination_parent_mutation_error_korean(
+        let aggregate = destination_parent_mutation_error_message(
             DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
                 requested_units: 2_097_153,
                 maximum_units: 2_097_152,
@@ -1616,7 +1618,7 @@ mod tests {
         assert!(aggregate.contains("목록은 변경되지 않았습니다"));
         assert!(aggregate.contains("더 짧은 경로"));
 
-        let allocation = destination_parent_mutation_error_korean(
+        let allocation = destination_parent_mutation_error_message(
             DestinationParentMutationError::AllocationFailed,
         );
         assert!(allocation.contains("목록은 변경되지 않았습니다"));
@@ -1762,7 +1764,7 @@ mod tests {
     #[test]
     fn proposal_mutation_errors_keep_failure_copy_actionable_and_path_free() {
         assert_eq!(
-            proposal_mutation_error_korean(ProposalMutationError::NameBudgetExceeded {
+            proposal_mutation_error_message(ProposalMutationError::NameBudgetExceeded {
                 row: 7,
                 requested_units: 256,
                 maximum_units: 255,
@@ -1770,11 +1772,11 @@ mod tests {
             "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
         );
         assert_eq!(
-            proposal_mutation_error_korean(ProposalMutationError::AllocationFailed),
+            proposal_mutation_error_message(ProposalMutationError::AllocationFailed),
             "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
         );
         assert_eq!(
-            proposal_mutation_error_korean(
+            proposal_mutation_error_message(
                 ProposalMutationError::PlannedPathAggregateBudgetExceeded {
                     requested_units: 2_097_153,
                     maximum_units: 2_097_152,
