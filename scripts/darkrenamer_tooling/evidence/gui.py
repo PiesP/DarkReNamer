@@ -194,19 +194,21 @@ def selected_picker_failure_schema(repo: Path, source_sha: str) -> int:
     except UnicodeDecodeError as error:
         raise EvidenceError("Selected picker producer source is not UTF-8.") from error
     versions = PICKER_FAILURE_SCHEMA_MARKER.findall(producer)
-    require(versions in (["1"], ["2"]) and
+    require(versions in (["1"], ["2"], ["3"]) and
             "Failure.SchemaVersion -ne $script:PickerFailureSchemaVersion" in producer and
             "sampler_failure" in producer,
             "Selected picker failure schema marker is unsupported or unused.")
-    if versions == ["2"]:
+    if versions in (["2"], ["3"]):
         native = subprocess.run(
             ["git", "show", f"{source_sha}:scripts/modules/powershell/ui-native.ps1"],
             cwd=repo, capture_output=True, check=False)
         require(native.returncode == 0 and
                 "popup_diagnostic_schema_version" in producer and
                 b'knownHiddenInactive ? "owned-hidden-inactive"' in native.stdout and
-                b'SchemaVersion = 2, Phase = phase' in native.stdout,
-                "Selected picker v2 schema does not produce its new state marker.")
+                f'SchemaVersion = {versions[0]}, Phase = phase'.encode() in native.stdout and
+                (versions == ["2"] or
+                 b'diagnostic.PopupClass == "DarkReNamerInputWindow"' in native.stdout),
+                "Selected picker popup schema does not produce its declared state.")
     return int(versions[0])
 
 
@@ -217,7 +219,7 @@ PICKER_FAULTS = {"popup-zero", "thread-lookup", "thread-mismatch", "process-mism
 def validate_picker_popup(value: object, stage: str, main_handle: int,
                           process_id: int, main_thread_id: int,
                           *, schema_version: int = 1) -> dict | None:
-    require(schema_version in {1, 2}, "Picker popup schema version is unsupported.")
+    require(schema_version in {1, 2, 3}, "Picker popup schema version is unsupported.")
     if value is None:
         return None
     popup = exact_keys(value, {"stage", "begin_ticks", "end_ticks", "raw_popup_handle",
@@ -312,11 +314,13 @@ def validate_picker_popup(value: object, stage: str, main_handle: int,
                     "hidden" in observed,
                     "Picker inactive popup was silently accepted or reclassified.")
         elif disposition == "owned-hidden-inactive":
-            require(schema_version == 2 and not popup["popup_visible"] and
+            require(schema_version in {2, 3} and not popup["popup_visible"] and
                     not popup["main_enabled_at_lookup"] and accepted == 0 and
                     observed == ["hidden"] and not failed and
                     popup["thread_lookup"] == "complete" and
-                    popup["class_lookup"] == "complete" and popup["popup_class"] == "#32770" and
+                    popup["class_lookup"] == "complete" and
+                    popup["popup_class"] in ({"#32770", "DarkReNamerInputWindow"}
+                                             if schema_version == 3 else {"#32770"}) and
                     popup["owner_lookup"] == "returned" and popup["direct_owner"] == main_handle and
                     popup["owner_chain"] == [main_handle] and
                     popup["owner_chain_lookup"] == "main-reached" and
@@ -346,7 +350,7 @@ def validate_picker_failure(value: object, *, main_handle: int, process_id: int,
         "sample_begin_ticks", "sample_end_ticks", "probe_begin_ticks", "probe_end_ticks",
         "probe_error_code", "qpc_frequency", "main_before", "main_after", "popup_before",
         "popup_after"}, "picker sampler failure")
-    require(schema_version in {1, 2} and type(failure["schema_version"]) is int and
+    require(schema_version in {1, 2, 3} and type(failure["schema_version"]) is int and
             failure["schema_version"] == schema_version and
             failure["phase"] in {"empty-idle", "ordinary-100", "post"} and
             failure["error_type"] in {"InvalidOperationException", "Win32Exception"} and
@@ -4659,7 +4663,7 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             nested(scenario, "environment", "hwnd_dpi") == 96 and
             nested(scenario, "environment", "text_scale_factor_percent") == 100,
             "Picker process, display, or fixed workload differs.")
-    require((scenario.get("popup_diagnostic_schema_version") == 2 if schema_version == 2 else
+    require((scenario.get("popup_diagnostic_schema_version") == schema_version if schema_version in {2, 3} else
              "popup_diagnostic_schema_version" not in scenario),
             "Picker popup schema marker differs from selected source.")
     main_handle = checked_int(nested(scenario, "environment", "main_window", "hwnd"),

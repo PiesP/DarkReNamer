@@ -1,5 +1,5 @@
 ﻿$script:PerformanceResponseTimelineSchemaVersion = 1
-$script:PickerFailureSchemaVersion = 2
+$script:PickerFailureSchemaVersion = 3
 
 function Get-ObserverContextConfirmationReachability {
     param(

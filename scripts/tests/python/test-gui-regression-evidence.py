@@ -50,26 +50,34 @@ class SyntheticFixtureTestCase(unittest.TestCase):
 
 
 class GuiEvidenceTests(SyntheticFixtureTestCase):
-    def test_picker_source_selects_v1_or_v2_without_receipt_downgrade(self):
+    def test_picker_source_selects_historical_and_custom_popup_schemas(self):
         marker = '$script:PickerFailureSchemaVersion = {}\n' \
                  'Failure.SchemaVersion -ne $script:PickerFailureSchemaVersion\n' \
                  'sampler_failure\n'
         native = b'knownHiddenInactive ? "owned-hidden-inactive"\n' \
-                 b'SchemaVersion = 2, Phase = phase'
-        for version in (1, 2):
+                 b'SchemaVersion = {}, Phase = phase'
+        for version in (1, 2, 3):
             with self.subTest(version=version):
                 responses = [SimpleNamespace(returncode=0, stdout=marker.format(version).encode())]
-                if version == 2:
+                if version in (2, 3):
                     responses.append(SimpleNamespace(returncode=0,
                         stdout=b'popup_diagnostic_schema_version'))
                     # The marker belongs to the scenario producer, while state emission is native.
                     responses[0].stdout += b'popup_diagnostic_schema_version'
-                    responses[1].stdout = native
+                    responses[1].stdout = native.replace(b'{}', str(version).encode())
+                    if version == 3:
+                        responses[1].stdout += b'\ndiagnostic.PopupClass == "DarkReNamerInputWindow"'
                 with mock.patch.object(evidence.subprocess, 'run', side_effect=responses):
                     self.assertEqual(evidence.selected_picker_failure_schema(
                         SCRIPT_ROOT.parent, 'a' * 40), version)
         with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
                 returncode=0, stdout=marker.format(2).encode())):
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.selected_picker_failure_schema(SCRIPT_ROOT.parent, 'a' * 40)
+        responses = [SimpleNamespace(returncode=0, stdout=(marker.format(3) +
+            'popup_diagnostic_schema_version').encode()),
+            SimpleNamespace(returncode=0, stdout=native.replace(b'{}', b'3'))]
+        with mock.patch.object(evidence.subprocess, 'run', side_effect=responses):
             with self.assertRaises(evidence.EvidenceError):
                 evidence.selected_picker_failure_schema(SCRIPT_ROOT.parent, 'a' * 40)
 
@@ -107,16 +115,24 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_picker_popup(ignored, "before-probe", 800, 42, 7)
 
-    def test_picker_v2_hidden_owned_state_requires_complete_identity(self):
+    def test_picker_hidden_owned_state_requires_source_selected_class_and_complete_identity(self):
         hidden = self.picker_popup()
         hidden.update(accepted_popup_handle=0, popup_visible=False,
                       visibility_lookup="hidden", disposition="owned-hidden-inactive",
                       observed_predicates=["hidden"])
         self.assertEqual(evidence.validate_picker_popup(
             hidden, "before-probe", 800, 42, 7, schema_version=2), hidden)
+        self.assertEqual(evidence.validate_picker_popup(
+            hidden, "before-probe", 800, 42, 7, schema_version=3), hidden)
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_picker_popup(hidden, "before-probe", 800, 42, 7,
                                            schema_version=1)
+        custom = {**hidden, "popup_class": "DarkReNamerInputWindow"}
+        self.assertEqual(evidence.validate_picker_popup(
+            custom, "before-probe", 800, 42, 7, schema_version=3), custom)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_picker_popup(custom, "before-probe", 800, 42, 7,
+                                           schema_version=2)
         for changes in (
             {"popup_process_id": 43, "observed_predicates": ["process-mismatch", "hidden"]},
             {"popup_thread_id": 8, "observed_predicates": ["thread-mismatch", "hidden"]},
@@ -137,6 +153,28 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
                 with self.assertRaises(evidence.EvidenceError):
                     evidence.validate_picker_popup(changed, "before-probe", 800, 42, 7,
                                                    schema_version=2)
+        for changes in (
+            {"popup_process_id": 43, "observed_predicates": ["process-mismatch", "hidden"]},
+            {"popup_thread_id": 8, "observed_predicates": ["thread-mismatch", "hidden"]},
+            {"direct_owner": 801, "owner_chain": [801],
+             "owner_chain_lookup": "ended", "owner_chain_lookup_error": 0,
+             "observed_predicates": ["direct-owner-mismatch", "hidden"]},
+            {"owner_chain": [801, 800]},
+            {"thread_lookup": "failed", "thread_lookup_error": 1400,
+             "popup_thread_id": 0,
+             "observed_predicates": ["thread-lookup", "thread-mismatch", "hidden"]},
+            {"class_lookup": "failed", "class_lookup_error": 1400,
+             "popup_class": "", "observed_predicates": ["hidden", "class-lookup", "class-unavailable"]},
+            {"popup_class": "UnknownWindow"},
+            {"main_enabled_at_lookup": True},
+            {"failed_predicates": ["hidden"]},
+            {"raw_popup_handle": 0, "popup_lookup": "zero",
+             "observed_predicates": ["popup-zero"]},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_picker_popup({**custom, **changes}, "before-probe",
+                                                   800, 42, 7, schema_version=3)
 
     def test_picker_failure_rejects_schema_downgrade_and_missing_transition(self):
         popup = self.picker_popup()

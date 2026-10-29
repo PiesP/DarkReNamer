@@ -1719,7 +1719,9 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
             // A bound hidden dialog is inactive at this instant; it is not an active probe target.
             knownHiddenInactive = !mainEnabled && faults.Count == 1 && faults[0] == "hidden" &&
                 diagnostic.ThreadLookup == "complete" && diagnostic.ClassLookup == "complete" &&
-                diagnostic.PopupClass == "#32770" && diagnostic.OwnerLookup == "returned" &&
+                (diagnostic.PopupClass == "#32770" ||
+                 diagnostic.PopupClass == "DarkReNamerInputWindow") &&
+                diagnostic.OwnerLookup == "returned" &&
                 chain.Count == 1 && chain[0] == window.ToInt64();
             if ((!diagnostic.PopupVisible && mainEnabled) || knownHiddenInactive) {
                 popup = window;
@@ -1773,7 +1775,7 @@ public sealed class DarkReNamerPerformanceSampler : IDisposable {
     private void Sample(object ignored) {
         if (!System.Threading.Monitor.TryEnter(gate)) return;
         var diagnostic = new DarkReNamerSamplerFailure {
-            SchemaVersion = 2, Phase = phase,
+            SchemaVersion = 3, Phase = phase,
             SampleBeginTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
             QpcFrequency = System.Diagnostics.Stopwatch.Frequency
         };
