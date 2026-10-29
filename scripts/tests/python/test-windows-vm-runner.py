@@ -954,6 +954,52 @@ class VmRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'process Job'):
             vm.verify_virtual_execution_job(row, [])
 
+    def test_virtual_execution_result_accepts_real_bundle_shape_and_libtest_prefix(self):
+        binary = dict(self.artifact('rename_windows_backend-0123456789abcdef.exe', b'backend test'),
+                      name='rename_windows_backend')
+        runner = self.artifact('windows-vm-guest.ps1', b'guest runner')
+        diagnostic = {
+            'kind': 'virtual-execution', 'test_profile': 'release',
+            'test_name': vm.VIRTUAL_EXECUTION_TEST, 'count': 100, 'iteration': 1,
+            'media': 'virtual', 'evidence_class': 'virtual-execution',
+            'scope': 'vm-durable', 'variant': 'baseline', 'topology': 'same-parent'}
+        manifest = dict(self.manifest, test_binaries=[binary], runner=runner,
+                        diagnostic=diagnostic)
+        output = ('running 1 test\ntest ' + vm.VIRTUAL_EXECUTION_TEST + ' ... ' +
+                  self.virtual_execution_output() + 'ok\n\n' +
+                  'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                  '41 filtered out; finished in 0.1s\n')
+        stdout = self.output_artifact('virtual.stdout.txt', output.encode())
+        stderr = self.output_artifact('virtual.stderr.txt', b'')
+        row = dict(binary, test_name=vm.VIRTUAL_EXECUTION_TEST, status='passed',
+                   job_cleanup=True, exit_code=0, failure_reason=None,
+                   passed=1, failed=0, ignored=0, stdout=stdout, stderr=stderr,
+                   process_lifecycle={'pid': 1234, 'start_time_utc_ticks': '638975000000000000'})
+        job = {'pid': 1234, 'process_start_time_utc_ticks': '638975000000000000',
+               'status': 'clean', 'job_empty': True, 'job_closed': True,
+               'capture_complete': True, 'had_survivors': False,
+               'forced_termination': False, 'active_processes_at_close': 0}
+        result = dict(manifest, status='passed', gui=None, tests=[row],
+                      process_job_cleanup=[job], transport={
+                          'task_kind': 'core', 'status': 'collected',
+                          'guest_cleanup': True, 'raw_cleanup': {}})
+        with mock.patch.object(vm, 'verify_controller_cleanup'), \
+             mock.patch.object(vm, 'verify_current_anchor_from_bundle'), \
+             mock.patch.object(vm, '_verify_v2_result_owned_binding'), \
+             mock.patch.object(vm, 'verify_transport_binding'):
+            observed = vm.verify_virtual_execution_result(
+                self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+            self.assertEqual(observed['metrics']['verified_files'], 100)
+            row['passed'] = True
+            with self.assertRaisesRegex(ValueError, 'test did not finish'):
+                vm.verify_virtual_execution_result(
+                    self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+            row['passed'] = 1
+            stdout['bytes'] -= 1
+            with self.assertRaisesRegex(ValueError, 'transcript size'):
+                vm.verify_virtual_execution_result(
+                    self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+
     def test_focused_icon_cli_selects_one_profile_and_fixed_vm_bounds(self):
         for profile in ('debug', 'release'):
             args = vm.parse_arguments(['--ssh-host', 'prepared-vm',

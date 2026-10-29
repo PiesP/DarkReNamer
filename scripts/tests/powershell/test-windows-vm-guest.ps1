@@ -4105,17 +4105,23 @@ Invoke-DrTestPowerShellModuleScope `
                 [string] $FocusedIconCase,
                 [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
                     'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
-                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes,
+                [int] $VirtualExecutionCount, [int] $VirtualExecutionIteration,
+                [string] $VirtualExecutionSourceSha
             )
             [pscustomobject]@{
                 focused = [bool]$FocusedIconTests
                 has_case = $PSBoundParameters.ContainsKey('FocusedIconCase')
                 case = $FocusedIconCase
+                virtual_count = $VirtualExecutionCount
+                virtual_iteration = $VirtualExecutionIteration
+                virtual_source = $VirtualExecutionSourceSha
             }
         }
         $verified = [pscustomobject]@{
             root = $focusedBindingRoot
             tests = @([pscustomobject]@{ file = 'not-launched.exe' })
+            manifest = [pscustomobject]@{ source_sha = ('a' * 40) }
         }
         $testInvocations = @([pscustomobject]@{
             test = $verified.tests[0]
@@ -4128,6 +4134,8 @@ Invoke-DrTestPowerShellModuleScope `
         $RefreshProfileOrder = ''
         $FocusedIconTests = $true
         $FocusedRefreshTests = $false
+        $VirtualExecutionCount = 0
+        $VirtualExecutionIteration = 0
         $testOutputBudgetBytes = [long]0
         $caseTimeoutSeconds = 600
         $focusedCaseArguments = @{ FocusedIconCase = 'close_and_forced_destroy_retire' }
@@ -4138,6 +4146,15 @@ Invoke-DrTestPowerShellModuleScope `
         }
         $focusedCaseArguments = @{ FocusedIconCase = 'arbitrary_test' }
         Assert-Fails { & $guestCall } 'Cannot validate argument'
+        $focusedCaseArguments = @{}
+        $FocusedIconTests = $false
+        $VirtualExecutionCount = 100
+        $virtualCall = & $guestCall
+        if ($virtualCall.virtual_count -ne 100 -or $virtualCall.virtual_iteration -ne 0 -or
+            $virtualCall.virtual_source -cne ('a' * 40)) {
+            throw 'The actual guest call must bind count, warmup iteration zero and frozen source.'
+        }
+        $VirtualExecutionCount = 0
     }
     finally {
         Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
@@ -4167,7 +4184,9 @@ Invoke-DrTestPowerShellModuleScope `
                 [string] $FocusedIconCase,
                 [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
                     'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
-                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes
+                [string] $FocusedRefreshCase, [long] $OutputBudgetBytes,
+                [int] $VirtualExecutionCount, [int] $VirtualExecutionIteration,
+                [string] $VirtualExecutionSourceSha
             )
             $script:focusedLoopCalls.Add([pscustomobject]@{
                 index = $Index
@@ -4201,6 +4220,7 @@ Invoke-DrTestPowerShellModuleScope `
             root = $focusedBindingRoot
             tests = @([pscustomobject]@{ file = 'one-frozen.exe'; sha256 = ('a' * 64) })
             manifest = [pscustomobject]@{
+                source_sha = ('a' * 40)
                 diagnostic = [pscustomobject]@{ test_names = $focusedNames }
             }
         }

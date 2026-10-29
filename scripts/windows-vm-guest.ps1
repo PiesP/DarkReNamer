@@ -19,6 +19,8 @@ param(
     [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
         'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
     [string] $FocusedRefreshCase,
+    [ValidateSet(100, 1000, 10000)][int] $VirtualExecutionCount,
+    [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
 
     [string] $OutputRoot,
 
@@ -38,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
     throw 'Unsupported VM acceptance profile identity.'
 }
-$ToolingManifestSha256 = 'dd92057981c7b39990fb807e663bfd38464051af8a77dbf388616099dfa1807e'
+$ToolingManifestSha256 = '367da6511778feb4c2c67b42c4a99d26512aa09c78f48af4c1cda01134965873'
 $ToolingLoaderSha256 = '322bfaad0639f443756a4da7680594ebc86e011e139f49d1c22976db6bc058f1'
 
 function Get-DrBootstrapSha256 {

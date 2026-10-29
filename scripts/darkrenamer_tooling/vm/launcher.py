@@ -2713,8 +2713,12 @@ def verify_virtual_execution_lines(output, *, source_sha, count, iteration):
     identity or process-lifecycle attestation by itself.
     """
     prefix = 'darkrenamer_benchmark_virtual_v1,'
-    lines = [line.removeprefix(prefix).strip() for line in output.splitlines()
-             if line.startswith(prefix)]
+    test_prefix = 'test ' + VIRTUAL_EXECUTION_TEST + ' ... '
+    lines = []
+    for line in output.splitlines():
+        line = line.removeprefix(test_prefix)
+        if line.startswith(prefix):
+            lines.append(line.removeprefix(prefix).strip())
     if len(lines) != 2:
         raise ValueError('Virtual execution requires started and completed v1 records.')
     parsed = []
@@ -2835,19 +2839,20 @@ def verify_virtual_execution_result(root, manifest, result, transport_kind,
             row.get('test_name') != VIRTUAL_EXECUTION_TEST or row.get('status') != 'passed' or
             row.get('job_cleanup') is not True or row.get('exit_code') != 0 or
             row.get('failure_reason') is not None or
+            any(type(row.get(key)) is not int for key in ('passed', 'failed', 'ignored')) or
             [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
         raise ValueError('Virtual execution test did not finish with clean job ownership.')
     verify_virtual_execution_job(row, result.get('process_job_cleanup'))
     for record in (binary, manifest['application'], manifest['runner']):
-        if checked_artifact(root, record).stat().st_size != record['bytes']:
-            raise ValueError('Virtual execution output size differs from its record.')
+        checked_artifact(root, record)
     total_output = 0
     for channel in ('stdout', 'stderr'):
         record = row.get(channel)
         if (not isinstance(record, dict) or type(record.get('bytes')) is not int or
                 record['bytes'] < 0 or record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES):
             raise ValueError('Virtual execution output is missing or exceeds its channel bound.')
-        checked_artifact(root, record)
+        if checked_artifact(root, record).stat().st_size != record['bytes']:
+            raise ValueError('Virtual execution transcript size differs from its record.')
         total_output += record['bytes']
     if total_output > TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES:
         raise ValueError('Virtual execution output exceeds its aggregate bound.')
