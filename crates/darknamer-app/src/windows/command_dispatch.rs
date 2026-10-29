@@ -53,6 +53,9 @@ use crate::appearance_command_allowed;
 use crate::changed_move_rows;
 use crate::command_effect_fits_policy;
 use crate::command_ui_spec;
+use crate::i18n::LanguagePreference;
+use crate::i18n::native_ui;
+use crate::i18n::native_ui::Text;
 use crate::legacy_command_shortcuts;
 use crate::preview_item_details;
 use crate::rename::ModelRevision;
@@ -743,11 +746,16 @@ pub(super) fn dispatch_command(
     if state.appearance_dialog.is_some() {
         return prepare_appearance_dialog(window, state).map(PreparedCommandAction::Appearance);
     }
+    if let Some(preference) = LanguagePreference::from_command(command) {
+        state.select_language_preference(preference);
+        update_controls(state);
+        return None;
+    }
     if state.read_only_locked() && !recovery_command_allowed(command) {
         message(
             window,
-            "복구 잠금 상태에서는 진단 저널 내보내기, 테마 변경, 정보 보기, 종료만 사용할 수 있습니다.",
-            "DarkReNamer - 읽기 전용",
+            Text::DispatchReadOnlyGuidance.get(),
+            Text::DispatchReadOnlyTitle.get(),
         );
         return None;
     }
@@ -759,8 +767,8 @@ pub(super) fn dispatch_command(
     {
         message(
             window,
-            "파일 변경이 끝날 때까지 테마 변경, 정보 보기와 종료 요청만 사용할 수 있습니다.",
-            "DarkReNamer - 변경 중",
+            Text::DispatchMutationGuidance.get(),
+            Text::DispatchMutationTitle.get(),
         );
         return None;
     }
@@ -790,7 +798,7 @@ pub(super) fn dispatch_command(
         let issue = state.preview_issue_cache.issue(row);
         let text = preview_item_details(item, issue);
         let details = PreparedTextDetails {
-            caption: "DarkReNamer - 선택 항목 진단".to_owned(),
+            caption: Text::DispatchPreviewTitle.get().to_owned(),
             text,
             appearance: state.prompt_appearance(),
         };
@@ -870,8 +878,8 @@ pub(super) fn dispatch_command(
         UNIFY_PATH => {
             message(
                 window,
-                "대상 폴더 지정은 일반 파일만 있는 목록에서 사용할 수 있습니다. 폴더 항목을 목록에서 제거한 뒤 다시 시도하세요.",
-                "DarkReNamer - 대상 폴더 지정",
+                Text::DispatchTargetFilesOnly.get(),
+                Text::DispatchTargetTitle.get(),
             );
             CommandOutcome::ui(UiEffect::None)
         }
@@ -889,7 +897,7 @@ pub(super) fn dispatch_command(
             CommandOutcome::ui(UiEffect::ColumnsChanged(index))
         }
         VERSION => {
-            message(window, &super::about_text(), "DarkReNamer 정보");
+            message(window, &super::about_text(), Text::DispatchAboutTitle.get());
             CommandOutcome::ui(UiEffect::None)
         }
         SHOW_RECOVERY_STATUS => {
@@ -922,7 +930,7 @@ struct SelectionRestore {
 fn model_outcome(state: &mut AppState, changed: bool, effect: UiEffect) -> CommandOutcome {
     state.commit_known_model_change(changed);
     if changed {
-        state.set_transient_status("미리보기 · ‘변경 적용’ 전에는 파일을 수정하지 않습니다.");
+        state.set_transient_status(Text::DispatchPreviewOnly.get());
     }
     CommandOutcome::model(changed, effect)
 }
@@ -1085,8 +1093,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
             (
                 prompt_spec(
                     caption,
-                    format!("{} 를", current.to_string_lossy()),
-                    "으로",
+                    native_ui::prompt_manual_current(&current.to_string_lossy()),
+                    Text::PromptTo.get(),
                     "",
                     current,
                     LegacyText::default(),
@@ -1098,9 +1106,9 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         REPLACE => (
             prompt_spec(
                 caption,
-                "이름에 들어있는 문자열을 바꿉니다.",
-                "를",
-                "으로",
+                Text::PromptReplaceExplanation.get(),
+                Text::PromptFrom.get(),
+                Text::PromptTo.get(),
                 LegacyText::default(),
                 LegacyText::default(),
                 &[],
@@ -1110,8 +1118,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         PREFIX => (
             prompt_spec(
                 caption,
-                "이름의 앞에 지정한 문자열을 붙여줍니다.",
-                "붙일 문자열",
+                Text::PromptPrefixExplanation.get(),
+                Text::PromptTextToAdd.get(),
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
@@ -1122,8 +1130,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         SUFFIX => (
             prompt_spec(
                 caption,
-                "이름의 뒤에 지정한 문자열을 붙여줍니다.",
-                "붙일 문자열",
+                Text::PromptSuffixExplanation.get(),
+                Text::PromptTextToAdd.get(),
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
@@ -1134,8 +1142,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         EXT_ADD => (
             prompt_spec(
                 caption,
-                "확장자를 뒤에 붙입니다.",
-                "붙일 확장자",
+                Text::PromptExtensionAddExplanation.get(),
+                Text::PromptExtensionToAdd.get(),
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
@@ -1146,8 +1154,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         EXT_REPLACE => (
             prompt_spec(
                 caption,
-                "확장자를 바꿔 줍니다.",
-                "바꿀 확장자",
+                Text::PromptExtensionReplaceExplanation.get(),
+                Text::PromptReplacementExtension.get(),
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
@@ -1158,28 +1166,28 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         PAD_DIGITS => (
             prompt_spec(
                 caption,
-                "숫자부분의 자리수를 맞춰 0을 붙입니다.",
-                "자리수",
+                Text::PromptPadDigitsExplanation.get(),
+                Text::PromptDigits.get(),
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
-                &["제일 뒷번호 맞춤", "제일 앞번호 맞춤"],
+                &[Text::PromptPadLast.get(), Text::PromptPadFirst.get()],
             ),
             PromptContinuation::PadDigits,
         ),
         SEQUENCE => (
             prompt_spec(
                 caption,
-                "붙일 숫자의 자리수와 시작값을 지정합니다.",
-                "자리수",
-                "시작값",
+                Text::PromptSequenceExplanation.get(),
+                Text::PromptDigits.get(),
+                Text::PromptStartValue.get(),
                 LegacyText::default(),
                 LegacyText::default(),
                 &[
-                    "이름뒤에 번호붙임",
-                    "이름앞에 번호붙임",
-                    "폴더별로 뒤 번호붙임",
-                    "폴더별로 앞 번호붙임",
+                    Text::PromptSequenceSuffix.get(),
+                    Text::PromptSequencePrefix.get(),
+                    Text::PromptSequenceFolderSuffix.get(),
+                    Text::PromptSequenceFolderPrefix.get(),
                 ],
             ),
             PromptContinuation::Sequence,
@@ -1187,21 +1195,24 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         DELETE_POSITION => (
             prompt_spec(
                 caption,
-                "지정위치를 삭제합니다.(첫글자는 1번째)",
-                "번째부터",
-                "번째까지",
+                Text::PromptDeletePositionExplanation.get(),
+                Text::PromptFromPosition.get(),
+                Text::PromptToPosition.get(),
                 LegacyText::default(),
                 LegacyText::default(),
-                &["앞에서부터 삭제", "제일 뒤부터 삭제"],
+                &[
+                    Text::PromptDeleteFromStart.get(),
+                    Text::PromptDeleteFromEnd.get(),
+                ],
             ),
             PromptContinuation::DeletePosition,
         ),
         DELETE_DELIMITED => (
             prompt_spec(
                 caption,
-                "지정된 문자로 묶인 부분을 삭제합니다.",
-                ":시작문자",
-                ":끝문자",
+                Text::PromptDeleteDelimitedExplanation.get(),
+                Text::PromptStartDelimiter.get(),
+                Text::PromptEndDelimiter.get(),
                 LegacyText::default(),
                 LegacyText::default(),
                 &[],
@@ -1211,22 +1222,22 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         SORT => (
             prompt_spec(
                 caption,
-                "정렬 기준 설정",
+                Text::PromptSortExplanation.get(),
                 "",
                 "",
                 LegacyText::default(),
                 LegacyText::default(),
                 &[
-                    "파일 이름에 따라 오름차순",
-                    "파일 이름에 따라 내림차순",
-                    "현재 전체 경로에 따라 오름차순",
-                    "현재 전체 경로에 따라 내림차순",
-                    "실제 파일 크기에 따라 오름차순",
-                    "실제 파일 크기에 따라 내림차순",
-                    "수정한 시각에 따라 오름차순",
-                    "수정한 시각에 따라 내림차순",
-                    "만든 시각에 따라 오름차순",
-                    "만든 시각에 따라 내림차순",
+                    Text::PromptSortNameAsc.get(),
+                    Text::PromptSortNameDesc.get(),
+                    Text::PromptSortPathAsc.get(),
+                    Text::PromptSortPathDesc.get(),
+                    Text::PromptSortSizeAsc.get(),
+                    Text::PromptSortSizeDesc.get(),
+                    Text::PromptSortModifiedAsc.get(),
+                    Text::PromptSortModifiedDesc.get(),
+                    Text::PromptSortCreatedAsc.get(),
+                    Text::PromptSortCreatedDesc.get(),
                 ],
             ),
             PromptContinuation::Sort,
@@ -1341,7 +1352,7 @@ pub(super) fn run_prepared_preview_details(
     } else if let Err(error) = result {
         message(
             owner,
-            &format!("전체 정보를 표시하지 못했습니다: {error}"),
+            &native_ui::dispatch_details_failure(&error),
             "DarkReNamer",
         );
     }
@@ -1415,16 +1426,12 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
             let destination_parent = legacy_path(&path);
             let validation_error = validate_destination_parent(&destination_parent)
                 .err()
-                .map(|error| {
-                    format!(
-                    "선택한 대상 폴더를 로컬 NTFS 안전 범위에서 확인하지 못했습니다. 목록은 변경되지 않았습니다. 다른 폴더를 선택해 주세요. ({error})"
-                )
-                });
+                .map(|error| native_ui::dispatch_target_validation_failure(&error));
             if let Some(error) = validation_error {
                 if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
                     .is_some()
                 {
-                    report_error(window, &error, "DarkReNamer - 대상 폴더 지정");
+                    report_error(window, &error, Text::DispatchTargetTitle.get());
                 }
                 return;
             }
@@ -1447,7 +1454,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 report_error(
                     window,
                     destination_parent_mutation_error_korean(error),
-                    "DarkReNamer - 대상 폴더 지정",
+                    Text::DispatchTargetTitle.get(),
                 );
             }
         }
@@ -1459,8 +1466,8 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                     Ok(()) => {}
                     Err(error) => message(
                         window,
-                        &format!("파일을 저장하지 못했습니다: {error}"),
-                        "DarkReNamer - 저장 실패",
+                        &native_ui::dispatch_save_failure(&error),
+                        Text::DialogSaveFailureTitle.get(),
                     ),
                 }
             }
@@ -1519,8 +1526,8 @@ fn start_selected_import(
         update_controls(state);
         message(
             window,
-            &format!("가져오기 작업을 시작하지 못했습니다: {error}"),
-            "DarkReNamer - 가져오기 실패",
+            &native_ui::dispatch_import_start_failure(&error),
+            Text::DialogImportFailureTitle.get(),
         );
         try_finish_window_close(window, state);
     }
@@ -1551,9 +1558,7 @@ pub(super) fn finish_import_worker_result(
     );
     if disposition != FileDialogSessionDisposition::Accepted {
         if disposition == FileDialogSessionDisposition::Rejected && !state.close_pending {
-            state.set_transient_status(
-                "가져오기 중 목록 또는 작업 상태가 바뀌어 결과를 적용하지 않았습니다.",
-            );
+            state.set_transient_status(Text::DispatchImportStale.get());
         }
         return;
     }
@@ -1562,8 +1567,8 @@ pub(super) fn finish_import_worker_result(
         Err(error) => {
             message(
                 window,
-                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-                "DarkReNamer - 가져오기 실패",
+                &native_ui::dispatch_import_read_failure(&error),
+                Text::DialogImportFailureTitle.get(),
             );
             return;
         }
@@ -1577,7 +1582,7 @@ pub(super) fn finish_import_worker_result(
             Err(error) => message(
                 window,
                 proposal_mutation_error_korean(error),
-                "DarkReNamer - 이름 가져오기",
+                Text::DispatchImportNamesTitle.get(),
             ),
         },
         ImportKind::Paths => {
@@ -1592,8 +1597,8 @@ pub(super) fn finish_import_worker_result(
             if over_limit {
                 message(
                     window,
-                    "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-                    "DarkReNamer - 가져오기 한도",
+                    Text::DispatchImportExceedsList.get(),
+                    Text::DispatchImportLimitTitle.get(),
                 );
             }
             match admit_paths(window, state, paths) {
@@ -1655,9 +1660,7 @@ fn finish_file_dialog_session<R>(
         FileDialogSessionDisposition::Cancelled | FileDialogSessionDisposition::Missing => None,
         FileDialogSessionDisposition::Rejected => {
             if !state.close_pending {
-                state.set_transient_status(
-                "파일 대화상자가 열린 동안 목록 또는 작업 상태가 바뀌어 결과를 적용하지 않았습니다.",
-            );
+                state.set_transient_status(Text::DispatchDialogStale.get());
                 update_controls(state);
             }
             None
@@ -1713,9 +1716,7 @@ pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
         return;
     };
     if !completion_current {
-        state.set_transient_status(
-            "입력창이 열린 동안 목록 또는 작업 상태가 바뀌어 입력을 적용하지 않았습니다.",
-        );
+        state.set_transient_status(Text::DispatchPromptStale.get());
         update_controls(state);
         if state.close_pending {
             try_finish_window_close(window, state);
@@ -1823,7 +1824,7 @@ fn finish_pad_digits_command(
 ) -> CommandOutcome {
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        state.set_transient_status("자리수 입력이 잘못되었습니다.");
+        state.set_transient_status(Text::DispatchInvalidDigits.get());
         return CommandOutcome::ui(UiEffect::None);
     }
     proposal_mutation(state, |model| {
@@ -1842,7 +1843,7 @@ fn finish_sequence_command(
 ) -> CommandOutcome {
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        state.set_transient_status("자리수 입력이 잘못되었습니다.");
+        state.set_transient_status(Text::DispatchInvalidDigits.get());
         return CommandOutcome::ui(UiEffect::None);
     }
     let mode = match result.choice {
@@ -1869,15 +1870,15 @@ fn finish_delete_position_command(
     let start = legacy_atoi(&result.value_one);
     let end = legacy_atoi(&result.value_two);
     if start < 0 || end < 0 {
-        state.set_transient_status("음수값이나 잘못된 값이 입력되었습니다.");
+        state.set_transient_status(Text::DispatchInvalidNumber.get());
         return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 0 && end > 0 && start > end {
-        state.set_transient_status("시작점이 끝점보다 뒤에 있습니다.");
+        state.set_transient_status(Text::DispatchInvalidRange.get());
         return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 1 && start != 0 {
-        state.set_transient_status("맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.");
+        state.set_transient_status(Text::DispatchDeleteFromEnd.get());
         return CommandOutcome::ui(UiEffect::None);
     }
     let changed = {
@@ -1904,7 +1905,7 @@ fn finish_delete_delimited_command(
     {
         Ok(changed) => changed,
         Err(LegacyInputError::EmptyDelimiter) => {
-            state.set_transient_status("시작/끝 문자가 정확하게 지정되지 않았습니다.");
+            state.set_transient_status(Text::DispatchInvalidDelimiters.get());
             Box::default()
         }
         Err(_) => Box::default(),

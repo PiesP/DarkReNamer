@@ -233,7 +233,7 @@ impl CommandRail {
     fn populate(&mut self, commands: &[&CommandUiSpec], group_count: usize) -> io::Result<()> {
         for command_spec in commands {
             let command = command_spec.id;
-            let label = wide(command_spec.menu_label);
+            let label = wide(command_spec.localized_menu_label());
             // A standard BUTTON exposes the full menu command as its accessible
             // name. Owner-draw painting resolves the shorter rail label from
             // the same command ID, so narrow visual copy cannot truncate the
@@ -272,7 +272,7 @@ impl CommandRail {
                 window: button,
             });
             install_rail_hover_subclass(button)?;
-            self.add_tooltip(button, command_spec.tooltip_label)?;
+            self.add_tooltip(button, command_spec.localized_tooltip_label())?;
         }
         for _ in 1..group_count {
             // An owner-drawn STATIC separator is decorative and deliberately
