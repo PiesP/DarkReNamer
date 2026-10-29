@@ -200,7 +200,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "475116e7ca1ad03ec35ab41d5834658f60417f9edbf44406273983ba6c57053c",
+      "sha256": "7f5553183032645bda46bf27cc57e92e14a06b629ffb7b4504dd6e60e6b39100",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -418,7 +418,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "da0755256d87c8722f45d5584f77f590481f618af0759c6590d635e02b84a2af",
+      "sha256": "f7a26bb92835af06593978e58c8995437e6d3dd0a1d4fbb149278f9e4a8de19f",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -618,7 +618,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "8f96a610cbdbcfd5307ae65d8f4a6c59bd14ec0e14700c06605f938691fd2307",
+      "sha256": "a6f59e3b885d44a3a7ce7235451f82ef431a4ac46d37a8f084f04d4c8fec38dd",
       "dependencies": []
     },
     {
@@ -627,7 +627,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "24a8464dc0510f9d7207bf06e04ecde37af5eab3c9a29b43be60f1ff1bf67e98",
+      "sha256": "f053be1d04fb6055906ba2bb9ffc7c52a4e6eb5bef63916980767ed90e963f4e",
       "dependencies": []
     },
     {
@@ -645,7 +645,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "de7c954d56d204d22a77904d1824ed1d5873b70857a6480d6dc047f0f31ae46c",
+      "sha256": "f9677e5cd79ca85a797801793dc29aaac0099b1f1f46f9f857e4c492db87a7c1",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -799,7 +799,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "023ef6292c5a110a4a5c2b46daa5be5b8552a88da8b485a8e834dc15497c495a",
+      "sha256": "201f874c5fc933c329f528f95e62cd9eab858f756d6d3bb83d40389cb3473604",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
