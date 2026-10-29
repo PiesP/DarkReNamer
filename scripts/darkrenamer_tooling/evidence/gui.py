@@ -5538,12 +5538,55 @@ def validate_runtime_samples(cell: dict) -> dict:
             "sampled_phase_resources": resources}
 
 
+RUNTIME_DEFAULT_APPEARANCE = {
+    "theme": 0, "density": 0, "emphasis": 1, "show_separators": True,
+    "show_preview_tint": True, "show_empty_safety": True,
+}
+
+
+def decode_runtime_appearance_preference(data: bytes) -> dict:
+    # Mirror preferences.rs decode_appearance, including its independent reserved bytes.
+    require(type(data) is bytes and len(data) == 24,
+            "Runtime appearance preference length is invalid.")
+    require(data[:8] == b"DRAPPR\0\0" and data[8:12] == bytes((1, 8, 0, 0)),
+            "Runtime appearance preference header is invalid.")
+    checksum = 2166136261
+    for byte in data[:20]:
+        checksum = ((checksum ^ byte) * 16777619) & 0xffffffff
+    require(int.from_bytes(data[20:24], "little") == checksum,
+            "Runtime appearance preference checksum is invalid.")
+    require(data[18:20] == b"\0\0" and data[12] <= 2 and data[13] <= 3 and
+            data[14] <= 2 and all(value in (0, 1) for value in data[15:18]),
+            "Runtime appearance preference reserved bytes, enums, or flags are invalid.")
+    return {"theme": data[12], "density": data[13], "emphasis": data[14],
+            "show_separators": data[15] == 1, "show_preview_tint": data[16] == 1,
+            "show_empty_safety": data[17] == 1}
+
+
+def validate_runtime_appearance_preference(value: object) -> None:
+    if value == "absent":
+        return
+    record = exact_keys(value, {"status", "bytes", "sha256", "bytes_hex", "value"},
+                        "runtime persisted appearance preference")
+    require(record["status"] == "valid-saved" and int_equals(record["bytes"], 24) and
+            type(record["bytes_hex"]) is str and
+            re.fullmatch(r"[0-9a-f]{48}", record["bytes_hex"]) is not None,
+            "Runtime persisted appearance record is not a bounded product-format snapshot.")
+    data = bytes.fromhex(record["bytes_hex"])
+    decoded = decode_runtime_appearance_preference(data)
+    require(typed_equal(record["value"], decoded) and
+            typed_equal(decoded, RUNTIME_DEFAULT_APPEARANCE) and
+            record["sha256"] == sha256_bytes(data),
+            "Runtime persisted appearance differs from the default System snapshot or its bytes.")
+
+
 def validate_runtime_appearance(environment: dict, process_id: int) -> dict:
     observation = exact_keys(environment.get("appearance"),
         {"preference_before", "preference_after", "pre_launch_resolution", "ready_resolution",
          "pre_close_resolution", "ready_menu", "pre_close_menu"}, "runtime appearance")
-    require(observation["preference_before"] == observation["preference_after"] == "absent",
-            "Runtime baseline appearance preference override is present or unobserved.")
+    require(observation["preference_before"] == "absent",
+            "Runtime baseline startup appearance preference override is present or unobserved.")
+    validate_runtime_appearance_preference(observation["preference_after"])
     for phase in ("pre_launch_resolution", "ready_resolution", "pre_close_resolution"):
         resolution = exact_keys(observation[phase],
             {"query", "foreground_argb", "resolved_theme", "system_visual_style"},

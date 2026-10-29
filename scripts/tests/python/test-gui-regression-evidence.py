@@ -3712,6 +3712,24 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
     sample_scenario = PerformanceSampleEvidenceTests.sample_scenario
     refresh_owned = PerformanceSampleEvidenceTests.refresh_owned
 
+    @staticmethod
+    def saved_default_appearance():
+        # Product DRAPPR v1: UiAppearance::DEFAULT + little-endian FNV-1a checksum.
+        raw = bytes.fromhex('4452415050520000010800000000010101010000e950f7f9')
+        return {'status': 'valid-saved', 'bytes': 24, 'bytes_hex': raw.hex(),
+            'sha256': 'b4371b6a8cb9748700ca1b99c7bd6afdac28f08a53365031a70fc690b0b6d5b8',
+            'value': {'theme': 0, 'density': 0, 'emphasis': 1, 'show_separators': True,
+                      'show_preview_tint': True, 'show_empty_safety': True}}
+
+    @staticmethod
+    def rechecksum_appearance(raw):
+        result = bytearray(raw)
+        checksum = 2166136261
+        for byte in result[:20]:
+            checksum = ((checksum ^ byte) * 16777619) & 0xffffffff
+        result[20:] = checksum.to_bytes(4, 'little')
+        return bytes(result)
+
     def refresh_runtime(self, run):
         self.refresh_owned(run)
         path = run / 'output/run-result.json'
@@ -3771,7 +3789,8 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                     {'command_id': 0x9010, 'checked': True},
                     {'command_id': 0x9011, 'checked': False},
                     {'command_id': 0x9012, 'checked': False}]}
-            cell_environment['appearance'] = {'preference_before': 'absent', 'preference_after': 'absent',
+            cell_environment['appearance'] = {'preference_before': 'absent',
+                'preference_after': self.saved_default_appearance(),
                 'pre_launch_resolution': deepcopy(resolution), 'ready_resolution': deepcopy(resolution),
                 'pre_close_resolution': deepcopy(resolution), 'ready_menu': deepcopy(appearance_menu),
                 'pre_close_menu': deepcopy(appearance_menu)}
@@ -3903,6 +3922,71 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                     evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
         path.write_bytes(original)
         self.refresh_runtime(run)
+
+    def test_product_appearance_golden_codec_and_strict_default_snapshot(self):
+        record = self.saved_default_appearance()
+        raw = bytes.fromhex(record['bytes_hex'])
+        self.assertEqual(evidence.decode_runtime_appearance_preference(raw), record['value'])
+        self.assertEqual(digest(raw), record['sha256'])
+        evidence.validate_runtime_appearance_preference(record)
+        evidence.validate_runtime_appearance_preference('absent')
+        # Exact golden bytes from preferences.rs::both_formats_keep_independent_golden_bytes.
+        dark = bytes([68, 82, 65, 80, 80, 82, 0, 0, 1, 8, 0, 0,
+                      2, 2, 2, 0, 1, 0, 0, 0, 254, 181, 216, 140])
+        self.assertEqual(evidence.decode_runtime_appearance_preference(dark),
+            {'theme': 2, 'density': 2, 'emphasis': 2, 'show_separators': False,
+             'show_preview_tint': True, 'show_empty_safety': False})
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_appearance_preference({**record, 'bytes_hex': dark.hex(),
+                'sha256': digest(dark), 'value': evidence.decode_runtime_appearance_preference(dark)})
+        for offset, value in ((0, 0), (8, 2), (9, 9), (10, 1), (11, 1), (12, 3),
+                              (13, 4), (14, 3), (15, 2), (16, 2), (17, 2), (18, 1), (19, 1)):
+            changed = bytearray(raw)
+            changed[offset] = value
+            with self.subTest(offset=offset), self.assertRaises(evidence.EvidenceError):
+                evidence.decode_runtime_appearance_preference(self.rechecksum_appearance(changed))
+        for changed in (raw[:-1], raw + b'\0', raw[:-1] + bytes([raw[-1] ^ 1])):
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.decode_runtime_appearance_preference(changed)
+
+    def test_rehashed_saved_appearance_rejects_explicit_theme_flags_hash_and_bool(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutation in ('light', 'dark', 'density', 'emphasis', 'separators', 'tint', 'safety',
+                         'checksum', 'reserved', 'hash', 'bool-enum', 'int-flag', 'bool-length'):
+            changed = json.loads(original)
+            record = changed['assertions']['scenario']['cells'][1]['environment']['appearance']['preference_after']
+            raw = bytearray.fromhex(record['bytes_hex'])
+            if mutation in ('light', 'dark', 'density', 'emphasis', 'separators', 'tint', 'safety', 'reserved'):
+                offset, value = {'light': (12, 1), 'dark': (12, 2), 'density': (13, 1),
+                    'emphasis': (14, 2), 'separators': (15, 0), 'tint': (16, 0),
+                    'safety': (17, 0), 'reserved': (18, 1)}[mutation]
+                raw[offset] = value
+                raw = self.rechecksum_appearance(raw)
+                if mutation != 'reserved':
+                    record['value'] = evidence.decode_runtime_appearance_preference(raw)
+                record.update(bytes_hex=raw.hex(), sha256=digest(raw))
+            elif mutation == 'checksum':
+                raw[-1] ^= 1
+                record.update(bytes_hex=raw.hex(), sha256=digest(raw))
+            elif mutation == 'hash':
+                record['sha256'] = 'f' * 64
+            elif mutation == 'bool-enum':
+                record['value']['theme'] = False
+            elif mutation == 'int-flag':
+                record['value']['show_separators'] = 1
+            else:
+                record['bytes'] = True
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        changed = json.loads(original)
+        changed['assertions']['scenario']['cells'][2]['environment']['appearance']['preference_after'] = 'absent'
+        write_json(path, changed)
+        self.refresh_runtime(run)
+        self.assertEqual(len(evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)['metrics']['cells']), 3)
 
     def test_zero_sample_short_phase_preserves_real_powershell_double_zero_summary(self):
         run = self.runtime_run()
