@@ -1838,6 +1838,20 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                         language=language, require_occupied=True)
         capture_bytes += flow['prefix_prompt_capture']['bytes']
         checkpoints = verify_flow_checkpoints(flow)
+        prelaunch = flow.get('prelaunch_checkpoints')
+        if (not isinstance(prelaunch, list) or len(prelaunch) != 1 or
+                not isinstance(prelaunch[0], dict) or
+                set(prelaunch[0]) != {'phase', 'fixture_entries', 'journal_entries'} or
+                prelaunch[0]['phase'] != 'initial' or
+                prelaunch[0]['fixture_entries'] != flow['checkpoints'][0]['fixture_entries']):
+            raise ValueError('Language flow prelaunch fixture checkpoint is invalid.')
+        runtime_lock = [{'name': 'runtime.lock', 'kind': 'file', 'bytes': 0}]
+        for journal in (prelaunch[0]['journal_entries'], flow['checkpoints'][0]['journal_entries']):
+            if (not isinstance(journal, list) or len(journal) != 1 or
+                    not isinstance(journal[0], dict) or
+                    set(journal[0]) != {'name', 'kind', 'bytes'} or
+                    type(journal[0]['bytes']) is not int or journal != runtime_lock):
+                raise ValueError('Language flow requires the same exact prelaunch and startup runtime lock.')
         if (flow.get('before_content_sha256') != baseline_flow.get('before_content_sha256') or
                 flow.get('after_content_sha256') != checkpoints['after_apply']['content_sha256'] or
                 flow.get('after_file_identity_sha256') != checkpoints['after_apply']['file_identity_sha256']):

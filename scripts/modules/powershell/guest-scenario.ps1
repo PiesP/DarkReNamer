@@ -386,8 +386,13 @@ function Invoke-ProductionRenameFlow {
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [switch] $RawEvidence,
+        [switch] $ExpectExistingRuntimeLock,
         [ValidateSet('ko', 'en', 'ja')][string] $Language = 'ko'
     )
+
+    if ($ExpectExistingRuntimeLock -and ($RawEvidence -or $Language -ceq 'ko')) {
+        throw 'Only non-raw English and Japanese flows may reuse the runtime lock.'
+    }
 
     $Process = $OwnedProcess.process
     $labels = Get-ProductionLanguageSpec -Language $Language
@@ -451,7 +456,8 @@ function Invoke-ProductionRenameFlow {
         $flow.failure_reason = 'startup_fixture_changed'
         Assert-ProductionRenameFlowStartupCheckpoint `
             -Prelaunch $InitialFixture.checkpoints[0] `
-            -Startup $flow.checkpoints[0]
+            -Startup $flow.checkpoints[0] `
+            -ExpectExistingRuntimeLock:$ExpectExistingRuntimeLock
         if ($RawEvidence) {
             Assert-ProductionRenameFlowStartupCheckpoint `
                 -Prelaunch $InitialFixture.raw_checkpoints[0] `
@@ -2633,7 +2639,7 @@ function Invoke-ProductionLanguageCycle {
                 $flow = Invoke-ProductionRenameFlow -OwnedProcess $owned -InitialFixture $initial `
                     -MainWindow $main -MainWindowHandle $handle -FixtureRoot $fixture `
                     -OutputRoot $OutputRoot -ExpectedSession $Session -TimeoutSeconds $TimeoutSeconds `
-                    -Language $step.language
+                    -Language $step.language -ExpectExistingRuntimeLock
                 if ($flow.status -cne 'passed') {
                     throw "$($step.language) production rename flow failed: $($flow.failure_reason)"
                 }
