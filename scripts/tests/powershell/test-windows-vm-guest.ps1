@@ -463,6 +463,50 @@ try {
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
     } 'fixed focused native selection is invalid'
+    $runtimeModelBundle = New-Fixture -Name 'runtime-model-selection'
+    $runtimeModelBundle.manifest.test_binaries[0].name = 'darknamer_app'
+    $runtimeModelBundle.manifest.diagnostic = [ordered]@{
+        kind = 'runtime-model-baseline'
+        test_profile = 'release'
+        test_name = 'windows::list_view::native_tests::profile_runtime_model_baseline'
+        scope = 'instrumented-windows-libtest'
+        schema_version = 1
+        records = 183
+    }
+    Save-Manifest $runtimeModelBundle
+    Invoke-TestGuest -EntryPointPath $runtimeModelBundle.runner `
+        -BundleRoot $runtimeModelBundle.root -ExpectedSessionId 1 -ValidateOnly
+    foreach ($mutation in @(
+        @{ name = 'test_profile'; value = 'debug' },
+        @{ name = 'test_name'; value = 'arbitrary_test' },
+        @{ name = 'scope'; value = 'production' },
+        @{ name = 'schema_version'; value = $true },
+        @{ name = 'schema_version'; value = 2 },
+        @{ name = 'records'; value = $true },
+        @{ name = 'records'; value = 182 }
+    )) {
+        $original = $runtimeModelBundle.manifest.diagnostic[$mutation.name]
+        $runtimeModelBundle.manifest.diagnostic[$mutation.name] = $mutation.value
+        Save-Manifest $runtimeModelBundle
+        Assert-Fails {
+            Invoke-TestGuest -EntryPointPath $runtimeModelBundle.runner `
+                -BundleRoot $runtimeModelBundle.root -ExpectedSessionId 1 -ValidateOnly
+        } 'runtime model selection is invalid'
+        $runtimeModelBundle.manifest.diagnostic[$mutation.name] = $original
+    }
+    $runtimeModelBundle.manifest.test_binaries[0].name = 'rename_windows_backend'
+    Save-Manifest $runtimeModelBundle
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $runtimeModelBundle.runner `
+            -BundleRoot $runtimeModelBundle.root -ExpectedSessionId 1 -ValidateOnly
+    } 'one exact test binary'
+    $runtimeModelBundle.manifest.test_binaries[0].name = 'darknamer_app'
+    $runtimeModelBundle.manifest.diagnostic['extra'] = 1
+    Save-Manifest $runtimeModelBundle
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $runtimeModelBundle.runner `
+            -BundleRoot $runtimeModelBundle.root -ExpectedSessionId 1 -ValidateOnly
+    } 'unexpected fields'
     $virtual = New-Fixture -Name 'virtual-execution-selection'
     $virtual.manifest.test_binaries[0].name = 'rename_windows_backend'
     $virtual.manifest.diagnostic = [ordered]@{

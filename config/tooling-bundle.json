@@ -464,7 +464,7 @@
       "bundle": "guest-contracts.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "71aac5270c761225ab37b90b8822d61429b15ba873a5b7c6f059c952fc29f9d3",
+      "sha256": "2c0ecfaf3a4e16e4c2257348fc565271f6368205f9f222024f3d207d2a679d5e",
       "dependencies": []
     },
     {
