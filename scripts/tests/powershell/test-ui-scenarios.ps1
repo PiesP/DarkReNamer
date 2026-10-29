@@ -96,6 +96,22 @@ namespace Windows.Automation {
 namespace UIAutomationClientsideProviders { public class UIAutomationClientSideProviders {} }
 '@
 
+# The clock ends after the empty grid/import command observations, before
+# observer capture sizing, native-lifetime verification and environment probes.
+$runtimeSource = ${function:Invoke-ObserverRuntimeBaselineScenario}.ToString()
+$gridAt = $runtimeSource.IndexOf('$grid = Get-ObserverGrid')
+$commandAt = $runtimeSource.IndexOf('::IsMenuCommandEnabled(')
+$readyAt = $runtimeSource.IndexOf('$readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()')
+$clockAt = $runtimeSource.IndexOf('$cell.startup = [ordered]@{')
+$resizeAt = $runtimeSource.IndexOf('Ensure-AcceptanceMainWindowCaptureSize')
+$environmentAt = $runtimeSource.IndexOf('$environment = Get-ObserverEnvironmentMetadata')
+$lifetimeAt = $runtimeSource.IndexOf('$nativeLifetime = ')
+if ($gridAt -lt 0 -or $commandAt -le $gridAt -or $readyAt -le $commandAt -or
+    $clockAt -le $readyAt -or $resizeAt -le $clockAt -or $environmentAt -le $resizeAt -or
+    $lifetimeAt -le $clockAt) {
+    throw 'Runtime ready clock includes capture sizing or environment work, or omits command readiness.'
+}
+
 $process = [Diagnostics.Process]::GetCurrentProcess()
 $window = [Windows.Automation.AutomationElement]::new()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-scenarios-' + [guid]::NewGuid().ToString('N'))
