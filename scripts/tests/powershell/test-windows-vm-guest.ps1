@@ -370,6 +370,16 @@ try {
         throw 'System language resolution did not use English after unsupported tags.'
     }
     Initialize-ProductionLanguageMenuReader
+    $expectedInputLayout = switch ([IntPtr]::Size) {
+        8 { @(24, 32, 32, 40, 8) }
+        4 { @(16, 24, 24, 28, 4) }
+        default { throw 'The guest test runs on an unsupported native INPUT pointer size.' }
+    }
+    $actualInputLayout = @([DarkReNamerLanguageMenuReader]::InputLayout())
+    if (($actualInputLayout -join ',') -cne ($expectedInputLayout -join ',')) {
+        throw "Native SendInput layout is wrong: $($actualInputLayout -join ',')."
+    }
+    Initialize-ProductionLanguageMenuReader
     $valid = New-Fixture -Name 'valid'
     Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
     $focused = New-Fixture -Name 'focused-selection'
