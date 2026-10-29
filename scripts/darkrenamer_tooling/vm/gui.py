@@ -92,7 +92,7 @@ PICKER_PLAN = {
 CUSTOM_PLAN = {
     "ordinary_rows": [100], "idle_ms": 1000, "sample_interval_ms": 200,
     "maximum_seconds": 120, "command_timeout_ms": 5000,
-    "fixture_file_limit": 100, "prompt_settle_ms": 350,
+    "fixture_file_limit": 100, "prompt_settle_ms": 350, "controlled_hidden_ms": 700,
     "confirmed_prefix": "confirmed-", "cancelled_prefix": "cancelled-",
     "prompt_count": 2, "full_performance_sample": False,
 }

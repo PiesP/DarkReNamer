@@ -1044,6 +1044,8 @@ function Invoke-ObserverPrefix {
         [string] $ExpectedFirstSourceName = 'item-00000.txt',
         [object] $Command,
         [ValidateRange(0, 1000)][int] $PromptSettleMilliseconds = 0,
+        [ValidateRange(0, 1000)][int] $ControlledHiddenMilliseconds = 0,
+        [object] $Sampler,
         [Collections.Generic.List[object]] $TimelineEvents
     )
     if ($null -ne $TimelineEvents -and $TimelineEvents.Count + 5 -gt 128) {
@@ -1061,6 +1063,31 @@ function Invoke-ObserverPrefix {
     $promptClass = [string]$prompt.Current.ClassName
     $promptVisible = -not [bool]$prompt.Current.IsOffscreen
     $promptEnabled = [bool]$prompt.Current.IsEnabled
+    $hiddenControl = $null
+    if ($ControlledHiddenMilliseconds -gt 0) {
+        if ($null -eq $Sampler -or $promptClass -cne 'DarkReNamerInputWindow' -or
+            -not $promptVisible -or -not $promptEnabled) {
+            throw 'Controlled custom prompt requires a visible bound native window and sampler.'
+        }
+        $hideRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        $hiddenObservedTicks = [long]0
+        $restoreRequestTicks = [long]0
+        $restoredObservedTicks = [long]0
+        try {
+            $hiddenObservedTicks = $Sampler.SetBoundCustomPromptVisibility($handle, $false, 5000)
+            Start-Sleep -Milliseconds $ControlledHiddenMilliseconds
+        }
+        finally {
+            $restoreRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+            $restoredObservedTicks = $Sampler.SetBoundCustomPromptVisibility($handle, $true, 5000)
+        }
+        $hiddenControl = [ordered]@{
+            schema_version=1; prompt_handle=$handle.ToInt64();
+            hide_request_ticks=[long]$hideRequestTicks;
+            hidden_observed_ticks=[long]$hiddenObservedTicks;
+            restore_request_ticks=[long]$restoreRequestTicks;
+            restored_observed_ticks=[long]$restoredObservedTicks }
+    }
     if ($PromptSettleMilliseconds -gt 0) {
         if ($promptClass -cne 'DarkReNamerInputWindow' -or -not $promptVisible -or -not $promptEnabled) {
             throw 'Focused custom input prompt class or visible/enabled state differs.'
@@ -1101,7 +1128,7 @@ function Invoke-ObserverPrefix {
         expected_first_name = $expected; prompt_handle = $handle.ToInt64();
         prompt_class = $promptClass; prompt_visible = $promptVisible;
         prompt_enabled = $promptEnabled; prompt_found_ticks = $promptFoundTicks;
-        prompt_closed_ticks = $promptClosedTicks }
+        prompt_closed_ticks = $promptClosedTicks; hidden_control=$hiddenControl }
 }
 function Get-ObserverReadOnlyDetails {
     param(

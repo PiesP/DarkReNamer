@@ -1314,18 +1314,31 @@ python3 -I scripts/run-gui-regression.py \
 The fixed run imports 100 ordinary files through the native picker control,
 then opens the real `DarkReNamerInputWindow` twice. It confirms `confirmed-`,
 verifies the proposal, resets it, enters `cancelled-`, cancels, and verifies that
-the proposal stays reset. Each prompt remains open for a declared 350 ms. The
-sampler records source-selected schema-3 raw and accepted popup identities,
+the proposal stays reset. The first prompt is deliberately hidden for 700 ms
+and restored before confirmation; the native visibility request is bounded to
+five seconds and checks the same PID, thread, class, direct owner, and disabled
+main window before and after. Each visible prompt remains open for a declared
+350 ms. The sampler records source-selected schema-3 raw and accepted popup identities,
 class, PID, thread, direct owner, owner chain, visibility, lookup status, and
-failure predicates in the same probe brackets. The verifier requires a visible
-bound custom popup sample during both prompt intervals and a retired popup
-after cancellation. The native picker is an independent control in the same
-run; the custom prompt does not inherit picker class handling.
+failure predicates in the same probe brackets. The verifier requires a bound
+`owned-hidden-inactive` custom sample during the controlled interval, a visible
+sample after restoration, visible samples during both prompt intervals, and a
+retired popup after cancellation. The controlled interval tests the policy; it
+does not claim to observe a naturally timed creation or retirement transition.
+If `GetLastActivePopup` does not expose the hidden prompt, the run remains a
+preserved failure. The native picker is an independent control in the same run;
+the custom prompt does not inherit picker class handling.
 
 The observer has a 120-second and 650-sample limit, the controller has
 120-second task and 240-second suite limits, and collection is capped at 32 MiB
 and one screenshot. The V2 owned-resource, managed-desktop, failed first-record,
 and pre-delete restoration requirements also apply. This focused diagnostic
+checks each probe's native status/error pair and QPC-derived response time.
+After the sampler stops, screenshot, fixture readback, journal readback, normal
+close, or native exit errors retain completed samples and a bounded
+`post_stop_failure` stage, separate from `sampler_failure`. Observer and
+controller cleanup failures retain the original status and independent owned
+cleanup proof; none become accepted observations. This focused diagnostic
 does not execute the complete performance workload. Run and verify one complete
 `performance-sample` after it; a failed or partial record cannot qualify the
 full workload. Schema-2 receipts retain their prior `#32770`-only hidden-popup
