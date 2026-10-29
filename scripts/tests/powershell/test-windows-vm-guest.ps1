@@ -1444,6 +1444,33 @@ foreach ($rawEvidence in @($true, $false)) {
     if ($longGuiFailureDetail.error_detail.message.Length -ne 1024) {
         throw 'GUI smoke failure messages must be capped at 1024 characters.'
     }
+    $languageFailureDetail = [ordered]@{ error_detail = $null }
+    $languageEvidence = [ordered]@{
+        schema_version = 1; stage = 'durable-preference-acknowledgement'
+        target_command = 36898; expected_preference = 2
+        first_post_enter = [ordered]@{ status = 'pending'; preference = 0 }
+        last_post_enter = [ordered]@{ status = 'write failed'; preference = 0 }
+    }
+    $languageFailure = [InvalidOperationException]::new('input trace ' + ('x' * 2048))
+    $languageFailure.Data['DarkReNamerLanguageMenuFailure'] = $languageEvidence
+    try { throw [Exception]::new('wrapped language failure', $languageFailure) }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $languageFailureDetail -ErrorRecord $_
+    }
+    if (($languageFailureDetail.error_detail.language_menu_failure | ConvertTo-Json -Depth 5 -Compress) -cne
+        ($languageEvidence | ConvertTo-Json -Depth 5 -Compress) -or
+        $languageFailureDetail.error_detail.message -cne 'wrapped language failure') {
+        throw 'Language post-selection evidence must survive exception wrapping and message truncation.'
+    }
+    $directLanguageFailureDetail = [ordered]@{ error_detail = $null }
+    try { throw $languageFailure }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $directLanguageFailureDetail -ErrorRecord $_
+    }
+    if ($directLanguageFailureDetail.error_detail.message.Length -ne 1024 -or
+        $directLanguageFailureDetail.error_detail.language_menu_failure.last_post_enter.status -cne 'write failed') {
+        throw 'A long menu trace must not hide the final language save observation.'
+    }
     if ($runnerText.Contains('maximumProcessIds') -or
         $runnerText.Contains('capacity = capacity * 2')) {
         throw 'The sole-process Job Object query must not retry a multi-PID snapshot with a larger buffer.'
