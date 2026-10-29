@@ -381,36 +381,42 @@ impl AdmissionProgress {
 }
 
 pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
-    let window_value = window as usize;
-    let writer = PreferencesWriter::spawn(state.column_preferences_path.clone(), move || {
-        // SAFETY: the integer value is the top-level HWND captured before the
-        // writer starts. The wake contains no pointer payload or borrowed data.
-        unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
-    });
-    let columns = match writer {
-        Ok(writer) => Some(writer),
-        Err(error) => {
-            state.set_transient_status(format!(
-                "열 표시 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-            ));
-            None
-        }
-    };
-    let window_value = window as usize;
-    let appearance_writer =
-        AppearancePreferencesWriter::spawn(state.appearance_preferences_path.clone(), move || {
-            // SAFETY: the integer value is the top-level HWND captured before
-            // the writer starts. No UI-owned pointer crosses this boundary.
+    let columns = if state.column_preferences_authorized {
+        let window_value = window as usize;
+        match PreferencesWriter::spawn(state.column_preferences_path.clone(), move || {
+            // SAFETY: this scalar HWND carries no borrowed data in the wake.
             unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
-        });
-    let appearance = match appearance_writer {
-        Ok(writer) => Some(writer),
-        Err(error) => {
-            state.set_transient_status(format!(
-                "모양 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-            ));
-            None
+        }) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                state.set_transient_status(format!(
+                    "열 표시 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+                ));
+                None
+            }
         }
+    } else {
+        None
+    };
+    let appearance = if state.appearance_preferences_authorized {
+        let window_value = window as usize;
+        match AppearancePreferencesWriter::spawn(
+            state.appearance_preferences_path.clone(),
+            move || {
+                // SAFETY: this scalar HWND carries no borrowed data in the wake.
+                unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
+            },
+        ) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                state.set_transient_status(format!(
+                    "모양 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
     };
     state.preference_persistence = PreferencePersistence::new(columns, appearance);
     if state.preference_persistence.is_joined() {

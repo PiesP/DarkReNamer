@@ -2041,7 +2041,8 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::IDCANCEL;
 
     #[test]
-    fn preference_read_failure_before_close_baseline() -> Result<(), Box<dyn std::error::Error>> {
+    fn preference_read_failure_preserves_original_on_production_close()
+    -> Result<(), Box<dyn std::error::Error>> {
         use crate::preferences::{
             appearance_path_for_journal_root, path_for_journal_root, save, save_appearance,
         };
@@ -2049,7 +2050,7 @@ mod tests {
         use std::time::{Duration, Instant};
         use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
 
-        for fail_columns in [true, false] {
+        for (fail_columns, edit) in [(true, false), (false, false), (true, true), (false, true)] {
             let dir = tempfile::tempdir()?;
             let runtime = initialize_safe_runtime_at(dir.path())?;
             let columns_path = path_for_journal_root(runtime.root.path());
@@ -2080,6 +2081,23 @@ mod tests {
                 }
                 drop(state);
                 drop(obstruction);
+                if edit {
+                    let mut state =
+                        try_app_state(window).ok_or_else(|| io::Error::other("missing state"))?;
+                    let state = state.state_mut();
+                    state.column_states[0].record_user_resize(210, BASE_DPI);
+                    state.appearance.theme = AppThemeMode::Dark;
+                    state.persist_column_preferences();
+                    state.persist_appearance_preferences();
+                    // Resetting the failed preference is an in-memory edit, not write authority.
+                    if fail_columns {
+                        state.column_states = crate::default_column_states();
+                        state.persist_column_preferences();
+                    } else {
+                        state.appearance = UiAppearance::default();
+                        state.persist_appearance_preferences();
+                    }
+                }
                 // SAFETY: the live test window receives the ordinary production close message.
                 unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -2110,7 +2128,17 @@ mod tests {
                 original,
                 after
             );
-            assert_ne!(after, original, "baseline must reproduce replacement");
+            assert_eq!(after, original, "unread preferences must survive close");
+            if edit {
+                let reopened = AppState::new(initialize_safe_runtime_at(dir.path())?);
+                if fail_columns {
+                    assert_eq!(reopened.appearance.theme, AppThemeMode::Dark);
+                } else {
+                    let mut expected = crate::default_column_states();
+                    expected[0].record_user_resize(210, BASE_DPI);
+                    assert_eq!(reopened.column_states, expected);
+                }
+            }
         }
         Ok(())
     }
