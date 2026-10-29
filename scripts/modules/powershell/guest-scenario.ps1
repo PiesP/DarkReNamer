@@ -1205,7 +1205,10 @@ public static class DarkReNamerVmGuiObserverDpi {
 }
 
 function Initialize-ProductionLanguageMenuReader {
-    if ('DarkReNamerLanguageMenuReader' -as [type]) { return }
+    if ('DarkReNamerLanguageMenuReader' -as [type]) {
+        [DarkReNamerLanguageMenuReader]::AssertInputLayout()
+        return
+    }
     Add-Type @'
 using System;
 using System.ComponentModel;
@@ -1218,14 +1221,37 @@ public static class DarkReNamerLanguageMenuReader {
         public uint Flags, Time;
         public UIntPtr ExtraInfo;
     }
+    [StructLayout(LayoutKind.Sequential)] private struct MouseInput {
+        public int X, Y;
+        public uint MouseData, Flags, Time;
+        public UIntPtr ExtraInfo;
+    }
     [StructLayout(LayoutKind.Explicit)] private struct InputUnion {
         [FieldOffset(0)] public KeyInput Keyboard;
+        [FieldOffset(0)] public MouseInput Mouse;
     }
     [StructLayout(LayoutKind.Sequential)] private struct Input {
         public uint Type;
         public InputUnion Value;
     }
     [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+    public static int[] InputLayout() {
+        return new [] {
+            Marshal.SizeOf(typeof(KeyInput)), Marshal.SizeOf(typeof(MouseInput)),
+            Marshal.SizeOf(typeof(InputUnion)), Marshal.SizeOf(typeof(Input)),
+            Marshal.OffsetOf(typeof(Input), "Value").ToInt32()
+        };
+    }
+    public static void AssertInputLayout() {
+        int[] actual = InputLayout();
+        int[] expected = IntPtr.Size == 8 ? new [] { 24, 32, 32, 40, 8 } :
+            IntPtr.Size == 4 ? new [] { 16, 24, 24, 28, 4 } : null;
+        if (expected == null) throw new InvalidOperationException("Unsupported native INPUT pointer size.");
+        for (int index = 0; index < expected.Length; index++) {
+            if (actual[index] != expected[index])
+                throw new InvalidOperationException("Native INPUT layout differs from the SendInput ABI.");
+        }
+    }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetUserPreferredUILanguages(uint flags, out uint count, [Out] char[] buffer, ref uint size);
@@ -1255,6 +1281,7 @@ public static class DarkReNamerLanguageMenuReader {
     }
 
     private static void SendKey(ushort virtualKey, uint flags) {
+        AssertInputLayout();
         Input input = new Input { Type = 1, Value = new InputUnion {
             Keyboard = new KeyInput { VirtualKey = virtualKey, ScanCode = 0,
                 Flags = flags, Time = 0, ExtraInfo = UIntPtr.Zero }
@@ -1371,6 +1398,7 @@ public static class DarkReNamerLanguageMenuReader {
     }
 }
 '@
+    [DarkReNamerLanguageMenuReader]::AssertInputLayout()
 }
 
 function Resolve-ProductionSystemLanguage {
