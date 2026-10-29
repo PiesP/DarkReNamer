@@ -3484,6 +3484,28 @@ function New-ObserverRuntimeLanguagePreference {
     return $record
 }
 
+function Get-ObserverRuntimeLightAppearance {
+    $resolution = Get-ObserverResolvedSystemAppearance
+    if ($resolution.resolved_theme -cne 'light' -or
+        $resolution.system_visual_style.forced_colors -isnot [bool] -or
+        $resolution.system_visual_style.forced_colors) {
+        throw 'Runtime baseline requires observed System Light appearance without Forced Colors.'
+    }
+    return $resolution
+}
+
+function Assert-ObserverRuntimeSystemAppearanceMenu {
+    param([Parameter(Mandatory)] $Menu)
+    $expected = @(
+        [ordered]@{ command_id=0x9010; checked=$true },
+        [ordered]@{ command_id=0x9011; checked=$false },
+        [ordered]@{ command_id=0x9012; checked=$false })
+    if (($Menu.menu_checked | ConvertTo-Json -Compress) -cne
+        ($expected | ConvertTo-Json -Compress)) {
+        throw 'Runtime baseline product appearance did not retain the fresh System selection.'
+    }
+}
+
 function Invoke-ObserverRuntimeBaselineScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -3558,6 +3580,11 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     $cell.preference_before = [ordered]@{ status='valid-saved'; value=$seed.value;
                         sha256=$seed.sha256 }
                 }
+                $appearancePreferencePath = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'ui-appearance-v1'
+                if (Test-Path -LiteralPath $appearancePreferencePath) {
+                    throw 'Runtime baseline startup contains an appearance preference override.'
+                }
+                $appearanceBeforeLaunch = Get-ObserverRuntimeLightAppearance
                 $application = Start-AcceptanceApplication -FilePath $applicationPath `
                     -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds `
                     -Label 'runtime baseline application' `
@@ -3610,6 +3637,16 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     process_start_to_ready_lower_ms=[Math]::Round(($readyTicks - $createEnd) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
                     process_start_to_ready_upper_ms=[Math]::Round(($readyTicks - $createBegin) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
                     main_hwnd_bound=$true; empty_grid=$true; import_command_enabled=$true
+                }
+                # Keep environment queries outside the launch-to-ready clock above.
+                $appearanceReady = Get-ObserverRuntimeLightAppearance
+                $appearanceMenu = Get-VmAutomatedAppearance -Window $application.main `
+                    -Process $application.process -ExpectedSession $SessionId
+                Assert-ObserverRuntimeSystemAppearanceMenu -Menu $appearanceMenu
+                $environment['appearance'] = [ordered]@{
+                    preference_before='absent'; preference_after=$null
+                    pre_launch_resolution=$appearanceBeforeLaunch; ready_resolution=$appearanceReady
+                    pre_close_resolution=$null; ready_menu=$appearanceMenu; pre_close_menu=$null
                 }
                 $menu = Read-ProductionLanguageMenu -Process $application.process `
                     -MainWindow $application.main -Session $SessionId -Language $step.language
@@ -3730,6 +3767,10 @@ function Invoke-ObserverRuntimeBaselineScenario {
                 $cell.disk_unchanged = $true
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
                 $cell.journal_residue_count = 0
+                $environment.appearance.pre_close_resolution = Get-ObserverRuntimeLightAppearance
+                $environment.appearance.pre_close_menu = Get-VmAutomatedAppearance `
+                    -Window $application.main -Process $application.process -ExpectedSession $SessionId
+                Assert-ObserverRuntimeSystemAppearanceMenu -Menu $environment.appearance.pre_close_menu
                 $cell.normal_exit_code = Close-AcceptanceApplication -Application $application `
                     -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
                 $finalPreference = if (Test-Path -LiteralPath $preferencePath) {
@@ -3740,6 +3781,10 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     ($cell.preference_after | ConvertTo-Json -Compress)) {
                     throw 'Runtime baseline preference changed before normal process exit.'
                 }
+                if (Test-Path -LiteralPath $appearancePreferencePath) {
+                    throw 'Runtime baseline wrote an appearance preference override.'
+                }
+                $environment.appearance.preference_after = 'absent'
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
             }
             finally {
