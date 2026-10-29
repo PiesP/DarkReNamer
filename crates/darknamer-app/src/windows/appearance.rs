@@ -1417,9 +1417,7 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
 
 pub(super) fn apply_native_appearance_nonblocking(window: HWND, state: &mut AppState) {
     if let Err(error) = apply_native_appearance(window, state) {
-        state.set_transient_status(format!(
-            "모양 설정을 화면에 적용하지 못했습니다. 파일 작업에는 영향이 없습니다: {error}"
-        ));
+        state.set_transient_status(crate::i18n::native_ui::appearance_apply_failure(&error));
     }
 }
 

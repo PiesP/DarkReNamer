@@ -483,13 +483,17 @@ impl IDropTarget_Impl for DropTarget_Impl {
             }
             if extracted.count_truncated || extracted.path_budget_exhausted {
                 let detail = if extracted.count_truncated && extracted.path_budget_exhausted {
-                    "선택 항목이 남은 개수와 UTF-16 경로 용량 안전 한도를 초과해 제한된 수만 처리합니다."
+                    crate::i18n::native_ui::Text::DragDropItemAndPathLimit.get()
                 } else if extracted.count_truncated {
-                    "선택 항목이 남은 개수 한도를 초과해 제한된 수만 처리합니다."
+                    crate::i18n::native_ui::Text::DragDropItemLimit.get()
                 } else {
-                    "선택 경로가 UTF-16 경로 용량 안전 한도를 초과해 이미 확인한 항목만 처리합니다."
+                    crate::i18n::native_ui::Text::DragDropPathLimit.get()
                 };
-                message(self.state_owner, detail, "DarkReNamer - 추가 한도");
+                message(
+                    self.state_owner,
+                    detail,
+                    crate::i18n::native_ui::Text::DragDropLimitTitle.get(),
+                );
             }
             if drop_locked(self.state_owner) != Some(false) {
                 return Some(S_OK);
@@ -497,11 +501,8 @@ impl IDropTarget_Impl for DropTarget_Impl {
             if extracted.excluded_paths > 0 {
                 message(
                     self.state_owner,
-                    &format!(
-                        "드롭한 항목 중 {}개의 경로를 읽지 못해 제외했습니다. 정상적으로 읽은 경로만 추가 대상으로 검사합니다.",
-                        extracted.excluded_paths
-                    ),
-                    "DarkReNamer - 경로 읽기 실패",
+                    &crate::i18n::native_ui::drag_drop_unreadable_paths(extracted.excluded_paths),
+                    crate::i18n::native_ui::Text::DragDropReadFailureTitle.get(),
                 );
             }
             if drop_locked(self.state_owner) != Some(false) {

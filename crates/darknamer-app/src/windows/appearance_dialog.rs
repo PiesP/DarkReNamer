@@ -1,3 +1,5 @@
+use crate::i18n::native_ui;
+use crate::i18n::native_ui::Text;
 use std::io;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
@@ -137,22 +139,25 @@ thread_local! {
 }
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
 const WM_APP_APPEARANCE_REDRAW: u32 = WM_APP + 0x53;
-const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정 (미리보기)";
 // Use the standard modal caption and close target, not the compact tool-window
 // caption. Creation and DPI/work-area sizing must use the same frame metrics.
 const APPEARANCE_DIALOG_EX_STYLE: u32 = WS_EX_DLGMODALFRAME;
-const DENSITY_GROUP_LABEL: &str = "명령 버튼 배치";
-const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
-const EMPHASIS_GROUP_LABEL: &str = "변경 후 이름 강조";
-const EMPHASIS_LABELS: [&str; 3] = ["약하게", "표준", "강하게"];
-const SEPARATOR_LABEL: &str = "명령 버튼 그룹 구분선 표시";
-const TINT_LABEL: &str = "변경 후 이름 셀 배경 강조";
-const EMPTY_SAFETY_LABEL: &str = "빈 목록에서 안전 안내 표시";
-const FORCED_COLORS_EXPLANATION: &str =
-    "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다.";
-const RESET_LABEL: &str = "기본값으로 복원";
-const OK_LABEL: &str = "저장";
-const CANCEL_LABEL: &str = "취소";
+fn density_labels() -> [&'static str; 4] {
+    [
+        Text::AppearanceDensityAuto.get(),
+        Text::AppearanceDensitySpacious.get(),
+        Text::AppearanceDensityCompact.get(),
+        Text::AppearanceDensityMenuOnly.get(),
+    ]
+}
+
+fn emphasis_labels() -> [&'static str; 3] {
+    [
+        Text::AppearanceEmphasisSubtle.get(),
+        Text::AppearanceEmphasisStandard.get(),
+        Text::AppearanceEmphasisStrong.get(),
+    ]
+}
 
 pub(super) struct AppearanceDialogSession {
     pub(super) id: u32,
@@ -319,8 +324,8 @@ pub(super) fn prepare_appearance_dialog(
     if !advanced_appearance_available(worker_active, state.confirmation_pending) {
         message(
             owner,
-            "진행 중인 작업이나 확인 대화상자를 마친 뒤 모양 설정을 열어 주세요.",
-            "DarkReNamer - 모양 설정",
+            Text::AppearanceWaitUntilIdle.get(),
+            Text::AppearanceSettingsTitle.get(),
         );
         return None;
     }
@@ -391,9 +396,7 @@ pub(super) fn run_prepared_appearance_action(
                     finish_failed_appearance_creation(
                         owner,
                         command_session_id,
-                        format!(
-                            "모양 설정 창을 열지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-                        ),
+                        native_ui::appearance_open_failure(&error),
                     );
                     return;
                 }
@@ -422,9 +425,7 @@ pub(super) fn run_prepared_appearance_action(
             state.active_prompt = None;
             if !current {
                 if !state.close_pending {
-                    state.set_transient_status(
-                        "모양 설정 창을 준비하는 동안 작업 상태가 바뀌어 창을 열지 않았습니다.",
-                    );
+                    state.set_transient_status(Text::AppearanceStateChangedBeforeOpen.get());
                 } else {
                     try_finish_window_close(owner, state);
                 }
@@ -446,7 +447,7 @@ pub(super) fn run_prepared_appearance_action(
                     owner,
                     appearance_session_id,
                     window,
-                    "모양 설정 창을 활성화하지 못했습니다. 현재 작업에는 영향이 없습니다.",
+                    Text::AppearanceActivationFailed.get(),
                 );
                 platform.destroy(window);
                 return;
@@ -489,9 +490,7 @@ pub(super) fn run_prepared_appearance_action(
                 owner_guard.disarm();
                 try_finish_window_close(owner, state);
             } else {
-                state.set_transient_status(
-                    "모양 설정 창을 활성화하는 동안 작업 상태가 바뀌어 창을 닫았습니다.",
-                );
+                state.set_transient_status(Text::AppearanceStateChangedDuringActivation.get());
             }
             drop(state_lease);
             platform.destroy(window);
@@ -753,7 +752,7 @@ pub(super) fn create_appearance_dialog_window(
         state: state_ptr,
         adopted: &mut adopted,
     };
-    let title = wide(APPEARANCE_DIALOG_TITLE);
+    let title = wide(Text::AppearanceTitle.get());
     // SAFETY: owner/instance are live; title, class, init, and the boxed state
     // remain allocated through synchronous creation and its callbacks.
     let window = unsafe {
@@ -830,20 +829,20 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.density_group = child(
         body,
         "BUTTON",
-        DENSITY_GROUP_LABEL,
+        Text::AppearanceGroupDensity.get(),
         0xA100,
         BS_GROUPBOX as u32,
     )?;
     state.density_group_state = Some(install_appearance_group_subclass(
         state.density_group,
-        DENSITY_GROUP_LABEL,
+        Text::AppearanceGroupDensity.get(),
         Rc::clone(&state.font),
     )?);
     state.density = [
         child(
             body,
             "BUTTON",
-            DENSITY_LABELS[0],
+            density_labels()[0],
             DENSITY_AUTOMATIC_ID,
             BS_AUTORADIOBUTTON as u32
                 | BS_MULTILINE as u32
@@ -854,21 +853,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             body,
             "BUTTON",
-            DENSITY_LABELS[1],
+            density_labels()[1],
             DENSITY_COMFORTABLE_ID,
             BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
             body,
             "BUTTON",
-            DENSITY_LABELS[2],
+            density_labels()[2],
             DENSITY_COMPACT_ID,
             BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
             body,
             "BUTTON",
-            DENSITY_LABELS[3],
+            density_labels()[3],
             DENSITY_MENU_ONLY_ID,
             BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
@@ -876,20 +875,20 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.emphasis_group = child(
         body,
         "BUTTON",
-        EMPHASIS_GROUP_LABEL,
+        Text::AppearanceGroupEmphasis.get(),
         0xA110,
         BS_GROUPBOX as u32,
     )?;
     state.emphasis_group_state = Some(install_appearance_group_subclass(
         state.emphasis_group,
-        EMPHASIS_GROUP_LABEL,
+        Text::AppearanceGroupEmphasis.get(),
         Rc::clone(&state.font),
     )?);
     state.emphasis = [
         child(
             body,
             "BUTTON",
-            EMPHASIS_LABELS[0],
+            emphasis_labels()[0],
             EMPHASIS_SUBTLE_ID,
             BS_AUTORADIOBUTTON as u32
                 | BS_MULTILINE as u32
@@ -900,14 +899,14 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             body,
             "BUTTON",
-            EMPHASIS_LABELS[1],
+            emphasis_labels()[1],
             EMPHASIS_STANDARD_ID,
             BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
             body,
             "BUTTON",
-            EMPHASIS_LABELS[2],
+            emphasis_labels()[2],
             EMPHASIS_STRONG_ID,
             BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
@@ -915,7 +914,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.forced_explanation = child(
         body,
         "STATIC",
-        FORCED_COLORS_EXPLANATION,
+        Text::AppearanceForcedColors.get(),
         FORCED_EXPLANATION_ID,
         SS_NOPREFIX | SS_EDITCONTROL,
     )?;
@@ -923,21 +922,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             body,
             "BUTTON",
-            SEPARATOR_LABEL,
+            Text::AppearanceSeparators.get(),
             SHOW_SEPARATORS_ID,
             BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
             body,
             "BUTTON",
-            TINT_LABEL,
+            Text::AppearanceTint.get(),
             SHOW_PREVIEW_TINT_ID,
             BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
             body,
             "BUTTON",
-            EMPTY_SAFETY_LABEL,
+            Text::AppearanceEmptySafety.get(),
             SHOW_EMPTY_SAFETY_ID,
             BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
@@ -946,21 +945,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.reset = child(
         window,
         "BUTTON",
-        RESET_LABEL,
+        Text::AppearanceReset.get(),
         RESET_DEFAULTS_ID,
         WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
     state.ok = child(
         window,
         "BUTTON",
-        OK_LABEL,
+        Text::AppearanceSave.get(),
         IDOK as u16,
         WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
     )?;
     state.cancel = child(
         window,
         "BUTTON",
-        CANCEL_LABEL,
+        Text::DialogCancel.get(),
         IDCANCEL as u16,
         WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
@@ -1463,19 +1462,26 @@ fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetri
             })
     };
     let (option_width, option_height) = measure_many(&[
-        DENSITY_GROUP_LABEL,
-        DENSITY_LABELS[0],
-        DENSITY_LABELS[1],
-        DENSITY_LABELS[2],
-        DENSITY_LABELS[3],
-        EMPHASIS_GROUP_LABEL,
-        EMPHASIS_LABELS[0],
-        EMPHASIS_LABELS[1],
-        EMPHASIS_LABELS[2],
+        Text::AppearanceGroupDensity.get(),
+        density_labels()[0],
+        density_labels()[1],
+        density_labels()[2],
+        density_labels()[3],
+        Text::AppearanceGroupEmphasis.get(),
+        emphasis_labels()[0],
+        emphasis_labels()[1],
+        emphasis_labels()[2],
     ]);
-    let (checkbox_width, checkbox_height) =
-        measure_many(&[SEPARATOR_LABEL, TINT_LABEL, EMPTY_SAFETY_LABEL]);
-    let (button_width, button_height) = measure_many(&[RESET_LABEL, OK_LABEL, CANCEL_LABEL]);
+    let (checkbox_width, checkbox_height) = measure_many(&[
+        Text::AppearanceSeparators.get(),
+        Text::AppearanceTint.get(),
+        Text::AppearanceEmptySafety.get(),
+    ]);
+    let (button_width, button_height) = measure_many(&[
+        Text::AppearanceReset.get(),
+        Text::AppearanceSave.get(),
+        Text::DialogCancel.get(),
+    ]);
     AppearanceDialogMetrics {
         text_height: option_height.max(checkbox_height),
         widest_option: option_width,
@@ -1544,24 +1550,28 @@ fn measure_wrapped_appearance_dialog(
     let checkbox_width = layout.checkboxes[0]
         .width
         .saturating_sub(scale_dip(22, state.dpi));
-    let wrapped_option_height = DENSITY_LABELS
+    let wrapped_option_height = density_labels()
         .iter()
-        .chain(EMPHASIS_LABELS.iter())
+        .chain(emphasis_labels().iter())
         .map(|label| measure_wrapped_text(state.viewport, font, label, option_width))
         .max()
         .unwrap_or(0);
-    let wrapped_checkbox_height = [SEPARATOR_LABEL, TINT_LABEL, EMPTY_SAFETY_LABEL]
-        .iter()
-        .map(|label| measure_wrapped_text(state.viewport, font, label, checkbox_width))
-        .max()
-        .unwrap_or(0);
+    let wrapped_checkbox_height = [
+        Text::AppearanceSeparators.get(),
+        Text::AppearanceTint.get(),
+        Text::AppearanceEmptySafety.get(),
+    ]
+    .iter()
+    .map(|label| measure_wrapped_text(state.viewport, font, label, checkbox_width))
+    .max()
+    .unwrap_or(0);
     AppearanceDialogMetrics {
         wrapped_option_height,
         wrapped_checkbox_height,
         forced_explanation_height: measure_wrapped_text(
             state.viewport,
             font,
-            FORCED_COLORS_EXPLANATION,
+            Text::AppearanceForcedColors.get(),
             layout.forced_explanation.width,
         ),
         ..state.measured
@@ -2532,17 +2542,23 @@ mod native_tests {
     #[test]
     fn appearance_copy_names_the_current_settings_exactly() {
         assert_eq!(
-            APPEARANCE_DIALOG_TITLE,
+            Text::AppearanceTitle.get(),
             "DarkReNamer - 모양 설정 (미리보기)"
         );
-        assert_eq!(DENSITY_GROUP_LABEL, "명령 버튼 배치");
-        assert_eq!(EMPHASIS_GROUP_LABEL, "변경 후 이름 강조");
-        assert_eq!(SEPARATOR_LABEL, "명령 버튼 그룹 구분선 표시");
-        assert_eq!(TINT_LABEL, "변경 후 이름 셀 배경 강조");
-        assert_eq!(EMPTY_SAFETY_LABEL, "빈 목록에서 안전 안내 표시");
-        assert_eq!(OK_LABEL, "저장");
+        assert_eq!(Text::AppearanceGroupDensity.get(), "명령 버튼 배치");
+        assert_eq!(Text::AppearanceGroupEmphasis.get(), "변경 후 이름 강조");
         assert_eq!(
-            FORCED_COLORS_EXPLANATION,
+            Text::AppearanceSeparators.get(),
+            "명령 버튼 그룹 구분선 표시"
+        );
+        assert_eq!(Text::AppearanceTint.get(), "변경 후 이름 셀 배경 강조");
+        assert_eq!(
+            Text::AppearanceEmptySafety.get(),
+            "빈 목록에서 안전 안내 표시"
+        );
+        assert_eq!(Text::AppearanceSave.get(), "저장");
+        assert_eq!(
+            Text::AppearanceForcedColors.get(),
             "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다."
         );
     }
@@ -3365,8 +3381,14 @@ mod native_tests {
         // SAFETY: group_dc came from this exact live control.
         unsafe { ReleaseDC(density_group, group_dc) };
 
-        assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
-        assert_eq!(window_text(ok), LegacyText::from(OK_LABEL));
+        assert_eq!(
+            window_text(menu_only),
+            LegacyText::from(density_labels()[3])
+        );
+        assert_eq!(
+            window_text(ok),
+            LegacyText::from(Text::AppearanceSave.get())
+        );
         // SAFETY: menu_only is live and the borrowed theme handle query retains
         // no caller storage. Custom colors require the classic paint path.
         assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);

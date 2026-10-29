@@ -146,7 +146,7 @@ fn read_legacy_text_from_cancellable<R: Read>(
     if length > MAX_IMPORT_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "가져오기 파일이 2 MiB 한도를 초과합니다",
+            crate::i18n::native_ui::Text::TextIoFileTooLarge.get(),
         ));
     }
     check_import_cancellation(cancellation)?;
