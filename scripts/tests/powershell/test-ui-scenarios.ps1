@@ -112,6 +112,48 @@ if ($gridAt -lt 0 -or $commandAt -le $gridAt -or $readyAt -le $commandAt -or
     throw 'Runtime ready clock includes capture sizing or environment work, or omits command readiness.'
 }
 
+$idleCalls = [regex]::Matches($runtimeSource,
+    'Wait-ObserverRuntimeMinimumIdle -StartTicks \$\w+Start\s+`\s*-MinimumMilliseconds 30000 -OverallDeadline \$deadline')
+Assert-Equal $idleCalls.Count 2 'Runtime empty and populated idle deadline calls'
+$frequency = [long][Diagnostics.Stopwatch]::Frequency
+$requiredTicks = [long][Math]::Ceiling(30000.0 * $frequency / 1000.0)
+$script:idleTicks = 123456L
+$script:idleSleeps = [Collections.Generic.List[int]]::new()
+$script:idleSteps = [Collections.Generic.Queue[long]]::new()
+$firstEarlyTicks = [long][Math]::Ceiling(29998.532 * $frequency / 1000.0)
+$script:idleSteps.Enqueue($firstEarlyTicks)
+$script:idleSteps.Enqueue($requiredTicks - $firstEarlyTicks - 1)
+$script:idleSteps.Enqueue(1L)
+$idleEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks $script:idleTicks `
+    -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddMinutes(1) `
+    -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+        param([int] $Milliseconds)
+        if ($Milliseconds -le 0) { throw 'Runtime idle requested a nonpositive sleep.' }
+        $script:idleSleeps.Add($Milliseconds)
+        $script:idleTicks += $script:idleSteps.Dequeue()
+    }
+Assert-Equal $idleEnd (123456L + $requiredTicks) 'Runtime idle waits through multiple early returns'
+Assert-Equal $script:idleSleeps.Count 3 'Runtime idle rechecks the monotonic deadline'
+Assert-Equal $script:idleSleeps[0] 30000 'Runtime idle first waits for the full remaining interval'
+Assert-Equal $script:idleSteps.Count 0 'Runtime idle consumed simulated early returns'
+$script:idleSleeps.Clear()
+$idleEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks 123456L `
+    -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddMinutes(1) `
+    -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+        param([int] $Milliseconds)
+        throw 'Runtime idle slept after reaching the exact deadline.'
+    }
+Assert-Equal $idleEnd (123456L + $requiredTicks) 'Runtime idle accepts exact deadline without sleeping'
+Assert-Equal $script:idleSleeps.Count 0 'Runtime idle has no extra wake after exact deadline'
+Assert-Fails {
+    Wait-ObserverRuntimeMinimumIdle -StartTicks 123456L `
+        -MinimumMilliseconds 30000 -OverallDeadline (Get-Date).AddSeconds(-1) `
+        -GetTimestamp { $script:idleTicks } -SleepMilliseconds {
+            param([int] $Milliseconds)
+            throw 'Runtime idle slept after the scenario deadline.'
+        }
+} 'fixed scenario deadline'
+
 $process = [Diagnostics.Process]::GetCurrentProcess()
 $window = [Windows.Automation.AutomationElement]::new()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-scenarios-' + [guid]::NewGuid().ToString('N'))
