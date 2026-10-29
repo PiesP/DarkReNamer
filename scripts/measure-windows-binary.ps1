@@ -4,10 +4,10 @@ param(
     [string] $ExecutablePath,
     [Parameter(Mandatory)]
     [string] $PdbPath,
-    [Parameter(Mandatory)]
     [string] $DebugSymbolsZipPath,
     [Parameter(Mandatory)]
-    [string] $OutputPath
+    [string] $OutputPath,
+    [switch] $IdentityOnly
 )
 
 Set-StrictMode -Version Latest
@@ -230,7 +230,15 @@ function Get-PdbIdentity {
 
 $resolvedExecutable = Resolve-RequiredFile -Path $ExecutablePath -Label 'ExecutablePath'
 $resolvedPdb = Resolve-RequiredFile -Path $PdbPath -Label 'PdbPath'
-$resolvedSymbols = Resolve-RequiredFile -Path $DebugSymbolsZipPath -Label 'DebugSymbolsZipPath'
+if (-not $IdentityOnly -and [string]::IsNullOrEmpty($DebugSymbolsZipPath)) {
+    throw 'DebugSymbolsZipPath is required for release binary measurement.'
+}
+if ($IdentityOnly -and -not [string]::IsNullOrEmpty($DebugSymbolsZipPath)) {
+    throw 'IdentityOnly does not accept a debug-symbol archive.'
+}
+$resolvedSymbols = if ($IdentityOnly) { $null } else {
+    Resolve-RequiredFile -Path $DebugSymbolsZipPath -Label 'DebugSymbolsZipPath'
+}
 $resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
 $outputParent = Split-Path -Parent $resolvedOutput
 if ([string]::IsNullOrEmpty($outputParent) -or
@@ -287,7 +295,7 @@ if ($optionalMagic -ne 0x20b) {
     throw 'Executable optional header must be PE32+ (0x20b).'
 }
 $subsystem = Read-UInt16LittleEndian -Bytes $bytes -Offset ($optionalHeaderOffset + 68) -Location 'PE subsystem'
-if ($subsystem -ne 2) {
+if ($subsystem -ne 2 -and -not ($IdentityOnly -and $subsystem -eq 3)) {
     throw 'Executable subsystem must be Windows GUI (2).'
 }
 
@@ -398,17 +406,17 @@ if ($codeViewIdentities.Count -ne 1) {
 }
 
 $pdbInfo = Get-Item -LiteralPath $resolvedPdb
-$symbolsInfo = Get-Item -LiteralPath $resolvedSymbols
+$symbolsInfo = if ($IdentityOnly) { $null } else { Get-Item -LiteralPath $resolvedSymbols }
 if ($pdbInfo.Length -le 0) {
     throw 'PdbPath must not be empty.'
 }
 if ($pdbInfo.Length -gt $maximumPdbBytes) {
     throw "PdbPath must not exceed $maximumPdbBytes bytes."
 }
-if ($symbolsInfo.Length -le 0) {
+if (-not $IdentityOnly -and $symbolsInfo.Length -le 0) {
     throw 'DebugSymbolsZipPath must not be empty.'
 }
-if ($symbolsInfo.Length -gt $maximumSymbolsZipBytes) {
+if (-not $IdentityOnly -and $symbolsInfo.Length -gt $maximumSymbolsZipBytes) {
     throw "DebugSymbolsZipPath must not exceed $maximumSymbolsZipBytes bytes."
 }
 $pdbHash = (Get-FileHash -LiteralPath $resolvedPdb -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -417,6 +425,7 @@ if ($pdbIdentity.guid -cne $codeViewIdentities[0].guid -or
     $pdbIdentity.age -ne $codeViewIdentities[0].age) {
     throw 'PDB GUID and age do not match the executable CodeView identity.'
 }
+if (-not $IdentityOnly) {
 $archive = [IO.Compression.ZipFile]::OpenRead($resolvedSymbols)
 try {
     $entries = @($archive.Entries)
@@ -464,8 +473,28 @@ $entryHash = [Convert]::ToHexString($entryHashBytes).ToLowerInvariant()
 if ($entryHash -cne $pdbHash) {
     throw 'Debug-symbol archive does not contain the PdbPath bytes.'
 }
+}
 
-$measurement = [pscustomobject][ordered]@{
+$measurement = if ($IdentityOnly) {
+    [pscustomobject][ordered]@{
+        schema_version = 1
+        executable = [pscustomobject][ordered]@{
+            filename = $executableInfo.Name
+            sha256 = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+            bytes = $executableInfo.Length
+        }
+        pe = [pscustomobject][ordered]@{
+            machine = 'x86_64'
+            subsystem = if ($subsystem -eq 2) { 'windows-gui' } else { 'windows-console' }
+        }
+        debug_symbols = [pscustomobject][ordered]@{
+            guid = $pdbIdentity.guid
+            age = $pdbIdentity.age
+            pdb_sha256 = $pdbHash
+            pdb_bytes = $pdbInfo.Length
+        }
+    }
+} else { [pscustomobject][ordered]@{
     schema_version = 1
     executable = [pscustomobject][ordered]@{
         filename = $executableInfo.Name
@@ -488,7 +517,7 @@ $measurement = [pscustomobject][ordered]@{
         zip_sha256 = (Get-FileHash -LiteralPath $resolvedSymbols -Algorithm SHA256).Hash.ToLowerInvariant()
         zip_bytes = $symbolsInfo.Length
     }
-}
+} }
 
 $stream = $null
 $writer = $null
