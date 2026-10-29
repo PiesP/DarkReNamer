@@ -1619,3 +1619,50 @@ The release-tool integrity fixtures cover wrong bytes before execution, stale
 pins, unsupported assets and corrupt retained inputs. Complete the registered
 release category and a non-publishing hosted candidate after pin changes;
 fixture passes alone do not establish Windows installation or signing success.
+
+### Production runtime baseline
+
+From a clean source commit, use a prepared source-built bundle from that exact
+commit and a new private output root:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --output-root /absolute/private/new-runtime-baseline-attempt \
+  --connection-profile /path/to/private/connection-profile.json \
+  --diagnostic runtime-baseline \
+  --prepared-bundle-root /path/to/source-bound/prepared-bundle \
+  --expected-prepared-application-sha256 '<64-character-executable-sha256>' \
+  --acceptance-profile-id vm-automated-v2-owned-resources
+```
+
+The fixed `runtime-baseline-v1-1366x768-96-text100` run requires the prepared
+1366×768, 96-DPI, text-100, light managed desktop and a System language that
+resolves to Korean. It starts three sequential fresh product processes with
+separate isolated `LOCALAPPDATA` roots: absent preference with System selected,
+valid saved System, and valid saved English. Every cell records the process
+creation bracket, bound main window, empty list, enabled path-list import
+command, exact preference record hash, localized menu radio state, VM region,
+normal close, and owned process Job cleanup.
+
+Only the first cell performs the workload: 30 seconds empty idle; one ordinary
+1,000-file import; the existing asynchronous status endpoint with a stable full
+icon generation; 30 seconds populated idle with the same settled generation;
+then grow, shrink, and no-op manual-name proposals with reset verification and
+unchanged fixture bytes. The existing 200 ms sampler retains raw CPU time,
+private bytes, working set, thread, handle and GDI counts, responsiveness probes,
+resource-query duration and sample gaps. Summaries are derived from those raw
+samples. The scenario has a 600-second ceiling and one original populated PNG
+within the existing 32 MiB evidence budget.
+
+The independent GUI verifier requires the exact source/profile/prepared binary,
+raw manifests and transcripts, all three process lifecycles and Jobs, normal
+exits, text-scale restoration and managed-desktop cleanup. Missing icon or
+populated-idle evidence is incomplete. The frozen strict-cleanup failure route
+retains the failed original receipt and verifies all three process identities
+before authorizing deletion of only its two held roots.
+
+This diagnostic does not run Apply, measure allocator internals or process
+wakeups, collect WPR traces, complete the unchanged fixed performance sample, or
+provide release acceptance. The fixed performance sample continues to cover
+100/1,000/10,000 rows, both long-path column orders, extension churn and reuse
+with its existing schema.

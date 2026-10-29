@@ -114,6 +114,7 @@ public static class DarkReNamerVmAcceptanceNative {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
     foreach ($name in @('Assert-DrControllerOwnedPerformanceTextScale',
+                        'Assert-DrControllerRuntimeBaselineProcesses',
                         'New-DrControllerOwnedPerformancePredelete',
                         'Invoke-DrControllerBoundRootDelete')) {
         $definition = @($ast.FindAll({param($node)
@@ -155,7 +156,7 @@ public static class DarkReNamerVmAcceptanceNative {
             bytes=(Get-Item $profilePath).Length;
             sha256=(Get-FileHash $profilePath -Algorithm SHA256).Hash.ToLowerInvariant()}
         if ($profileRef.sha256 -cne $profileSha) { throw 'Owned test profile bytes changed.' }
-        $bundleRef=Save-DrOwnedFixture 'bundle.json' @{source_sha=$sourceSha}
+        $bundleRef=Save-DrOwnedFixture 'bundle.json' @{source_sha=$sourceSha;application=@{sha256=$appSha}}
         $text=[ordered]@{registry_key_existed=$true;registry_value_existed=$true;
             registry_value_kind='DWord';registry_value=[long]100;
             ui_settings_raw_factor=[double]1.0;ui_settings_percent=100}
@@ -295,6 +296,105 @@ public static class DarkReNamerVmAcceptanceNative {
         [void](Save-DrOwnedFixture 'owned-cleanup-desktop-closed.json' $changedSignal)
         Assert-Fails { New-DrControllerOwnedPerformancePredelete @arguments } `
             'not coherent 100 percent'
+        # The runtime mode freezes three normal product lifetimes independently.
+        $runtimeId='runtime-baseline-v1-1366x768-96-text100'
+        $runtimeCells=@(); $runtimeLives=@(); $runtimeJobs=@(); $runtimeDeclared=@()
+        foreach ($index in 0..2) {
+            $cellId=@('fresh-system','saved-system','saved-english')[$index]
+            $ticks=[long]638965440000000000 + [long]$index * 1000000000
+            $productId=4242 + $index
+            $runtimeCells+=@{id=$cellId;process_id=$productId;process_start_utc_ticks=$ticks;
+                normal_exit_code=0;environment=@{main_window=@{process_id=$productId}}}
+            $runtimeLives+=@{process_lifecycle=@{pid=$productId;session_id=7;
+                start_time_utc_ticks=[string]$ticks;creation_filetime=($ticks - 504911232000000000);
+                executable_path='C:\fixture\DarkReNamer.exe';executable_sha256=$appSha;
+                start_observed=$true;exit_observed=$true;exit_method='normal-close';exit_code=0}}
+            $runtimeJobs+=@{pid=$productId;process_start_time_utc_ticks=[string]$ticks;
+                status='clean';job_empty=$true;job_closed=$true;capture_complete=$true;
+                forced_termination=$false;had_survivors=$false}
+            $runtimeDeclared+=@{pid=$productId;start_time_utc_ticks=[string]$ticks}
+        }
+        $runtimePlan=[ordered]@{startup_cells=@('fresh-system','saved-system','saved-english');
+            idle_seconds=30;populated_rows=1000;sample_interval_ms=200;
+            icon_poll_interval_ms=100;maximum_seconds=600;transform_cases=@('grow','shrink','no-op')}
+        $runtimeInput=[ordered]@{run_id=$runtimeId;source_sha=$sourceSha;
+            bundle_manifest=@{sha256=$bundleRef.sha256};
+            acceptance_profile_id='vm-automated-v2-owned-resources';
+            acceptance_profile_sha256=$profileSha;acceptance_profile=@{sha256=$profileSha};
+            request=[ordered]@{mode='runtime-baseline';appearance='light';
+                desktop=@{width=1366;height=768;dpi=96};text_scale_percent=100;
+                runtime_baseline_plan=$runtimePlan};artifacts=@{application=@{sha256=$appSha}};
+            prepared_bundle=@{origin='external-prepared-source-built-bundle';
+                bundle_manifest_sha256=$bundleRef.sha256;application_sha256=$appSha}}
+        $runtimeObservations=[ordered]@{run_id=$runtimeId;text_scale_restoration=[ordered]@{
+            schema_version=1;baseline=$text;final=$text;snapshot_equal=$true};
+            scenario=@{mode='runtime-baseline';executable_sha256=$appSha;cells=$runtimeCells}}
+        $runtimeResult=[ordered]@{source_sha=$sourceSha;application=@{sha256=$appSha};
+            status='review_required';assertions=@{overall='passed';scope='runtime-baseline-production-v1';
+                scenario=$runtimeObservations.scenario};acceptance_observations=$runtimeObservations;
+            process_lifecycles=$runtimeLives;process_job_cleanup=$runtimeJobs}
+        $runtimeObserver=@{pid=3003;session_id=7;start_time_utc_ticks='638965440000000003'}
+        $runtimeResult['observer_lifecycle']=$runtimeObserver
+        $runtimeOwned=@{runner_session_id=7;process_job_cleanup=$runtimeJobs;
+            declared_processes=$runtimeDeclared;task_execution=@{observer_lifecycle=$runtimeObserver}}
+        $runtimeFixture=@{input=$runtimeInput;result=$runtimeResult;
+            observations=$runtimeObservations;owned=$runtimeOwned} | ConvertTo-Json -Depth 24 -Compress
+        $runtimeParsed=$runtimeFixture | ConvertFrom-Json
+        Assert-DrControllerRuntimeBaselineProcesses -InputManifest $runtimeParsed.input `
+            -Result $runtimeParsed.result -Observations $runtimeParsed.observations `
+            -OwnedEvidence $runtimeParsed.owned
+        foreach ($mutation in @('missing-cell','duplicate-cell','wrong-lifetime','wrong-session',
+            'wrong-executable','forced-close','missing-job','wrong-declared','bad-plan','bool-time','wrong-observer')) {
+            $bad=$runtimeFixture | ConvertFrom-Json
+            switch ($mutation) {
+                'missing-cell' { $bad.observations.scenario.cells=$bad.observations.scenario.cells[0..1] }
+                'duplicate-cell' { $bad.observations.scenario.cells[1]=$bad.observations.scenario.cells[0] }
+                'wrong-lifetime' { $bad.result.process_lifecycles[2].process_lifecycle.creation_filetime++ }
+                'wrong-session' { $bad.result.process_lifecycles[1].process_lifecycle.session_id=8 }
+                'wrong-executable' { $bad.result.process_lifecycles[1].process_lifecycle.executable_sha256='f'*64 }
+                'forced-close' { $bad.result.process_lifecycles[2].process_lifecycle.exit_method='forced-termination' }
+                'missing-job' { $bad.result.process_job_cleanup=$bad.result.process_job_cleanup[0..1] }
+                'wrong-declared' { $bad.owned.declared_processes[1].pid=9001 }
+                'bad-plan' { $bad.input.request.runtime_baseline_plan.populated_rows=100 }
+                'bool-time' { $bad.observations.scenario.cells[1].process_start_utc_ticks=$true }
+                'wrong-observer' { $bad.result.observer_lifecycle.pid=9900 }
+            }
+            $bad.result.assertions.scenario=$bad.observations.scenario
+            Assert-Fails {
+                Assert-DrControllerRuntimeBaselineProcesses -InputManifest $bad.input `
+                    -Result $bad.result -Observations $bad.observations -OwnedEvidence $bad.owned
+            } 'Runtime baseline'
+        }
+        # Rebind every preserved layer and reach the actual frozen-file gate.
+        $runtimeObservationRef=Save-DrOwnedFixture 'acceptance-observations.json' $runtimeObservations
+        $runtimeResult.observations=@{sha256=$runtimeObservationRef.sha256}
+        $runtimeResultRef=Save-DrOwnedFixture 'acceptance-result.json' $runtimeResult
+        $runtimeInputRef=Save-DrOwnedFixture 'owned-performance-input-manifest.json' $runtimeInput
+        $runtimeTransportRef=Save-DrOwnedFixture 'original-transport.json' ([ordered]@{
+            status='failed';task_kind='ui';raw_cleanup=@{owned_resource_evidence=$runtimeOwned};
+            owned_cleanup_failure_context=[ordered]@{acceptance_mode='runtime-baseline';source_sha=$sourceSha;
+                bundle=$bundleRef;root_records=$roots;output_preservation_verified=$true;
+                source_result=$runtimeResultRef}})
+        $runtimeReceiptRef=Save-DrOwnedFixture 'owned-cleanup-strict-failure-preservation.json' ([ordered]@{
+            schema_version=3;kind='owned_cleanup_strict_failure_preservation';
+            run_name=$run;vm_id=$vm;nonce=$nonce;desktop_lease_id=$leaseId;
+            profile_id='vm-automated-v2-owned-resources';profile_sha256=$profileSha;
+            root_records=$roots;original_transport=$runtimeTransportRef;
+            files=@($runtimeTransportRef,$runtimeResultRef,$runtimeObservationRef,
+                $runtimeInputRef,$profileRef,$bundleRef)})
+        [void](Save-DrOwnedFixture 'owned-cleanup-desktop-closed.json' ([ordered]@{
+            nonce=$nonce;preservation_sha256=$runtimeReceiptRef.sha256}))
+        $runtimeAccepted=New-DrControllerOwnedPerformancePredelete @arguments
+        if ($runtimeAccepted.run_id -cne $runtimeId) { throw 'Runtime pre-delete run identity changed.' }
+        $runtimeJson=$runtimeAccepted | ConvertTo-Json -Depth 24 -Compress
+        $runtimeHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false).GetBytes($runtimeJson))).ToLowerInvariant()
+        $script:guestDeleteCalls=0; $script:trustedDeleteCalls=0
+        [void](Invoke-DrControllerBoundRootDelete @guestArguments `
+            -PredeleteJson $runtimeJson -PredeleteSha256 $runtimeHash)
+        if ($script:guestDeleteCalls -ne 1 -or $script:trustedDeleteCalls -ne 1) {
+            throw 'Frozen runtime receipt did not authorize each exact root once.'
+        }
         $body=(Get-Content -LiteralPath $source -Raw)
         $gateAt=$body.IndexOf('$predelete = New-DrControllerOwnedPerformancePredelete')
         $invokeAt=$body.IndexOf('$proof = Invoke-DrControllerOwnedCleanupAfterFailure')

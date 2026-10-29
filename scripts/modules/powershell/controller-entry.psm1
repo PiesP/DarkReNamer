@@ -187,7 +187,7 @@ function Test-DrControllerOwnedFailureModeSupported {
             'tooltip')) { return $true }
     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
         'first-clear-observation', 'picker-identity-observation',
-        'custom-input-identity-observation') -and
+        'custom-input-identity-observation', 'runtime-baseline') -and
         $TextScalePercent -eq 100 -and -not $HighContrast
 }
 
@@ -316,6 +316,99 @@ function Assert-DrControllerOwnedPerformanceTextScale {
     }
 }
 
+function Assert-DrControllerRuntimeBaselineProcesses {
+    param([Parameter(Mandatory)] $InputManifest, [Parameter(Mandatory)] $Result,
+          [Parameter(Mandatory)] $Observations, [Parameter(Mandatory)] $OwnedEvidence)
+    $ids = @('fresh-system','saved-system','saved-english')
+    $expectedPlan = [ordered]@{ startup_cells=$ids; idle_seconds=30; populated_rows=1000;
+        sample_interval_ms=200; icon_poll_interval_ms=100; maximum_seconds=600;
+        transform_cases=@('grow','shrink','no-op') }
+    if (($InputManifest.request.runtime_baseline_plan | ConvertTo-Json -Depth 5 -Compress) -cne
+        ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+        $InputManifest.request.appearance -cne 'light' -or
+        $InputManifest.request.text_scale_percent -ne 100 -or
+        $InputManifest.request.desktop.width -ne 1366 -or
+        $InputManifest.request.desktop.height -ne 768 -or
+        $InputManifest.request.desktop.dpi -ne 96 -or
+        @($InputManifest.request.PSObject.Properties.Name).Count -ne 5 -or
+        $InputManifest.prepared_bundle.origin -cne 'external-prepared-source-built-bundle' -or
+        $InputManifest.prepared_bundle.bundle_manifest_sha256 -cne $InputManifest.bundle_manifest.sha256 -or
+        $InputManifest.prepared_bundle.application_sha256 -cne $InputManifest.artifacts.application.sha256 -or
+        $Result.status -cne 'review_required' -or $Result.assertions.overall -cne 'passed' -or
+        $Result.assertions.scope -cne 'runtime-baseline-production-v1' -or
+        $Observations.scenario.mode -cne 'runtime-baseline' -or
+        $Observations.scenario.executable_sha256 -cne $InputManifest.artifacts.application.sha256 -or
+        ($Result.assertions.scenario | ConvertTo-Json -Depth 24 -Compress) -cne
+            ($Observations.scenario | ConvertTo-Json -Depth 24 -Compress)) {
+        throw 'Runtime baseline frozen production plan or result differs.'
+    }
+    $cells = @($Observations.scenario.cells)
+    $lives = @($Result.process_lifecycles)
+    $jobs = @($Result.process_job_cleanup)
+    $declared = @($OwnedEvidence.declared_processes)
+    if ($cells.Count -ne 3 -or $lives.Count -ne 3 -or $jobs.Count -ne 3 -or
+        $declared.Count -ne 3 -or $null -eq $Result.observer_lifecycle -or
+        ($Result.observer_lifecycle | ConvertTo-Json -Depth 6 -Compress) -cne
+            ($OwnedEvidence.task_execution.observer_lifecycle | ConvertTo-Json -Depth 6 -Compress) -or
+        ($jobs | ConvertTo-Json -Depth 6 -Compress) -cne
+            ($OwnedEvidence.process_job_cleanup | ConvertTo-Json -Depth 6 -Compress)) {
+        throw 'Runtime baseline requires three exact owned process lifetimes.'
+    }
+    $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $previousTicks = [long]0
+    $sharedExecutablePath = $null
+    for ($index = 0; $index -lt 3; $index++) {
+        $cell = $cells[$index]; $life = $lives[$index].process_lifecycle; $job = $jobs[$index]
+        if (($cell.process_id -isnot [int] -and $cell.process_id -isnot [long]) -or
+            $cell.process_id -lt 1 -or $cell.process_id -gt 4294967295 -or
+            $cell.process_start_utc_ticks -isnot [long] -or
+            $cell.process_start_utc_ticks -le 504911232000000000 -or
+            $cell.process_start_utc_ticks -gt 3155378975999999999 -or
+            $cell.process_start_utc_ticks -le $previousTicks) {
+            throw 'Runtime baseline cell process identity is invalid or reused.'
+        }
+        if ($cell.environment.main_window.process_id -ne $cell.process_id -or
+            ($cell.environment.main_window.process_id -isnot [int] -and
+                $cell.environment.main_window.process_id -isnot [long]) -or
+            $life.executable_path -isnot [string] -or
+            $life.executable_path -cnotmatch '^[A-Za-z]:\\.+' -or
+            ($null -ne $sharedExecutablePath -and $life.executable_path -cne $sharedExecutablePath)) {
+            throw 'Runtime baseline main window or shared executable path differs.'
+        }
+        $sharedExecutablePath = $life.executable_path
+        $ticks = $cell.process_start_utc_ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        if ($cell.id -cne $ids[$index] -or
+            -not $identities.Add(([string]$cell.process_id + '|' + $ticks)) -or
+            $cell.normal_exit_code -isnot [long] -and $cell.normal_exit_code -isnot [int] -or
+            $cell.normal_exit_code -ne 0 -or
+            ($life.pid -isnot [int] -and $life.pid -isnot [long]) -or
+            ($life.creation_filetime -isnot [int] -and $life.creation_filetime -isnot [long]) -or
+            ($life.session_id -isnot [int] -and $life.session_id -isnot [long]) -or
+            $life.pid -ne $cell.process_id -or $life.start_time_utc_ticks -cne $ticks -or
+            $life.creation_filetime -ne ($cell.process_start_utc_ticks - 504911232000000000) -or
+            $life.session_id -ne $OwnedEvidence.runner_session_id -or
+            $life.executable_sha256 -cne $InputManifest.artifacts.application.sha256 -or
+            $life.executable_path -isnot [string] -or [string]::IsNullOrWhiteSpace($life.executable_path) -or
+            $life.start_observed -isnot [bool] -or -not $life.start_observed -or
+            $life.exit_observed -isnot [bool] -or -not $life.exit_observed -or
+            $life.exit_method -cne 'normal-close' -or
+            ($life.exit_code -isnot [long] -and $life.exit_code -isnot [int]) -or $life.exit_code -ne 0 -or
+            ($job.pid -isnot [int] -and $job.pid -isnot [long]) -or
+            ($declared[$index].pid -isnot [int] -and $declared[$index].pid -isnot [long]) -or
+            $job.pid -ne $cell.process_id -or $job.process_start_time_utc_ticks -cne $ticks -or
+            $job.status -cne 'clean' -or $job.job_empty -isnot [bool] -or -not $job.job_empty -or
+            $job.job_closed -isnot [bool] -or -not $job.job_closed -or
+            $job.capture_complete -isnot [bool] -or -not $job.capture_complete -or
+            $job.forced_termination -isnot [bool] -or $job.forced_termination -or
+            $job.had_survivors -isnot [bool] -or $job.had_survivors -or
+            $declared[$index].pid -ne $cell.process_id -or
+            $declared[$index].start_time_utc_ticks -cne $ticks) {
+            throw 'Runtime baseline cell, lifecycle, Job, or declared identity differs.'
+        }
+        $previousTicks = $cell.process_start_utc_ticks
+    }
+}
+
 function New-DrControllerOwnedPerformancePredelete {
     param([Parameter(Mandatory)][string] $OutputRoot,
           [Parameter(Mandatory)][string] $PreservationPath,
@@ -346,7 +439,7 @@ function New-DrControllerOwnedPerformancePredelete {
         $original.status -cne 'failed' -or $original.task_kind -cne 'ui' -or
         $original.owned_cleanup_failure_context.acceptance_mode -cnotin
             @('performance-sample','picker-identity-observation',
-              'custom-input-identity-observation') -or
+              'custom-input-identity-observation', 'runtime-baseline') -or
         $original.owned_cleanup_failure_context.source_sha -cne $SourceSha -or
         $original.owned_cleanup_failure_context.bundle.sha256 -cne $BundleSha256 -or
         $original.owned_cleanup_failure_context.root_records.guest.file_id -cne
@@ -402,9 +495,10 @@ function New-DrControllerOwnedPerformancePredelete {
     $runId = [string]$input.run_id
     $pickerRun = $runId -ceq 'picker-identity-observation-v1-1366x768-96-text100'
     $customRun = $runId -ceq 'custom-input-identity-observation-v1-1366x768-96-text100'
+    $runtimeRun = $runId -ceq 'runtime-baseline-v1-1366x768-96-text100'
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
-    if (-not $pickerRun -and -not $customRun -and -not $performanceRun) {
+    if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun) {
         throw 'Owned diagnostic frozen run ID differs.'
     }
     if (
@@ -414,6 +508,7 @@ function New-DrControllerOwnedPerformancePredelete {
         $input.acceptance_profile.sha256 -cne $ProfileSha256 -or
         $input.request.mode -cne $(if ($pickerRun) { 'picker-identity-observation' }
             elseif ($customRun) { 'custom-input-identity-observation' }
+            elseif ($runtimeRun) { 'runtime-baseline' }
             else { 'performance-sample' }) -or
         ($pickerRun -and ($input.request.picker_identity_plan.PSObject.Properties.Name.Count -ne 8 -or
             (@($input.request.picker_identity_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
@@ -462,6 +557,15 @@ function New-DrControllerOwnedPerformancePredelete {
         throw 'Owned performance frozen input, profile, result, or observations differ.'
     }
     Assert-DrControllerOwnedPerformanceTextScale -Observations $observations
+    if ($runtimeRun) {
+        $runtimeBundle = Get-Content -LiteralPath (Join-Path $OutputRoot 'bundle.json') -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+        if ($runtimeBundle.application.sha256 -cne $input.artifacts.application.sha256) {
+            throw 'Runtime baseline frozen executable differs from the prepared bundle.'
+        }
+        Assert-DrControllerRuntimeBaselineProcesses -InputManifest $input -Result $result `
+            -Observations $observations -OwnedEvidence $original.raw_cleanup.owned_resource_evidence
+    }
     $refs = [ordered]@{}
     foreach ($key in @('original-transport.json','acceptance-result.json',
         'acceptance-observations.json','owned-performance-input-manifest.json',
@@ -641,7 +745,8 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     $predelete.run_name -cne $name -or
                     ($predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -and
                      $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100' -and
-                     $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100') -or
+                     $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100' -and
+                     $predelete.run_id -cne 'runtime-baseline-v1-1366x768-96-text100') -or
                     $predelete.vm_id -cne $actualVmId -or
                     $predelete.nonce -cne $expectedNonce -or
                     $predelete.desktop_lease_id -cne $expectedLeaseId -or
@@ -1458,7 +1563,7 @@ function Invoke-DrWindowsVmController {
     [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1564,8 +1669,8 @@ if ($refreshProfile -or $runtimeModel -or $FocusedRefreshTests) { $coreTestOutpu
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
 $ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
     $AcceptanceMode -cin @('performance-sample','picker-identity-observation',
-        'custom-input-identity-observation')
-if ($ownedPerformance -and ((($AcceptanceMode -ceq 'performance-sample') -and
+        'custom-input-identity-observation', 'runtime-baseline')
+if ($ownedPerformance -and ((($AcceptanceMode -cin @('performance-sample','runtime-baseline')) -and
     ($TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 1200)) -or
     (($AcceptanceMode -cin @('picker-identity-observation','custom-input-identity-observation')) -and
     ($TestTimeoutSeconds -ne 120 -or $SuiteTimeoutSeconds -ne 240)) -or
@@ -7250,7 +7355,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 if ($taskSelection.kind -ceq 'ui' -and
                     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
                         'first-clear-observation', 'picker-identity-observation',
-                        'custom-input-identity-observation')) {
+                        'custom-input-identity-observation', 'runtime-baseline')) {
                     $transport['owned_cleanup_failure_context']['acceptance_text_scale_percent'] =
                         [int]$AcceptanceTextScalePercent
                 }

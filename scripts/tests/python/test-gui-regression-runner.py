@@ -366,6 +366,42 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
 
+    def test_runtime_baseline_requires_fixed_prepared_owned_plan_before_vm(self):
+        base = ["--output-root", str(self.root / "runtime-output"),
+                "--connection-profile", str(self.root / "missing.json"),
+                "--diagnostic", runner.RUNTIME_BASELINE_MODE]
+        with self.assertRaisesRegex(ValueError, "explicit owned V2"):
+            runner.main(self.root, base)
+        selected = base + ["--acceptance-profile-id", runner.V2_PROFILE_ID]
+        with self.assertRaisesRegex(ValueError, "requires a prepared bundle"):
+            runner.main(self.root, selected)
+        prepared = selected + ["--prepared-bundle-root", str(self.root / "bundle"),
+                               "--expected-prepared-application-sha256", "a" * 64]
+        for extra, message in ((["--desktop-width", "1280"], "desktop overrides"),
+                               (["--desktop-dpi", "144"], "desktop overrides"),
+                               (["--configuration-set", "focused"], "configuration set"),
+                               (["--performance-column-order", "hidden-visible"], "Long-path order"),
+                               (["--icon-endpoint-method", runner.ICON_BASELINE_METHOD], "Icon endpoint")):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, message):
+                runner.main(self.root, prepared + extra)
+        self.assertFalse((self.root / "runtime-output").exists())
+        run = runner.runtime_baseline_run()
+        inputs = {"bundle_manifest": {"sha256": "b" * 64},
+                  "artifacts": {"application": {"sha256": "a" * 64}},
+                  "acceptance_profile": {"sha256": runner.OWNED_PERFORMANCE_PROFILE_SHA256},
+                  "source_sha": "c" * 40, "source_tree": "d" * 40}
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            manifest = runner.input_manifest(self.root, self.root, self.root, run, "f" * 64,
+                                              {}, {}, prepared_application_sha256="a" * 64)
+        self.assertEqual(manifest["request"]["runtime_baseline_plan"], runner.RUNTIME_BASELINE_PLAN)
+        self.assertNotIn("performance_plan", manifest["request"])
+        self.assertNotIn("endpoint_method", manifest["request"])
+        self.assertEqual(manifest["run_id"], runner.RUNTIME_BASELINE_RUN_ID)
+        self.assertEqual(manifest["command"][-2:], ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        with mock.patch.object(runner, "run_input_artifacts", return_value=({}, inputs)):
+            with self.assertRaisesRegex(ValueError, "requires a pinned prepared executable"):
+                runner.input_manifest(self.root, self.root, self.root, run, "f" * 64, {}, {})
+
     def test_icon_settlement_has_new_method_prepared_pin_and_v2_profile(self):
         run = {**runner.icon_settlement_run(), "acceptance_profile_sha256": "e" * 64}
         pin = "a" * 64

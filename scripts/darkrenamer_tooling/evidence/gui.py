@@ -127,6 +127,14 @@ FIRST_CLEAR_PLAN = {
     "stop_after_first_clear": True, "full_performance_sample": False,
 }
 ICON_SETTLEMENT_MODE = "icon-settlement"
+RUNTIME_BASELINE_MODE = "runtime-baseline"
+RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v1-1366x768-96-text100"
+RUNTIME_BASELINE_PLAN = {
+    "startup_cells": ["fresh-system", "saved-system", "saved-english"],
+    "idle_seconds": 30, "populated_rows": 1000, "sample_interval_ms": 200,
+    "icon_poll_interval_ms": 100, "maximum_seconds": 600,
+    "transform_cases": ["grow", "shrink", "no-op"],
+}
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
 ICON_BASELINE_RUN_ID = "icon-settlement-sync-upper-bound-v1-1366x768-96-text100"
@@ -782,8 +790,10 @@ def validate_request(value: object) -> dict:
         fields.update({"settlement_plan", "endpoint_method"})
         if value.get("endpoint_method") == ICON_BASELINE_METHOD:
             fields.add("baseline_product_source_sha")
+    if isinstance(value, dict) and value.get("mode") == RUNTIME_BASELINE_MODE:
+        fields.add("runtime_baseline_plan")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE},
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
@@ -835,6 +845,11 @@ def validate_request(value: object) -> dict:
                  request["baseline_product_source_sha"] == ICON_BASELINE_PRODUCT_SOURCE_SHA) and
                 request["settlement_plan"] == ICON_SETTLEMENT_PLAN,
                 "Icon settlement request differs from its fixed endpoint method or plan.")
+    elif request["mode"] == RUNTIME_BASELINE_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                typed_equal(request["runtime_baseline_plan"], RUNTIME_BASELINE_PLAN),
+                "Runtime baseline request differs from its fixed plan.")
     else:
         expected = FIXED_REQUESTS[request["mode"]]
         require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
@@ -881,7 +896,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
-            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance):
+            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance):
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID or value["request"].get("mode") == FIRST_CLEAR_MODE:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -906,9 +921,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE} or fixed_v2 or owned_performance else
+                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance else
                  {V1_PROFILE_ID} if request["mode"] == FIRST_CLEAR_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
         if request["mode"] == FIRST_CLEAR_MODE:
@@ -929,9 +944,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
             require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
                     profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 3),
                     "Appearance V2 profile definition is invalid.")
-            if fixed_v2 or owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE}:
+            if fixed_v2 or owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE}:
                 require(expected_profile_sha256 == profile_artifact["sha256"] and
-                        (not (owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE}) or
+                        (not (owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE}) or
                          profile_artifact["sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256),
                         "Fixed GUI V2 profile differs from the selected source blob.")
     if request["mode"] == FIRST_CLEAR_MODE:
@@ -948,7 +963,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -1143,8 +1158,23 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--expected-prepared-application-sha256", prepared["application_sha256"],
                             "--acceptance-profile-id", V2_PROFILE_ID, *method_args],
                 "Icon settlement manifest identity or command is invalid.")
+    if request["mode"] == RUNTIME_BASELINE_MODE:
+        prepared = exact_keys(manifest.get("prepared_bundle"),
+                              {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              "runtime baseline prepared bundle")
+        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                prepared["application_sha256"] == artifacts["application"]["sha256"] and
+                manifest["run_id"] == RUNTIME_BASELINE_RUN_ID and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", RUNTIME_BASELINE_MODE,
+                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--expected-prepared-application-sha256", prepared["application_sha256"],
+                            "--acceptance-profile-id", V2_PROFILE_ID],
+                "Runtime baseline manifest identity or prepared executable differs.")
     else:
-        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE}:
+        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE}:
             require("prepared_bundle" not in manifest,
                     "Prepared bundle provenance is restricted to performance and focused clear runs.")
     if request["mode"] == "tooltip":
@@ -5382,6 +5412,404 @@ def validate_icon_settlement_run(root: Path, run_id: str, source_sha: str) -> di
             "metrics": metrics, "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
 
+def runtime_language_preference_hash(value: int) -> str:
+    record = bytearray(b"DRLANG\0\0" + bytes((1, 0, 0, 0, value, 0, 0, 0)))
+    checksum = 2166136261
+    for byte in record:
+        checksum = ((checksum ^ byte) * 16777619) & 0xffffffff
+    return sha256_bytes(record + checksum.to_bytes(4, "little"))
+
+
+def runtime_ms(value: object, label: str, *, minimum: float = 0) -> float:
+    require(type(value) in (int, float) and math.isfinite(value) and
+            minimum <= value <= 600000, f"{label} is outside the fixed runtime envelope.")
+    return value
+
+
+def validate_runtime_icon_receipt(value: object, label: str) -> dict:
+    receipt = exact_keys(value, {"data_ready_ms", "icon_settled_observed_ms", "first_status",
+        "settled_status", "confirmation_status", "poll_count", "unstable_query_attempts",
+        "sampled_peak_pending", "sampled_peak_unresolved_rows"}, label)
+    ready = runtime_ms(receipt["data_ready_ms"], f"{label}.data_ready_ms", minimum=0.001)
+    settled = runtime_ms(receipt["icon_settled_observed_ms"],
+                         f"{label}.icon_settled_observed_ms", minimum=ready)
+    checked_int(receipt["poll_count"], 2, 6000, f"{label}.poll_count")
+    checked_int(receipt["unstable_query_attempts"], 0, 6000,
+                f"{label}.unstable_query_attempts")
+    require(receipt["poll_count"] + receipt["unstable_query_attempts"] <= 6000,
+            f"{label} exceeded its bounded status polling plan.")
+    checked_int(receipt["sampled_peak_pending"], 0, 64, f"{label}.sampled_peak_pending")
+    checked_int(receipt["sampled_peak_unresolved_rows"], 0, 1000,
+                f"{label}.sampled_peak_unresolved_rows")
+    first = validate_icon_status(receipt["first_status"], 1000, f"{label}.first_status")
+    terminal = validate_icon_status(receipt["settled_status"], 1000,
+                                    f"{label}.settled_status")
+    confirmation = validate_icon_status(receipt["confirmation_status"], 1000,
+                                        f"{label}.confirmation_status")
+    require(first["bootstrap"] != 2 and icon_terminal(terminal) and
+            icon_terminal(confirmation) and int(terminal["generation"]) > 0 and
+            first["session"] == terminal["session"] == confirmation["session"] and
+            first["model_revision"] == terminal["model_revision"] == confirmation["model_revision"] and
+            terminal["generation"] == confirmation["generation"] and
+            receipt["sampled_peak_pending"] >= max(
+                first["queued"] + first["inflight"] + first["undrained"],
+                terminal["queued"] + terminal["inflight"] + terminal["undrained"]) and
+            receipt["sampled_peak_unresolved_rows"] >= max(
+                first["unresolved_rows"], terminal["unresolved_rows"]),
+            f"{label} did not bind a stable full-generation icon endpoint.")
+    return receipt
+
+
+RUNTIME_PHASES = ("empty-idle", "import-1000", "icon-settlement", "populated-idle",
+                  "transform-grow", "transform-shrink", "transform-no-op", "post")
+
+
+def validate_runtime_samples(cell: dict) -> dict:
+    samples = cell["samples"]
+    require(type(samples) is list and 200 <= len(samples) <= 3000,
+            "Runtime baseline raw sample count is incomplete or excessive.")
+    grouped = {phase: [] for phase in RUNTIME_PHASES}
+    previous_time, previous_cpu, previous_phase = -1, -1, 0
+    for index, value in enumerate(samples):
+        row = exact_keys(value, {"phase", "elapsed_ms", "cpu_ms", "private_bytes",
+            "working_set_bytes", "threads", "handles", "gdi_objects", "ui_response_ms",
+            "probe_status", "probe_error_code", "resource_collection_ms", "sample_gap_ms"},
+            f"runtime sample {index}")
+        require(type(row["phase"]) is str and row["phase"] in grouped,
+                "Runtime baseline sample phase is invalid.")
+        phase_index = RUNTIME_PHASES.index(row["phase"])
+        require(phase_index >= previous_phase, "Runtime baseline sample phase regressed.")
+        previous_phase = phase_index
+        elapsed = checked_int(row["elapsed_ms"], 0, 600000, "runtime sample elapsed_ms")
+        cpu = checked_int(row["cpu_ms"], 0, 6000000, "runtime sample cpu_ms")
+        require(elapsed > previous_time and cpu >= previous_cpu,
+                "Runtime baseline sample clock or CPU regressed or duplicated.")
+        previous_time, previous_cpu = elapsed, cpu
+        for name in ("private_bytes", "working_set_bytes"):
+            checked_int(row[name], 1, 32 * 1024**3, f"runtime sample {name}")
+        for name, maximum in (("threads", 4096), ("handles", 1000000), ("gdi_objects", 1000000)):
+            checked_int(row[name], 0, maximum, f"runtime sample {name}")
+        for name, maximum in (("ui_response_ms", 5000), ("resource_collection_ms", 5000),
+                              ("sample_gap_ms", 5000)):
+            runtime_ms(row[name], f"runtime sample {name}")
+            require(row[name] <= maximum, f"Runtime baseline {name} exceeded its sample bound.")
+        require(row["probe_status"] in {"success", "timeout"} and
+                type(row["probe_error_code"]) is int and
+                ((row["probe_status"] == "success" and row["probe_error_code"] == 0) or
+                 (row["probe_status"] == "timeout" and row["probe_error_code"] == 1460)) and
+                ((index == 0 and row["sample_gap_ms"] == 0) or
+                 (index > 0 and row["sample_gap_ms"] > 0)),
+                "Runtime baseline sampler probe or cadence is invalid.")
+        grouped[row["phase"]].append(row)
+    for phase, observed in (("empty-idle", cell["empty_idle"]),
+                            ("populated-idle", cell["populated_idle"])):
+        window = grouped[phase]
+        require(len(window) >= 100 and len(window) <= 250 and
+                window[-1]["elapsed_ms"] - window[0]["elapsed_ms"] >= 28000 and
+                runtime_ms(observed["elapsed_ms"], f"{phase}.elapsed_ms", minimum=30000) <= 45000,
+                f"Runtime baseline {phase} lacks its measured 30-second sample window.")
+    require(samples[0]["phase"] == "empty-idle" and samples[-1]["phase"] == "post" and
+            len(grouped["post"]) >= 1,
+            "Runtime baseline sample phase endpoints are incomplete.")
+    summary = cell["phase_summary"]
+    require(type(summary) is list and len(summary) == len(RUNTIME_PHASES),
+            "Runtime baseline phase summary is incomplete.")
+    for index, phase in enumerate(RUNTIME_PHASES):
+        expected = {"phase": phase, "sample_count": len(grouped[phase]),
+                    "max_sample_gap_ms": max((row["sample_gap_ms"] for row in grouped[phase]), default=0),
+                    "max_resource_collection_ms": max((row["resource_collection_ms"] for row in grouped[phase]), default=0)}
+        require(typed_equal(summary[index], expected),
+                "Runtime baseline phase summary differs from the raw samples.")
+    resources = []
+    for phase, window in grouped.items():
+        if not window:
+            continue
+        resources.append({"phase": phase, "sample_count": len(window),
+            "sample_span_ms": window[-1]["elapsed_ms"] - window[0]["elapsed_ms"],
+            "sampled_cpu_delta_ms": window[-1]["cpu_ms"] - window[0]["cpu_ms"],
+            "first_private_bytes": window[0]["private_bytes"],
+            "last_private_bytes": window[-1]["private_bytes"],
+            **{f"peak_{name}": max(row[name] for row in window) for name in
+               ("private_bytes", "working_set_bytes", "threads", "handles", "gdi_objects")},
+            "probe_timeouts": sum(row["probe_status"] == "timeout" for row in window),
+            "max_ui_response_ms": max(row["ui_response_ms"] for row in window)})
+    return {"sample_count": len(samples), "empty_idle_samples": len(grouped["empty-idle"]),
+            "populated_idle_samples": len(grouped["populated-idle"]),
+            "sampled_phase_resources": resources}
+
+
+def validate_runtime_baseline_metrics(scenario: object) -> dict:
+    scenario = exact_keys(scenario, {"mode", "plan", "system_resolution", "executable_sha256",
+        "cells", "environment", "disk_unchanged", "journal_residue_count", "wakeups", "appearance"},
+        "runtime baseline scenario")
+    require(scenario["mode"] == RUNTIME_BASELINE_MODE and
+            typed_equal(scenario["plan"], RUNTIME_BASELINE_PLAN) and
+            scenario["appearance"] == "light" and scenario["disk_unchanged"] is True and
+            int_equals(scenario["journal_residue_count"], 0) and
+            scenario["wakeups"] == {"status": "not_run", "reason": "no-supported-process-wakeup-counter"},
+            "Runtime baseline scenario plan, disk, or measurement scope differs.")
+    resolution = exact_keys(scenario["system_resolution"],
+                            {"language", "selected_tag", "preferred_tags"}, "system language")
+    tags = resolution["preferred_tags"]
+    require(type(tags) is list and 1 <= len(tags) <= 128 and
+            all(type(tag) is str and 0 < len(tag) <= 128 for tag in tags),
+            "Runtime baseline system language inventory is invalid.")
+    selected = next((tag for tag in tags if re.match(r"^(ko|en|ja)(?:-|$)", tag, re.I)), None)
+    require(resolution["language"] == "ko" and type(resolution["selected_tag"]) is str and
+            resolution["selected_tag"] == selected and
+            re.match(r"^ko(?:-|$)", resolution["selected_tag"], re.I) is not None,
+            "Runtime baseline prepared VM did not resolve System to Korean.")
+    cells = scenario["cells"]
+    require(type(cells) is list and len(cells) == 3 and
+            [row.get("id") if type(row) is dict else None for row in cells] ==
+            RUNTIME_BASELINE_PLAN["startup_cells"],
+            "Runtime baseline requires exactly three ordered independent startup cells.")
+    require(type(scenario["executable_sha256"]) is str and
+            SHA256.fullmatch(scenario["executable_sha256"]) is not None,
+            "Runtime baseline executable hash is invalid.")
+    metrics = []
+    for index, cell in enumerate(cells):
+        cell = exact_keys(cell, {"id", "preference_kind", "preference_value", "resolved_language",
+            "process_id", "process_start_utc_ticks", "startup", "preference_before",
+            "preference_after", "menu", "empty_idle", "import", "icon_settlement",
+            "populated_idle", "transforms", "samples", "phase_summary", "normal_exit_code",
+            "disk_unchanged", "journal_residue_count", "environment"},
+            f"runtime baseline cell {index}")
+        expected_id = RUNTIME_BASELINE_PLAN["startup_cells"][index]
+        expected_value, language = ((0, "ko") if index < 2 else (2, "en"))
+        require(cell["id"] == expected_id and cell["preference_kind"] ==
+                ("absent" if index == 0 else "valid-saved") and
+                int_equals(cell["preference_value"], expected_value) and
+                cell["resolved_language"] == language and
+                cell["disk_unchanged"] is True and
+                int_equals(cell["journal_residue_count"], 0) and
+                int_equals(cell["normal_exit_code"], 0) and
+                type(cell["process_id"]) is int and cell["process_id"] > 0 and
+                type(cell["process_start_utc_ticks"]) is int and
+                cell["process_start_utc_ticks"] > 504911232000000000,
+                "Runtime baseline cell identity, exit, or fixture differs.")
+        before = exact_keys(cell["preference_before"], {"status", "value", "sha256"},
+                            f"runtime baseline {expected_id} preference before")
+        after = exact_keys(cell["preference_after"], {"status", "value", "sha256"},
+                           f"runtime baseline {expected_id} preference after")
+        expected_hash = runtime_language_preference_hash(expected_value)
+        require((before == {"status": "absent", "value": None, "sha256": None} if index == 0 else
+                 typed_equal(before, {"status": "valid-saved", "value": expected_value, "sha256": expected_hash})) and
+                (after == {"status": "absent", "value": None, "sha256": None} or
+                 typed_equal(after, {"status": "valid-saved", "value": 0, "sha256": expected_hash})
+                 if index == 0 else typed_equal(after, before)),
+                "Runtime baseline exact language preference bytes or state differ.")
+        menu = exact_keys(cell["menu"], {"parent", "options", "checked_command"},
+                          f"runtime baseline {expected_id} menu")
+        parent, system_label = (("언어(&L) · 다음 실행부터", "시스템 언어") if language == "ko"
+                                else ("&Language · next startup", "System language"))
+        require(typed_equal(menu, {"checked_command": 0x9020 + expected_value,
+                                  "parent": parent,
+                                  "options": [system_label, "한국어", "English", "日本語"]}),
+                "Runtime baseline resolved menu radio or labels differ.")
+        startup = exact_keys(cell["startup"], {"launch_request_to_ready_ms",
+            "process_start_to_ready_lower_ms", "process_start_to_ready_upper_ms",
+            "main_hwnd_bound", "empty_grid", "import_command_enabled"},
+            f"runtime baseline {expected_id} startup")
+        request_ms = runtime_ms(startup["launch_request_to_ready_ms"], "startup request", minimum=0.001)
+        lower = runtime_ms(startup["process_start_to_ready_lower_ms"], "startup lower")
+        upper = runtime_ms(startup["process_start_to_ready_upper_ms"], "startup upper")
+        require(0 <= lower <= upper <= request_ms and
+                all(startup[name] is True for name in
+                    ("main_hwnd_bound", "empty_grid", "import_command_enabled")),
+                "Runtime baseline process creation bracket or readiness differs.")
+        environment = cell["environment"]
+        region = exact_keys(nested(environment, "region"), {"culture", "ui_culture", "timezone"},
+                            "runtime baseline region")
+        require(all(type(region[name]) is str and 0 < len(region[name]) <= 128 for name in region) and
+                typed_equal(region, nested(scenario["environment"], "region")),
+                "Runtime baseline cell region differs from the fixed VM region.")
+        require(nested(environment, "physical_screen", "width") == 1366 and
+                nested(environment, "physical_screen", "height") == 768 and
+                nested(environment, "hwnd_dpi") == 96 and
+                nested(environment, "text_scale_factor_percent") == 100 and
+                int_equals(nested(environment, "main_window", "process_id"), cell["process_id"]) and
+                type(nested(environment, "main_window", "hwnd")) is int and
+                nested(environment, "main_window", "hwnd") > 0,
+                "Runtime baseline cell display or bound main HWND differs.")
+        if index:
+            require(all(cell[name] is None for name in ("empty_idle", "import", "icon_settlement",
+                "populated_idle", "transforms", "samples", "phase_summary")),
+                "Saved-language startup cell contained undeclared workload.")
+            metrics.append({"id": expected_id, "startup_ms": request_ms, "startup": startup})
+            continue
+        require(typed_equal(scenario["environment"], environment) and
+                int_equals(exact_keys(cell["empty_idle"], {"elapsed_ms", "rows"}, "empty idle")["rows"], 0) and
+                int_equals(exact_keys(cell["populated_idle"], {"elapsed_ms", "rows", "end_status"},
+                           "populated idle")["rows"], 1000),
+                "Runtime baseline fresh System idle state differs.")
+        imported = exact_keys(cell["import"], {"rows", "observed_rows", "data_ready_ms",
+            "command_ready_after_rows_ms"}, "runtime import")
+        require(int_equals(imported["rows"], 1000) and int_equals(imported["observed_rows"], 1000) and
+                runtime_ms(imported["data_ready_ms"], "import data ready", minimum=0.001) > 0 and
+                runtime_ms(imported["command_ready_after_rows_ms"], "import command ready") >= 0,
+                "Runtime baseline one ordinary import or command readiness differs.")
+        receipt = validate_runtime_icon_receipt(cell["icon_settlement"], "runtime icon settlement")
+        after = validate_icon_status(cell["populated_idle"]["end_status"], 1000,
+                                     "runtime populated idle icon status")
+        require(imported["data_ready_ms"] == receipt["data_ready_ms"] and
+                icon_terminal(after) and
+                all(after[name] == receipt["confirmation_status"][name] for name in
+                    ("session", "generation", "model_revision")),
+                "Runtime baseline populated idle did not retain the settled icon generation.")
+        transforms = cell["transforms"]
+        require(type(transforms) is list and len(transforms) == 3,
+                "Runtime baseline requires exactly three proposal transforms.")
+        for transform, (name, target) in zip(transforms,
+            (("grow", "expanded-ordinary-0000.txt"), ("shrink", "x.txt"),
+             ("no-op", "ordinary-0000.txt")), strict=True):
+            row = exact_keys(transform, {"id", "source", "proposal", "reset",
+                "edit_elapsed_ms", "reset_elapsed_ms", "reset_required"},
+                f"runtime transform {name}")
+            require(row["id"] == name and row["source"] == row["reset"] == "ordinary-0000.txt" and
+                    row["proposal"] == target and row["reset_required"] is (name != "no-op") and
+                    runtime_ms(row["edit_elapsed_ms"], f"runtime {name} edit", minimum=0.001) > 0 and
+                    (runtime_ms(row["reset_elapsed_ms"], f"runtime {name} reset", minimum=0.001) > 0
+                     if name != "no-op" else runtime_ms(row["reset_elapsed_ms"], "runtime no-op reset") == 0),
+                    "Runtime baseline proposal or reset differs.")
+        metrics.append({"id": expected_id, "startup_ms": request_ms, "startup": startup,
+                        "import": imported, "transforms": transforms,
+                        "icon_settled_observed_ms": receipt["icon_settled_observed_ms"],
+                        **validate_runtime_samples(cell)})
+    require(len({(cell["process_id"], cell["process_start_utc_ticks"]) for cell in cells}) == 3,
+            "Runtime baseline startup cells reused a product process.")
+    require(all(cells[index]["process_start_utc_ticks"] < cells[index + 1]["process_start_utc_ticks"]
+                for index in range(2)) and
+            cells[-1]["process_start_utc_ticks"] - cells[0]["process_start_utc_ticks"] <= 6000000000,
+            "Runtime baseline startup cell creation times did not advance inside its fixed deadline.")
+    return {"cells": metrics, "wakeups": "not-measured"}
+
+
+def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> dict:
+    require(run_id == RUNTIME_BASELINE_RUN_ID, "Runtime baseline run id is invalid.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "Runtime baseline run directory is missing.")
+    manifest, input_bytes = validate_input_manifest(
+        run_root, source_sha, expected_profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+    require(manifest["request"]["mode"] == RUNTIME_BASELINE_MODE,
+            "Runtime baseline request mode differs.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 32 * 1024 * 1024 and
+            sum(name.endswith(".png") for name in files) == 1,
+            "Runtime baseline exceeds its fixed 32 MiB/one-PNG output budget.")
+    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    result, _ = read_json(run_root / "output", Path("run-result.json"), "runtime baseline result")
+    result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
+        "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256",
+        "observer_sha256", "observer_result_sha256", "status", "exit_code"},
+        "runtime baseline result")
+    artifacts = manifest["artifacts"]
+    require(int_equals(result["schema_version"], 1) and
+            result["diagnostic"] == RUNTIME_BASELINE_MODE and result["run_id"] == run_id and
+            result["input_manifest_sha256"] == input_hash and
+            result["collection_sha256"] == sha256_bytes(collection_bytes) and
+            result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            result["source_sha"] == source_sha and
+            result["application_sha256"] == artifacts["application"]["sha256"] and
+            result["observer_sha256"] == artifacts["observer"]["sha256"] and
+            result["status"] == "review_required" and int_equals(result["exit_code"], 0),
+            "Runtime baseline normalized result or retained hash differs.")
+    transport = validate_transport_exit(run_root, files, 0)
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"),
+                               "runtime baseline observer")
+    observations, observation_bytes = read_json(run_root / "output",
+                                                Path("acceptance-observations.json"),
+                                                "runtime baseline observations")
+    require(result["observer_result_sha256"] == sha256_bytes(raw_bytes) ==
+            files["acceptance-result.json"]["sha256"] and
+            sha256_bytes(observation_bytes) == files["acceptance-observations.json"]["sha256"] and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observation_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "Runtime baseline protected observations are not source-bound.")
+    require(raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("status") == "review_required" and
+            nested(raw, "assertions", "overall") == "passed" and
+            nested(raw, "assertions", "scope") == "runtime-baseline-production-v1" and
+            raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            nested(raw, "capture", "status") == "passed" and
+            nested(raw, "keyboard", "status") == "not_run" and
+            nested(raw, "accessibility", "status") == "not_run",
+            "Runtime baseline observer identity, scope, or cleanup differs.")
+    require(int_equals(raw.get("schema_version"), 1) and
+            int_equals(observations.get("schema_version"), 1) and
+            observations.get("run_id") == run_id,
+            "Runtime baseline raw observer or observation identity differs.")
+    scenario = observations.get("scenario")
+    metrics = validate_runtime_baseline_metrics(scenario)
+    require(scenario["executable_sha256"] == artifacts["application"]["sha256"],
+            "Runtime baseline scenario executable hash differs.")
+    cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
+                                        profile_sha256=manifest["acceptance_profile_sha256"])
+    validate_current_protected_transport(manifest, transport)
+    owned = cleanup["owned_resource_evidence"]
+    jobs = raw.get("process_job_cleanup")
+    require(type(jobs) is list and len(jobs) == 3 and
+            typed_equal(jobs, owned["process_job_cleanup"]) and
+            typed_equal(raw.get("observer_lifecycle"), owned["task_execution"]["observer_lifecycle"]),
+            "Runtime baseline must bind three owned Jobs and the observer lifetime.")
+    expected = [(cell["process_id"], cell["process_start_utc_ticks"])
+                for cell in scenario["cells"]]
+    verify_process_job_cleanup(jobs, expected_processes=expected)
+    require(owned["declared_processes"] ==
+            [{"pid": pid, "start_time_utc_ticks": str(ticks)} for pid, ticks in expected] and
+            owned["task_execution"]["terminal"] is True and
+            owned["task_execution"]["exit_code"] == 0 and
+            postlaunch["target"]["process_id"] in {pid for pid, _ in expected},
+            "Runtime baseline declared process inventory or postlaunch target differs.")
+    lifecycles = raw.get("process_lifecycles")
+    require(type(lifecycles) is list and len(lifecycles) == 3,
+            "Runtime baseline product lifecycles are incomplete.")
+    shared_executable_path = None
+    for cell, wrapped in zip(scenario["cells"], lifecycles, strict=True):
+        life = exact_keys(exact_keys(wrapped, {"process_lifecycle"},
+                                     "runtime lifecycle")["process_lifecycle"],
+                          {"pid", "session_id", "start_time_utc_ticks", "creation_filetime",
+                           "executable_path", "executable_sha256", "start_observed",
+                           "exit_observed", "exit_method", "exit_code"}, "runtime product lifecycle")
+        path = life["executable_path"]
+        require(type(path) is str and re.fullmatch(r"[A-Za-z]:\\.+", path) is not None and
+                (shared_executable_path is None or path == shared_executable_path),
+                "Runtime baseline product executable paths differ or are not absolute Windows paths.")
+        shared_executable_path = path
+        require(int_equals(life["pid"], cell["process_id"]) and
+                type(life["creation_filetime"]) is int and
+                type(life["session_id"]) is int and
+                life["start_time_utc_ticks"] == str(cell["process_start_utc_ticks"]) and
+                life["creation_filetime"] == cell["process_start_utc_ticks"] -
+                    504911232000000000 and
+                life["session_id"] == owned["runner_session_id"] and
+                type(life["executable_path"]) is str and life["executable_path"] and
+                life["executable_sha256"] == artifacts["application"]["sha256"] and
+                life["start_observed"] is True and life["exit_observed"] is True and
+                life["exit_method"] == "normal-close" and int_equals(life["exit_code"], 0),
+                "Runtime baseline product lifecycle did not close normally from the source executable.")
+    validate_owned_performance_desktop(run_root, files, manifest, transport, owned)
+    verify_owned_performance_text_scale(observations)
+    captures = raw.get("screenshots")
+    capture = "runtime-baseline-populated.png"
+    require(capture in files and type(captures) is list and len(captures) == 1 and
+            captures[0].get("file") == capture and
+            captures[0].get("sha256") == files[capture]["sha256"],
+            "Runtime baseline settled populated screenshot is missing or unbound.")
+    return {"run_id": run_id, "source_sha": source_sha,
+            "application_sha256": artifacts["application"]["sha256"],
+            "bundle_mode": "prepared", "metrics": metrics,
+            "full_four_run_regression": "not-run", "performance_batch": "not-run",
+            "release_campaign": "not-run"}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", required=True, type=Path)
@@ -5389,7 +5817,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -5399,10 +5827,26 @@ def main(repo: Path, argv=None) -> int:
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
     require(args.acceptance_profile_id is None or args.diagnostic is None or
-            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
+            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
             "Fixed GUI profile selection cannot be used for this diagnostic.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
+    if args.diagnostic == RUNTIME_BASELINE_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                args.runs == [RUNTIME_BASELINE_RUN_ID] and
+                args.acceptance_profile_id == V2_PROFILE_ID,
+                "Runtime baseline requires its single fixed V2-owned source-bound run.")
+        blob = subprocess.run(["git", "show", f"{args.expected_source_sha}:config/vm-automated-v2.json"],
+                              cwd=repo, capture_output=True, check=False)
+        require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
+                "Runtime baseline source profile differs from reviewed V2 revision-3 bytes.")
+        measured = validate_runtime_baseline_run(root, args.runs[0], args.expected_source_sha)
+        print(json.dumps({"schema_version": 1, "diagnostic": RUNTIME_BASELINE_MODE,
+                          "status": "measured", "source_sha": args.expected_source_sha,
+                          "runs": [measured], "full_four_run_regression": "not-run",
+                          "performance_batch": "not-run", "release_campaign": "not-run"},
+                         ensure_ascii=False, indent=2))
+        return 0
     if args.diagnostic in {PICKER_MODE, CUSTOM_MODE}:
         custom = args.diagnostic == CUSTOM_MODE
         require(not args.require_complete_set and args.configuration_set is None and
