@@ -2584,7 +2584,30 @@ foreach ($inputCall in $sendKeys) {
             "[Windows.Forms.SendKeys]::SendWait('{DOWN}')",
             "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
         )) { throw 'Language menu keyboard input exceeds the reviewed navigation.' }
+        if ([regex]::Matches($owner.Extent.Text,
+            'Assert-ProductionLanguageMenuForeground[^\r\n]*\r?\n\s*\[Windows\.Forms\.SendKeys\]::SendWait\(').Count -ne 6) {
+            throw 'Each language menu keyboard input must recheck the exact foreground owner.'
+        }
     }
+}
+$languageForegroundGuards = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-ProductionLanguageMenuForeground'
+}, $true))
+if ($languageForegroundGuards.Count -ne 1 -or
+    $languageForegroundGuards[0].Extent.Text.IndexOf('Get-ForegroundObservation', [StringComparison]::Ordinal) -lt 0 -or
+    $languageForegroundGuards[0].Extent.Text.IndexOf('$foreground.session_id -ne $Session', [StringComparison]::Ordinal) -lt 0) {
+    throw 'Language keyboard foreground guard lost its exact process and session observation.'
+}
+$languageCycle = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ProductionLanguageCycle'
+}, $true))
+if ($languageCycle.Count -ne 1 -or
+    $languageCycle[0].Extent.Text.IndexOf('if ($ownedCleanupClean -and $null -ne $fixture', [StringComparison]::Ordinal) -lt 0) {
+    throw 'Language fixture cleanup must require a verified clean owned process job.'
 }
 foreach ($name in $auditedInputSites.Keys) {
     if ($observedInputSites[$name] -ne $auditedInputSites[$name]) {

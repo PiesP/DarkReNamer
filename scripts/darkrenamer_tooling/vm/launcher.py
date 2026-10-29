@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
+import zlib
 
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
@@ -941,6 +942,35 @@ def checked_artifact(root, record):
     return path
 
 
+def checked_language_capture(root, record, expected_file):
+    """Check a bounded, source-bound native PNG capture and its recorded shape."""
+    if not isinstance(record, dict) or record.get('file') != expected_file:
+        raise ValueError('Language PNG capture inventory is incomplete.')
+    path = checked_artifact(root, record)
+    size = path.stat().st_size
+    if (type(record.get('bytes')) is not int or record['bytes'] != size or
+            not 45 <= size <= 8 * 1024 * 1024):
+        raise ValueError('Language PNG capture byte count is invalid.')
+    with path.open('rb') as stream:
+        header = stream.read(33)
+        stream.seek(-12, 2)
+        trailer = stream.read(12)
+    if (len(header) != 33 or header[:8] != b'\x89PNG\r\n\x1a\n' or
+            header[8:16] != b'\x00\x00\x00\rIHDR' or header[24] != 8 or
+            header[25] not in (2, 6) or header[26:29] != b'\x00\x00\x00' or
+            int.from_bytes(header[29:33], 'big') != zlib.crc32(header[12:29]) or
+            trailer != b'\x00\x00\x00\x00IEND\xaeB`\x82'):
+        raise ValueError('Language capture has an invalid PNG structure.')
+    width = int.from_bytes(header[16:20], 'big')
+    height = int.from_bytes(header[20:24], 'big')
+    if (type(record.get('width')) is not int or type(record.get('height')) is not int or
+            record['width'] != width or record['height'] != height or
+            not 1 <= width <= 16384 or not 1 <= height <= 16384 or
+            width * height > 100_000_000):
+        raise ValueError('Language capture PNG dimensions differ from the recorded window.')
+    return path
+
+
 def application_record(manifest):
     if manifest.get('schema_version') == 2:
         return manifest['product']['application']
@@ -1230,6 +1260,13 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
                 any(type(occupied['bounds'].get(key)) not in (int, float) or
                     occupied['bounds'][key] <= 0 for key in ('width', 'height'))):
             raise ValueError('VM production GUI flow did not prove localized no-overwrite refusal.')
+        for subject in ('source', 'destination'):
+            for suffix in ('sha256', 'file_identity_sha256'):
+                before = occupied.get(subject + '_before_' + suffix)
+                after = occupied.get(subject + '_after_' + suffix)
+                if (not isinstance(before, str) or
+                        not re.fullmatch(r'[0-9a-f]{64}', before) or before != after):
+                    raise ValueError('VM occupied destination raw content or identity changed.')
     screenshots = flow.get('screenshots')
     if not isinstance(screenshots, list) or len(screenshots) != 2:
         raise ValueError('VM production GUI flow screenshots are incomplete.')
@@ -1245,6 +1282,34 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('VM production GUI flow screenshot is not a PNG.')
+    if require_occupied:
+        checked_language_capture(root, flow.get('prefix_prompt_capture'),
+                                 language + '-prefix-prompt.png')
+        binding = {key: flow.get(key) for key in ('process_id', 'session_id', 'window_handle')}
+        if (any(type(binding[key]) is not int or binding[key] <= 0 for key in binding) or
+                not isinstance(flow.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', flow['process_start_time_utc_ticks'])):
+            raise ValueError('Language flow lacks process, window, session, or start identity.')
+        if gui_binding is not None and (
+                any(flow.get(key) != gui_binding.get(other) for key, other in
+                    (('process_id', 'process_id'), ('session_id', 'session_id'),
+                     ('window_handle', 'window_handle'))) or
+                (isinstance(gui_binding.get('process_lifecycle'), dict) and
+                 flow['process_start_time_utc_ticks'] !=
+                 gui_binding['process_lifecycle'].get('start_time_utc_ticks'))):
+            raise ValueError('Language flow differs from the source-bound GUI process.')
+        observations = flow.get('foreground_observations')
+        if not isinstance(observations, list) or len(observations) != 3:
+            raise ValueError('Language flow screenshot foreground evidence is incomplete.')
+        for observation, label, window_class in zip(observations,
+                ('prefix prompt', 'production rename preview', 'apply confirmation task dialog'),
+                ('DarkReNamerInputWindow', 'DarkReNamerWindow', '#32770')):
+            verify_flow_foreground_observation(observation, binding, label, window_class)
+        if (type(flow.get('prefix_prompt_hwnd')) is not int or
+                flow['prefix_prompt_hwnd'] <= 0 or
+                observations[0]['target_hwnd'] != flow['prefix_prompt_hwnd'] or
+                observations[1]['target_hwnd'] != flow['window_handle']):
+            raise ValueError('Language flow captures differ from exact prompt or main HWND.')
     if require_checkpoints:
         observations = flow.get('foreground_observations')
         expected_observations = (
@@ -1305,12 +1370,30 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
     selections = checks.get('selections')
     if not isinstance(selections, list) or len(selections) != len(locales):
         raise ValueError('Language startup and menu selection inventory is incomplete.')
-    for row, (language, before, after, menu_label, system_label, rail_name) in zip(selections, locales):
+    checked_language_capture(root, baseline_flow.get('prefix_prompt_capture'),
+                             'ko-prefix-prompt.png')
+    capture_bytes = baseline_flow['prefix_prompt_capture']['bytes']
+    for index, (row, (language, before, after, menu_label, system_label, rail_name)) in enumerate(zip(selections, locales)):
         if not isinstance(row, dict) or row.get('language') != language:
             raise ValueError('Language startup order is invalid.')
         for key in ('pid', 'hwnd', 'session_id'):
             if type(row.get(key)) is not int or row[key] <= 0:
                 raise ValueError('Language process, window, or session binding is invalid.')
+        if (not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', row['process_start_time_utc_ticks'])):
+            raise ValueError('Language startup process start identity is invalid.')
+        if index < 3:
+            capture = row.get('startup_capture')
+            checked_language_capture(root, capture, language + '-language-main.png')
+            capture_bytes += capture['bytes']
+            verify_flow_foreground_observation(
+                row.get('startup_capture_foreground'),
+                {'process_id': row['pid'], 'session_id': row['session_id']},
+                language + ' language main workbench', 'DarkReNamerWindow')
+            if row['startup_capture_foreground']['target_hwnd'] != row['hwnd']:
+                raise ValueError('Language main capture differs from startup HWND.')
+        elif row.get('startup_capture') is not None or row.get('startup_capture_foreground') is not None:
+            raise ValueError('Language startup has an unexpected additional main capture.')
         preference, menu, rail, choice = (row.get(key) for key in
                                            ('startup_preference', 'startup_menu', 'startup_rail', 'choice'))
         if (not isinstance(preference, dict) or preference.get('value') != before or
@@ -1343,6 +1426,17 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                     any(type(blocked['notice_bounds'].get(key)) not in (int, float) or
                         blocked['notice_bounds'][key] <= 0 for key in ('width', 'height'))):
                 raise ValueError('Localized blocked recovery or retained-journal evidence is incomplete.')
+            capture = blocked.get('notice_capture')
+            checked_language_capture(root, capture, language + '-blocked-recovery.png')
+            capture_bytes += capture['bytes']
+            verify_flow_foreground_observation(
+                blocked.get('notice_capture_foreground'),
+                {'process_id': blocked['pid'], 'session_id': blocked['session_id']},
+                language + ' blocked recovery notice', '#32770')
+            if (type(blocked.get('notice_hwnd')) is not int or
+                    blocked['notice_hwnd'] <= 0 or blocked['notice_hwnd'] == blocked['hwnd'] or
+                    blocked['notice_capture_foreground']['target_hwnd'] != blocked['notice_hwnd']):
+                raise ValueError('Blocked recovery capture targeted the wrong dialog HWND.')
         elif blocked is not None:
             raise ValueError('Language startup has an unexpected blocked-recovery probe.')
         if after is None:
@@ -1357,11 +1451,37 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
               choice['after'].get('parent') != menu_label or
               choice['after'].get('options') != menu['options'] or
               type(choice.get('model_rows_before')) is not int or
+              not 0 <= choice['model_rows_before'] <= 1 or
               choice.get('model_rows_after') != choice['model_rows_before'] or
+              not isinstance(choice.get('model_before'), dict) or
+              choice.get('model_after') != choice['model_before'] or
+              choice['model_before'].get('rows') != choice['model_rows_before'] or
+              not isinstance(choice['model_before'].get('cells'), list) or
+              len(choice['model_before']['cells']) != 4 * choice['model_rows_before'] or
+              any(not isinstance(cell, str) or len(cell) > 32768
+                  for cell in choice['model_before']['cells']) or
               choice.get('rail_before') != rail or choice.get('rail_after') != rail or
               not isinstance(choice.get('preference'), dict) or
               choice['preference'].get('value') != after):
             raise ValueError('Language menu selection changed the current UI or model.')
+        if after is not None:
+            pending_before = choice.get('pending_file_before')
+            pending_after = choice.get('pending_file_after')
+            if index == 1:
+                cells = choice['model_before']['cells']
+                if (choice['model_rows_before'] != 1 or
+                        not all(isinstance(cell, str) and 0 < len(cell) <= 32768 for cell in cells) or
+                        cells[1] == cells[0] or not cells[1].startswith('pending-') or
+                        not cells[2] or not cells[3] or
+                        not isinstance(pending_before, dict) or pending_after != pending_before or
+                        any(not isinstance(pending_before.get(key), str) or
+                            not re.fullmatch(r'[0-9a-f]{64}', pending_before[key])
+                            for key in ('content_sha256', 'file_identity_sha256'))):
+                    raise ValueError('Language choice did not preserve an unapplied model proposal and file.')
+            elif pending_before is not None or pending_after is not None:
+                raise ValueError('Language choice has an unexpected pending-file probe.')
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
     restored = checks.get('restored_preference')
     if (not isinstance(restored, dict) or restored != selections[-2]['choice']['preference'] or
             restored != selections[-1]['startup_preference']):
@@ -1373,13 +1493,29 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
         if not isinstance(row, dict) or row.get('language') != language:
             raise ValueError('Language file-flow order is invalid.')
         flow = row.get('flow')
+        selection = selections[1 if language == 'en' else 2]
+        if (not isinstance(flow, dict) or
+                any(flow.get(key) != selection[binding] for key, binding in
+                    (('process_id', 'pid'), ('session_id', 'session_id'),
+                     ('window_handle', 'hwnd'),
+                     ('process_start_time_utc_ticks', 'process_start_time_utc_ticks')))):
+            raise ValueError('Language file flow is not bound to its startup process and window.')
         verify_gui_flow(root, manifest, flow, screenshot_prefix=language + '-',
                         language=language, require_occupied=True)
+        capture_bytes += flow['prefix_prompt_capture']['bytes']
         checkpoints = verify_flow_checkpoints(flow)
         if (flow.get('before_content_sha256') != baseline_flow.get('before_content_sha256') or
                 flow.get('after_content_sha256') != checkpoints['after_apply']['content_sha256'] or
                 flow.get('after_file_identity_sha256') != checkpoints['after_apply']['file_identity_sha256']):
             raise ValueError('Language file outcomes differ from the source-bound baseline.')
+        if language == 'en' and (
+                selections[1]['choice']['pending_file_before']['content_sha256'] !=
+                flow['after_content_sha256'] or
+                selections[1]['choice']['pending_file_before']['file_identity_sha256'] !=
+                flow['after_file_identity_sha256']):
+            raise ValueError('Pending selection file does not match the applied flow outcome.')
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
     return True
 
 

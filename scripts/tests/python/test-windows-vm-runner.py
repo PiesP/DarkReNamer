@@ -11,15 +11,40 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import struct
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import zlib
 
 from controller_cleanup_fixture import clean_controller_cleanup, clean_controller_cleanup_v3_protected
 from darkrenamer_tooling.vm import launcher as vm
 
 
 class VmRunnerTests(unittest.TestCase):
+    @staticmethod
+    def png_bytes(width=64, height=48):
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack(
+                '>I', zlib.crc32(kind + data) & 0xffffffff)
+        pixels = b''.join(b'\x00' + b'\x40\x80\xc0' * width for _ in range(height))
+        return (b'\x89PNG\r\n\x1a\n' +
+                chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
+                chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b''))
+
+    def language_capture(self, name, width=64, height=48):
+        data = self.png_bytes(width, height)
+        return dict(self.artifact(name, data), bytes=len(data), width=width, height=height)
+
+    @staticmethod
+    def foreground_observation(label, pid, hwnd, session, window_class):
+        observed = {'hwnd': hwnd, 'process_id': pid, 'session_id': session,
+                    'window_class': window_class}
+        return {'label': label, 'target_hwnd': hwnd, 'initial': copy.deepcopy(observed),
+                'uia_set_focus': 'not_attempted', 'set_foreground_window': None,
+                'final': copy.deepcopy(observed), 'capture_complete': copy.deepcopy(observed),
+                'capture_change': None}
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -39,6 +64,9 @@ class VmRunnerTests(unittest.TestCase):
             'scope': 'production-file-add-prefix-cancel-confirm',
             'application_file': self.app['file'],
             'application_sha256': self.app['sha256'],
+            'process_id': 123, 'session_id': 2, 'window_handle': 456,
+            'process_start_time_utc_ticks': '638974000000000000',
+            'prefix_prompt_hwnd': 789,
             'source_name': 'vm-flow-source.txt',
             'preview_name': 'vm-confirmed-vm-flow-source.txt',
             'before_content_sha256': 'c' * 64,
@@ -59,7 +87,21 @@ class VmRunnerTests(unittest.TestCase):
                                      'bounds': {'width': 500, 'height': 300},
                                      'source_unchanged': True,
                                      'destination_unchanged': True,
+                                     'source_before_sha256': 'c' * 64,
+                                     'source_after_sha256': 'c' * 64,
+                                     'source_before_file_identity_sha256': 'e' * 64,
+                                     'source_after_file_identity_sha256': 'e' * 64,
+                                     'destination_before_sha256': 'd' * 64,
+                                     'destination_after_sha256': 'd' * 64,
+                                     'destination_before_file_identity_sha256': 'f' * 64,
+                                     'destination_after_file_identity_sha256': 'f' * 64,
                                      'journal_residue_count': 0},
+            'prefix_prompt_capture': self.language_capture('ko-prefix-prompt.png'),
+            'foreground_observations': [
+                self.foreground_observation('prefix prompt', 123, 789, 2, 'DarkReNamerInputWindow'),
+                self.foreground_observation('production rename preview', 123, 456, 2, 'DarkReNamerWindow'),
+                self.foreground_observation('apply confirmation task dialog', 123, 790, 2, '#32770'),
+            ],
             'screenshots': [preview_screenshot, confirmation_screenshot],
             'diagnostic': None,
             'failure_reason': None,
@@ -95,12 +137,26 @@ class VmRunnerTests(unittest.TestCase):
             rail = {'automation_id': '32773', 'name': rail_name,
                     'bounds': {'x': 30, 'y': 50, 'width': 90, 'height': 40}}
             pid, hwnd = 200 + index, 600 + index
+            process_start = str(638974000000000000 + index)
+            model_cells = (['vm-confirmed-vm-flow-source.txt',
+                            'pending-vm-confirmed-vm-flow-source.txt', 'C:\\fixture',
+                            'C:\\fixture\\vm-confirmed-vm-flow-source.txt']
+                           if index == 1 else
+                           ['vm-confirmed-vm-flow-source.txt', 'vm-confirmed-vm-flow-source.txt',
+                            'C:\\fixture', 'C:\\fixture\\vm-confirmed-vm-flow-source.txt']
+                           if index == 2 else [])
+            model = {'rows': int(bool(model_cells)), 'cells': model_cells}
             choice = {'input': 'native-menu-keyboard', 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
                       'before': copy.deepcopy(menu),
                       'after': dict(menu, checked_command=0x9020 + after),
-                      'model_rows_before': 1, 'model_rows_after': 1,
+                      'model_rows_before': model['rows'], 'model_rows_after': model['rows'],
+                      'model_before': copy.deepcopy(model), 'model_after': copy.deepcopy(model),
                       'rail_before': copy.deepcopy(rail), 'rail_after': copy.deepcopy(rail),
                       'preference': saved}
+            if index == 1:
+                choice['pending_file_before'] = {'content_sha256': 'c' * 64,
+                                                 'file_identity_sha256': 'e' * 64}
+                choice['pending_file_after'] = copy.deepcopy(choice['pending_file_before'])
             blocked = None
             if index < 3:
                 title, guidance = {
@@ -110,21 +166,35 @@ class VmRunnerTests(unittest.TestCase):
                 }[language]
                 blocked = {'language': language, 'pid': 300 + index, 'hwnd': 700 + index,
                            'session_id': 2, 'title': title, 'lock_guidance': guidance,
+                           'notice_hwnd': 900 + index,
                            'notice_bounds': {'width': 500, 'height': 300},
                            'apply_enabled': False, 'model_rows': 0,
                            'journal_sha256': 'd' * 64, 'journal_unchanged': True,
-                           'normal_close': True, 'process_job_clean': True}
+                           'normal_close': True, 'process_job_clean': True,
+                           'notice_capture': self.language_capture(language + '-blocked-recovery.png'),
+                           'notice_capture_foreground': self.foreground_observation(
+                               language + ' blocked recovery notice', 300 + index,
+                               900 + index, 2, '#32770')}
             selections.append({'language': language, 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
+                               'process_start_time_utc_ticks': process_start,
                                'startup_preference': preference, 'startup_menu': menu,
                                'startup_rail': rail, 'choice': choice,
+                               'startup_capture': (self.language_capture(language + '-language-main.png')
+                                                   if index < 3 else None),
+                               'startup_capture_foreground': (
+                                   self.foreground_observation(language + ' language main workbench',
+                                                               pid, hwnd, 2, 'DarkReNamerWindow')
+                                   if index < 3 else None),
                                'blocked_recovery': blocked})
         selections.append({'language': 'ko', 'pid': 204, 'hwnd': 604, 'session_id': 2,
+                           'process_start_time_utc_ticks': '638974000000000004',
                            'startup_preference': copy.deepcopy(selections[-1]['choice']['preference']),
                            'startup_menu': {'parent': '언어(&L) · 다음 실행부터',
                                             'options': ['시스템 언어', '한국어', 'English', '日本語'],
                                             'checked_command': 0x9020},
                            'startup_rail': copy.deepcopy(selections[0]['startup_rail']),
-                           'choice': None, 'blocked_recovery': None})
+                           'choice': None, 'blocked_recovery': None,
+                           'startup_capture': None, 'startup_capture_foreground': None})
         flows = []
         for language in ('en', 'ja'):
             flow = copy.deepcopy(baseline_flow)
@@ -141,6 +211,20 @@ class VmRunnerTests(unittest.TestCase):
                 'ja': ('DarkReNamer - 適用をブロック', '変更先の名前はすでに使用されています。'),
             }[language]
             flow['occupied_destination'].update(title=blocked_title, reason=occupied_reason)
+            selection = selections[1 if language == 'en' else 2]
+            flow.update(process_id=selection['pid'], session_id=selection['session_id'],
+                        window_handle=selection['hwnd'],
+                        process_start_time_utc_ticks=selection['process_start_time_utc_ticks'],
+                        prefix_prompt_capture=self.language_capture(language + '-prefix-prompt.png'),
+                        prefix_prompt_hwnd=800 + selection['pid'])
+            flow['foreground_observations'] = [
+                self.foreground_observation('prefix prompt', selection['pid'],
+                                            800 + selection['pid'], 2, 'DarkReNamerInputWindow'),
+                self.foreground_observation('production rename preview', selection['pid'],
+                                            selection['hwnd'], 2, 'DarkReNamerWindow'),
+                self.foreground_observation('apply confirmation task dialog', selection['pid'],
+                                            900 + selection['pid'], 2, '#32770'),
+            ]
             flow['screenshots'] = [
                 dict(self.artifact(language + '-rename-preview.png', b'\x89PNG\r\n\x1a\npreview'),
                      width=900, height=700),
@@ -228,6 +312,18 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['selections'][-1]['startup_rail'].update(name='Add a name prefix...'),
             lambda row: row['selections'][1]['blocked_recovery'].update(journal_unchanged=False),
             lambda row: row['flows'][0]['flow']['occupied_destination'].update(destination_unchanged=False),
+            lambda row: row['flows'][0]['flow']['occupied_destination'].update(
+                destination_after_file_identity_sha256='0' * 64),
+            lambda row: row['flows'][0]['flow'].update(process_id=999),
+            lambda row: row['flows'][1]['flow'].update(process_start_time_utc_ticks='638974000000000099'),
+            lambda row: row['selections'][1]['choice']['model_after']['cells'].__setitem__(1, 'lost-pending.txt'),
+            lambda row: row['selections'][1]['choice']['pending_file_after'].update(content_sha256='0' * 64),
+            lambda row: row['selections'][2]['startup_capture'].update(width=99),
+            lambda row: row['selections'][0]['startup_capture_foreground']['final'].update(process_id=999),
+            lambda row: row['selections'][2]['blocked_recovery']['notice_capture'].update(bytes=1),
+            lambda row: row['selections'][2]['blocked_recovery'].update(notice_hwnd=999),
+            lambda row: row['flows'][1]['flow']['prefix_prompt_capture'].update(sha256='0' * 64),
+            lambda row: row['flows'][1]['flow'].update(prefix_prompt_hwnd=999),
         )
         for mutate in mutations:
             with self.subTest(mutation=mutate.__code__.co_firstlineno):
@@ -239,6 +335,23 @@ class VmRunnerTests(unittest.TestCase):
         self.result['gui'].pop('language_checks')
         with self.assertRaisesRegex(ValueError, 'language acceptance'):
             self.verify()
+
+    def test_language_capture_rejects_invalid_png_structure_and_digest(self):
+        checks = self.result['gui']['language_checks']
+        record = checks['selections'][0]['startup_capture']
+        path = self.root / record['file']
+        original = path.read_bytes()
+        for damaged in (original[:8] + b'bad-header' + original[18:], original[:-12] + b'bad-trailer!!'):
+            with self.subTest(damaged=damaged[8:20]):
+                path.write_bytes(damaged)
+                record['sha256'] = hashlib.sha256(damaged).hexdigest()
+                record['bytes'] = len(damaged)
+                with self.assertRaisesRegex(ValueError, 'PNG structure'):
+                    vm.verify_language_checks(self.root, self.manifest, checks,
+                                              self.result['gui']['flow'])
+        path.write_bytes(original)
+        record['sha256'] = hashlib.sha256(original).hexdigest()
+        record['bytes'] = len(original)
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
