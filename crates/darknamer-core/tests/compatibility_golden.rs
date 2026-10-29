@@ -391,6 +391,35 @@ fn repeated_replacement_and_extreme_sequence_width_stop_at_the_budget() {
 }
 
 #[test]
+fn empty_replacement_updates_exact_rows_and_retained_units() {
+    let mut names = list(&[
+        (r"C:\root\aa", false),
+        (r"C:\root\baab", false),
+        (r"C:\root\keep", true),
+    ]);
+    let prior_paths = names.planned_path_utf16_units();
+    assert_eq!(
+        names
+            .replace_complete_changed(&LegacyText::from("aa"), &LegacyText::from(""))
+            .as_deref(),
+        Ok(&[0, 1][..])
+    );
+    assert_eq!(names.items()[0].proposed_name().units(), &[]);
+    assert_eq!(names.items()[1].proposed_name(), &LegacyText::from("bb"));
+    assert_eq!(names.items()[2].proposed_name(), &LegacyText::from("keep"));
+    assert_eq!(names.proposed_name_utf16_units(), 6);
+    assert_eq!(names.planned_path_utf16_units(), prior_paths - 4);
+    let unchanged = names.clone();
+    assert_eq!(
+        names
+            .replace_complete_changed(&LegacyText::from("aa"), &LegacyText::from(""))
+            .as_deref(),
+        Ok(&[][..])
+    );
+    assert_eq!(names, unchanged);
+}
+
+#[test]
 fn replacement_noops_and_nonoverlap_preserve_raw_utf16() {
     let mut source = r"C:\root\a".encode_utf16().collect::<Vec<_>>();
     source.extend([0xD800, b'.' as u16, b't' as u16, b'x' as u16, b't' as u16]);
