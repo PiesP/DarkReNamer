@@ -1221,10 +1221,25 @@ public static class DarkReNamerLanguageMenuReader {
     [DllImport("user32.dll", SetLastError=true)] private static extern int GetMenuItemCount(IntPtr menu);
     [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuItemID(IntPtr menu, int position);
     [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuState(IntPtr menu, uint position, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", SetLastError=true)] private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool IsChild(IntPtr parent, IntPtr child);
     [DllImport("user32.dll", SetLastError=true)] public static extern int GetDlgCtrlID(IntPtr control);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern int GetMenuStringW(IntPtr menu, uint position, StringBuilder text, int capacity, uint flags);
+
+    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct GuiThreadInfo {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
+    public sealed class MenuStage {
+        public uint ThreadId, ProcessId, GuiFlags;
+        public long MenuOwner, LanguageHandle;
+        public uint ViewLanguageState;
+        public uint[] Commands, States;
+    }
 
     private static IntPtr Child(IntPtr parent, int position) {
         IntPtr value = GetSubMenu(parent, position);
@@ -1256,6 +1271,39 @@ public static class DarkReNamerLanguageMenuReader {
         }
         if (rows[5] == null) throw new InvalidOperationException("Language menu has no selected preference.");
         return rows;
+    }
+    public static MenuStage Observe(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        uint thread = GetWindowThreadProcessId(window, out processId);
+        if (thread == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Language menu thread differs from the bound application.");
+        GuiThreadInfo gui = new GuiThreadInfo();
+        gui.Size = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
+        if (!GetGUIThreadInfo(thread, ref gui)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr bar = GetMenu(window);
+        if (bar == IntPtr.Zero || GetMenuItemCount(bar) != 6)
+            throw new InvalidOperationException("Language menu bar changed during keyboard navigation.");
+        IntPtr view = Child(bar, 2);
+        if (GetMenuItemCount(view) != 10)
+            throw new InvalidOperationException("View menu changed during keyboard navigation.");
+        IntPtr language = Child(view, 9);
+        if (GetMenuItemCount(language) != 4)
+            throw new InvalidOperationException("Language submenu changed during keyboard navigation.");
+        MenuStage stage = new MenuStage {
+            ThreadId = thread, ProcessId = processId, GuiFlags = gui.Flags,
+            MenuOwner = gui.MenuOwner.ToInt64(), LanguageHandle = language.ToInt64(),
+            ViewLanguageState = GetMenuState(view, 9, 0x400),
+            Commands = new uint[4], States = new uint[4]
+        };
+        if (stage.ViewLanguageState == UInt32.MaxValue)
+            throw new InvalidOperationException("View Language item state is unreadable.");
+        for (int index = 0; index < 4; index++) {
+            stage.Commands[index] = GetMenuItemID(language, index);
+            stage.States[index] = GetMenuState(language, (uint)index, 0x400);
+            if (stage.Commands[index] != 0x9020 + index || stage.States[index] == UInt32.MaxValue)
+                throw new InvalidOperationException("Language command or state changed during keyboard navigation.");
+        }
+        return stage;
     }
     public static string[] PreferredLanguages() {
         uint count, size = 0;
@@ -1306,8 +1354,26 @@ function Read-ProductionLanguagePreference {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         $item.Length -ne 20) { throw 'The owned language preference is not an ordinary 20-byte record.' }
-    $bytes = [IO.File]::ReadAllBytes($path)
-    if ($bytes.Length -ne 20 -or
+    $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+    $bytes = [byte[]]::new(20)
+    $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open,
+        [IO.FileAccess]::Read, $share)
+    try {
+        if ($stream.Length -ne 20) {
+            throw 'The owned language preference is not an ordinary 20-byte record.'
+        }
+        $count = 0
+        while ($count -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $count, $bytes.Length - $count)
+            if ($read -eq 0) { break }
+            $count += $read
+        }
+        if ($count -ne 20 -or $stream.ReadByte() -ne -1) {
+            throw 'The owned language preference changed during its bounded read.'
+        }
+    }
+    finally { $stream.Dispose() }
+    if (
         [Text.Encoding]::ASCII.GetString($bytes, 0, 8) -cne "DRLANG`0`0" -or
         $bytes[8] -ne 1 -or $bytes[9] -ne 0 -or $bytes[10] -ne 0 -or $bytes[11] -ne 0 -or
         $bytes[13] -ne 0 -or $bytes[14] -ne 0 -or $bytes[15] -ne 0 -or
@@ -1319,7 +1385,11 @@ function Read-ProductionLanguagePreference {
     if ([BitConverter]::ToUInt32($bytes, 16) -ne $hash) {
         throw 'The owned language preference checksum is invalid.'
     }
-    [ordered]@{ value = [int]$bytes[12]; sha256 = Get-LowerSha256 -Path $path }
+    $digest = [Security.Cryptography.SHA256]::HashData($bytes)
+    [ordered]@{
+        value = [int]$bytes[12]
+        sha256 = [Convert]::ToHexString($digest).ToLowerInvariant()
+    }
 }
 
 function Read-ProductionLanguageMenu {
@@ -1386,6 +1456,135 @@ function Assert-ProductionLanguageMenuForeground {
         $foreground.session_id -ne $Session -or
         $foreground.window_class -cne 'DarkReNamerWindow') {
         throw 'Language menu owner lost exact foreground process, window, or session binding.'
+    }
+}
+
+function Get-ProductionLanguageMenuStage {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $Phase
+    )
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
+    $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
+    $native = [DarkReNamerLanguageMenuReader]::Observe($handle, [uint32]$Process.Id)
+    $states = @($native.States | ForEach-Object { [int64]$_ })
+    $highlighted = @(0..3 | Where-Object { ($states[$_] -band 0x80) -ne 0 })
+    [ordered]@{
+        phase = $Phase; pid = [int]$native.ProcessId; session_id = [int]$Session
+        hwnd = [long]$handle; thread_id = [long]$native.ThreadId
+        menu_owner = [long]$native.MenuOwner; language_handle = [long]$native.LanguageHandle
+        gui_flags = [long]$native.GuiFlags
+        view_language_state = [long]$native.ViewLanguageState
+        commands = @($native.Commands | ForEach-Object { [int]$_ })
+        states = $states
+        highlighted_indices = $highlighted
+    }
+}
+
+function Test-ProductionLanguageMenuStage {
+    param(
+        [Parameter(Mandatory)][object] $Stage,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][long] $ExpectedWindow,
+        [int] $ExpectedHighlight = -1,
+        [switch] $RequireViewLanguageHighlight
+    )
+    if ($Stage.pid -ne $ExpectedProcessId -or $Stage.session_id -ne $ExpectedSession -or
+        $Stage.hwnd -ne $ExpectedWindow -or $Stage.menu_owner -ne $ExpectedWindow -or
+        $Stage.thread_id -le 0 -or $Stage.language_handle -le 0 -or
+        ($Stage.gui_flags -band 0x4) -ne 0x4 -or
+        @($Stage.commands).Count -ne 4 -or
+        (@($Stage.commands) -join ',') -cne '36896,36897,36898,36899' -or
+        @($Stage.states).Count -ne 4) {
+        return $false
+    }
+    if ($RequireViewLanguageHighlight -and ($Stage.view_language_state -band 0x80) -eq 0) {
+        return $false
+    }
+    if ($ExpectedHighlight -ge 0) {
+        if (@($Stage.highlighted_indices).Count -ne 1 -or
+            $Stage.highlighted_indices[0] -ne $ExpectedHighlight -or
+            ($Stage.states[$ExpectedHighlight] -band 0x3) -ne 0) {
+            return $false
+        }
+    }
+    $true
+}
+
+function Wait-ProductionLanguageMenuStage {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $Phase,
+        [int] $ExpectedHighlight = -1,
+        [switch] $RequireViewLanguageHighlight
+    )
+    $handle = [long]$MainWindow.Current.NativeWindowHandle
+    $deadline = (Get-Date).AddSeconds(3)
+    $stage = $null
+    do {
+        $stage = Get-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Phase $Phase
+        if (Test-ProductionLanguageMenuStage -Stage $stage -ExpectedProcessId $Process.Id `
+            -ExpectedSession $Session -ExpectedWindow $handle `
+            -ExpectedHighlight $ExpectedHighlight `
+            -RequireViewLanguageHighlight:$RequireViewLanguageHighlight) {
+            return $stage
+        }
+        Start-Sleep -Milliseconds 75
+    } while ((Get-Date) -lt $deadline)
+    $summary = $stage | ConvertTo-Json -Depth 3 -Compress
+    if ($summary.Length -gt 2048) { $summary = $summary.Substring(0, 2048) }
+    throw "Language menu $Phase did not reach its exact native stage: $summary"
+}
+
+function Get-ProductionLanguageChoiceObservation {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Status,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $CurrentLanguage
+    )
+    $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $handle -MainWindow $MainWindow -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' -Label 'language post-selection owner'
+    Assert-AutomationBinding -Element $Status -Process $Process -ExpectedSession $Session `
+        -Label 'language post-selection status' -RequireWindowHandle
+    $message = [string]$Status.Current.Name
+    if ($message.Length -gt 512) { $message = $message.Substring(0, 512) }
+    $preference = $null
+    $readError = $null
+    try { $preference = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA }
+    catch { $readError = [ordered]@{
+        kind = $_.Exception.GetType().Name
+        native_error = [int]($_.Exception.HResult -band 0xffff)
+    } }
+    $menu = $null
+    $menuError = $null
+    try {
+        $menu = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Language $CurrentLanguage
+    }
+    catch { $menuError = $_.Exception.GetType().Name }
+    $modals = @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id) |
+        Where-Object { $_.Owner -eq [long]$handle -and $_.Visible -and
+            $_.ClassName -ceq '#32770' } | Select-Object -First 4 | ForEach-Object {
+            [ordered]@{ hwnd = [long]$_.Handle; class = [string]$_.ClassName
+                title = ([string]$_.Title).Substring(0, [Math]::Min(128, ([string]$_.Title).Length)) }
+        })
+    [ordered]@{
+        status = $message
+        preference = $preference
+        preference_read_error = $readError
+        checked_command = if ($null -eq $menu) { $null } else { $menu.checked_command }
+        menu_read_error = $menuError
+        owned_modals = $modals
     }
 }
 
@@ -1499,32 +1698,64 @@ function Invoke-ProductionLanguageMenuChoice {
     }
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     $saved = $null
+    $trace = [Collections.Generic.List[object]]::new()
+    $postEnter = [Collections.Generic.List[object]]::new()
+    $status = Find-UniqueAutomationElement -Root $MainWindow -Process $Process `
+        -ExpectedSession $Session -AutomationId '1007' `
+        -ControlType ([Windows.Automation.ControlType]::Text) `
+        -TimeoutSeconds $TimeoutSeconds -Label 'language save status' -RequireWindowHandle
+    $statusBefore = [string]$status.Current.Name
+    if ($statusBefore.Length -gt 512) { $statusBefore = $statusBefore.Substring(0, 512) }
     Add-Type -AssemblyName System.Windows.Forms
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('%v')
+    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'alt-v'))
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{END}')
+    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'end' -RequireViewLanguageHighlight))
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'right'))
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{HOME}')
+    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'home' -ExpectedHighlight 0))
     for ($index = 0; $index -lt ($target - 0x9020); $index++) {
         Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
         [Windows.Forms.SendKeys]::SendWait('{DOWN}')
+        $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Phase "down-$($index + 1)" -ExpectedHighlight ($index + 1)))
     }
+    $preEnter = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'pre-enter' -ExpectedHighlight ($target - 0x9020)
+    $trace.Add($preEnter)
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{ENTER}')
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        try {
-            $saved = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
-            if ($saved.value -eq ($target - 0x9020)) { break }
+        $observation = Get-ProductionLanguageChoiceObservation -Process $Process `
+            -MainWindow $MainWindow -Status $status -Session $Session `
+            -CurrentLanguage $CurrentLanguage
+        if ($postEnter.Count -eq 0 -or
+            ($postEnter[$postEnter.Count - 1] | ConvertTo-Json -Depth 5 -Compress) -cne
+            ($observation | ConvertTo-Json -Depth 5 -Compress)) {
+            if ($postEnter.Count -ge 16) { $postEnter.RemoveAt(0) }
+            $postEnter.Add($observation)
         }
-        catch {}
+        $saved = $observation.preference
+        if ($null -ne $saved -and $saved.value -eq ($target - 0x9020)) { break }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     if ($null -eq $saved -or $saved.value -ne ($target - 0x9020)) {
-        throw 'Language preference was not durably saved after the real menu selection.'
+        $diagnostic = [ordered]@{
+            target = [int]$target; input_trace = $trace.ToArray()
+            status_before = $statusBefore; post_enter = $postEnter.ToArray()
+        } | ConvertTo-Json -Depth 7 -Compress
+        if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0, 8192) }
+        throw "Language preference was not durably saved after the real menu selection: $diagnostic"
     }
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
@@ -1559,6 +1790,8 @@ function Invoke-ProductionLanguageMenuChoice {
         model_before = $cellsBefore; model_after = $cellsAfter
         rail_before = $railBefore; rail_after = $railAfter
         preference = $saved
+        input_trace = $trace.ToArray(); status_before = $statusBefore
+        post_enter = $postEnter.ToArray()
     }
 }
 

@@ -1529,11 +1529,83 @@ def verify_valid_active_recovery(root, manifest, record):
               not isinstance(choice.get('after'), dict) or
               choice['after'].get('checked_command') != 0x9020 + after):
             raise ValueError('Valid-active language choice did not preserve the recovery lock.')
+        if after is not None:
+            verify_language_menu_input_trace(choice, 0x9020 + after)
         if index > 0 and row['startup_preference'] != observations[index - 1]['choice']['preference']:
             raise ValueError('Valid-active next startup did not reload its selected language.')
     if len({row['pid'] for row in observations} | {child['pid']}) != 4:
         raise ValueError('Valid-active recovery reused a supposedly closed process.')
     return capture_bytes
+
+
+def verify_language_menu_input_trace(choice, target):
+    trace = choice.get('input_trace')
+    target_index = target - 0x9020
+    phases = ['alt-v', 'end', 'right', 'home'] + [
+        'down-' + str(index) for index in range(1, target_index + 1)] + ['pre-enter']
+    if not isinstance(trace, list) or len(trace) != len(phases):
+        raise ValueError('Real language menu keyboard stage trace is incomplete.')
+    for index, (stage, phase) in enumerate(zip(trace, phases)):
+        if (not isinstance(stage, dict) or stage.get('phase') != phase or
+                any(type(stage.get(key)) is not int or stage[key] <= 0 for key in
+                    ('pid', 'session_id', 'hwnd', 'thread_id', 'language_handle')) or
+                stage['pid'] != choice['pid'] or stage['session_id'] != choice['session_id'] or
+                stage['hwnd'] != choice['hwnd'] or stage.get('menu_owner') != choice['hwnd'] or
+                type(stage.get('gui_flags')) is not int or
+                stage['gui_flags'] & 0x4 != 0x4 or
+                type(stage.get('view_language_state')) is not int or
+                stage.get('commands') != list(range(0x9020, 0x9024)) or
+                not isinstance(stage.get('states'), list) or len(stage['states']) != 4 or
+                any(type(state) is not int or state < 0 for state in stage['states'])):
+            raise ValueError('Real language menu stage lost process, owner, mode, or command binding.')
+        highlighted = [position for position, state in enumerate(stage['states'])
+                       if state & 0x80]
+        if stage.get('highlighted_indices') != highlighted:
+            raise ValueError('Real language menu highlighted indices contradict native states.')
+        expected = 0 if phase == 'home' else (
+            int(phase[5:]) if phase.startswith('down-') else
+            target_index if phase == 'pre-enter' else None)
+        if (phase == 'end' and stage['view_language_state'] & 0x80 == 0 or
+                expected is not None and
+                (highlighted != [expected] or stage['states'][expected] & 0x3)):
+            raise ValueError('Real language menu was not visibly on the enabled target.')
+    if (not isinstance(choice.get('status_before'), str) or
+            len(choice['status_before']) > 512):
+        raise ValueError('Language menu initial status observation is invalid.')
+    samples = choice.get('post_enter')
+    if not isinstance(samples, list) or not 1 <= len(samples) <= 16:
+        raise ValueError('Language menu has no bounded post-Enter observations.')
+    for sample in samples:
+        if (not isinstance(sample, dict) or
+                not isinstance(sample.get('status'), str) or len(sample['status']) > 512 or
+                sample.get('checked_command') not in (None, *range(0x9020, 0x9024)) or
+                sample.get('menu_read_error') is not None and
+                (not isinstance(sample['menu_read_error'], str) or
+                 len(sample['menu_read_error']) > 128) or
+                not isinstance(sample.get('owned_modals'), list) or
+                len(sample['owned_modals']) > 4):
+            raise ValueError('Language menu post-Enter status or menu observation is invalid.')
+        for modal in sample['owned_modals']:
+            if (not isinstance(modal, dict) or type(modal.get('hwnd')) is not int or
+                    modal['hwnd'] <= 0 or modal.get('class') != '#32770' or
+                    not isinstance(modal.get('title'), str) or len(modal['title']) > 128):
+                raise ValueError('Language menu owned modal observation is invalid.')
+        preference = sample.get('preference')
+        if preference is not None and (not isinstance(preference, dict) or
+                type(preference.get('value')) is not int or
+                preference['value'] not in range(4) or
+                not isinstance(preference.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', preference['sha256'])):
+            raise ValueError('Language menu observed malformed preference metadata.')
+        read_error = sample.get('preference_read_error')
+        if read_error is not None and (not isinstance(read_error, dict) or
+                not isinstance(read_error.get('kind'), str) or
+                len(read_error['kind']) > 128 or
+                type(read_error.get('native_error')) is not int or
+                read_error['native_error'] < 0):
+            raise ValueError('Language menu observed malformed preference read failure.')
+    if samples[-1].get('preference') != choice['preference']:
+        raise ValueError('Language menu saved preference lacks matching post-Enter readback.')
 
 
 def verify_language_checks(root, manifest, checks, baseline_flow):
@@ -1675,6 +1747,7 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
               choice['preference'].get('value') != after):
             raise ValueError('Language menu selection changed the current UI or model.')
         if after is not None:
+            verify_language_menu_input_trace(choice, 0x9020 + after)
             pending_before = choice.get('pending_file_before')
             pending_after = choice.get('pending_file_after')
             if index == 1:

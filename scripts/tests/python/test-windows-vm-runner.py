@@ -154,13 +154,31 @@ class VmRunnerTests(unittest.TestCase):
                             'C:\\fixture', 'C:\\fixture\\vm-confirmed-vm-flow-source.txt']
                            if index == 2 else [])
             model = {'rows': int(bool(model_cells)), 'cells': model_cells}
+            stages = []
+            for phase in (['alt-v', 'end', 'right', 'home'] +
+                          ['down-' + str(step) for step in range(1, after + 1)] + ['pre-enter']):
+                highlighted = (0 if phase == 'home' else
+                               int(phase[5:]) if phase.startswith('down-') else
+                               after if phase == 'pre-enter' else None)
+                states = [0x80 if position == highlighted else 0 for position in range(4)]
+                stages.append({'phase': phase, 'pid': pid, 'session_id': 2, 'hwnd': hwnd,
+                               'thread_id': 500 + index, 'language_handle': 800 + index,
+                               'menu_owner': hwnd,
+                               'gui_flags': 0x4 if phase == 'alt-v' else 0x14,
+                               'view_language_state': 0x80 if phase == 'end' else 0,
+                               'commands': list(range(0x9020, 0x9024)), 'states': states,
+                               'highlighted_indices': ([] if highlighted is None else [highlighted])})
             choice = {'input': 'native-menu-keyboard', 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
                       'before': copy.deepcopy(menu),
                       'after': dict(menu, checked_command=0x9020 + after),
                       'model_rows_before': model['rows'], 'model_rows_after': model['rows'],
                       'model_before': copy.deepcopy(model), 'model_after': copy.deepcopy(model),
                       'rail_before': copy.deepcopy(rail), 'rail_after': copy.deepcopy(rail),
-                      'preference': saved}
+                      'preference': saved, 'input_trace': stages, 'status_before': '',
+                      'post_enter': [{'status': 'UI language saved.', 'preference': saved,
+                                      'preference_read_error': None,
+                                      'checked_command': 0x9020 + after,
+                                      'menu_read_error': None, 'owned_modals': []}]}
             if index == 1:
                 choice['pending_file_before'] = {'content_sha256': 'c' * 64,
                                                  'file_identity_sha256': 'e' * 64}
@@ -307,6 +325,9 @@ class VmRunnerTests(unittest.TestCase):
                               model_rows_before=0, model_rows_after=0,
                               model_before={'rows': 0, 'cells': []},
                               model_after={'rows': 0, 'cells': []})
+                for stage in choice['input_trace']:
+                    stage.update(pid=pid, hwnd=main_hwnd, menu_owner=main_hwnd,
+                                 thread_id=700 + index, language_handle=1200 + index)
                 choice.pop('pending_file_before', None)
                 choice.pop('pending_file_after', None)
             rows.append({
@@ -398,6 +419,10 @@ class VmRunnerTests(unittest.TestCase):
         mutations = (
             lambda row: row['selections'][1]['startup_menu'].update(parent='언어(&L) · 다음 실행부터'),
             lambda row: row['selections'][2]['choice'].update(model_rows_after=2),
+            lambda row: row['selections'][0]['choice']['input_trace'][-1].update(menu_owner=999),
+            lambda row: row['selections'][0]['choice']['input_trace'][-1]['states'].__setitem__(2, 0),
+            lambda row: row['selections'][0]['choice']['input_trace'][-1].update(gui_flags=0),
+            lambda row: row['selections'][0]['choice']['post_enter'][-1].update(preference=None),
             lambda row: row['selections'][1]['choice']['preference'].update(value=1),
             lambda row: row['flows'][0]['flow'].update(confirmed_destination_present=False),
             lambda row: row['flows'][1]['flow']['checkpoints'][2]['fixture_entries'][0].update(
