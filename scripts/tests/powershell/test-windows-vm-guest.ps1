@@ -245,6 +245,49 @@ try {
     $record[0] = 0
     [IO.File]::WriteAllBytes($languagePath, $record)
     Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } 'header'
+    [IO.File]::WriteAllBytes($languagePath, ([byte[]]$record + [byte]0))
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } '20-byte record'
+    $menuStage = [ordered]@{
+        phase = 'pre-enter'; pid = 10; session_id = 2; hwnd = [long]100
+        thread_id = [long]20; language_handle = [long]200; menu_owner = [long]100
+        gui_flags = [long]0x14; view_language_state = [long]0
+        commands = @(0x9020, 0x9021, 0x9022, 0x9023)
+        states = @(0, 0, 0x80, 0); highlighted_indices = @(2)
+    }
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
+        throw 'Bound native language target stage was rejected.'
+    }
+    $menuStage.states[1] = 0x80
+    $menuStage.highlighted_indices = @(1, 2)
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Ambiguous native language highlight was accepted.'
+    }
+    $menuStage.states[1] = 0
+    $menuStage.highlighted_indices = @(2)
+    $menuStage.states[2] = 0x83
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Disabled native language target was accepted.'
+    }
+    $menuStage.states[2] = 0x80
+    $menuStage.menu_owner = [long]999
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Foreign language menu owner was accepted.'
+    }
+    $menuStage.menu_owner = [long]100
+    $menuStage.gui_flags = [long]0x4
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
+        throw 'Bound menu mode without optional popup-mode flag was rejected.'
+    }
+    $menuStage.gui_flags = [long]0
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'A non-menu GUI thread was accepted as the language menu.'
+    }
     foreach ($language in @('ko', 'en', 'ja')) {
         $labels = Get-ProductionLanguageSpec -Language $language
         if ([string]::IsNullOrEmpty($labels.picker) -or
