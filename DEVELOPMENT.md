@@ -58,10 +58,12 @@ These are authoring defaults; the [safety model](SAFETY.md),
 Column, appearance and language files have independent write authority. A successful read
 or a genuinely absent file permits that file's writer; an initial read error
 uses safe display defaults but starts no writer for that file for the session.
-Edits and resets still affect the current UI, but are not persisted, and the UI
-reports that limitation. There is no in-session retry or reset that restores
-write authority: restart retries the read, and edits from the blocked session
-are discarded. The other files remain independently writable. Both normal close
+Column and appearance edits and resets still affect the current UI, but are not
+persisted, and the UI reports that limitation. An initial language-file read
+failure blocks new language choices for that session. There is no in-session
+retry or reset that restores write authority: restart retries the read, and
+unpersisted column/appearance edits are discarded. The other files remain
+independently writable. Both normal close
 and message-loop failure retire all writers that were started. This preserves
 unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
