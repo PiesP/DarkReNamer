@@ -11,7 +11,7 @@ from darkrenamer_tooling.contracts.owned_cleanup import (
     _observer_finished, _process_jobs, _reject_owned_entries, _restoration, _setting_snapshot,
     _v2_finalizer_inventory, _owned_performance_predelete,
     verify_owned_performance_text_scale, OWNED_PERFORMANCE_PROFILE_SHA256,
-    verify_preserved_owned_cleanup,
+    verify_preserved_owned_cleanup, RUNTIME_BASELINE_RUN_ID, RUNTIME_BASELINE_PLAN,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
 from controller_cleanup_fixture import (
@@ -837,6 +837,187 @@ class V3OwnedCleanupTests(unittest.TestCase):
             self.rebind_original()
             with self.subTest(mode=mode), self.assertRaises(EvidenceError):
                 self.verify_v3()
+
+
+class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
+    """Complete preserved V3 failure with three ordinary product lifetimes."""
+
+    rebind_original = OwnedCleanupTests.rebind_original
+
+    def setUp(self):
+        V3OwnedCleanupTests.setUp(self)
+        def current_profile(value):
+            if type(value) is dict:
+                return {key: current_profile(item) for key, item in value.items()}
+            if type(value) is list:
+                return [current_profile(item) for item in value]
+            return OWNED_PERFORMANCE_PROFILE_SHA256 if value == 'a' * 64 else value
+        for name in ('original', 'receipt', 'proof', 'signal'):
+            setattr(self, name, current_profile(getattr(self, name)))
+        self.application_sha = 'c' * 64
+        self.bundle = {'schema_version': 1, 'source_sha': '9' * 40,
+                       'application': {'file': 'DarkReNamer.exe', 'sha256': self.application_sha}}
+        self.manifest = {'run_id': RUNTIME_BASELINE_RUN_ID, 'source_sha': '9' * 40,
+            'acceptance_profile_id': 'vm-automated-v2-owned-resources',
+            'acceptance_profile_sha256': OWNED_PERFORMANCE_PROFILE_SHA256,
+            'acceptance_profile': {'sha256': OWNED_PERFORMANCE_PROFILE_SHA256},
+            'artifacts': {'application': {'sha256': self.application_sha}},
+            'request': {'mode': 'runtime-baseline', 'appearance': 'light',
+                'desktop': {'width': 1366, 'height': 768, 'dpi': 96},
+                'text_scale_percent': 100, 'runtime_baseline_plan': deepcopy(RUNTIME_BASELINE_PLAN)}}
+        evidence = self.original['raw_cleanup']['owned_resource_evidence']
+        cells, lifecycles, jobs = [], [], []
+        for index, name in enumerate(RUNTIME_BASELINE_PLAN['startup_cells']):
+            pid, ticks = 3101 + index, 639268888530000000 + index * 100000000
+            cells.append({'id': name, 'process_id': pid, 'process_start_utc_ticks': ticks,
+                          'normal_exit_code': 0, 'environment': {'main_window': {'process_id': pid}}})
+            lifecycles.append({'process_lifecycle': {
+                'pid': pid, 'session_id': evidence['runner_session_id'],
+                'start_time_utc_ticks': str(ticks),
+                'creation_filetime': ticks - 504911232000000000,
+                'executable_path': self.roots['guest']['path'] + '\\DarkReNamer.exe',
+                'executable_sha256': self.application_sha, 'start_observed': True,
+                'exit_observed': True, 'exit_method': 'normal-close', 'exit_code': 0}})
+            job = deepcopy(process_result('9' * 40)['process_job_cleanup'][0])
+            job.update(pid=pid, process_start_time_utc_ticks=str(ticks))
+            jobs.append(job)
+        self.observations = {'schema_version': 1, 'run_id': RUNTIME_BASELINE_RUN_ID,
+            'scenario': {'mode': 'runtime-baseline', 'executable_sha256': self.application_sha,
+                         'cells': cells},
+            'text_scale_restoration': {'schema_version': 1,
+                'baseline': text_scale_snapshot(1.0), 'final': text_scale_snapshot(1.0),
+                'snapshot_equal': True}}
+        self.result = {'source_sha': '9' * 40, 'status': 'failed',
+            'failure_reason': 'gui_regression_observer_failed',
+            'acceptance_script_sha256': '8' * 64,
+            'application': {'sha256': self.application_sha},
+            'process_lifecycles': lifecycles, 'process_job_cleanup': jobs,
+            'observer_lifecycle': deepcopy(evidence['task_execution']['observer_lifecycle'])}
+        evidence['process_job_cleanup'] = deepcopy(jobs)
+        evidence['declared_processes'] = [
+            {'pid': cell['process_id'], 'start_time_utc_ticks': str(cell['process_start_utc_ticks'])}
+            for cell in cells]
+        self.original.update(task_kind='ui', observer_process={'state': 'exited', 'exit_code': 1})
+        self.original['owned_cleanup_failure_context'].update(task_kind='ui',
+            observer_sha256='8' * 64, acceptance_mode='runtime-baseline',
+            acceptance_text_scale_percent=100)
+        (self.root / 'original-result.json').unlink()
+        profile = Path(__file__).resolve().parents[3] / 'config/vm-automated-v2.json'
+        (self.root / 'owned-performance-profile.json').write_bytes(profile.read_bytes())
+        self.freeze()
+
+    def freeze(self):
+        """Rebind byte receipts so semantic mutations reach the independent contract."""
+        def reference(name):
+            data = (self.root / name).read_bytes()
+            return {'file': name, 'bytes': len(data), 'sha256': digest(data)}
+        bundle_bytes = write(self.root / 'bundle.json', self.bundle)
+        bundle_sha = digest(bundle_bytes)
+        self.manifest['bundle_manifest'] = {'sha256': bundle_sha}
+        self.manifest['prepared_bundle'] = {'origin': 'external-prepared-source-built-bundle',
+            'bundle_manifest_sha256': bundle_sha, 'application_sha256': self.application_sha}
+        observation_bytes = write(self.root / 'acceptance-observations.json', self.observations)
+        self.result['acceptance_observations'] = deepcopy(self.observations)
+        self.result['assertions'] = {'scenario': deepcopy(self.observations['scenario'])}
+        self.result['observations'] = {'sha256': digest(observation_bytes)}
+        write(self.root / 'acceptance-result.json', self.result)
+        write(self.root / 'owned-performance-input-manifest.json', self.manifest)
+        context = self.original['owned_cleanup_failure_context']
+        context['bundle'] = reference('bundle.json')
+        context['source_result'] = reference('acceptance-result.json')
+        evidence = self.original['raw_cleanup']['owned_resource_evidence']
+        for anchor in (evidence['protected_anchor_initial'], evidence['protected_anchor'],
+                       self.proof['protected_anchor']):
+            anchor['bundle_sha256'] = bundle_sha
+            anchor['proof']['bundle_sha256'] = bundle_sha
+        names = ('original-transport.json', 'acceptance-result.json', 'bundle.json',
+                 'acceptance-observations.json', 'owned-performance-input-manifest.json',
+                 'owned-performance-profile.json')
+        self.receipt['files'] = [reference(name) for name in names]
+        self.rebind_original()
+        refs = {name: reference(name) for name in names}
+        for name in ('owned-cleanup-strict-failure-preservation.json',
+                     'owned-cleanup-desktop-closed.json', 'desktop-lease.json'):
+            refs[name] = reference(name)
+        predelete = {'schema_version': 1, 'kind': 'owned_performance_predelete_restoration',
+            'run_name': RUN, 'run_id': RUNTIME_BASELINE_RUN_ID, 'vm_id': VM,
+            'nonce': self.receipt['nonce'], 'desktop_lease_id': self.receipt['desktop_lease_id'],
+            'source_sha': '9' * 40, 'bundle_sha256': bundle_sha,
+            'profile_id': 'vm-automated-v2-owned-resources',
+            'profile_sha256': OWNED_PERFORMANCE_PROFILE_SHA256,
+            'roots': self.roots, 'files': refs}
+        data = write(self.root / 'owned-performance-predelete.json', predelete)
+        self.proof['predelete_sha256'] = digest(data)
+        write(self.root / 'owned-cleanup-after-strict-failure.json', self.proof)
+
+    def verify(self):
+        return verify_preserved_owned_cleanup(self.root,
+            profile_id='vm-automated-v2-owned-resources',
+            profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+
+    def test_complete_runtime_failure_keeps_acceptance_rejected(self):
+        self.assertEqual(self.verify(), {'environment': 'strict-failed',
+                                        'owned_cleanup': 'owned-clean', 'acceptance': 'rejected'})
+
+    def test_runtime_cells_and_lifetimes_must_match_all_three_owned_jobs(self):
+        seed_observations, seed_result = deepcopy(self.observations), deepcopy(self.result)
+        mutations = ('missing-cell', 'duplicate-cell', 'missing-lifetime', 'extra-lifetime',
+                     'duplicate-lifetime', 'pid', 'start', 'boolean-pid', 'boolean-start',
+                     'boolean-window-pid', 'boolean-lifetime-pid', 'session', 'filetime',
+                     'source-executable', 'forced-exit', 'normal-exit', 'job-missing', 'job-unclean')
+        for mutation in mutations:
+            self.observations, self.result = deepcopy(seed_observations), deepcopy(seed_result)
+            cells = self.observations['scenario']['cells']
+            life = self.result['process_lifecycles'][0]['process_lifecycle']
+            if mutation == 'missing-cell': cells.pop()
+            elif mutation == 'duplicate-cell': cells[1] = deepcopy(cells[0])
+            elif mutation == 'missing-lifetime': self.result['process_lifecycles'].pop()
+            elif mutation == 'extra-lifetime': self.result['process_lifecycles'].append(deepcopy(life))
+            elif mutation == 'duplicate-lifetime': self.result['process_lifecycles'][1] = {'process_lifecycle': deepcopy(life)}
+            elif mutation == 'pid': life['pid'] += 1
+            elif mutation == 'start': life['start_time_utc_ticks'] = str(int(life['start_time_utc_ticks']) + 1)
+            elif mutation == 'boolean-pid': cells[0]['process_id'] = True
+            elif mutation == 'boolean-start': cells[0]['process_start_utc_ticks'] = True
+            elif mutation == 'boolean-window-pid': cells[0]['environment']['main_window']['process_id'] = True
+            elif mutation == 'boolean-lifetime-pid': life['pid'] = True
+            elif mutation == 'session': life['session_id'] += 1
+            elif mutation == 'filetime': life['creation_filetime'] += 1
+            elif mutation == 'source-executable': life['executable_sha256'] = 'f' * 64
+            elif mutation == 'forced-exit': life['exit_method'] = 'job-termination'
+            elif mutation == 'normal-exit': cells[0]['normal_exit_code'] = True
+            elif mutation == 'job-missing': self.result['process_job_cleanup'].pop()
+            else: self.result['process_job_cleanup'][0]['job_closed'] = False
+            self.freeze()
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify()
+
+    def test_runtime_frozen_source_and_finalizer_cannot_be_downgraded(self):
+        for mutation in ('predelete', 'run', 'plan', 'bundle-application', 'source',
+                         'desktop', 'root', 'poststop', 'strict-success'):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                if mutation == 'run': self.observations['run_id'] += '-other'
+                elif mutation == 'plan': self.manifest['request']['runtime_baseline_plan']['idle_seconds'] = 1
+                elif mutation == 'bundle-application': self.bundle['application']['sha256'] = 'f' * 64
+                elif mutation == 'source': self.result['source_sha'] = 'f' * 40
+                elif mutation == 'desktop': self.manifest['request']['desktop']['dpi'] = 144
+                elif mutation == 'root': self.proof['observed_roots_after']['guest_present'] = True
+                elif mutation == 'poststop':
+                    self.proof['protected_anchor']['proof']['child_path_closed'] = False
+                elif mutation == 'strict-success': self.original['status'] = 'collected'
+                self.freeze()
+                if mutation == 'predelete':
+                    (self.root / 'owned-performance-predelete.json').unlink()
+                with self.assertRaises(EvidenceError): self.verify()
+
+    def test_runtime_cannot_select_v1_or_an_unreviewed_v2_profile(self):
+        for profile_id, profile_sha in (('vm-automated-v1-win11-ntfs', None),
+                ('vm-automated-v2-owned-resources', V2_PROFILE_SHA256),
+                ('vm-automated-v2-owned-resources', 'f' * 64)):
+            with self.subTest(profile=profile_sha), self.assertRaisesRegex(
+                    EvidenceError, 'reviewed V2 revision-3'):
+                verify_preserved_owned_cleanup(self.root, profile_id=profile_id,
+                                                profile_sha256=profile_sha)
 
 
 if __name__ == '__main__':
