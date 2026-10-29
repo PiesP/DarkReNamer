@@ -1540,12 +1540,21 @@ function Assert-ProductionLanguageMenuForeground {
     }
 }
 
+function Get-ProductionLanguageKeyPacket {
+    param([Parameter(Mandatory)][ValidateSet('language-mnemonic', 'down', 'enter')][string] $Action)
+    switch ($Action) {
+        'language-mnemonic' { return [ordered]@{ virtual_key = 0x4C; extended = $false } }
+        'down'              { return [ordered]@{ virtual_key = 0x28; extended = $true } }
+        'enter'             { return [ordered]@{ virtual_key = 0x0D; extended = $false } }
+    }
+}
+
 function Send-ProductionLanguageNativeInput {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
         [Parameter(Mandatory)][int] $Session,
-        [Parameter(Mandatory)][ValidateSet('alt-v', 'end', 'right', 'home', 'down', 'enter')][string] $Action
+        [Parameter(Mandatory)][ValidateSet('alt-v', 'language-mnemonic', 'down', 'enter')][string] $Action
     )
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     if ($Action -ceq 'alt-v') {
@@ -1558,18 +1567,12 @@ function Send-ProductionLanguageNativeInput {
         }
         return
     }
-    $virtualKey = switch ($Action) {
-        'end'   { 0x23 }
-        'right' { 0x27 }
-        'home'  { 0x24 }
-        'down'  { 0x28 }
-        'enter' { 0x0D }
-    }
-    if ($Action -ceq 'enter') {
-        [DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)
+    $packet = Get-ProductionLanguageKeyPacket -Action $Action
+    if ($packet.extended) {
+        [DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)
     }
     else {
-        [DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)
+        [DarkReNamerLanguageMenuReader]::Tap([uint16]$packet.virtual_key)
     }
 }
 
@@ -1633,7 +1636,7 @@ function Test-ProductionLanguageMenuStage {
         $Stage.view_states[9] -ne $Stage.view_language_state -or
         ($Stage.top_states[2] -band 0x80) -eq 0 -or
         $Stage.popup_count -ne @($Stage.popups).Count -or
-        @($Stage.popups).Count -ne $(if ($Stage.phase -cin @('alt-v', 'end')) { 1 } else { 2 }) -or
+        @($Stage.popups).Count -ne $(if ($Stage.phase -ceq 'alt-v') { 1 } else { 2 }) -or
         @($Stage.commands).Count -ne 4 -or
         (@($Stage.commands) -join ',') -cne '36896,36897,36898,36899' -or
         @($Stage.states).Count -ne 4) {
@@ -1663,6 +1666,28 @@ function Test-ProductionLanguageMenuStage {
         }
     }
     $true
+}
+
+function Get-ProductionLanguageHighlightedIndex {
+    param([Parameter(Mandatory)][object] $Stage, [switch] $AllowNone)
+    $highlighted = @($Stage.highlighted_indices)
+    if ($highlighted.Count -eq 0 -and $AllowNone) { return -1 }
+    if ($highlighted.Count -ne 1 -or $highlighted[0] -notin 0..3 -or
+        ($Stage.states[$highlighted[0]] -band 0x3) -ne 0) {
+        throw 'Language submenu has no unique enabled native highlight.'
+    }
+    [int]$highlighted[0]
+}
+
+function Assert-ProductionLanguagePopupContinuity {
+    param([Parameter(Mandatory)][object] $Open, [Parameter(Mandatory)][object] $Stage)
+    $openHandles = @($Open.popups | ForEach-Object { [long]$_.hwnd } | Sort-Object)
+    $stageHandles = @($Stage.popups | ForEach-Object { [long]$_.hwnd } | Sort-Object)
+    if ($Stage.language_handle -ne $Open.language_handle -or
+        $openHandles.Count -ne 2 -or $stageHandles.Count -ne 2 -or
+        ($openHandles -join ',') -cne ($stageHandles -join ',')) {
+        throw 'Language submenu or its exact owned native popup handles changed during navigation.'
+    }
 }
 
 function Wait-ProductionLanguageMenuStage {
@@ -1859,28 +1884,47 @@ function Invoke-ProductionLanguageMenuChoice {
     if ($statusBefore.Length -gt 512) { $statusBefore = $statusBefore.Substring(0, 512) }
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
         -Session $Session -Action 'alt-v'
-    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Phase 'alt-v'))
+    $viewOpen = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'alt-v'
+    $trace.Add($viewOpen)
+    # Win32 standard menu keys include access keys and arrows, not End/Home:
+    # https://learn.microsoft.com/en-us/windows/win32/menurc/about-menus
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Action 'end'
-    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Phase 'end' -RequireViewLanguageHighlight))
-    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Action 'right'
-    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Phase 'right'))
-    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Action 'home'
-    $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Phase 'home' -ExpectedHighlight 0))
-    for ($index = 0; $index -lt ($target - 0x9020); $index++) {
+        -Session $Session -Action 'language-mnemonic'
+    $languageOpen = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Phase 'language-open' -RequireViewLanguageHighlight
+    if ($languageOpen.language_handle -ne $viewOpen.language_handle -or
+        @($languageOpen.popups | Where-Object { $_.hwnd -eq $viewOpen.popups[0].hwnd }).Count -ne 1) {
+        throw 'Language mnemonic opened a different native View menu.'
+    }
+    $trace.Add($languageOpen)
+    $current = Get-ProductionLanguageHighlightedIndex -Stage $languageOpen -AllowNone
+    $step = 0
+    if ($current -eq -1) {
+        $step++
         Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
             -Session $Session -Action 'down'
-        $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-            -Session $Session -Phase "down-$($index + 1)" -ExpectedHighlight ($index + 1)))
+        $first = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Phase "down-$step" -ExpectedHighlight 0
+        Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $first
+        $trace.Add($first)
+        $current = 0
+    }
+    while ($current -ne ($target - 0x9020)) {
+        if ($step -ge 4) { throw 'Language submenu navigation exceeded four native Down inputs.' }
+        $next = ($current + 1) % 4
+        $step++
+        Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Action 'down'
+        $moved = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Phase "down-$step" -ExpectedHighlight $next
+        Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $moved
+        $trace.Add($moved)
+        $current = $next
     }
     $preEnter = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'pre-enter' -ExpectedHighlight ($target - 0x9020)
+    Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $preEnter
     $trace.Add($preEnter)
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
         -Session $Session -Action 'enter'

@@ -269,6 +269,26 @@ try {
         -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
         throw 'Bound native language target stage was rejected.'
     }
+    if ((Get-ProductionLanguageHighlightedIndex -Stage $menuStage) -ne 2) {
+        throw 'Bound native language highlight was not decoded.'
+    }
+    $menuStage.highlighted_indices = @()
+    if ((Get-ProductionLanguageHighlightedIndex -Stage $menuStage -AllowNone) -ne -1) {
+        throw 'Empty native language highlight was not identified before first Down.'
+    }
+    Assert-Fails { Get-ProductionLanguageHighlightedIndex -Stage $menuStage } 'no unique enabled'
+    $menuStage.highlighted_indices = @(2)
+    Assert-ProductionLanguagePopupContinuity -Open $menuStage -Stage $menuStage
+    $changedPopup = [ordered]@{
+        language_handle = [long]200
+        popups = @(
+            [ordered]@{ hwnd = [long]301 },
+            [ordered]@{ hwnd = [long]999 }
+        )
+    }
+    Assert-Fails {
+        Assert-ProductionLanguagePopupContinuity -Open $menuStage -Stage $changedPopup
+    } 'popup handles changed'
     $menuStage.states[1] = 0x80
     $menuStage.highlighted_indices = @(1, 2)
     if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
@@ -380,20 +400,26 @@ try {
         throw "Native SendInput layout is wrong: $($actualInputLayout -join ',')."
     }
     foreach ($key in @(
-        @{ virtual_key = 0x23; extended = $true },
-        @{ virtual_key = 0x27; extended = $true },
-        @{ virtual_key = 0x24; extended = $true },
-        @{ virtual_key = 0x28; extended = $true },
-        @{ virtual_key = 0x56; extended = $false },
-        @{ virtual_key = 0x0D; extended = $false }
+        @{ action = 'language-mnemonic'; virtual_key = 0x4C; extended = $false },
+        @{ action = 'down'; virtual_key = 0x28; extended = $true },
+        @{ action = 'enter'; virtual_key = 0x0D; extended = $false }
     )) {
+        $dispatch = Get-ProductionLanguageKeyPacket -Action $key.action
+        if ($dispatch.virtual_key -ne $key.virtual_key -or
+            $dispatch.extended -ne $key.extended) {
+            throw "Native language action dispatch differs for $($key.action)."
+        }
         $actualPackets = @([DarkReNamerLanguageMenuReader]::InspectTapPackets(
-            [uint16]$key.virtual_key, [bool]$key.extended))
+            [uint16]$dispatch.virtual_key, [bool]$dispatch.extended))
         $expectedPackets = @(1, $key.virtual_key, [int]$key.extended, 1,
             $key.virtual_key, $(if ($key.extended) { 3 } else { 2 }))
         if (($actualPackets -join ',') -cne ($expectedPackets -join ',')) {
             throw "Native language key packet flags differ for virtual key $($key.virtual_key)."
         }
+    }
+    $altVPackets = @([DarkReNamerLanguageMenuReader]::InspectTapPackets([uint16]0x56, $false))
+    if (($altVPackets -join ',') -cne '1,86,0,1,86,2') {
+        throw 'Native Alt+V mnemonic lost its ordinary V key packet.'
     }
     Initialize-ProductionLanguageMenuReader
     $valid = New-Fixture -Name 'valid'
