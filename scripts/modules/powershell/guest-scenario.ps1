@@ -1280,12 +1280,22 @@ public static class DarkReNamerLanguageMenuReader {
         public uint[] Commands, States, TopStates, ViewStates;
     }
 
-    private static void SendKey(ushort virtualKey, uint flags) {
-        AssertInputLayout();
-        Input input = new Input { Type = 1, Value = new InputUnion {
+    private static Input KeyboardPacket(ushort virtualKey, uint flags) {
+        return new Input { Type = 1, Value = new InputUnion {
             Keyboard = new KeyInput { VirtualKey = virtualKey, ScanCode = 0,
                 Flags = flags, Time = 0, ExtraInfo = UIntPtr.Zero }
         } };
+    }
+    public static uint[] InspectTapPackets(ushort virtualKey, bool extended) {
+        Input down = KeyboardPacket(virtualKey, extended ? 1u : 0u);
+        Input up = KeyboardPacket(virtualKey, extended ? 3u : 2u);
+        return new uint[] { down.Type, down.Value.Keyboard.VirtualKey,
+            down.Value.Keyboard.Flags, up.Type, up.Value.Keyboard.VirtualKey,
+            up.Value.Keyboard.Flags };
+    }
+    private static void SendKey(ushort virtualKey, uint flags) {
+        AssertInputLayout();
+        Input input = KeyboardPacket(virtualKey, flags);
         if (SendInput(1, new [] { input }, Marshal.SizeOf(typeof(Input))) != 1)
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
@@ -1294,6 +1304,10 @@ public static class DarkReNamerLanguageMenuReader {
     public static void Tap(ushort virtualKey) {
         try { KeyDown(virtualKey); }
         finally { KeyUp(virtualKey); }
+    }
+    public static void TapExtended(ushort virtualKey) {
+        try { SendKey(virtualKey, 1); }
+        finally { SendKey(virtualKey, 3); }
     }
 
     private static IntPtr Child(IntPtr parent, int position) {
@@ -1551,7 +1565,12 @@ function Send-ProductionLanguageNativeInput {
         'down'  { 0x28 }
         'enter' { 0x0D }
     }
-    [DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)
+    if ($Action -ceq 'enter') {
+        [DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)
+    }
+    else {
+        [DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)
+    }
 }
 
 function Get-ProductionLanguageMenuStage {
