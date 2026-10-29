@@ -1527,11 +1527,15 @@ mod tests {
         let runtime = initialize_safe_runtime_at(directory.path())?;
         let columns_path = path_for_journal_root(runtime.root.path());
         let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+        let language_path = crate::preferences::language_path_for_journal_root(runtime.root.path());
         drop(runtime);
         std::fs::write(&columns_path, b"invalid columns")?;
         std::fs::write(&appearance_path, b"invalid appearance")?;
+        std::fs::write(&language_path, b"invalid language")?;
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         start_preferences_writers(null_mut(), &mut state);
+        state.start_language_writer(null_mut());
+        state.select_language_preference(crate::i18n::LanguagePreference::English);
         state.persist_column_preferences();
         state.persist_appearance_preferences();
         state
@@ -1540,6 +1544,7 @@ mod tests {
         assert!(state.preference_persistence.is_joined());
         assert_eq!(std::fs::read(columns_path)?, b"invalid columns");
         assert_eq!(std::fs::read(appearance_path)?, b"invalid appearance");
+        assert_eq!(std::fs::read(language_path)?, b"invalid language");
         Ok(())
     }
 

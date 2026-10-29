@@ -155,10 +155,11 @@ impl PreferencePersistence {
             closing,
         ));
         if let Some(writer) = &self.language {
+            let events = writer.drain_events();
             if let Some(preference) = writer.take_saved() {
                 self.language_saved = Some(preference);
             }
-            for event in writer.drain_events() {
+            for event in events {
                 match event {
                     PreferenceWriteEvent::Saved { generation }
                         if !closing

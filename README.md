@@ -8,9 +8,10 @@ of [DarkNamer](https://github.com/nanpuhaha/DarkNamer). It targets DarkNamer
 and interface. It is not an official release by `darkwalker`, Seo Jang-won, or
 the upstream repository maintainer.
 
-The application has a native Korean-language Windows interface. This README is
-also available in Korean and Japanese; those translations do not indicate
-additional interface languages.
+The native Windows interface embeds Korean, English, and Japanese in one
+executable. Choose **View > Language · next startup** to select a language.
+For the languages included in a downloaded release, check its release notes;
+see [language selection](docs/USER-GUIDE.md#language) for startup and settings behavior.
 
 ## Download
 

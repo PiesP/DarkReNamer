@@ -12,7 +12,7 @@ crate::i18n::catalog! {
         MenuTargetFolder = ("대상 폴더(&D)", "&Destination folder", "移動先フォルダー(&D)");
         MenuTheme = ("테마(&T)", "&Theme", "テーマ(&T)");
         MenuLanguage = ("언어(&L) · 다음 실행부터", "&Language · next startup", "言語(&L) · 次回起動から");
-        MenuText = ("텍스트(&T)", "&Text", "テキスト(&T)");
+        MenuTextTransforms = ("텍스트(&T)", "&Text", "テキスト(&T)");
         MenuRemoval = ("삭제·추출(&R)", "&Remove and extract", "削除・抽出(&R)");
         MenuNumber = ("번호(&N)", "&Number", "連番(&N)");
         MenuExtension = ("확장자(&E)", "&Extension", "拡張子(&E)");
@@ -147,7 +147,7 @@ crate::i18n::catalog! {
         DragDropItemLimit = ("선택 항목이 남은 개수 한도를 초과해 제한된 수만 처리합니다.", "The selection exceeds the remaining item count; only a bounded number will be processed.", "選択項目が残り件数の上限を超えたため、制限内の件数のみ処理します。");
         DragDropPathLimit = ("선택 경로가 UTF-16 경로 용량 안전 한도를 초과해 이미 확인한 항목만 처리합니다.", "Selected paths exceed the safe UTF-16 path capacity; only already checked items will be processed.", "選択したパスが UTF-16 パス容量の安全上限を超えたため、確認済みの項目のみ処理します。");
 
-        TextIoFileTooLarge = ("가져오기 파일이 2 MiB 한도를 초과합니다", "The import file exceeds the 2 MiB limit", "読み込みファイルが 2 MiB の上限を超えています");
+        ImportFileTooLarge = ("가져오기 파일이 2 MiB 한도를 초과합니다", "The import file exceeds the 2 MiB limit", "読み込みファイルが 2 MiB の上限を超えています");
     }
     messages {
         prompt_manual_current(current: &dyn std::fmt::Display) = ("{current} 를", "Rename {current} to", "{current} を次の名前に変更");

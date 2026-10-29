@@ -67,6 +67,45 @@ unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
 writers.
 
+### Embedded UI language maintenance
+
+`crates/darknamer-app/src/i18n.rs` owns the supported languages, immutable startup
+selection and typed `catalog!` representation. The four catalog owners under
+`src/i18n/` cover command metadata, shared presentation, native controls and
+runtime/recovery messages. Translations are compiled into the single EXE; there
+are no language downloads or runtime text parsers. Typed Rust catalogs keep the
+small fixed language set and format arguments checked without a serialization
+library or external language-pack lifecycle.
+
+Add complete Korean/English/Japanese messages in that order. Use typed static
+keys for labels and a named function for complete formatted messages. Each
+format is compiled with the same named arguments, so missing/extra parameters
+are build errors. Keep counts grammatically valid for zero, one and multiple
+items; use a count label or an explicit grammatical branch where needed.
+Translate safety intent, including all-list Apply scope, no replacement,
+proposal-only reset and retained recovery locks. Never translate path inputs,
+rewrite UTF-16 values or substitute rendered diagnostics into filesystem calls.
+Keep diagnostic kinds, native codes and technical/OS-owned exceptions defined
+in the [user guide](docs/USER-GUIDE.md#language).
+
+Native rendering uses `CommandUiSpec.localized_*` and
+`ColumnSpec.localized_label()`; the immutable Korean compatibility label fields
+are not active UI text. Startup resolves the language before app-owned fatal or
+recovery guidance. `windows/language.rs` uses the Windows UI-language API without
+changing regional locales. The independent versioned preference record reuses
+safe persistence; a successful initial read, uncertain legacy migration, pending
+write and acknowledged durable choice are distinct states. Menu selection tracks
+acknowledged writes, while running text stays in the startup language.
+
+Run focused i18n, confirmation, preview and preference tests before the full
+gate. Test overrides are thread-local and restore the caller, so concurrent
+language tests cannot change one another. Native/VM validation must exercise
+actual translated prompts, full accessible names, settings/restart and file
+outcomes; catalog or geometry tests alone do not establish visible layout or
+Windows execution. Keep tested/landed source, EXE identity, footprint comparison
+conditions, inspected captures and remaining release-only scope in the external
+completion record.
+
 ### Foreground worker ownership
 
 `AppState` owns four optional foreground workers: admission, import, planning,

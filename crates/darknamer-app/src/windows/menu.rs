@@ -1670,7 +1670,7 @@ fn owner_menu_label_for_tag(data: usize) -> Option<String> {
         MENU_POPUP_TARGET_FOLDER => Some(Text::MenuTargetFolder.get()),
         MENU_POPUP_THEME => Some(Text::MenuTheme.get()),
         MENU_POPUP_LANGUAGE => Some(Text::MenuLanguage.get()),
-        MENU_POPUP_TEXT => Some(Text::MenuText.get()),
+        MENU_POPUP_TEXT => Some(Text::MenuTextTransforms.get()),
         MENU_POPUP_REMOVAL => Some(Text::MenuRemoval.get()),
         MENU_POPUP_NUMBER => Some(Text::MenuNumber.get()),
         MENU_POPUP_EXTENSION => Some(Text::MenuExtension.get()),
@@ -2005,7 +2005,7 @@ fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut transform = MenuBuilder::popup(menu.owner_draw)?;
     for (section, data, label) in [
-        (0, MENU_POPUP_TEXT, Text::MenuText.get()),
+        (0, MENU_POPUP_TEXT, Text::MenuTextTransforms.get()),
         (1, MENU_POPUP_REMOVAL, Text::MenuRemoval.get()),
         (2, MENU_POPUP_NUMBER, Text::MenuNumber.get()),
         (3, MENU_POPUP_EXTENSION, Text::MenuExtension.get()),

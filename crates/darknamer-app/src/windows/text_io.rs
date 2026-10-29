@@ -146,7 +146,7 @@ fn read_legacy_text_from_cancellable<R: Read>(
     if length > MAX_IMPORT_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            crate::i18n::native_ui::Text::TextIoFileTooLarge.get(),
+            crate::i18n::native_ui::Text::ImportFileTooLarge.get(),
         ));
     }
     check_import_cancellation(cancellation)?;

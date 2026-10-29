@@ -2051,17 +2051,26 @@ mod tests {
     fn preference_read_failure_preserves_original_on_production_close()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::preferences::{
-            appearance_path_for_journal_root, path_for_journal_root, save, save_appearance,
+            appearance_path_for_journal_root, language_path_for_journal_root,
+            path_for_journal_root, save, save_appearance, save_language,
         };
         use std::os::windows::fs::OpenOptionsExt;
         use std::time::{Duration, Instant};
         use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
 
-        for (fail_columns, edit) in [(true, false), (false, false), (true, true), (false, true)] {
+        for (failed_preference, edit) in [
+            (0, false),
+            (1, false),
+            (2, false),
+            (0, true),
+            (1, true),
+            (2, true),
+        ] {
             let dir = tempfile::tempdir()?;
             let runtime = initialize_safe_runtime_at(dir.path())?;
             let columns_path = path_for_journal_root(runtime.root.path());
             let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+            let language_path = language_path_for_journal_root(runtime.root.path());
             drop(runtime);
             let mut columns = crate::default_column_states();
             columns[0].record_user_resize(320, BASE_DPI);
@@ -2071,20 +2080,21 @@ mod tests {
             };
             save(&columns_path, &columns)?;
             save_appearance(&appearance_path, appearance)?;
-            let path = if fail_columns {
-                &columns_path
-            } else {
-                &appearance_path
+            save_language(&language_path, crate::i18n::LanguagePreference::Japanese)?;
+            let path = match failed_preference {
+                0 => &columns_path,
+                1 => &appearance_path,
+                _ => &language_path,
             };
             let original = fs::read(path)?;
             let obstruction = fs::OpenOptions::new().read(true).share_mode(0).open(path)?;
             with_production_test_window(dir.path(), false, false, |window| {
                 let state =
                     try_app_state(window).ok_or_else(|| io::Error::other("missing state"))?;
-                if fail_columns {
-                    assert_eq!(state.state().column_states, crate::default_column_states());
-                } else {
-                    assert_eq!(state.state().appearance, UiAppearance::default());
+                match failed_preference {
+                    0 => assert_eq!(state.state().column_states, crate::default_column_states()),
+                    1 => assert_eq!(state.state().appearance, UiAppearance::default()),
+                    _ => assert!(!state.state().language_preferences_authorized),
                 }
                 drop(state);
                 drop(obstruction);
@@ -2096,13 +2106,23 @@ mod tests {
                     state.appearance.theme = AppThemeMode::Dark;
                     state.persist_column_preferences();
                     state.persist_appearance_preferences();
+                    let revision = state.model_revision;
+                    let locks = (state.mutation_locked, state.recovery_locked);
+                    state.select_language_preference(crate::i18n::LanguagePreference::English);
+                    assert_eq!(state.model_revision, revision);
+                    assert_eq!((state.mutation_locked, state.recovery_locked), locks);
                     // Resetting the failed preference is an in-memory edit, not write authority.
-                    if fail_columns {
-                        state.column_states = crate::default_column_states();
-                        state.persist_column_preferences();
-                    } else {
-                        state.appearance = UiAppearance::default();
-                        state.persist_appearance_preferences();
+                    match failed_preference {
+                        0 => {
+                            state.column_states = crate::default_column_states();
+                            state.persist_column_preferences();
+                        }
+                        1 => {
+                            state.appearance = UiAppearance::default();
+                            state.persist_appearance_preferences();
+                        }
+                        _ => state
+                            .select_language_preference(crate::i18n::LanguagePreference::System),
                     }
                 }
                 // SAFETY: the live test window receives the ordinary production close message.
@@ -2133,10 +2153,10 @@ mod tests {
             let after = fs::read(path)?;
             println!(
                 "failed file: {}; before: {:02x?}; after: {:02x?}",
-                if fail_columns {
-                    "columns"
-                } else {
-                    "appearance"
+                match failed_preference {
+                    0 => "columns",
+                    1 => "appearance",
+                    _ => "language",
                 },
                 original,
                 after
@@ -2144,12 +2164,23 @@ mod tests {
             assert_eq!(after, original, "unread preferences must survive close");
             if edit {
                 let reopened = AppState::new(initialize_safe_runtime_at(dir.path())?);
-                if fail_columns {
+                if failed_preference == 0 {
                     assert_eq!(reopened.appearance.theme, AppThemeMode::Dark);
                 } else {
                     let mut expected = crate::default_column_states();
                     expected[0].record_user_resize(210, BASE_DPI);
                     assert_eq!(reopened.column_states, expected);
+                }
+                assert_eq!(
+                    reopened.language_preference,
+                    if failed_preference == 2 {
+                        crate::i18n::LanguagePreference::Japanese
+                    } else {
+                        crate::i18n::LanguagePreference::English
+                    }
+                );
+                if failed_preference == 2 {
+                    assert_eq!(reopened.appearance.theme, AppThemeMode::Dark);
                 }
             }
         }

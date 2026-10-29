@@ -435,6 +435,7 @@ fn drain_preferences_events(state: &mut AppState) {
     }
     if let Some(preference) = state.preference_persistence.take_saved_language() {
         state.language_preference = preference;
+        update_controls(state);
     }
 }
 
