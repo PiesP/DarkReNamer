@@ -2540,6 +2540,62 @@ $auditedInputSites = @{
 }
 $observedInputSites = @{}
 if ($sendKeys.Count -ne 10) { throw 'Recovery input sites changed without an ownership audit.' }
+function Test-ProductionLanguageReadbackCallChain {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast] $SourceAst)
+    $choice = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionLanguageMenuChoice'
+    }, $true))
+    $observer = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-ProductionLanguageChoiceObservation'
+    }, $true))
+    $reader = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Read-ProductionLanguagePreference'
+    }, $true))
+    if ($choice.Count -ne 1 -or $observer.Count -ne 1 -or $reader.Count -ne 1) { return $false }
+    $choiceCalls = @($choice[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Get-ProductionLanguageChoiceObservation'
+    }, $true))
+    $observerCalls = @($observer[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Read-ProductionLanguagePreference'
+    }, $true))
+    if ($choiceCalls.Count -ne 1 -or $observerCalls.Count -ne 1 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-MainWindow $MainWindow', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Status $status', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Session $Session', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-CurrentLanguage $CurrentLanguage', [StringComparison]::Ordinal) -lt 0 -or
+        $observerCalls[0].Extent.Text.IndexOf('-LocalAppData $env:LOCALAPPDATA', [StringComparison]::Ordinal) -lt 0 -or
+        $choice[0].Extent.Text.IndexOf('$saved = $observation.preference', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('[IO.FileStream]::new', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('[IO.FileShare]::Delete', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('SHA256]::HashData($bytes)', [StringComparison]::Ordinal) -lt 0) {
+        return $false
+    }
+    $true
+}
+if (-not (Test-ProductionLanguageReadbackCallChain -SourceAst $fromFile)) {
+    throw 'Language menu keyboard selection lost its bound observer and durable readback chain.'
+}
+$detachedSource = $recoveryModuleSource.Replace(
+    'Get-ProductionLanguageChoiceObservation -Process $Process `',
+    'Get-ProductionLanguageChoiceObservationDetached -Process $Process `'
+)
+if ($detachedSource -ceq $recoveryModuleSource) {
+    throw 'Language readback negative fixture no longer matches the observed command call.'
+}
+$detachedTokens = $null
+$detachedErrors = $null
+$detachedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $detachedSource, [ref]$detachedTokens, [ref]$detachedErrors)
+if ($detachedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageReadbackCallChain -SourceAst $detachedAst)) {
+    throw 'Detached language save observation unexpectedly passed the readback-chain audit.'
+}
 foreach ($inputCall in $sendKeys) {
     $owner = $inputCall.Parent
     while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
@@ -2570,7 +2626,7 @@ foreach ($inputCall in $sendKeys) {
         foreach ($fragment in @(
             'Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow',
             '[DarkReNamerVmNative]::GetForegroundWindow() -ne $handle',
-            'Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA'
+            'Get-ProductionLanguageChoiceObservation -Process $Process'
         )) {
             if ($owner.Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
                 throw "Language menu keyboard input lost its bound owner or durable readback: $fragment"
