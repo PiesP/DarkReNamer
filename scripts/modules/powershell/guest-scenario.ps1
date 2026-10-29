@@ -2163,6 +2163,8 @@ function Invoke-ProductionBlockedRecoveryCheck {
         $passed = $true
         [ordered]@{
             language = $Language; pid = [int]$process.Id; session_id = [int]$Session
+            process_start_time_utc_ticks = [string]$owned.process_start_time_utc_ticks
+            process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $owned
             hwnd = [long]$handle; title = $labels.recovery
             notice_hwnd = [long]$noticeHandle
             lock_guidance = $labels.recovery_locked
@@ -2289,6 +2291,18 @@ function Get-ProductionCrashChildEnvironmentSnapshot {
     $saved
 }
 
+function Get-ProductionOwnedProcessLifecycle {
+    param([Parameter(Mandatory)][object] $Owned)
+    $processId = $Owned.process.Id
+    $ticks = $Owned.process_start_time_utc_ticks
+    if ($processId -isnot [int] -or $processId -le 0 -or
+        $ticks -isnot [string] -or $ticks -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        [decimal]$ticks -gt [datetime]::MaxValue.Ticks) {
+        throw 'Production process lifecycle lacks its owned PID or start time.'
+    }
+    [ordered]@{ pid = $processId; start_time_utc_ticks = $ticks }
+}
+
 function Clear-ProductionCrashChildOptionalFlags {
     foreach ($name in @(
         'DARKRENAMER_TEST_FORCE_ROLLBACK', 'DARKRENAMER_TEST_FAILURE_ROLLBACK',
@@ -2398,6 +2412,7 @@ function Invoke-ProductionValidActiveRecoveryCheck {
             test_file = $TestBinary.file; test_sha256 = $TestBinary.sha256
             arguments = $arguments; graph = 'swap'; crash_point = 'forward-completed-0'
             exit_code = 86; pid = $childPid; process_start_time_utc_ticks = $childStart
+            process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $child
             exit_semantics = 'expected-abrupt-crash-point'; single_process_job = $true
             job_clean = $true; job_had_survivors = $false; job_forced_termination = $false
         }
@@ -2524,6 +2539,7 @@ function Invoke-ProductionValidActiveRecoveryCheck {
                     language = $step.language; startup_preference = $saved
                     pid = [int]$process.Id; session_id = [int]$Session
                     process_start_time_utc_ticks = [string]$owned.process_start_time_utc_ticks
+                    process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $owned
                     main_hwnd = [long]$mainHandle; notice_hwnd = [long]$noticeHandle
                     title = $labels.recovery_confirm; question = $labels.recovery_question
                     cancel_guidance = $labels.recovery_detail
@@ -2717,7 +2733,8 @@ function Invoke-ProductionLanguageCycle {
             $observations.Add([ordered]@{
                 language = $step.language; pid = [int]$process.Id; hwnd = [long]$handle
                 session_id = [int]$Session
-                process_start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+                process_start_time_utc_ticks = [string]$owned.process_start_time_utc_ticks
+                process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $owned
                 startup_preference = $saved
                 startup_menu = $menu; startup_rail = $rail; choice = $choice
                 startup_capture = $startupCapture

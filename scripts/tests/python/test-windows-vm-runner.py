@@ -128,6 +128,18 @@ class VmRunnerTests(unittest.TestCase):
         gui['dialog_picker_checks'] = self.picker_checks()
         gui['language_checks'] = self.language_checks(flow)
         self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True, 'raw_cleanup': clean_controller_cleanup()})
+        checks = gui['language_checks']
+        records = (checks['selections'] +
+                   [row['blocked_recovery'] for row in checks['selections'][:3]] +
+                   [checks['valid_active_recovery']['child']] +
+                   checks['valid_active_recovery']['observations'])
+        self.result['process_job_cleanup'] = [
+            {'pid': row['pid'], 'process_start_time_utc_ticks': row['process_start_time_utc_ticks'],
+             'status': 'clean', 'job_empty': True, 'job_closed': True,
+             'capture_complete': True, 'had_survivors': False,
+             'forced_termination': False, 'active_processes_at_close': 0}
+            for row in records
+        ]
 
     def language_checks(self, baseline_flow):
         locales = (
@@ -208,7 +220,11 @@ class VmRunnerTests(unittest.TestCase):
                     'en': ('DarkReNamer - Recovery status', 'Apply is locked.'),
                     'ja': ('DarkReNamer - 復旧状態', '適用をロックしました。'),
                 }[language]
+                blocked_ticks = str(638974000000000010 + index)
                 blocked = {'language': language, 'pid': 300 + index, 'hwnd': 700 + index,
+                           'process_start_time_utc_ticks': blocked_ticks,
+                           'process_lifecycle': {'pid': 300 + index,
+                                                 'start_time_utc_ticks': blocked_ticks},
                            'session_id': 2, 'title': title, 'lock_guidance': guidance,
                            'ok_control': {'selection_contract': 'sole-native-messagebox-button',
                                           'native_button_count': 1,
@@ -228,6 +244,7 @@ class VmRunnerTests(unittest.TestCase):
                                900 + index, 2, '#32770')}
             selections.append({'language': language, 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
                                'process_start_time_utc_ticks': process_start,
+                               'process_lifecycle': {'pid': pid, 'start_time_utc_ticks': process_start},
                                'startup_preference': preference, 'startup_menu': menu,
                                'startup_rail': rail, 'choice': choice,
                                'startup_capture': (self.language_capture(language + '-language-main.png')
@@ -239,6 +256,7 @@ class VmRunnerTests(unittest.TestCase):
                                'blocked_recovery': blocked})
         selections.append({'language': 'ko', 'pid': 204, 'hwnd': 604, 'session_id': 2,
                            'process_start_time_utc_ticks': '638974000000000004',
+                           'process_lifecycle': {'pid': 204, 'start_time_utc_ticks': '638974000000000004'},
                            'startup_preference': copy.deepcopy(selections[-1]['choice']['preference']),
                            'startup_menu': {'parent': '언어(&L) · 다음 실행부터',
                                             'options': ['시스템 언어', '한국어', 'English', '日本語'],
@@ -351,6 +369,8 @@ class VmRunnerTests(unittest.TestCase):
                                        'sha256': format(preference + 1, '064x')},
                 'pid': pid, 'session_id': 2,
                 'process_start_time_utc_ticks': str(638975000000000000 + index),
+                'process_lifecycle': {'pid': pid,
+                                      'start_time_utc_ticks': str(638975000000000000 + index)},
                 'main_hwnd': main_hwnd, 'notice_hwnd': notice_hwnd,
                 'title': title, 'question': question, 'cancel_guidance': guidance,
                 'cancel_default_focused': True, 'apply_locked_after_cancel': True,
@@ -373,6 +393,8 @@ class VmRunnerTests(unittest.TestCase):
                           'graph': 'swap', 'crash_point': 'forward-completed-0',
                           'exit_code': 86, 'pid': 399,
                           'process_start_time_utc_ticks': '638975000000000099',
+                          'process_lifecycle': {'pid': 399,
+                                                'start_time_utc_ticks': '638975000000000099'},
                           'exit_semantics': 'expected-abrupt-crash-point',
                           'single_process_job': True, 'job_clean': True,
                           'job_had_survivors': False, 'job_forced_termination': False},
@@ -444,7 +466,8 @@ class VmRunnerTests(unittest.TestCase):
     def test_language_acceptance_requires_bound_menu_persistence_and_file_outcomes(self):
         checks = self.result['gui']['language_checks']
         self.assertTrue(vm.verify_language_checks(self.root, self.manifest, checks,
-                                                  self.result['gui']['flow']))
+                                                  self.result['gui']['flow'],
+                                                  self.result['process_job_cleanup']))
         mutations = (
             lambda row: row['selections'][1]['startup_menu'].update(parent='언어(&L) · 다음 실행부터'),
             lambda row: row['selections'][2]['choice'].update(model_rows_after=2),
@@ -543,7 +566,8 @@ class VmRunnerTests(unittest.TestCase):
                 mutate(damaged)
                 with self.assertRaises(ValueError):
                     vm.verify_language_checks(self.root, self.manifest, damaged,
-                                              self.result['gui']['flow'])
+                                              self.result['gui']['flow'],
+                                              self.result['process_job_cleanup'])
         self.result['gui'].pop('language_checks')
         with self.assertRaisesRegex(ValueError, 'language acceptance'):
             self.verify()
@@ -551,7 +575,8 @@ class VmRunnerTests(unittest.TestCase):
     def test_language_flow_reused_startup_requires_exact_runtime_lock(self):
         checks = self.result['gui']['language_checks']
         self.assertTrue(vm.verify_language_checks(self.root, self.manifest, checks,
-                                                  self.result['gui']['flow']))
+                                                  self.result['gui']['flow'],
+                                                  self.result['process_job_cleanup']))
         mutations = (
             lambda flow: flow.pop('prelaunch_checkpoints'),
             lambda flow: flow['prelaunch_checkpoints'][0].update(journal_entries=[]),
@@ -573,7 +598,43 @@ class VmRunnerTests(unittest.TestCase):
                     mutate(flow)
                     with self.assertRaises(ValueError):
                         vm.verify_language_checks(self.root, self.manifest, damaged,
-                                                  self.result['gui']['flow'])
+                                                  self.result['gui']['flow'],
+                                                  self.result['process_job_cleanup'])
+
+    def test_language_process_lifecycles_match_clean_job_ledger(self):
+        checks = self.result['gui']['language_checks']
+        jobs = self.result['process_job_cleanup']
+        vm.verify_language_process_jobs(checks, jobs)
+        record_mutations = (
+            lambda row: row['selections'][1].pop('process_lifecycle'),
+            lambda row: row['selections'][1]['process_lifecycle'].update(pid=999),
+            lambda row: row['selections'][1]['blocked_recovery']['process_lifecycle'].update(
+                start_time_utc_ticks='638974000000000099'),
+            lambda row: row['valid_active_recovery']['child']['process_lifecycle'].update(pid=999),
+            lambda row: row['valid_active_recovery']['observations'][0].update(
+                process_start_time_utc_ticks='638975000000000099'),
+            lambda row: row['selections'][2]['process_lifecycle'].update(
+                **row['selections'][1]['process_lifecycle']),
+        )
+        for mutate in record_mutations:
+            with self.subTest(record=mutate.__code__.co_firstlineno):
+                damaged = copy.deepcopy(checks)
+                mutate(damaged)
+                with self.assertRaises(ValueError):
+                    vm.verify_language_process_jobs(damaged, jobs)
+        job_mutations = (
+            lambda rows: rows.pop(),
+            lambda rows: rows[0].update(process_start_time_utc_ticks='638974000000000099'),
+            lambda rows: rows.append(copy.deepcopy(rows[0])),
+            lambda rows: rows[0].update(forced_termination=True),
+            lambda rows: rows[0].update(job_closed=False),
+        )
+        for mutate in job_mutations:
+            with self.subTest(job=mutate.__code__.co_firstlineno):
+                damaged = copy.deepcopy(jobs)
+                mutate(damaged)
+                with self.assertRaises(ValueError):
+                    vm.verify_language_process_jobs(checks, damaged)
 
     def test_language_capture_rejects_invalid_png_structure_and_digest(self):
         checks = self.result['gui']['language_checks']
@@ -587,7 +648,8 @@ class VmRunnerTests(unittest.TestCase):
                 record['bytes'] = len(damaged)
                 with self.assertRaisesRegex(ValueError, 'PNG structure'):
                     vm.verify_language_checks(self.root, self.manifest, checks,
-                                              self.result['gui']['flow'])
+                                              self.result['gui']['flow'],
+                                              self.result['process_job_cleanup'])
         path.write_bytes(original)
         record['sha256'] = hashlib.sha256(original).hexdigest()
         record['bytes'] = len(original)

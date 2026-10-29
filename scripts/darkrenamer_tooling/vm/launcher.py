@@ -1659,7 +1659,52 @@ def verify_language_menu_input_trace(choice, target):
         raise ValueError('Language menu saved preference lacks matching post-Enter readback.')
 
 
-def verify_language_checks(root, manifest, checks, baseline_flow):
+def verify_language_process_jobs(checks, process_jobs):
+    selections = checks['selections']
+    active = checks['valid_active_recovery']
+    records = (selections +
+               [row['blocked_recovery'] for row in selections[:3]] +
+               [active['child']] + active['observations'])
+    if len(records) != 12 or not isinstance(process_jobs, list) or not 12 <= len(process_jobs) <= 64:
+        raise ValueError('Language process lifecycle or Job inventory is incomplete.')
+    identities = set()
+    for record in records:
+        lifecycle = record.get('process_lifecycle') if isinstance(record, dict) else None
+        if (not isinstance(lifecycle, dict) or
+                set(lifecycle) != {'pid', 'start_time_utc_ticks'} or
+                type(lifecycle['pid']) is not int or lifecycle['pid'] <= 0 or
+                not isinstance(lifecycle['start_time_utc_ticks'], str) or
+                not re.fullmatch(r'[1-9][0-9]{14,18}', lifecycle['start_time_utc_ticks']) or
+                lifecycle['pid'] != record.get('pid') or
+                lifecycle['start_time_utc_ticks'] != record.get('process_start_time_utc_ticks')):
+            raise ValueError('Language process lifecycle differs from its recorded owner.')
+        identity = (lifecycle['pid'], lifecycle['start_time_utc_ticks'])
+        if identity in identities:
+            raise ValueError('Language process lifecycle is duplicated across roles.')
+        identities.add(identity)
+    jobs = {}
+    for row in process_jobs:
+        if (not isinstance(row, dict) or type(row.get('pid')) is not int or row['pid'] <= 0 or
+                not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,18}', row['process_start_time_utc_ticks'])):
+            raise ValueError('Language Job ledger has an invalid process identity.')
+        identity = (row['pid'], row['process_start_time_utc_ticks'])
+        if identity in jobs:
+            raise ValueError('Language Job ledger repeats a process identity.')
+        jobs[identity] = row
+    for identity in identities:
+        job = jobs.get(identity)
+        if (not isinstance(job, dict) or job.get('status') != 'clean' or
+                job.get('job_empty') is not True or job.get('job_closed') is not True or
+                job.get('capture_complete') is not True or
+                job.get('had_survivors') is not False or
+                job.get('forced_termination') is not False or
+                type(job.get('active_processes_at_close')) is not int or
+                job['active_processes_at_close'] != 0):
+            raise ValueError('Language process is not bound to a clean, closed Job.')
+
+
+def verify_language_checks(root, manifest, checks, baseline_flow, process_jobs):
     if (not isinstance(checks, dict) or checks.get('schema_version') != 1 or
             checks.get('status') != 'passed' or
             checks.get('scope') != 'source-built-three-language-native-menu' or
@@ -1868,6 +1913,7 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                                                   checks.get('valid_active_recovery'))
     if capture_bytes > 48 * 1024 * 1024:
         raise ValueError('Language capture inventory exceeds its total byte bound.')
+    verify_language_process_jobs(checks, process_jobs)
     return True
 
 
@@ -1990,7 +2036,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
             passed = False
         if not candidate:
             verify_picker_checks(gui.get('dialog_picker_checks'), gui)
-            verify_language_checks(root, manifest, gui.get('language_checks'), gui['flow'])
+            verify_language_checks(root, manifest, gui.get('language_checks'), gui['flow'],
+                                   result.get('process_job_cleanup'))
         if candidate:
             if type(gui.get('exit_code')) is not int or gui['exit_code'] != 0:
                 raise ValueError('VM candidate GUI process exit code is invalid.')
