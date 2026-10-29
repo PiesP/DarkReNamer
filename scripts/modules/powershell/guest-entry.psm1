@@ -176,6 +176,7 @@ elseif ($refreshProfile) {
     if ($verified.manifest.schema_version -ne 1 -or
         $verified.manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
         $verified.manifest.diagnostic.test_profile -cne 'release' -or
+        $verified.manifest.diagnostic.record_schema_version -ne 4 -or
         $verified.tests.Count -ne 1 -or $TestTimeoutSeconds -ne 600 -or
         $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
         throw 'The guest refresh diagnostic selection is invalid.'
@@ -317,6 +318,7 @@ elseif ($refreshProfile) {
         order = $RefreshProfileOrder
         test_name = 'windows::list_view::native_tests::profile_refresh_stages'
         test_profile = 'release'
+        record_schema_version = $verified.manifest.diagnostic.record_schema_version
     }
 }
 elseif ($focusedTests) {

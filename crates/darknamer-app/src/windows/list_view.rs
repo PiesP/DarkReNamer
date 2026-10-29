@@ -2691,7 +2691,7 @@ mod refresh_profile {
             assert_eq!(counters.maximum_shell_ns, 0);
             assert_eq!(counters.ui_shell_calls, 0);
             println!(
-                "{{\"kind\":\"refresh-stages-icon-async-streaming-test-build\",\"schema_version\":3,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"normal_staged_rows_peak\":{},\"normal_logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{},\"rendered_vec_growth_events\":{},\"rendered_vec_capacity_bytes_peak\":{},\"repeated_nonzero_filetime_inputs\":{}}}",
+                "{{\"kind\":\"refresh-stages-distinct-filetimes-test-build\",\"schema_version\":4,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"normal_staged_rows_peak\":{},\"normal_logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{},\"rendered_vec_growth_events\":{},\"rendered_vec_capacity_bytes_peak\":{},\"repeated_nonzero_filetime_inputs\":{}}}",
                 counters.maximum_shell_ns,
                 counters.issue_count_input_rows_visited,
                 counters.native_rows_visited,
@@ -4804,6 +4804,26 @@ mod native_tests {
             .collect()
     }
 
+    fn refresh_fixture_rows_with_distinct_dates(parent: &str) -> Vec<LegacyListItem> {
+        const MINUTE_IN_FILETIME_TICKS: u64 = 600_000_000;
+        refresh_fixture_rows(parent, "ordinary", 0, 10_000)
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let created =
+                    133_497_936_000_000_000 + (index as u64 * 2) * MINUTE_IN_FILETIME_TICKS;
+                LegacyListItem::new_with_actual_size(
+                    item.source_path().clone(),
+                    false,
+                    24,
+                    24,
+                    created,
+                    created + MINUTE_IN_FILETIME_TICKS,
+                )
+            })
+            .collect()
+    }
+
     fn assert_native_refresh_values(state: &AppState) {
         assert_eq!(state.rendered_rows.len(), state.model.len());
         for row in [
@@ -6556,6 +6576,40 @@ mod native_tests {
             });
             assert_eq!(reset.rows_formatted, 0);
             assert_eq!(reset.native_cells, 20000);
+            // Set up the same 10k names, paths and sizes with 20k distinct,
+            // valid minute-spaced FILETIMEs before the unchanged refresh clock.
+            state.model = LegacyList::new();
+            refresh_all_rows(state);
+            let distinct_rows = refresh_fixture_rows_with_distinct_dates(ordinary);
+            assert_eq!(distinct_rows.len(), 10_000);
+            assert_eq!(
+                distinct_rows
+                    .iter()
+                    .flat_map(|item| [item.created(), item.modified()])
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                20_000
+            );
+            state
+                .model
+                .append_batch_by(distinct_rows, compare_windows)?;
+            refresh_all_rows(state);
+            select_rows(state.list_window, &[4999]);
+            let distinct = measure_refresh(
+                state,
+                "ordinary-10000-distinct-dates-unchanged",
+                refresh_all_rows,
+            );
+            assert_eq!(selected_indices(state.list_window), vec![4999]);
+            assert_eq!(distinct.rows_formatted, 10_000);
+            assert_eq!(distinct.timestamp_values, 20_000);
+            assert_eq!(distinct.repeated_nonzero_filetime_inputs, 0);
+            assert_eq!(distinct.native_cells, 0);
+            assert_eq!(distinct.native_insertions, 0);
+            assert_eq!(distinct.native_deletions, 0);
+            assert_eq!(distinct.full_rebuilds, 0);
+            assert_eq!(distinct.normal_staged_rows_peak, 1);
+            assert_eq!(distinct.fallback_staged_rows_peak, 0);
             let long = format!(
                 "C:\\refresh-fixture\\long\\{}\\{}\\{}",
                 "a".repeat(42),
