@@ -50,29 +50,32 @@ impl Operation {
         )
     }
 
-    fn run(self, list: &mut LegacyList, import_input: &LegacyText) -> Box<[usize]> {
-        match self {
+    fn run(
+        self,
+        list: &mut LegacyList,
+        import_input: &LegacyText,
+    ) -> Result<Box<[usize]>, Box<dyn std::error::Error>> {
+        let changed = match self {
             Self::Clear => list.clear_name_changed(),
-            Self::Front => list.delete_front_range_changed(2, 2).expect("valid range"),
+            Self::Front => list.delete_front_range_changed(2, 2)?,
             Self::Last => list.delete_last_changed(1),
-            Self::Delimited => list
-                .delete_first_delimited_changed(&LegacyText::from("["), &LegacyText::from("]"))
-                .expect("valid delimiters"),
+            Self::Delimited => {
+                list.delete_first_delimited_changed(&LegacyText::from("["), &LegacyText::from("]"))?
+            }
             Self::Digits => list.keep_ascii_digits_changed(),
             Self::Extension => list.delete_extension_changed(),
-            Self::ReplaceAbsent => list
-                .replace_complete_changed(&LegacyText::from("ZZZ"), &LegacyText::from("Q"))
-                .expect("bounded replacement"),
-            Self::ReplaceEqual => list
-                .replace_complete_changed(&LegacyText::from("a"), &LegacyText::from("a"))
-                .expect("bounded replacement"),
-            Self::NormalizedExtension => list
-                .replace_extension_changed(&LegacyText::from(".txt"))
-                .expect("bounded extension"),
-            Self::ShortImport => list
-                .import_names_changed(import_input)
-                .expect("bounded import"),
-        }
+            Self::ReplaceAbsent => {
+                list.replace_complete_changed(&LegacyText::from("ZZZ"), &LegacyText::from("Q"))?
+            }
+            Self::ReplaceEqual => {
+                list.replace_complete_changed(&LegacyText::from("a"), &LegacyText::from("a"))?
+            }
+            Self::NormalizedExtension => {
+                list.replace_extension_changed(&LegacyText::from(".txt"))?
+            }
+            Self::ShortImport => list.import_names_changed(import_input)?,
+        };
+        Ok(changed)
     }
 }
 
@@ -95,7 +98,7 @@ impl Shape {
     fn changed_input(self, index: usize) -> bool {
         match self {
             Self::None => false,
-            Self::Half => index % 2 == 0,
+            Self::Half => index.is_multiple_of(2),
             Self::All => true,
         }
     }
@@ -151,15 +154,15 @@ fn expected_name(operation: Operation, name: &str) -> String {
         ),
         Operation::Last => format!("{}{}", &stem[..stem.len().saturating_sub(1)], extension),
         Operation::Delimited => {
-            if let Some(start) = stem.find('[') {
-                if let Some(end) = stem[start + 1..].find(']') {
-                    return format!(
-                        "{}{}{}",
-                        &stem[..start],
-                        &stem[start + end + 2..],
-                        extension
-                    );
-                }
+            if let Some(start) = stem.find('[')
+                && let Some(end) = stem[start + 1..].find(']')
+            {
+                return format!(
+                    "{}{}{}",
+                    &stem[..start],
+                    &stem[start + end + 2..],
+                    extension
+                );
             }
             name.to_string()
         }
@@ -193,13 +196,11 @@ fn prepare_list(operation: Operation, count: usize, length: usize, shape: Shape)
 
 #[test]
 #[ignore = "run explicitly for bounded preparation comparisons; not a CI speed gate"]
-fn source_bound_preparation_diagnostic() {
+fn source_bound_preparation_diagnostic() -> Result<(), Box<dyn std::error::Error>> {
     let maximum_rows = std::env::var("DARKRENAMER_PREP_DIAGNOSTIC_MAX_ROWS")
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .expect("maximum rows must be numeric")
-        })
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?
         .unwrap_or(10_000);
     assert!([100, 1_000, 10_000].contains(&maximum_rows));
     const OPERATIONS: [Operation; 10] = [
@@ -256,7 +257,8 @@ fn source_bound_preparation_diagnostic() {
                         let import_input =
                             LegacyText::from(format!("{}\r\n", before_names[0]).as_str());
                         let start = Instant::now();
-                        let changed = black_box(operation.run(black_box(&mut list), &import_input));
+                        let changed =
+                            black_box(operation.run(black_box(&mut list), &import_input)?);
                         let elapsed = start.elapsed();
                         assert_eq!(&*changed, expected_changed, "{}", operation.name());
                         for (row, expected) in list.items().iter().zip(&expected_names) {
@@ -289,4 +291,5 @@ fn source_bound_preparation_diagnostic() {
             }
         }
     }
+    Ok(())
 }
