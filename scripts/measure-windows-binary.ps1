@@ -542,4 +542,5 @@ finally {
     }
 }
 
-Write-Host "Measured x64 Windows GUI binary at $resolvedExecutable."
+$binaryKind = if ($IdentityOnly) { 'binary identity' } else { 'GUI binary' }
+Write-Host "Measured x64 Windows $binaryKind at $resolvedExecutable."
