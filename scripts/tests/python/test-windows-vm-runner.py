@@ -2464,7 +2464,8 @@ class VmRunnerTests(unittest.TestCase):
                             target_permissions=None, reported_artifact_path=None,
                             reported_metadata_target=None, focused_profile=None,
                             focused_case=None, focused_kind='icon',
-                            virtual_execution=None, commands=None, private_symbol_output=None,
+                            virtual_execution=None, runtime_model=False, commands=None,
+                            private_symbol_output=None,
                             missing_pdb=None, additional_test=False):
         outputs = outputs if outputs is not None else {}
         target_directories = target_directories if target_directories is not None else []
@@ -2477,7 +2478,7 @@ class VmRunnerTests(unittest.TestCase):
             target_directories.append(target_root)
             target_permissions.append(stat.S_IMODE(target_root.stat().st_mode))
             if command[1:3] == ['xwin', 'test']:
-                profile = 'release' if focused_profile == 'release' or virtual_execution else 'debug'
+                profile = 'release' if focused_profile == 'release' or virtual_execution or runtime_model else 'debug'
                 artifact = target_root / vm.TARGET / profile / 'deps' / 'suite.exe'
                 artifact.parent.mkdir(parents=True)
                 artifact.write_bytes(b'test executable bytes')
@@ -2487,7 +2488,7 @@ class VmRunnerTests(unittest.TestCase):
                 compiler_artifact = {
                     'reason': 'compiler-artifact', 'profile': {'test': True},
                     'target': {'name': ('rename_windows_backend' if virtual_execution else
-                                        'darknamer_app' if focused_profile else 'suite')},
+                                        'darknamer_app' if focused_profile or runtime_model else 'suite')},
                     'executable': str(reported_artifact_path or artifact),
                 }
                 kwargs['stdout'].write(json.dumps(compiler_artifact) + '\n')
@@ -2526,7 +2527,184 @@ class VmRunnerTests(unittest.TestCase):
             return vm.build_bundle(repo, output, focused_profile=focused_profile,
                                    focused_case=focused_case, focused_kind=focused_kind,
                                    virtual_execution=virtual_execution,
+                                   runtime_model=runtime_model,
                                    private_symbol_output=private_symbol_output)
+
+    def test_runtime_model_cli_and_source_bundle_are_fixed_and_separate(self):
+        args = vm.parse_arguments(['--ssh-host', 'prepared-vm', '--expected-vm-id',
+                                   '18338a47-f647-45c4-98b8-6107331e2602',
+                                   '--profile-runtime-model'])
+        self.assertEqual((args.test_timeout_seconds, args.desktop_scale,
+                          args.desktop_width, args.desktop_height), (1200, 100, 1366, 768))
+        args.acceptance_profile_sha256 = 'b' * 64
+        self.assertIn('-ProfileRuntimeModel', vm.controller_task_arguments(self.root, args))
+        self.assertFalse(vm.parse_arguments(['--ssh-host', 'prepared-vm']).profile_runtime_model)
+        for extra in (['--profile-refresh-stages'], ['--focused-icon-tests'],
+                      ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1'],
+                      ['--prepare-only'], ['--test-timeout-seconds', '1199']):
+            with self.subTest(extra=extra), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    vm.parse_arguments(['--ssh-host', 'prepared-vm', '--expected-vm-id',
+                                        '18338a47-f647-45c4-98b8-6107331e2602',
+                                        '--profile-runtime-model', *extra])
+        repo, target, _, _, _ = self.source_build_inputs('-runtime-model')
+        commands = []
+        manifest = self.build_source_bundle(repo, target, self.root / 'runtime-model-bundle',
+                                            runtime_model=True, commands=commands)
+        self.assertEqual(manifest['diagnostic'], {
+            'kind': vm.RUNTIME_MODEL_KIND, 'test_profile': 'release',
+            'test_name': vm.RUNTIME_MODEL_TEST, 'scope': vm.RUNTIME_MODEL_SCOPE,
+            'schema_version': 1, 'records': 183})
+        self.assertEqual([row['name'] for row in manifest['test_binaries']], ['darknamer_app'])
+        self.assertIn('--release', commands[0])
+        self.assertIn('--lib', commands[0])
+        self.assertNotIn('--workspace', commands[0])
+        private = self.root / 'runtime-model-symbols'
+        def measure(_script, exe, pdb, output):
+            record = {'schema_version': 1,
+                      'executable': {'sha256': vm.sha256(exe)},
+                      'debug_symbols': {'pdb_sha256': vm.sha256(pdb),
+                                        'guid': '4f7eddc7-cf33-b9e9-4c4c-44205044422e',
+                                        'age': 1}}
+            output.write_text(json.dumps(record))
+            return record
+        with mock.patch.object(vm, 'measure_private_binary', side_effect=measure):
+            self.build_source_bundle(repo, target, self.root / 'runtime-symbol-bundle',
+                                     runtime_model=True, private_symbol_output=private)
+        receipt = json.loads((private / 'private-symbols.json').read_text())
+        self.assertEqual(receipt['test_profile'], 'release')
+        self.assertEqual([row['role'] for row in receipt['binaries']],
+                         ['application', 'test:suite.exe'])
+        self.assertTrue((private / 'suite.pdb').is_file())
+
+    @staticmethod
+    def runtime_model_samples():
+        samples = []
+        for rows in (100, 1000, 10000):
+            group = min(rows // 10, 1000)
+            for repetition in (1, 2, 3):
+                for distribution in ('unique', 'collision_pairs', 'large_collision_group'):
+                    samples.append(dict(kind='runtime-model-baseline', schema_version=1,
+                                        scope='instrumented-windows-libtest',
+                                        icon_worker_attached=False, operation='preview_full',
+                                        distribution=distribution, rows=rows, repetition=repetition,
+                                        preview_cache_ns=12000, affected_rows=rows, changed_rows=rows,
+                                        blocker_rows=0 if distribution == 'unique' else
+                                        rows if distribution == 'collision_pairs' else group,
+                                        functional_checks=rows, status='pass'))
+                for distribution in ('unique_to_unique', 'enter_collision',
+                                     'leave_collision', 'unchanged_windows_key',
+                                     'large_group_leave'):
+                    samples.append(dict(kind='runtime-model-baseline', schema_version=1,
+                                        scope='instrumented-windows-libtest',
+                                        icon_worker_attached=False, operation='preview_single_edit',
+                                        distribution=distribution, rows=rows, repetition=repetition,
+                                        model_edit_ns=1000, preview_cache_ns=2000,
+                                        affected_rows=(2 if distribution in ('enter_collision',
+                                                                              'leave_collision') else
+                                                       group if distribution == 'large_group_leave' else 1),
+                                        changed_rows=(2 if distribution == 'leave_collision' else
+                                                      group if distribution == 'large_group_leave' else 1),
+                                        blocker_rows=(1 if distribution == 'enter_collision' else
+                                                      group - 1 if distribution == 'large_group_leave' else 0),
+                                        functional_checks=rows, status='pass'))
+                for distribution in ('sorted', 'reverse', 'shuffled', 'equal_keys'):
+                    samples.append(dict(kind='runtime-model-baseline', schema_version=1,
+                                        scope='instrumented-windows-libtest',
+                                        icon_worker_attached=False, operation='sort_model',
+                                        distribution=distribution, rows=rows, repetition=repetition,
+                                        sort_inclusive_ns=20000, compare_nested_ns=9000,
+                                        comparisons=rows, selection='none',
+                                        changed=distribution not in ('sorted', 'equal_keys'),
+                                        functional_checks=rows, status='pass'))
+                for distribution in ('sorted', 'reverse', 'shuffled', 'equal_keys'):
+                    choices = ('none', 'sparse', 'broad') if rows == 10000 and distribution == 'shuffled' else ('none', 'sparse')
+                    for selection in choices:
+                        selected = 0 if selection == 'none' else 3 if selection == 'sparse' else rows // 2
+                        samples.append(dict(kind='runtime-model-baseline', schema_version=1,
+                                            scope='instrumented-windows-libtest',
+                                            icon_worker_attached=False, operation='sort_command',
+                                            distribution=distribution, rows=rows, repetition=repetition,
+                                            selection=selection, selected_rows=selected, snapshot_ns=100,
+                                            sort_inclusive_ns=20000, compare_nested_ns=9000,
+                                            comparisons=rows, token_remap_ns=150,
+                                            native_refresh_ns=1200 if distribution not in ('sorted', 'equal_keys') else 0,
+                                            selection_restore_ns=500, post_controls_ns=250,
+                                            changed=distribution not in ('sorted', 'equal_keys'),
+                                            functional_checks=rows + selected + 5, status='pass'))
+        return samples
+
+    def test_runtime_model_inventory_rejects_corrupt_or_missing_measurements(self):
+        samples = self.runtime_model_samples()
+        self.assertEqual(len(samples), 183)
+        self.assertEqual([sum(row['rows'] == count for row in samples)
+                          for count in (100, 1000, 10000)], [60, 60, 63])
+        def output(records):
+            return '\n'.join(json.dumps(row, separators=(',', ':')) for row in records)
+        self.assertEqual(len(vm.verify_runtime_model_records(output(samples))), 183)
+        for mutation in ('missing', 'duplicate', 'extra', 'bool_time', 'negative_time',
+                         'wrong_scope', 'bad_nested', 'wrong_selection', 'failed_status'):
+            changed = copy.deepcopy(samples)
+            if mutation == 'missing': changed.pop()
+            elif mutation == 'duplicate': changed[1] = copy.deepcopy(changed[0])
+            elif mutation == 'extra': changed.append(copy.deepcopy(changed[-1]))
+            elif mutation == 'bool_time': changed[0]['preview_cache_ns'] = True
+            elif mutation == 'negative_time': changed[0]['preview_cache_ns'] = -1
+            elif mutation == 'wrong_scope': changed[0]['scope'] = 'production-gui'
+            elif mutation == 'bad_nested': changed[8]['compare_nested_ns'] = 30000
+            elif mutation == 'wrong_selection': changed[-1]['selected_rows'] = 0
+            else: changed[-1]['status'] = 'fail'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                vm.verify_runtime_model_records(output(changed))
+        with self.assertRaisesRegex(ValueError, 'malformed JSON'):
+            vm.verify_runtime_model_records(output(samples) + '\n{"kind":"runtime-model-baseline"')
+
+    def test_runtime_model_result_binds_real_bundle_shape_and_clean_job(self):
+        binary = dict(self.test)
+        runner = self.artifact('windows-vm-guest.ps1', b'guest runner')
+        diagnostic = {'kind': vm.RUNTIME_MODEL_KIND, 'test_profile': 'release',
+                      'test_name': vm.RUNTIME_MODEL_TEST, 'scope': vm.RUNTIME_MODEL_SCOPE,
+                      'schema_version': 1, 'records': 183}
+        manifest = dict(self.manifest, test_binaries=[binary], runner=runner,
+                        diagnostic=diagnostic)
+        records = self.runtime_model_samples()
+        output = ('running 1 test\ntest ' + vm.RUNTIME_MODEL_TEST + ' ... ' +
+                  json.dumps(records[0]) + '\n' +
+                  '\n'.join(json.dumps(row) for row in records[1:]) +
+                  '\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; '
+                  '0 measured; 401 filtered out; finished in 0.2s\n')
+        stdout = self.output_artifact('runtime-model.stdout.txt', output.encode())
+        stderr = self.output_artifact('runtime-model.stderr.txt', b'')
+        row = dict(binary, test_name=vm.RUNTIME_MODEL_TEST, status='passed',
+                   job_cleanup=True, exit_code=0, failure_reason=None,
+                   passed=1, failed=0, ignored=0, stdout=stdout, stderr=stderr,
+                   process_lifecycle={'pid': 1234, 'start_time_utc_ticks': '638975000000000000'})
+        job = {'pid': 1234, 'process_start_time_utc_ticks': '638975000000000000',
+               'status': 'clean', 'job_empty': True, 'job_closed': True,
+               'capture_complete': True, 'had_survivors': False,
+               'forced_termination': False, 'active_processes_at_close': 0}
+        result = dict(manifest, status='passed', gui=None, tests=[row],
+                      process_job_cleanup=[job], transport={
+                          'task_kind': 'core', 'status': 'collected',
+                          'guest_cleanup': True, 'raw_cleanup': {}})
+        with mock.patch.object(vm, 'verify_controller_cleanup'), \
+             mock.patch.object(vm, 'verify_current_anchor_from_bundle'), \
+             mock.patch.object(vm, '_verify_v2_result_owned_binding'), \
+             mock.patch.object(vm, 'verify_transport_binding'):
+            observed = vm.verify_runtime_model_result(
+                self.root, manifest, result, 'ssh', 'a-vm-id', 'b' * 64)
+            self.assertEqual((observed['records'], observed['filtered_out']), (183, 401))
+            self.assertEqual(observed['stdout_sha256'], stdout['sha256'])
+            for mutation in ('wrong_source', 'wrong_job', 'truncated_transcript',
+                             'missing_test_name'):
+                changed = copy.deepcopy(result)
+                if mutation == 'wrong_source': changed['source_sha'] = 'b' * 40
+                elif mutation == 'wrong_job': changed['process_job_cleanup'][0]['job_closed'] = False
+                elif mutation == 'truncated_transcript': changed['tests'][0]['stdout']['bytes'] -= 1
+                else: changed['tests'][0]['test_name'] = 'another-test'
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    vm.verify_runtime_model_result(
+                        self.root, manifest, changed, 'ssh', 'a-vm-id', 'b' * 64)
 
     def test_virtual_execution_bundle_builds_one_release_backend_binary(self):
         repo, target, _, _, _ = self.source_build_inputs('-virtual-execution')

@@ -37,6 +37,7 @@ function Invoke-DrWindowsVmGuest {
     [int] $TestTimeoutSeconds = 300,
 
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $ProfileRuntimeModel,
     [switch] $FocusedIconTests,
     [switch] $FocusedRefreshTests,
     [ValidateSet(0, 100, 1000, 10000)][int] $VirtualExecutionCount,
@@ -133,6 +134,7 @@ if ($null -eq $verified) {
     }
 }
 $refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+$runtimeModel = [bool]$ProfileRuntimeModel
 $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
 $virtualExecution = $PSBoundParameters.ContainsKey('VirtualExecutionCount') -and
     $VirtualExecutionCount -ne 0
@@ -142,7 +144,8 @@ $focusedFilter = if ($FocusedIconTests) {
 } else { 'windows::list_view::native_tests::full_refresh_' }
 $focusedKind = if ($FocusedIconTests) { 'focused-icon-tests' } else { 'focused-refresh-tests' }
 if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests) -or
-    ($virtualExecution -and ($refreshProfile -or $focusedTests))) {
+    ($virtualExecution -and ($refreshProfile -or $focusedTests)) -or
+    ($runtimeModel -and ($refreshProfile -or $focusedTests -or $virtualExecution))) {
     throw 'A core test run cannot select two fixed native diagnostic modes.'
 }
 if ($PSBoundParameters.ContainsKey('VirtualExecutionIteration') -ne
@@ -155,7 +158,21 @@ if ($FocusedIconCase -and -not $FocusedIconTests) {
 if ($FocusedRefreshCase -and -not $FocusedRefreshTests) {
     throw 'A single focused refresh case requires its fixed test selector.'
 }
-if ($refreshProfile) {
+if ($runtimeModel) {
+    if ($verified.manifest.schema_version -ne 1 -or
+        $verified.manifest.diagnostic.kind -cne 'runtime-model-baseline' -or
+        $verified.manifest.diagnostic.test_profile -cne 'release' -or
+        $verified.manifest.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_runtime_model_baseline' -or
+        $verified.manifest.diagnostic.scope -cne 'instrumented-windows-libtest' -or
+        $verified.manifest.diagnostic.schema_version -ne 1 -or
+        $verified.manifest.diagnostic.records -ne 183 -or
+        $verified.tests.Count -ne 1 -or $verified.tests[0].name -cne 'darknamer_app' -or
+        $TestTimeoutSeconds -ne 1200 -or
+        $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
+        throw 'The guest runtime model selection is invalid.'
+    }
+}
+elseif ($refreshProfile) {
     if ($verified.manifest.schema_version -ne 1 -or
         $verified.manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
         $verified.manifest.diagnostic.test_profile -cne 'release' -or
@@ -284,7 +301,17 @@ $result = if ($candidateLane) {
         failure_reason = $null
     }
 }
-if ($refreshProfile) {
+if ($runtimeModel) {
+    $result['diagnostic'] = [ordered]@{
+        kind = 'runtime-model-baseline'
+        test_profile = 'release'
+        test_name = 'windows::list_view::native_tests::profile_runtime_model_baseline'
+        scope = 'instrumented-windows-libtest'
+        schema_version = 1
+        records = 183
+    }
+}
+elseif ($refreshProfile) {
     $result['diagnostic'] = [ordered]@{
         kind = 'profile-refresh-stages'
         order = $RefreshProfileOrder
@@ -380,7 +407,7 @@ try {
     }
     $testResults = [Collections.Generic.List[object]]::new()
     $remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes
-    if ($refreshProfile -or $FocusedRefreshTests) { $remainingSuiteOutputBytes = [long](32MB) }
+    if ($refreshProfile -or $runtimeModel -or $FocusedRefreshTests) { $remainingSuiteOutputBytes = [long](32MB) }
     $testInvocations = [Collections.Generic.List[object]]::new()
     if ($focusedTests -and -not $focusedCase) {
         foreach ($name in $verified.manifest.diagnostic.test_names) {
@@ -423,6 +450,7 @@ try {
             -Index ($index + 1) `
             -TimeoutSeconds $caseTimeoutSeconds `
             -RefreshProfileOrder $RefreshProfileOrder `
+            -ProfileRuntimeModel:$ProfileRuntimeModel `
             -FocusedIconTests:$FocusedIconTests `
             -FocusedRefreshTests:$FocusedRefreshTests `
             -VirtualExecutionCount $VirtualExecutionCount `

@@ -766,6 +766,46 @@ throughput. These instrumented virtual-storage results do not establish GUI
 Apply latency, physical SSD/HDD performance, power-loss durability or release
 acceptance. The validation-skip estimator is not an execution candidate.
 
+### Windows runtime model baseline diagnostic
+
+Run the fixed source-built model diagnostic on the prepared VM from a clean
+committed checkout. Select the configured SSH alias, exact VM GUID, and a new
+private output directory. The optional symbol directory must also be new,
+absolute, private, and outside the checkout and bundle:
+
+```bash
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host "$DARKRENAMER_VM_SSH_HOST" \
+  --expected-vm-id "$DARKRENAMER_VM_ID" \
+  --profile-runtime-model \
+  --private-symbol-output /absolute/private/new-model-symbols \
+  --output /absolute/private/new-runtime-model-baseline
+```
+
+This selection fixes the v2 owned-resource cleanup profile, managed 1366×768
+96-DPI RDP desktop, and a 1,200-second test and suite limit. It builds one
+optimized app-library test binary plus the production executable from the
+same source and runs exactly the ignored
+`windows::list_view::native_tests::profile_runtime_model_baseline` test. The
+optional private symbol directory retains the fresh executable/PDB pairs and
+CodeView identities; the VM bundle does not contain PDBs. A passing
+`validation-result.json` binds the source, test binary, complete stdout and
+stderr bytes, exact libtest outcome, process Job, transport, and owned cleanup.
+
+The test emits 183 schema-1 `runtime-model-baseline` records: three independent
+repetitions each at 100, 1,000, and 10,000 model rows. Each repetition includes
+full preview uniqueness/collision groups, five single-row edit cases, four
+model sort distributions, and native command sorting with none/sparse selection;
+10,000 shuffled rows also include broad selection. The fixed verifier rejects
+missing, duplicated, reordered, malformed, or out-of-range records. Setup and
+functional assertions are outside the clocks. `compare_nested_ns` is included
+in `sort_inclusive_ns`; do not sum those values. The sort-command record reports
+separate selection snapshot, sort, token remap, native refresh, selection
+restore, and post-control times. This is an instrumented Windows libtest/model
+baseline, not production GUI Apply latency, process allocation count, heap peak,
+or a user-visible responsiveness result. Keep actual product EXE and heap traces
+as separate, source-bound evidence.
+
 ### ListView refresh stage diagnostic
 
 On the prepared VM, run the fixed native refresh diagnostic from a clean,

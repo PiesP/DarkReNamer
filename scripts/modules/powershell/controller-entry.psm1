@@ -1445,6 +1445,7 @@ function Invoke-DrWindowsVmController {
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400,
     [ValidateSet('core', 'ui', 'recovery')][string] $TaskKind,
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+    [switch] $ProfileRuntimeModel,
     [switch] $FocusedIconTests,
     [switch] $FocusedRefreshTests,
     [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
@@ -1515,6 +1516,7 @@ $taskSelection = Resolve-ControllerTaskSelection `
     -HasRecoveryFixtureCount $PSBoundParameters.ContainsKey('RecoveryFixtureCount') `
     -TimeoutSeconds $TestTimeoutSeconds
 $refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
+$runtimeModel = [bool]$ProfileRuntimeModel
 $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
 $focusedCase = if ($FocusedIconTests) { $FocusedIconCase } else { $FocusedRefreshCase }
 $focusedFilter = if ($FocusedIconTests) {
@@ -1531,7 +1533,8 @@ if ($virtualExecution -and ($refreshProfile -or $focusedTests -or
     $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
     throw 'Virtual execution requires a distinct source-built core v2 selection and exact VM identity.'
 }
-if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests)) {
+if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests) -or
+    ($runtimeModel -and ($refreshProfile -or $focusedTests -or $virtualExecution))) {
     throw 'A core test run cannot select two fixed native diagnostic modes.'
 }
 if ($FocusedIconCase -and -not $FocusedIconTests) {
@@ -1539,6 +1542,12 @@ if ($FocusedIconCase -and -not $FocusedIconTests) {
 }
 if ($FocusedRefreshCase -and -not $FocusedRefreshTests) {
     throw 'A single focused refresh case requires its fixed test selector.'
+}
+if ($runtimeModel -and ($taskSelection.kind -cne 'core' -or
+    $TestTimeoutSeconds -ne 1200 -or $SuiteTimeoutSeconds -ne 1200 -or
+    $ExpectedGuestVmId -eq [guid]::Empty -or
+    $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
+    throw 'Runtime model baseline requires fixed source-built core v2 bounds and exact VM identity.'
 }
 if ($refreshProfile -and ($taskSelection.kind -cne 'core' -or
     $TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 600 -or
@@ -1550,7 +1559,7 @@ if ($focusedTests -and ($taskSelection.kind -cne 'core' -or
     $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
     throw 'Focused native tests require fixed core v2 bounds.'
 }
-if ($refreshProfile -or $FocusedRefreshTests) { $coreTestOutputAggregateMaximumBytes = 32MB }
+if ($refreshProfile -or $runtimeModel -or $FocusedRefreshTests) { $coreTestOutputAggregateMaximumBytes = 32MB }
 
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
 $ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
@@ -1696,7 +1705,20 @@ try {
             $manifest.source_state -ne 'clean' -or @($manifest.test_binaries).Count -eq 0) {
             throw 'A clean source-bound bundle with native tests is required.'
         }
-        if ($refreshProfile) {
+        if ($runtimeModel) {
+            if (@($manifest.diagnostic.PSObject.Properties).Count -ne 6 -or
+                $manifest.diagnostic.kind -cne 'runtime-model-baseline' -or
+                $manifest.diagnostic.schema_version -ne 1 -or
+                $manifest.diagnostic.test_profile -cne 'release' -or
+                $manifest.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_runtime_model_baseline' -or
+                $manifest.diagnostic.scope -cne 'instrumented-windows-libtest' -or
+                $manifest.diagnostic.records -ne 183 -or
+                @($manifest.test_binaries).Count -ne 1 -or
+                $manifest.test_binaries[0].name -cne 'darknamer_app') {
+                throw 'Runtime model bundle identity is invalid.'
+            }
+        }
+        elseif ($refreshProfile) {
             if ($manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
                 $manifest.diagnostic.test_profile -cne 'release' -or
                 $manifest.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
@@ -5939,8 +5961,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
     $candidateTaskMayHaveStarted = $true
-    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$FocusedIconTests),$FocusedIconCase,([bool]$FocusedRefreshTests),$FocusedRefreshCase,$VirtualExecutionCount,$VirtualExecutionIteration -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$focusedIcon,$focusedIconCase,$focusedRefresh,$focusedRefreshCase,$virtualCount,$virtualIteration)
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$ProfileRuntimeModel),([bool]$FocusedIconTests),$FocusedIconCase,([bool]$FocusedRefreshTests),$FocusedRefreshCase,$VirtualExecutionCount,$VirtualExecutionIteration -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$runtimeModelSelector,$focusedIcon,$focusedIconCase,$focusedRefresh,$focusedRefreshCase,$virtualCount,$virtualIteration)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
         $powerShell = Get-DrVmTrustedPowerShellPath
@@ -5968,6 +5990,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtimeRoot + '"'
         if ($v2) { $arguments += ' -AcceptanceProfileId vm-automated-v2-owned-resources' }
         if ($refreshOrder) { $arguments += ' -RefreshProfileOrder ' + $refreshOrder }
+        if ($runtimeModelSelector) { $arguments += ' -ProfileRuntimeModel' }
         if ($focusedIcon) { $arguments += ' -FocusedIconTests' }
         if ($focusedIconCase) { $arguments += ' -FocusedIconCase ' + $focusedIconCase }
         if ($focusedRefresh) { $arguments += ' -FocusedRefreshTests' }
@@ -6119,9 +6142,21 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
-        (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution -and
+        (-not $refreshProfile -and -not $runtimeModel -and -not $focusedTests -and -not $virtualExecution -and
          ($result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup))) {
         throw 'Guest process jobs were not empty and closed before result collection.'
+    }
+    if ($runtimeModel -and ($null -eq $result.diagnostic -or
+        $result.diagnostic.kind -cne 'runtime-model-baseline' -or
+         $result.diagnostic.test_profile -cne 'release' -or
+         $result.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_runtime_model_baseline' -or
+         $result.diagnostic.scope -cne 'instrumented-windows-libtest' -or
+         $result.diagnostic.schema_version -ne 1 -or
+         $result.diagnostic.records -ne 183 -or
+         @($result.tests).Count -ne 1 -or
+         $result.tests[0].test_name -cne 'windows::list_view::native_tests::profile_runtime_model_baseline' -or
+         $null -ne $result.gui)) {
+        throw 'Runtime model result selection is invalid.'
     }
     if ($refreshProfile -and ($result.diagnostic.kind -cne 'profile-refresh-stages' -or
         $result.diagnostic.order -cne $RefreshProfileOrder -or

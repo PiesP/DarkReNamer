@@ -4153,6 +4153,24 @@ Invoke-DrTestPowerShellModuleScope `
             throw 'Empty/default and declared diagnostic orders must bind without launching.'
         }
     }
+    $modelBindingRoot = Join-Path $temporaryRoot ('model-binding-' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $modelBindingRoot)
+    $modelBinding = Invoke-RustTestBinary -Test ([pscustomobject]@{
+        name = 'darknamer_app'; file = 'not-launched.exe'; sha256 = ('0' * 64)
+    }) -Root $modelBindingRoot -OutputRoot $modelBindingRoot -RuntimeRoot $modelBindingRoot `
+        -Index 1 -TimeoutSeconds 1200 -OutputBudgetBytes 0 -ProfileRuntimeModel
+    if ($modelBinding.failure_reason -cne 'suite_output_limit_exceeded' -or
+        $modelBinding.test_name -cne
+            'windows::list_view::native_tests::profile_runtime_model_baseline') {
+        throw 'Runtime model selector did not bind one exact ignored app test.'
+    }
+    Assert-Fails {
+        Invoke-RustTestBinary -Test ([pscustomobject]@{
+            name = 'wrong_binary'; file = 'not-launched.exe'; sha256 = ('0' * 64)
+        }) -Root $modelBindingRoot -OutputRoot $modelBindingRoot `
+            -RuntimeRoot $modelBindingRoot -Index 2 -TimeoutSeconds 1200 `
+            -OutputBudgetBytes 0 -ProfileRuntimeModel
+    } 'one fixed exact case'
     $focusedBindingRoot = Join-Path $temporaryRoot ('focused-binding-' + [Guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $focusedBindingRoot)
     Assert-Fails {
@@ -4210,7 +4228,8 @@ Invoke-DrTestPowerShellModuleScope `
             param(
                 [object] $Test, [string] $Root, [string] $OutputRoot,
                 [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
-                [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [string] $RefreshProfileOrder, [switch] $ProfileRuntimeModel,
+                [switch] $FocusedIconTests,
                 [switch] $FocusedRefreshTests,
                 [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
                     'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
@@ -4225,6 +4244,7 @@ Invoke-DrTestPowerShellModuleScope `
                 focused = [bool]$FocusedIconTests
                 has_case = $PSBoundParameters.ContainsKey('FocusedIconCase')
                 case = $FocusedIconCase
+                runtime_model = [bool]$ProfileRuntimeModel
                 virtual_count = $VirtualExecutionCount
                 virtual_iteration = $VirtualExecutionIteration
                 virtual_source = $VirtualExecutionSourceSha
@@ -4244,6 +4264,7 @@ Invoke-DrTestPowerShellModuleScope `
         $effectiveRuntimeRoot = $focusedBindingRoot
         $TestTimeoutSeconds = 600
         $RefreshProfileOrder = ''
+        $ProfileRuntimeModel = $false
         $FocusedIconTests = $true
         $FocusedRefreshTests = $false
         $VirtualExecutionCount = 0
@@ -4289,7 +4310,8 @@ Invoke-DrTestPowerShellModuleScope `
             param(
                 [object] $Test, [string] $Root, [string] $OutputRoot,
                 [string] $RuntimeRoot, [int] $Index, [int] $TimeoutSeconds,
-                [string] $RefreshProfileOrder, [switch] $FocusedIconTests,
+                [string] $RefreshProfileOrder, [switch] $ProfileRuntimeModel,
+                [switch] $FocusedIconTests,
                 [switch] $FocusedRefreshTests,
                 [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
                     'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
@@ -4340,6 +4362,7 @@ Invoke-DrTestPowerShellModuleScope `
         $effectiveRuntimeRoot = $focusedBindingRoot
         $TestTimeoutSeconds = 600
         $RefreshProfileOrder = ''
+        $ProfileRuntimeModel = $false
         $FocusedIconTests = $true
         $FocusedIconCase = ''
         $FocusedRefreshTests = $false
@@ -4444,6 +4467,21 @@ Invoke-DrTestPowerShellModuleScope `
     $refreshSummary = Read-RustTestSummary `
         -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
         -Stderr '' -RefreshProfile
+    $modelSummary = Read-RustTestSummary `
+        -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out;' `
+        -Stderr '' -ProfileRuntimeModel
+    if ($modelSummary.passed -ne 1 -or $modelSummary.filtered -ne 401) {
+        throw 'Runtime model baseline did not accept the exact ignored test summary.'
+    }
+    foreach ($invalidModel in @(
+        'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 401 filtered out;',
+        'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'
+    )) {
+        Assert-Fails {
+            Read-RustTestSummary -Stdout $invalidModel -Stderr '' -ProfileRuntimeModel
+        } 'must select exactly one ignored test'
+    }
     $virtualSummary = Read-RustTestSummary `
         -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out;' `
         -Stderr '' -VirtualExecution
