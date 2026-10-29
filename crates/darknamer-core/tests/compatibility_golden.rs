@@ -391,6 +391,110 @@ fn repeated_replacement_and_extreme_sequence_width_stop_at_the_budget() {
 }
 
 #[test]
+fn replacement_noops_and_nonoverlap_preserve_raw_utf16() {
+    let mut source = r"C:\root\a".encode_utf16().collect::<Vec<_>>();
+    source.extend([0xD800, b'.' as u16, b't' as u16, b'x' as u16, b't' as u16]);
+    let mut list = LegacyList::new();
+    assert_eq!(
+        list.append(LegacyListItem::new(
+            LegacyText::from_units(source),
+            false,
+            0,
+            0,
+            0
+        )),
+        Ok(true)
+    );
+    let before = list.clone();
+    for (needle, replacement) in [("", "replacement"), ("missing", "replacement"), ("a", "a")] {
+        assert_eq!(
+            list.replace_complete_changed(
+                &LegacyText::from(needle),
+                &LegacyText::from(replacement)
+            )
+            .as_deref(),
+            Ok(&[][..])
+        );
+        assert_eq!(list, before);
+    }
+
+    assert_eq!(
+        list.replace_complete_changed(&LegacyText::from("a"), &LegacyText::from("z"))
+            .as_deref(),
+        Ok(&[0][..])
+    );
+    assert_eq!(
+        list.items()[0].proposed_name().units(),
+        &[
+            b'z' as u16,
+            0xD800,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16
+        ]
+    );
+    assert_eq!(
+        list.proposed_name_utf16_units(),
+        before.proposed_name_utf16_units()
+    );
+    assert_eq!(
+        list.planned_path_utf16_units(),
+        before.planned_path_utf16_units()
+    );
+
+    let mut pairs = LegacyList::new();
+    assert_eq!(
+        pairs.append_batch([
+            item(r"C:\root\aaaa.txt", false),
+            item(r"C:\root\zzzz.txt", false),
+        ]),
+        Ok(2)
+    );
+    assert_eq!(
+        pairs
+            .replace_complete_changed(&LegacyText::from("aa"), &LegacyText::from("b"))
+            .as_deref(),
+        Ok(&[0][..])
+    );
+    assert_eq!(proposed(&pairs), ["bb.txt", "zzzz.txt"]);
+}
+
+#[test]
+fn replacement_noop_accounting_and_late_failure_remain_atomic() {
+    let source = format!(r"C:\root\a{}", "b".repeat(200));
+    let rows = (0..10_000)
+        .map(|_| item(&source, false))
+        .collect::<Vec<_>>();
+    let mut list = LegacyList::new();
+    assert_eq!(list.append_batch(rows), Ok(10_000));
+    let before = list.clone();
+    assert_eq!(list.planned_path_utf16_units(), 2_090_000);
+
+    assert_eq!(
+        list.replace_complete_changed(&LegacyText::from("missing"), &LegacyText::from("x"))
+            .as_deref(),
+        Ok(&[][..])
+    );
+    assert_eq!(list, before);
+    assert_eq!(
+        list.replace_complete_changed(&LegacyText::from("a"), &LegacyText::from("a"))
+            .as_deref(),
+        Ok(&[][..])
+    );
+    assert_eq!(list, before);
+
+    assert_eq!(
+        list.replace_complete_changed(&LegacyText::from("a"), &LegacyText::from("aa")),
+        Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+            requested_units: 2_100_000,
+            maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+        })
+    );
+    assert_eq!(list, before);
+}
+
+#[test]
 fn manual_and_imported_names_share_the_atomic_proposal_budget() {
     let oversized = "x".repeat(MAX_PROPOSED_NAME_UTF16_UNITS + 1);
     let mut manual = list(&[(r"C:\work\one.txt", false)]);
