@@ -125,10 +125,10 @@ use super::{
     PreparedFileDialogSelection, PreparedRecoveryExport, PreparedTaskDialogSpec,
     PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec, SHOW_RECOVERY_STATUS,
     admit_paths, apply_changes, apply_native_appearance_nonblocking, arrange, compare_windows,
-    copy_clipboard_or_report, destination_parent_mutation_error_korean, finalize_admission_start,
+    copy_clipboard_or_report, destination_parent_mutation_error_message, finalize_admission_start,
     finalize_admission_start_failure, legacy_path, message, prepare_appearance_dialog,
     prepare_discard_staged_journal, prepare_recovery_export, prompt_input_or_report,
-    proposal_mutation_error_korean, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
+    proposal_mutation_error_message, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
     report_admission_start_error, request_window_close, run_prepared_appearance_action,
     run_prepared_discard_task_dialog, run_prepared_recovery_export, show_recovery_status,
     start_import_worker, text_details, try_app_state, try_finish_window_close,
@@ -863,7 +863,7 @@ pub(super) fn dispatch_command(
         RESET_PATH => match state.model.reset_destination_parents() {
             Ok(changed) => model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged),
             Err(error) => {
-                state.set_transient_status(destination_parent_mutation_error_korean(error));
+                state.set_transient_status(destination_parent_mutation_error_message(error));
                 CommandOutcome::ui(UiEffect::None)
             }
         },
@@ -992,7 +992,7 @@ fn proposal_mutation(
     match mutation(&mut state.model) {
         Ok(changed) => proposal_outcome(state, changed),
         Err(error) => {
-            state.set_transient_status(proposal_mutation_error_korean(error));
+            state.set_transient_status(proposal_mutation_error_message(error));
             CommandOutcome::ui(UiEffect::None)
         }
     }
@@ -1516,7 +1516,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
             if let Some(Err(error)) = result {
                 report_error(
                     window,
-                    destination_parent_mutation_error_korean(error),
+                    destination_parent_mutation_error_message(error),
                     Text::DispatchTargetTitle.get(),
                 );
             }
@@ -1644,7 +1644,7 @@ pub(super) fn finish_import_worker_result(
             }
             Err(error) => message(
                 window,
-                proposal_mutation_error_korean(error),
+                proposal_mutation_error_message(error),
                 Text::DispatchImportNamesTitle.get(),
             ),
         },
@@ -1847,7 +1847,7 @@ fn finish_prompt_command(
                     UiEffect::ProposalRowsChanged(vec![row].into_boxed_slice()),
                 ),
                 Err(error) => {
-                    state.set_transient_status(proposal_mutation_error_korean(error));
+                    state.set_transient_status(proposal_mutation_error_message(error));
                     CommandOutcome::ui(UiEffect::None)
                 }
             }

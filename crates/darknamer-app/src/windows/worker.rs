@@ -6,7 +6,7 @@ use super::{
     WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE, WM_APP_PLAN_COMPLETE,
     WM_APP_PREFERENCES_WAKE, apply_cancel_control_state, begin_prepared_task_dialog,
     cleanup_file_journal, clear_selection, compare_windows, finish_import_worker_result,
-    legacy_path, message, path_wide, proposal_mutation_error_korean, read_legacy_text_cancellable,
+    legacy_path, message, path_wide, proposal_mutation_error_message, read_legacy_text_cancellable,
     refresh, schedule_focus_target, schedule_icon_poll, select_rows, selected_indices,
     take_prepared_task_dialog, try_app_state, update_controls,
 };
@@ -1836,7 +1836,7 @@ pub(super) fn handle_admission_completion(
                         }
                     }
                     Err(error) => {
-                        let error_message = proposal_mutation_error_korean(error);
+                        let error_message = proposal_mutation_error_message(error);
                         state.set_transient_status(rt::admission_result_unchanged(error_message));
                         message(
                             window,
