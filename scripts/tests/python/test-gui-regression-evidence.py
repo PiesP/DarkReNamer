@@ -3707,5 +3707,307 @@ class IconSettlementEvidenceTests(SyntheticFixtureTestCase):
                 evidence.validate_input_manifest(run, SOURCE)
 
 
+class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
+    owned_run = PerformanceSampleEvidenceTests.owned_run
+    sample_scenario = PerformanceSampleEvidenceTests.sample_scenario
+    refresh_owned = PerformanceSampleEvidenceTests.refresh_owned
+
+    def refresh_runtime(self, run):
+        self.refresh_owned(run)
+        path = run / 'output/run-result.json'
+        result = json.loads(path.read_text())
+        result['diagnostic'] = evidence.RUNTIME_BASELINE_MODE
+        write_json(path, result)
+
+    def runtime_run(self):
+        run, profile_sha = self.owned_run()
+        run = run.rename(self.root / evidence.RUNTIME_BASELINE_RUN_ID)
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['run_id'] = run.name
+        manifest['request'] = {'mode': evidence.RUNTIME_BASELINE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'runtime_baseline_plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN)}
+        app_hash = manifest['artifacts']['application']['sha256']
+        manifest['prepared_bundle'] = {'origin': 'external-prepared-source-built-bundle',
+            'bundle_manifest_sha256': manifest['bundle_manifest']['sha256'],
+            'application_sha256': app_hash}
+        manifest['command'] = ['python3', '-I', 'scripts/run-gui-regression.py',
+            '--output-root', '<external-output-root>', '--connection-profile',
+            '<private-connection-profile>', '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+            '--prepared-bundle-root', '<external-prepared-bundle-root>',
+            '--expected-prepared-application-sha256', app_hash,
+            '--acceptance-profile-id', evidence.V2_PROFILE_ID]
+        write_json(manifest_path, manifest)
+        for leaf in ('cleanup.json', 'platform-preflight.json', 'platform-postlaunch.json',
+                     'acceptance-observations.json'):
+            path = output / leaf
+            document = json.loads(path.read_text())
+            document['run_id'] = run.name
+            write_json(path, document)
+        (output / 'performance-empty.png').rename(output / 'runtime-baseline-populated.png')
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        environment = raw['assertions']['scenario']['environment']
+        environment['physical_screen'].update(width=1366, height=768, right=1366, bottom=768)
+        environment['region'] = {'culture': 'ko-KR', 'ui_culture': 'ko-KR',
+                                 'timezone': 'Korea Standard Time'}
+        cells, jobs, lives = [], [], []
+        for index, name in enumerate(evidence.RUNTIME_BASELINE_PLAN['startup_cells']):
+            ticks = 638965440000000000 + index * 1000000000
+            pid = 4242 + index
+            value = 0 if index < 2 else 2
+            preference = {'status': 'valid-saved', 'value': value,
+                          'sha256': evidence.runtime_language_preference_hash(value)}
+            cell_environment = deepcopy(environment)
+            cell_environment['main_window']['process_id'] = pid
+            resolution = {'query': 'UISettings.GetColorValue(UIColorType.Foreground)+SPI_GETHIGHCONTRAST',
+                'foreground_argb': [255, 0, 0, 0], 'resolved_theme': 'light',
+                'system_visual_style': {'theme_path_sha256': 'a' * 64,
+                    'theme_color': 'NormalColor', 'theme_size': 'NormalSize', 'forced_colors': False}}
+            appearance_menu = {'hwnd': cell_environment['main_window']['hwnd'],
+                'pid': pid, 'session_id': 2, 'menu_checked': [
+                    {'command_id': 0x9010, 'checked': True},
+                    {'command_id': 0x9011, 'checked': False},
+                    {'command_id': 0x9012, 'checked': False}]}
+            cell_environment['appearance'] = {'preference_before': 'absent', 'preference_after': 'absent',
+                'pre_launch_resolution': deepcopy(resolution), 'ready_resolution': deepcopy(resolution),
+                'pre_close_resolution': deepcopy(resolution), 'ready_menu': deepcopy(appearance_menu),
+                'pre_close_menu': deepcopy(appearance_menu)}
+            cell = {'id': name, 'preference_kind': 'absent' if index == 0 else 'valid-saved',
+                'preference_value': value, 'resolved_language': 'ko' if index < 2 else 'en',
+                'process_id': pid, 'process_start_utc_ticks': ticks,
+                'startup': {'launch_request_to_ready_ms': 200.0,
+                    'process_start_to_ready_lower_ms': 180.0,
+                    'process_start_to_ready_upper_ms': 190.0,
+                    'main_hwnd_bound': True, 'empty_grid': True, 'import_command_enabled': True},
+                'preference_before': {'status': 'absent', 'value': None, 'sha256': None}
+                                     if index == 0 else deepcopy(preference),
+                'preference_after': {'status': 'absent', 'value': None, 'sha256': None}
+                                    if index == 0 else deepcopy(preference),
+                'menu': {'parent': '언어(&L) · 다음 실행부터' if index < 2 else '&Language · next startup',
+                         'options': ['시스템 언어' if index < 2 else 'System language',
+                                     '한국어', 'English', '日本語'], 'checked_command': 0x9020 + value},
+                'empty_idle': None, 'import': None, 'icon_settlement': None,
+                'populated_idle': None, 'transforms': None, 'samples': None, 'phase_summary': None,
+                'normal_exit_code': 0, 'disk_unchanged': True, 'journal_residue_count': 0,
+                'environment': cell_environment}
+            cells.append(cell)
+            job = deepcopy(raw['process_job_cleanup'][0])
+            job.update(pid=pid, process_start_time_utc_ticks=str(ticks))
+            jobs.append(job)
+            life = deepcopy(raw['process_lifecycles'][0])
+            life['process_lifecycle'].update(pid=pid, start_time_utc_ticks=str(ticks),
+                creation_filetime=ticks - 504911232000000000)
+            lives.append(life)
+        rows = []
+        for phase in evidence.RUNTIME_PHASES:
+            for _ in range(150 if phase in {'empty-idle', 'populated-idle'} else 2):
+                elapsed = len(rows) * 200
+                rows.append({'phase': phase, 'elapsed_ms': elapsed, 'cpu_ms': elapsed // 4,
+                    'private_bytes': 10000000, 'working_set_bytes': 20000000,
+                    'threads': 4, 'handles': 100, 'gdi_objects': 20, 'ui_response_ms': 2.0,
+                    'probe_status': 'success', 'probe_error_code': 0,
+                    'resource_collection_ms': 3.0, 'sample_gap_ms': 0 if not rows else 200.0})
+        terminal = IconSettlementEvidenceTests.status(2)
+        receipt = {'data_ready_ms': 25.0, 'icon_settled_observed_ms': 125.0,
+            'first_status': IconSettlementEvidenceTests.status(2, settled=False, pending=2),
+            'settled_status': deepcopy(terminal), 'confirmation_status': deepcopy(terminal),
+            'poll_count': 3, 'unstable_query_attempts': 0, 'sampled_peak_pending': 2,
+            'sampled_peak_unresolved_rows': 0}
+        cells[0].update(empty_idle={'elapsed_ms': 30000.0, 'rows': 0},
+            populated_idle={'elapsed_ms': 30100.0, 'rows': 1000, 'end_status': terminal},
+            icon_settlement=receipt, samples=rows)
+        cells[0]['import'] = {'rows': 1000, 'observed_rows': 1000, 'data_ready_ms': 25.0,
+                              'command_ready_after_rows_ms': 2.0}
+        cells[0]['phase_summary'] = [{'phase': phase,
+            'sample_count': sum(row['phase'] == phase for row in rows),
+            'max_sample_gap_ms': 200.0, 'max_resource_collection_ms': 3.0}
+            for phase in evidence.RUNTIME_PHASES]
+        cells[0]['transforms'] = [{'id': name, 'source': 'ordinary-0000.txt',
+            'proposal': target, 'reset': 'ordinary-0000.txt', 'edit_elapsed_ms': 100.0,
+            'reset_elapsed_ms': 50.0 if name != 'no-op' else 0, 'reset_required': name != 'no-op'}
+            for name, target in [('grow', 'expanded-ordinary-0000.txt'), ('shrink', 'x.txt'),
+                                 ('no-op', 'ordinary-0000.txt')]]
+        scenario = {'mode': evidence.RUNTIME_BASELINE_MODE,
+            'plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN),
+            'system_resolution': {'language': 'ko', 'selected_tag': 'ko-KR',
+                                  'preferred_tags': ['ko-KR', 'en-US']},
+            'executable_sha256': app_hash, 'cells': cells, 'environment': deepcopy(cells[0]['environment']),
+            'disk_unchanged': True, 'journal_residue_count': 0,
+            'wakeups': {'status': 'not_run', 'reason': 'no-supported-process-wakeup-counter'},
+            'appearance': 'light'}
+        raw['assertions'] = {'overall': 'passed', 'scope': 'runtime-baseline-production-v1',
+                             'scenario': scenario}
+        raw.update(process_lifecycles=lives, process_job_cleanup=jobs,
+            keyboard={'status': 'not_run'}, accessibility={'status': 'not_run'},
+            screenshots=[{'file': 'runtime-baseline-populated.png',
+                'sha256': digest((output / 'runtime-baseline-populated.png').read_bytes())}])
+        write_json(raw_path, raw)
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport['raw_cleanup'] = clean_controller_cleanup_v3(profile_sha256=profile_sha,
+            process_jobs=jobs, source_sha=SOURCE,
+            bundle_sha256=manifest['bundle_manifest']['sha256'])
+        write_json(transport_path, transport)
+        self.refresh_runtime(run)
+        return run
+
+    def test_complete_producer_shape_three_process_runtime_evidence(self):
+        run = self.runtime_run()
+        result = evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        self.assertEqual(len(result['metrics']['cells']), 3)
+        self.assertEqual(result['metrics']['cells'][0]['populated_idle_samples'], 150)
+        self.assertEqual(result['performance_batch'], 'not-run')
+        profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+        with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=profile)), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(evidence.main(SCRIPT_ROOT.parent, ['--result-root', str(self.root),
+                '--expected-source-sha', SOURCE, '--run', run.name,
+                '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+                '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'measured')
+
+    def test_rehashed_missing_endpoints_wrong_language_samples_and_exit_fail(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutate in (
+            lambda r: r['assertions']['scenario']['cells'][0].__setitem__('icon_settlement', None),
+            lambda r: r['assertions']['scenario']['cells'][0].__setitem__('populated_idle', None),
+            lambda r: r['assertions']['scenario']['cells'][1].__setitem__('resolved_language', 'en'),
+            lambda r: r['assertions']['scenario']['cells'][2]['menu'].__setitem__('parent', '언어'),
+            lambda r: r['assertions']['scenario']['cells'][0]['samples'][1].__setitem__('cpu_ms', True),
+            lambda r: r['assertions']['scenario']['cells'][0]['samples'][1].__setitem__('elapsed_ms', 0),
+            lambda r: r['assertions']['scenario']['cells'][0]['startup'].__setitem__('launch_request_to_ready_ms', float('nan')),
+            lambda r: r['assertions']['scenario']['cells'][1]['preference_before'].__setitem__('sha256', 'f' * 64),
+            lambda r: r['assertions']['scenario']['cells'][1]['preference_before'].__setitem__('value', False),
+            lambda r: r['assertions']['scenario']['cells'][2]['environment']['region'].__setitem__('culture', 'en-US'),
+            lambda r: r['assertions']['scenario']['cells'][0]['empty_idle'].__setitem__('rows', False),
+            lambda r: r['assertions']['scenario']['cells'][0]['transforms'][2].__setitem__('reset_elapsed_ms', False),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('exit_method', 'forced-termination'),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('executable_path', r'C:\other\DarkReNamer.exe'),
+            lambda r: r['process_lifecycles'][2]['process_lifecycle'].__setitem__('creation_filetime', True),
+            lambda r: r['assertions']['scenario']['system_resolution'].__setitem__('preferred_tags', ['en-US', 'ko-KR']),
+            lambda r: r.__setitem__('process_job_cleanup', r['process_job_cleanup'][:2]),
+            lambda r: r['assertions']['scenario']['cells'].__setitem__(1,
+                deepcopy(r['assertions']['scenario']['cells'][0])),
+        ):
+            with self.subTest(mutate=mutate):
+                changed = json.loads(original)
+                mutate(changed)
+                write_json(path, changed)
+                self.refresh_runtime(run)
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_zero_sample_short_phase_preserves_real_powershell_double_zero_summary(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        raw = json.loads(path.read_text())
+        cell = raw['assertions']['scenario']['cells'][0]
+        cell['samples'] = [row for row in cell['samples'] if row['phase'] != 'transform-no-op']
+        # A real sub-200ms phase can occur entirely between timer callbacks.
+        # Get-ObserverPerformancePhaseSummary emits [double]0 as JSON 0.0.
+        for summary in cell['phase_summary']:
+            rows = [row for row in cell['samples'] if row['phase'] == summary['phase']]
+            summary.update(sample_count=len(rows),
+                max_sample_gap_ms=max((row['sample_gap_ms'] for row in rows), default=0.0),
+                max_resource_collection_ms=max((row['resource_collection_ms'] for row in rows), default=0.0))
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        result = evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        self.assertEqual(result['metrics']['cells'][0]['sample_count'], 310)
+        self.assertNotIn('transform-no-op', [row['phase'] for row in
+            result['metrics']['cells'][0]['sampled_phase_resources']])
+        short = next(row for row in cell['phase_summary'] if row['phase'] == 'transform-no-op')
+        short['max_sample_gap_ms'] = False
+        write_json(path, raw)
+        self.refresh_runtime(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+
+    def test_rehashed_dark_forced_missing_override_and_unbound_appearance_fail(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        for mutation in ('dark-before', 'dark-ready', 'forced-close', 'missing', 'missing-resolution',
+                         'override-before', 'override-after', 'wrong-pid', 'wrong-hwnd',
+                         'wrong-session', 'explicit-light', 'missing-radio'):
+            changed = json.loads(original)
+            cell = changed['assertions']['scenario']['cells'][1]
+            appearance = cell['environment']['appearance']
+            if mutation.startswith('dark'):
+                phase = 'pre_launch_resolution' if mutation == 'dark-before' else 'ready_resolution'
+                # Even a forged Light label cannot conceal the actual dark foreground.
+                appearance[phase]['foreground_argb'] = [255, 245, 245, 245]
+            elif mutation == 'forced-close':
+                appearance['pre_close_resolution']['system_visual_style']['forced_colors'] = True
+            elif mutation == 'missing':
+                del cell['environment']['appearance']
+            elif mutation == 'missing-resolution':
+                del appearance['ready_resolution']
+            elif mutation.startswith('override'):
+                appearance['preference_before' if mutation == 'override-before' else 'preference_after'] = 'present'
+            elif mutation == 'wrong-pid':
+                appearance['ready_menu']['pid'] += 1
+            elif mutation == 'wrong-hwnd':
+                appearance['pre_close_menu']['hwnd'] += 1
+            elif mutation == 'wrong-session':
+                appearance['ready_menu']['session_id'] = 3
+                appearance['pre_close_menu']['session_id'] = 3
+            elif mutation == 'explicit-light':
+                appearance['ready_menu']['menu_checked'][0]['checked'] = False
+                appearance['ready_menu']['menu_checked'][1]['checked'] = True
+            else:
+                del appearance['ready_menu']['menu_checked']
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.write_bytes(original)
+        self.refresh_runtime(run)
+
+    def test_runtime_cli_requires_one_fixed_run_and_diagnostic_only_plan(self):
+        base = ['--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
+                '--acceptance-profile-id', evidence.V2_PROFILE_ID]
+        for extra in (['--run', evidence.RUNTIME_BASELINE_RUN_ID, '--require-complete-set'],
+                      ['--run', evidence.RUNTIME_BASELINE_RUN_ID, '--configuration-set', 'focused'],
+                      ['--run', evidence.PICKER_RUN_ID]):
+            with self.subTest(extra=extra), self.assertRaises(evidence.EvidenceError):
+                evidence.main(SCRIPT_ROOT.parent, base + extra)
+        request = {'mode': evidence.RUNTIME_BASELINE_MODE, 'appearance': 'light',
+            'desktop': {'width': 1366, 'height': 768, 'dpi': 96}, 'text_scale_percent': 100,
+            'runtime_baseline_plan': deepcopy(evidence.RUNTIME_BASELINE_PLAN)}
+        for plan in ('performance_plan', 'settlement_plan', 'picker_identity_plan'):
+            changed = {**request, plan: {}}
+            with self.subTest(plan=plan), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_request(changed)
+
+    def test_manifest_hash_plan_and_incomplete_cleanup_fail_closed(self):
+        run = self.runtime_run()
+        for relative, mutate in (
+            ('input-manifest.json', lambda d: d['prepared_bundle'].__setitem__('application_sha256', 'f' * 64)),
+            ('input-manifest.json', lambda d: d['request']['runtime_baseline_plan'].__setitem__('idle_seconds', 29)),
+            ('input-manifest.json', lambda d: d['request']['runtime_baseline_plan'].__setitem__('idle_seconds', True)),
+            ('output/desktop-stop-response.json', lambda d: d.__setitem__('lifecycleStatus', 'pending')),
+            ('output/transport.json', lambda d: d['raw_cleanup']['owned_resource_evidence']['process_job_cleanup'][2].__setitem__('job_closed', False)),
+        ):
+            path = run / relative
+            original = path.read_bytes()
+            changed = json.loads(original)
+            mutate(changed)
+            write_json(path, changed)
+            self.refresh_runtime(run)
+            with self.subTest(relative=relative, mutate=mutate), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+            path.write_bytes(original)
+            self.refresh_runtime(run)
+
+
 if __name__ == "__main__":
     unittest.main()

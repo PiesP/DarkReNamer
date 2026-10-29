@@ -28,6 +28,14 @@ OWNED_PERFORMANCE_RUN = re.compile(
     r"performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)\Z")
 PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
 CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
+RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v1-1366x768-96-text100"
+RUNTIME_BASELINE_CELLS = ["fresh-system", "saved-system", "saved-english"]
+RUNTIME_BASELINE_PLAN = {
+    "startup_cells": RUNTIME_BASELINE_CELLS, "idle_seconds": 30,
+    "populated_rows": 1000, "sample_interval_ms": 200,
+    "icon_poll_interval_ms": 100, "maximum_seconds": 600,
+    "transform_cases": ["grow", "shrink", "no-op"],
+}
 PICKER_PLAN = {"ordinary_rows": [100], "idle_ms": 1000, "picker_settle_ms": 350,
                "sample_interval_ms": 200, "maximum_seconds": 120,
                "command_timeout_ms": 5000, "fixture_file_limit": 100,
@@ -347,6 +355,76 @@ def verify_owned_performance_text_scale(observations: object) -> dict:
     return proof
 
 
+def _runtime_baseline_processes(original: dict, result: dict) -> None:
+    """Bind the three normal product lifetimes without qualifying the failed run."""
+    observations = result.get("acceptance_observations")
+    require(type(observations) is dict and
+            observations.get("run_id") == RUNTIME_BASELINE_RUN_ID,
+            "Runtime baseline observations have no fixed run identity.")
+    scenario = observations.get("scenario")
+    application = result.get("application")
+    require(type(scenario) is dict and scenario.get("mode") == "runtime-baseline" and
+            type(application) is dict and type(application.get("sha256")) is str and
+            HEX64.fullmatch(application["sha256"]) is not None and
+            scenario.get("executable_sha256") == application["sha256"] and
+            type(result.get("assertions")) is dict and
+            result["assertions"].get("scenario") == scenario,
+            "Runtime baseline scenario or source executable binding differs.")
+    cells = scenario.get("cells")
+    lifecycles = result.get("process_lifecycles")
+    require(type(cells) is list and len(cells) == 3 and
+            all(type(cell) is dict for cell in cells) and
+            [cell.get("id") for cell in cells] == RUNTIME_BASELINE_CELLS and
+            type(lifecycles) is list and len(lifecycles) == 3,
+            "Runtime baseline requires exactly three ordered cells and lifetimes.")
+    evidence = original["raw_cleanup"]["owned_resource_evidence"]
+    session = evidence["runner_session_id"]
+    identities = []
+    paths = set()
+    for cell, wrapped in zip(cells, lifecycles, strict=True):
+        pid, ticks = cell.get("process_id"), cell.get("process_start_utc_ticks")
+        require(type(pid) is int and 0 < pid <= 0xFFFFFFFF and
+                type(ticks) is int and 504911232000000000 < ticks <= 3_155_378_975_999_999_999 and
+                type(cell.get("normal_exit_code")) is int and cell["normal_exit_code"] == 0 and
+                type(cell.get("environment")) is dict and
+                type(cell["environment"].get("main_window")) is dict and
+                type(cell["environment"]["main_window"].get("process_id")) is int and
+                cell["environment"]["main_window"]["process_id"] == pid,
+                "Runtime baseline cell process identity or normal exit is unavailable.")
+        life = require_exact_keys(require_exact_keys(wrapped, {"process_lifecycle"},
+            "Runtime baseline lifecycle wrapper")["process_lifecycle"], {
+                "pid", "session_id", "start_time_utc_ticks", "creation_filetime",
+                "executable_path", "executable_sha256", "start_observed", "exit_observed",
+                "exit_method", "exit_code"}, "Runtime baseline lifecycle")
+        require(type(life["pid"]) is int and life["pid"] == pid and
+                life["start_time_utc_ticks"] == str(ticks) and
+                type(life["creation_filetime"]) is int and
+                life["creation_filetime"] == ticks - 504911232000000000 and
+                type(life["session_id"]) is int and life["session_id"] == session and
+                type(life["executable_path"]) is str and
+                re.match(r"^[A-Za-z]:\\", life["executable_path"]) is not None and
+                life["executable_sha256"] == application["sha256"] and
+                life["start_observed"] is True and life["exit_observed"] is True and
+                life["exit_method"] == "normal-close" and
+                type(life["exit_code"]) is int and life["exit_code"] == 0,
+                "Runtime baseline lifetime is not a source-bound normal process exit.")
+        identities.append((pid, ticks))
+        paths.add(life["executable_path"])
+    require(len(set(identities)) == 3 and len(paths) == 1 and
+            identities[0][1] < identities[1][1] < identities[2][1],
+            "Runtime baseline process identities repeat or startup order differs.")
+    jobs = verify_process_job_cleanup(result.get("process_job_cleanup"),
+                                      expected_processes=identities)
+    require([(job["pid"], int(job["process_start_time_utc_ticks"])) for job in jobs] == identities and
+            all(job["forced_termination"] is False and
+                job["active_processes_at_primary_exit"] == 0 for job in jobs) and
+            evidence["declared_processes"] == [
+                {"pid": pid, "start_time_utc_ticks": str(ticks)} for pid, ticks in identities] and
+            jobs == evidence["process_job_cleanup"] and
+            result.get("observer_lifecycle") == evidence["task_execution"]["observer_lifecycle"],
+            "Runtime baseline cells, declared lifetimes, Jobs, or observer differ.")
+
+
 def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
                                  proof: dict, indexed: dict[str, dict],
                                  receipt_bytes: bytes, signal_bytes: bytes,
@@ -364,8 +442,9 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
     match = OWNED_PERFORMANCE_RUN.fullmatch(run_id) if type(run_id) is str else None
     picker = run_id == PICKER_RUN_ID
     custom = run_id == CUSTOM_RUN_ID
+    runtime = run_id == RUNTIME_BASELINE_RUN_ID
     require(frozen["schema_version"] == 1 and
-            frozen["kind"] == "owned_performance_predelete_restoration" and (match is not None or picker or custom) and
+            frozen["kind"] == "owned_performance_predelete_restoration" and (match is not None or picker or custom or runtime) and
             frozen["run_name"] == receipt["run_name"] and
             frozen["vm_id"] == receipt["vm_id"] and
             frozen["nonce"] == receipt["nonce"] and
@@ -412,12 +491,15 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
             manifest.get("bundle_manifest", {}).get("sha256") == frozen["bundle_sha256"] and
             manifest.get("request", {}).get("mode") ==
                 ("picker-identity-observation" if picker else
-                 "custom-input-identity-observation" if custom else "performance-sample") and
+                 "custom-input-identity-observation" if custom else
+                 "runtime-baseline" if runtime else "performance-sample") and
             context.get("acceptance_mode") == manifest.get("request", {}).get("mode") and
             ((manifest.get("request", {}).get("picker_identity_plan") == PICKER_PLAN and
               "performance_plan" not in manifest.get("request", {})) if picker else
              (manifest.get("request", {}).get("custom_input_plan") == CUSTOM_PLAN and
               "performance_plan" not in manifest.get("request", {})) if custom else
+             (manifest.get("request", {}).get("runtime_baseline_plan") == RUNTIME_BASELINE_PLAN and
+              "performance_plan" not in manifest.get("request", {})) if runtime else
              manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
                 match.group(1)) and
             result.get("application", {}).get("sha256") ==
@@ -426,6 +508,24 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
                 expected["acceptance-observations.json"]["sha256"] and
             result.get("acceptance_observations") == observations,
             "Owned performance frozen input, profile, result, or observations differ.")
+    if runtime:
+        request = require_exact_keys(manifest.get("request"), {
+            "mode", "appearance", "desktop", "text_scale_percent", "runtime_baseline_plan",
+        }, "Runtime baseline request")
+        require(request["appearance"] == "light" and
+                request["desktop"] == {"width": 1366, "height": 768, "dpi": 96} and
+                type(request["text_scale_percent"]) is int and request["text_scale_percent"] == 100,
+                "Runtime baseline fixed desktop request differs.")
+        prepared = require_exact_keys(manifest.get("prepared_bundle"), {
+            "origin", "bundle_manifest_sha256", "application_sha256"}, "Runtime prepared bundle")
+        bundle = document("bundle.json")
+        require(prepared == {"origin": "external-prepared-source-built-bundle",
+                    "bundle_manifest_sha256": frozen["bundle_sha256"],
+                    "application_sha256": result["application"]["sha256"]} and
+                bundle.get("source_sha") == frozen["source_sha"] and
+                bundle.get("application", {}).get("sha256") == result["application"]["sha256"],
+                "Runtime baseline prepared source bundle or application differs.")
+        _runtime_baseline_processes(original, result)
     verify_owned_performance_text_scale(observations)
 
 
@@ -490,7 +590,7 @@ def _source_result(root: Path, original: dict, receipt: dict,
     bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
                   raw_context.get("acceptance_mode") in
                   ("appearance-pair", "performance-sample", "first-clear-observation",
-                   "picker-identity-observation", "custom-input-identity-observation"))
+                   "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline"))
     context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -545,7 +645,7 @@ def _source_result(root: Path, original: dict, receipt: dict,
              ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
              (context["acceptance_mode"] in
               ("appearance-pair", "performance-sample", "first-clear-observation",
-               "picker-identity-observation", "custom-input-identity-observation") and
+               "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline") and
               type(context["acceptance_text_scale_percent"]) is int and
               context["acceptance_text_scale_percent"] == 100 and
               context["high_contrast_requested"] is False)
@@ -611,9 +711,9 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
     selected_context = original.get("owned_cleanup_failure_context")
     if type(selected_context) is dict and selected_context.get("acceptance_mode") in \
-            {"picker-identity-observation", "custom-input-identity-observation"}:
+            {"picker-identity-observation", "custom-input-identity-observation", "runtime-baseline"}:
         require(possible_owned_performance,
-                "Focused picker preservation requires reviewed V2 revision-3 cleanup.")
+                "Focused GUI preservation requires reviewed V2 revision-3 cleanup.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
     receipt = require_exact_keys(_json(receipt_bytes, "Preservation receipt"), {
         "schema_version", "kind", "run_name", "vm_id", "nonce", "desktop_lease_id", "original_transport",
@@ -728,10 +828,10 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         embedded = result.get("acceptance_observations")
         run_id = embedded.get("run_id") if type(embedded) is dict else None
         candidate = (context["acceptance_mode"] in {"performance-sample", "picker-identity-observation",
-                                                   "custom-input-identity-observation"} or
+                                                   "custom-input-identity-observation", "runtime-baseline"} or
                      type(run_id) is str and
                      run_id.startswith("performance-sample-v2-owned-r3-") or
-                     run_id in {PICKER_RUN_ID, CUSTOM_RUN_ID} or
+                     run_id in {PICKER_RUN_ID, CUSTOM_RUN_ID, RUNTIME_BASELINE_RUN_ID} or
                      any(name.startswith("owned-performance-") for name in listed) or
                      "predelete_sha256" in proof or
                      (root / "owned-performance-predelete.json").exists())
@@ -742,7 +842,9 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
                      (context["acceptance_mode"] == "picker-identity-observation" and
                       run_id == PICKER_RUN_ID) or
                      (context["acceptance_mode"] == "custom-input-identity-observation" and
-                      run_id == CUSTOM_RUN_ID)) and
+                      run_id == CUSTOM_RUN_ID) or
+                     (context["acceptance_mode"] == "runtime-baseline" and
+                      run_id == RUNTIME_BASELINE_RUN_ID)) and
                     "predelete_sha256" in proof,
                     "Owned performance route lacks its frozen restoration gate.")
             _owned_performance_predelete(root, original, receipt, proof,

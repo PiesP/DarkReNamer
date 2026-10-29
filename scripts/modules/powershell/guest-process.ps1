@@ -10,6 +10,7 @@
 
         [switch] $AllowZeroTests,
         [switch] $RefreshProfile,
+        [switch] $ProfileRuntimeModel,
         [switch] $FocusedIconTests,
         [switch] $FocusedRefreshTests,
         [switch] $VirtualExecution,
@@ -33,7 +34,8 @@
     $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
     $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
     if (($RefreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests) -or
-        ($VirtualExecution -and ($RefreshProfile -or $focusedTests))) {
+        ($VirtualExecution -and ($RefreshProfile -or $focusedTests)) -or
+        ($ProfileRuntimeModel -and ($RefreshProfile -or $focusedTests -or $VirtualExecution))) {
         throw 'A Rust test summary cannot use two selectors.'
     }
     if ($FocusedIconCase -and -not $FocusedIconTests) {
@@ -48,13 +50,18 @@
     if ($FocusedRefreshTests -and -not $FocusedRefreshCase) {
         throw 'Focused refresh summary requires one fixed exact case.'
     }
-    if (-not $RefreshProfile -and -not $focusedTests -and -not $VirtualExecution -and $filtered -ne 0) {
+    if (-not $RefreshProfile -and -not $ProfileRuntimeModel -and -not $focusedTests -and -not $VirtualExecution -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
     }
     if ($RefreshProfile -and ($passed + $failed -ne 1 -or
         $ignored -ne 0 -or $filtered -lt 1 -or
         ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
         throw 'The fixed refresh diagnostic must select exactly one ignored test.'
+    }
+    if ($ProfileRuntimeModel -and ($passed + $failed -ne 1 -or
+        $ignored -ne 0 -or $filtered -lt 1 -or
+        ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
+        throw 'The runtime model baseline must select exactly one ignored test.'
     }
     if ($VirtualExecution -and ($passed + $failed -ne 1 -or
         $ignored -ne 0 -or $filtered -lt 1 -or
@@ -2196,6 +2203,7 @@ function Invoke-RustTestBinary {
         [Parameter(Mandatory)][int] $Index,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [ValidateSet('', 'hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
+        [switch] $ProfileRuntimeModel,
         [switch] $FocusedIconTests,
         [switch] $FocusedRefreshTests,
         [ValidateSet(0, 100, 1000, 10000)][int] $VirtualExecutionCount,
@@ -2215,7 +2223,9 @@ function Invoke-RustTestBinary {
         throw 'Focused icon launch requires one fixed exact case.'
     }
     if ([bool]$FocusedRefreshTests -ne [bool]$FocusedRefreshCase -or
-        ($FocusedIconTests -and $FocusedRefreshTests)) {
+        ($FocusedIconTests -and $FocusedRefreshTests) -or
+        ($ProfileRuntimeModel -and ($RefreshProfileOrder -or $FocusedIconTests -or
+            $FocusedRefreshTests -or $VirtualExecutionCount -or $Test.name -cne 'darknamer_app'))) {
         throw 'Focused refresh launch requires one fixed exact case.'
     }
     if ($VirtualExecutionCount -and ($RefreshProfileOrder -or $FocusedIconTests -or
@@ -2255,6 +2265,9 @@ function Invoke-RustTestBinary {
         $row['test_name'] =
             'windows::list_view::native_tests::full_refresh_' + $FocusedRefreshCase
     }
+    if ($ProfileRuntimeModel) {
+        $row['test_name'] = 'windows::list_view::native_tests::profile_runtime_model_baseline'
+    }
     if ($VirtualExecutionCount) {
         $row['test_name'] = 'benchmark_durable_production_path'
     }
@@ -2289,7 +2302,9 @@ function Invoke-RustTestBinary {
                 -VirtualExecutionIteration $VirtualExecutionIteration `
                 -VirtualExecutionSourceSha $VirtualExecutionSourceSha `
                 -Action {
-                $testArguments = if ($RefreshProfileOrder) {
+                $testArguments = if ($ProfileRuntimeModel) {
+                    '--exact windows::list_view::native_tests::profile_runtime_model_baseline --ignored --nocapture --test-threads=1'
+                } elseif ($RefreshProfileOrder) {
                     '--exact windows::list_view::native_tests::profile_refresh_stages --ignored --nocapture --test-threads=1'
                 } elseif ($FocusedIconCase) {
                     '--exact windows::list_view::native_tests::icon_worker_' +
@@ -2341,6 +2356,7 @@ function Invoke-RustTestBinary {
                         -Stderr $stderrText `
                         -AllowZeroTests:($Test.name -ceq 'DarkReNamer') `
                         -RefreshProfile:([bool]$RefreshProfileOrder) `
+                        -ProfileRuntimeModel:$ProfileRuntimeModel `
                         -FocusedIconTests:$FocusedIconTests `
                         -FocusedRefreshTests:$FocusedRefreshTests `
                         -VirtualExecution:([bool]$VirtualExecutionCount) @focusedCaseArguments

@@ -766,6 +766,46 @@ throughput. These instrumented virtual-storage results do not establish GUI
 Apply latency, physical SSD/HDD performance, power-loss durability or release
 acceptance. The validation-skip estimator is not an execution candidate.
 
+### Windows runtime model baseline diagnostic
+
+Run the fixed source-built model diagnostic on the prepared VM from a clean
+committed checkout. Select the configured SSH alias, exact VM GUID, and a new
+private output directory. The optional symbol directory must also be new,
+absolute, private, and outside the checkout and bundle:
+
+```bash
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host "$DARKRENAMER_VM_SSH_HOST" \
+  --expected-vm-id "$DARKRENAMER_VM_ID" \
+  --profile-runtime-model \
+  --private-symbol-output /absolute/private/new-model-symbols \
+  --output /absolute/private/new-runtime-model-baseline
+```
+
+This selection fixes the v2 owned-resource cleanup profile, managed 1366×768
+96-DPI RDP desktop, and a 1,200-second test and suite limit. It builds one
+optimized app-library test binary plus the production executable from the
+same source and runs exactly the ignored
+`windows::list_view::native_tests::profile_runtime_model_baseline` test. The
+optional private symbol directory retains the fresh executable/PDB pairs and
+CodeView identities; the VM bundle does not contain PDBs. A passing
+`validation-result.json` binds the source, test binary, complete stdout and
+stderr bytes, exact libtest outcome, process Job, transport, and owned cleanup.
+
+The test emits 183 schema-1 `runtime-model-baseline` records, with three
+repetitions at 100, 1,000, and 10,000 model rows in each process. Each repetition includes
+full preview uniqueness/collision groups, five single-row edit cases, four
+model sort distributions, and native command sorting with none/sparse selection;
+10,000 shuffled rows also include broad selection. The fixed verifier rejects
+missing, duplicated, reordered, malformed, or out-of-range records. Setup and
+functional assertions are outside the clocks. `compare_nested_ns` is included
+in `sort_inclusive_ns`; do not sum those values. The sort-command record reports
+separate selection snapshot, sort, token remap, native refresh, selection
+restore, and post-control times. This is an instrumented Windows libtest/model
+baseline, not production GUI Apply latency, process allocation count, heap peak,
+or a user-visible responsiveness result. Keep actual product EXE and heap traces
+as separate, source-bound evidence.
+
 ### ListView refresh stage diagnostic
 
 On the prepared VM, run the fixed native refresh diagnostic from a clean,
@@ -1579,3 +1619,59 @@ The release-tool integrity fixtures cover wrong bytes before execution, stale
 pins, unsupported assets and corrupt retained inputs. Complete the registered
 release category and a non-publishing hosted candidate after pin changes;
 fixture passes alone do not establish Windows installation or signing success.
+
+### Production runtime baseline
+
+From a clean source commit, use a prepared source-built bundle from that exact
+commit and a new private output root:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --output-root /absolute/private/new-runtime-baseline-attempt \
+  --connection-profile /path/to/private/connection-profile.json \
+  --diagnostic runtime-baseline \
+  --prepared-bundle-root /path/to/source-bound/prepared-bundle \
+  --expected-prepared-application-sha256 '<64-character-executable-sha256>' \
+  --acceptance-profile-id vm-automated-v2-owned-resources
+```
+
+The fixed `runtime-baseline-v1-1366x768-96-text100` run requires the prepared
+1366×768, 96-DPI, text-100, light managed desktop and a System language that
+resolves to Korean. It starts three sequential fresh product processes with
+separate isolated `LOCALAPPDATA` roots: absent preference with System selected,
+valid saved System, and valid saved English. Every cell records the process
+creation bracket, bound main window, empty list, enabled path-list import
+command, exact preference record hash, localized menu radio state, VM region,
+normal close, and owned process Job cleanup.
+
+Each cell requires absent `ui-appearance-v1` records before launch and after
+normal exit, with the product's System appearance radio selected on its bound
+PID/HWND/session. Existing native probes observe the official UISettings
+foreground color and `SPI_GETHIGHCONTRAST` before launch, after readiness, and
+before close. The verifier derives Light from the same foreground luminance
+threshold used by the product and rejects dark, Forced Colors, missing probes,
+or appearance overrides. These observations do not change startup preferences
+or OS appearance settings; appearance probes are outside the startup clock.
+
+Only the first cell performs the workload: 30 seconds empty idle; one ordinary
+1,000-file import; the existing asynchronous status endpoint with a stable full
+icon generation; 30 seconds populated idle with the same settled generation;
+then grow, shrink, and no-op manual-name proposals with reset verification and
+unchanged fixture bytes. The existing 200 ms sampler retains raw CPU time,
+private bytes, working set, thread, handle and GDI counts, responsiveness probes,
+resource-query duration and sample gaps. Summaries are derived from those raw
+samples. The scenario has a 600-second ceiling and one original populated PNG
+within the existing 32 MiB evidence budget.
+
+The independent GUI verifier requires the exact source/profile/prepared binary,
+raw manifests and transcripts, all three process lifecycles and Jobs, normal
+exits, text-scale restoration and managed-desktop cleanup. Missing icon or
+populated-idle evidence is incomplete. The frozen strict-cleanup failure route
+retains the failed original receipt and verifies all three process identities
+before authorizing deletion of only its two held roots.
+
+This diagnostic does not run Apply, measure allocator internals or process
+wakeups, collect WPR traces, complete the unchanged fixed performance sample, or
+provide release acceptance. The fixed performance sample continues to cover
+100/1,000/10,000 rows, both long-path column orders, extension churn and reuse
+with its existing schema.

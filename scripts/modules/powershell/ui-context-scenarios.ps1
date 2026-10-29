@@ -3460,3 +3460,351 @@ function Invoke-ObserverIconSettlementScenario {
     }
     finally { if ($null -ne $application) { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned } }
 }
+
+function New-ObserverRuntimeLanguagePreference {
+    param([Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][ValidateSet(0,2)][int] $Value)
+
+    $directory = New-PrivateDirectory -Parent $LocalAppData -Leaf 'DarkReNamer'
+    $path = Join-Path $directory 'ui-language-v1'
+    if (Test-Path -LiteralPath $path) { throw 'Runtime baseline language fixture is not fresh.' }
+    $bytes = [byte[]]::new(20)
+    [Text.Encoding]::ASCII.GetBytes("DRLANG`0`0").CopyTo($bytes, 0)
+    $bytes[8] = 1
+    $bytes[12] = [byte]$Value
+    $hash = [uint32]2166136261
+    foreach ($index in 0..15) {
+        $hash = [uint32]((([uint64]($hash -bxor [uint32]$bytes[$index])) *
+            [uint64]16777619) -band [uint64]4294967295)
+    }
+    [BitConverter]::GetBytes($hash).CopyTo($bytes, 16)
+    [IO.File]::WriteAllBytes($path, $bytes)
+    $record = Read-ProductionLanguagePreference -LocalAppData $LocalAppData
+    if ($record.value -ne $Value) { throw 'Runtime baseline language fixture failed its production decoder.' }
+    return $record
+}
+
+function Get-ObserverRuntimeLightAppearance {
+    $resolution = Get-ObserverResolvedSystemAppearance
+    if ($resolution.resolved_theme -cne 'light' -or
+        $resolution.system_visual_style.forced_colors -isnot [bool] -or
+        $resolution.system_visual_style.forced_colors) {
+        throw 'Runtime baseline requires observed System Light appearance without Forced Colors.'
+    }
+    return $resolution
+}
+
+function Assert-ObserverRuntimeSystemAppearanceMenu {
+    param([Parameter(Mandatory)] $Menu)
+    $expected = @(
+        [ordered]@{ command_id=0x9010; checked=$true },
+        [ordered]@{ command_id=0x9011; checked=$false },
+        [ordered]@{ command_id=0x9012; checked=$false })
+    if (($Menu.menu_checked | ConvertTo-Json -Compress) -cne
+        ($expected | ConvertTo-Json -Compress)) {
+        throw 'Runtime baseline product appearance did not retain the fresh System selection.'
+    }
+}
+
+function Invoke-ObserverRuntimeBaselineScenario {
+    param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(600, $WaitSeconds))
+    $applicationPath = Join-Path $Verified.root $Verified.application.file
+    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+        throw 'Runtime baseline executable differs from its source-bound bundle.'
+    }
+    Initialize-ProductionLanguageMenuReader
+    $systemLanguage = Resolve-ProductionSystemLanguage `
+        -Tags @([DarkReNamerLanguageMenuReader]::PreferredLanguages())
+    if ($systemLanguage.language -cne 'ko') {
+        throw 'Runtime baseline expected Korean System language on the prepared VM.'
+    }
+    $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'runtime-baseline-fixture'
+    $ordinary = New-PrivateDirectory -Parent $fixture -Leaf 'ordinary'
+    $paths = [Collections.Generic.List[string]]::new()
+    foreach ($index in 0..999) {
+        $path = Join-Path $ordinary ('ordinary-{0:D4}.txt' -f $index)
+        [IO.File]::WriteAllText($path, ('runtime-ordinary-{0:D4}' -f $index), [Text.Encoding]::ASCII)
+        $paths.Add($path)
+    }
+    $pathList = New-ObserverPathList -RuntimeRoot $RuntimeRoot `
+        -Paths ([string[]]$paths.ToArray()) -Leaf 'runtime-baseline-paths.txt'
+    $ObservationSink['mode'] = 'runtime-baseline'
+    $ObservationSink['plan'] = [ordered]@{
+        startup_cells=@('fresh-system','saved-system','saved-english')
+        idle_seconds=30; populated_rows=1000; sample_interval_ms=200
+        icon_poll_interval_ms=100; maximum_seconds=600
+        transform_cases=@('grow','shrink','no-op')
+    }
+    $ObservationSink['system_resolution'] = $systemLanguage
+    $ObservationSink['executable_sha256'] = $Verified.application.sha256
+    $cells = [Collections.Generic.List[object]]::new()
+    $ObservationSink['cells'] = $cells
+    foreach ($step in @(
+        [ordered]@{ id='fresh-system'; preference=$null; value=0; language='ko'; workload=$true },
+        [ordered]@{ id='saved-system'; preference=0; value=0; language='ko'; workload=$false },
+        [ordered]@{ id='saved-english'; preference=2; value=2; language='en'; workload=$false }
+    )) {
+        if ((Get-Date) -ge $deadline) { throw 'Runtime baseline exceeded its fixed scenario deadline.' }
+        $cellRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf ('runtime-cell-' + $step.id)
+        $cell = [ordered]@{ id=$step.id; preference_kind=$(if ($null -eq $step.preference) {
+                'absent' } else { 'valid-saved' }); preference_value=$step.value;
+            resolved_language=$step.language; process_id=$null; process_start_utc_ticks=$null;
+            startup=$null; preference_before=$null; preference_after=$null; menu=$null;
+            empty_idle=$null; import=$null; icon_settlement=$null;
+            populated_idle=$null; transforms=$null; samples=$null; phase_summary=$null;
+            normal_exit_code=$null; disk_unchanged=$false; journal_residue_count=$null }
+        $cells.Add($cell)
+        Invoke-WithIsolatedEnvironment -RuntimeRoot $cellRoot -Action {
+            $application = $null
+            $sampler = $null
+            try {
+                $preferencePath = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'ui-language-v1'
+                if ($null -eq $step.preference) {
+                    if (Test-Path -LiteralPath $preferencePath) {
+                        throw 'Fresh runtime baseline cell has preexisting language preference.'
+                    }
+                    $cell.preference_before = [ordered]@{ status='absent'; value=$null; sha256=$null }
+                }
+                else {
+                    $seed = New-ObserverRuntimeLanguagePreference -LocalAppData $env:LOCALAPPDATA `
+                        -Value $step.preference
+                    $cell.preference_before = [ordered]@{ status='valid-saved'; value=$seed.value;
+                        sha256=$seed.sha256 }
+                }
+                $appearancePreferencePath = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'ui-appearance-v1'
+                if (Test-Path -LiteralPath $appearancePreferencePath) {
+                    throw 'Runtime baseline startup contains an appearance preference override.'
+                }
+                $appearanceBeforeLaunch = Get-ObserverRuntimeLightAppearance
+                $application = Start-AcceptanceApplication -FilePath $applicationPath `
+                    -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds `
+                    -Label 'runtime baseline application' `
+                    -ProcessLifecycleObservations $ProcessLifecycleObservations
+                $nativeLifetime = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+                    [IntPtr]$application.process.Handle, [uint32]$application.process.Id, 0, $false)
+                if ([decimal]$application.owned.process_start_time_utc_ticks -ne
+                    ([decimal]$nativeLifetime[0] + 504911232000000000)) {
+                    throw 'Runtime baseline native and managed creation times differ.'
+                }
+                $application.process_lifecycle['creation_filetime'] = [long]$nativeLifetime[0]
+                [void](Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main `
+                    -Process $application.process -ExpectedSession $SessionId)
+                $environment = Get-ObserverEnvironmentMetadata -Application $application
+                $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+                $environment['region'] = [ordered]@{
+                    culture=[Globalization.CultureInfo]::CurrentCulture.Name
+                    ui_culture=[Globalization.CultureInfo]::CurrentUICulture.Name
+                    timezone=[TimeZoneInfo]::Local.Id
+                }
+                if ($environment.physical_screen.width -ne 1366 -or
+                    $environment.physical_screen.height -ne 768 -or $environment.hwnd_dpi -ne 96 -or
+                    $environment.text_scale_factor_percent -ne 100) {
+                    throw 'Runtime baseline display differs from its fixed request.'
+                }
+                if ($step.workload) { $ObservationSink['environment'] = $environment }
+                $cell['environment'] = $environment
+                $cell.process_id = [int]$application.process.Id
+                $cell.process_start_utc_ticks = [long]$application.process.StartTime.ToUniversalTime().Ticks
+                $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+                if ($grid.pattern.Current.RowCount -ne 0) {
+                    throw 'Runtime baseline product did not start with an empty list.'
+                }
+                $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+                while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                    [IntPtr]$application.main_handle, [uint32]0x801D)) {
+                    if ((Get-Date) -ge $readyDeadline) {
+                        throw 'Runtime baseline import command was not ready.'
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
+                $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                $createBegin = [long]$application.owned.ProcessCreateBeginTimestamp
+                $createEnd = [long]$application.owned.ProcessCreateEndTimestamp
+                if ($createBegin -le 0 -or $createEnd -lt $createBegin -or $readyTicks -lt $createEnd) {
+                    throw 'Runtime baseline process creation bracket is invalid.'
+                }
+                $cell.startup = [ordered]@{
+                    launch_request_to_ready_ms=[Math]::Round(($readyTicks - $application.launch_ticks) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
+                    process_start_to_ready_lower_ms=[Math]::Round(($readyTicks - $createEnd) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
+                    process_start_to_ready_upper_ms=[Math]::Round(($readyTicks - $createBegin) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
+                    main_hwnd_bound=$true; empty_grid=$true; import_command_enabled=$true
+                }
+                # Keep environment queries outside the launch-to-ready clock above.
+                $appearanceReady = Get-ObserverRuntimeLightAppearance
+                $appearanceMenu = Get-VmAutomatedAppearance -Window $application.main `
+                    -Process $application.process -ExpectedSession $SessionId
+                Assert-ObserverRuntimeSystemAppearanceMenu -Menu $appearanceMenu
+                $environment['appearance'] = [ordered]@{
+                    preference_before='absent'; preference_after=$null
+                    pre_launch_resolution=$appearanceBeforeLaunch; ready_resolution=$appearanceReady
+                    pre_close_resolution=$null; ready_menu=$appearanceMenu; pre_close_menu=$null
+                }
+                $menu = Read-ProductionLanguageMenu -Process $application.process `
+                    -MainWindow $application.main -Session $SessionId -Language $step.language
+                if ($menu.checked_command -ne (0x9020 + $step.value)) {
+                    throw 'Runtime baseline startup language radio selection differs.'
+                }
+                $cell.menu = $menu
+                $preferenceAfter = if (Test-Path -LiteralPath $preferencePath) {
+                    Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+                } else { $null }
+                if ($null -ne $step.preference -and ($null -eq $preferenceAfter -or
+                    $preferenceAfter.value -ne $step.preference -or
+                    $preferenceAfter.sha256 -cne $cell.preference_before.sha256)) {
+                    throw 'Runtime baseline saved language preference changed during startup.'
+                }
+                if ($null -eq $step.preference -and $null -ne $preferenceAfter -and
+                    $preferenceAfter.value -ne 0) {
+                    throw 'Runtime baseline fresh System preference resolved unexpectedly.'
+                }
+                $cell.preference_after = if ($null -ne $preferenceAfter) {
+                    [ordered]@{ status='valid-saved'; value=$preferenceAfter.value;
+                        sha256=$preferenceAfter.sha256 }
+                } else { [ordered]@{ status='absent'; value=$null; sha256=$null } }
+                if ($step.workload) {
+                    $sampler = [DarkReNamerPerformanceSampler]::new(
+                        $application.process, [IntPtr]$application.main_handle)
+                    $sampler.SetPhase('empty-idle')
+                    $emptyStart = [Diagnostics.Stopwatch]::GetTimestamp()
+                    Start-Sleep -Seconds 30
+                    $cell.empty_idle = [ordered]@{ elapsed_ms=[Math]::Round(
+                        ([Diagnostics.Stopwatch]::GetTimestamp() - $emptyStart) * 1000.0 /
+                        [Diagnostics.Stopwatch]::Frequency, 3); rows=0 }
+                    $sampler.SetPhase('import-1000')
+                    $import = Import-GuiRegressionPathList -Application $application -PathsFile $pathList `
+                        -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid `
+                        -MeasureCommandReadiness -IncludeOpenTicks
+                    $cell.import = [ordered]@{ rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount;
+                        data_ready_ms=$import.elapsed_ms;
+                        command_ready_after_rows_ms=$import.command_ready_after_rows_ms }
+                    $sampler.SetPhase('icon-settlement')
+                    $cell.icon_settlement = Wait-ObserverIconSettlementPhase -Application $application `
+                        -StartUtcTicks $cell.process_start_utc_ticks -OpenTicks $import.open_ticks `
+                        -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
+                    $sampler.SetPhase('populated-idle')
+                    $populatedStart = [Diagnostics.Stopwatch]::GetTimestamp()
+                    Start-Sleep -Seconds 30
+                    $afterIdleReceipt = Wait-ObserverIconSettlementPhase -Application $application `
+                        -StartUtcTicks $cell.process_start_utc_ticks -OpenTicks $import.open_ticks `
+                        -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
+                    $afterIdle = $afterIdleReceipt.confirmation_status
+                    if (-not (Test-ObserverIconTerminalSnapshot -Snapshot $afterIdle -Rows 1000) -or
+                        $afterIdle.session -cne $cell.icon_settlement.confirmation_status.session -or
+                        $afterIdle.model_revision -cne $cell.icon_settlement.confirmation_status.model_revision -or
+                        $afterIdle.generation -cne $cell.icon_settlement.confirmation_status.generation) {
+                        throw 'Runtime baseline populated idle did not preserve settled icon ownership.'
+                    }
+                    $cell.populated_idle = [ordered]@{ elapsed_ms=[Math]::Round(
+                        ([Diagnostics.Stopwatch]::GetTimestamp() - $populatedStart) * 1000.0 /
+                        [Diagnostics.Stopwatch]::Frequency, 3); rows=1000; end_status=$afterIdle }
+                    [void]$Captures.Add((Save-WindowScreenshot `
+                        -ForegroundObservations $script:acceptanceForegroundObservations `
+                        -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+                        -Root $EvidenceRoot -Leaf 'runtime-baseline-populated.png' `
+                        -Label 'runtime baseline settled populated list'))
+                    $transforms = [Collections.Generic.List[object]]::new()
+                    foreach ($edit in @(
+                        [ordered]@{ id='grow'; target='expanded-ordinary-0000.txt' },
+                        [ordered]@{ id='shrink'; target='x.txt' },
+                        [ordered]@{ id='no-op'; target='ordinary-0000.txt' }
+                    )) {
+                        $sampler.SetPhase('transform-' + $edit.id)
+                        $editStart = [Diagnostics.Stopwatch]::GetTimestamp()
+                        [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 `
+                            -Name $edit.target -SessionId $SessionId -WaitSeconds $WaitSeconds)
+                        $editElapsed = [Math]::Round((
+                            [Diagnostics.Stopwatch]::GetTimestamp() - $editStart) * 1000.0 /
+                            [Diagnostics.Stopwatch]::Frequency, 3)
+                        if ($grid.pattern.GetItem(0, 0).Current.Name -cne 'ordinary-0000.txt' -or
+                            $grid.pattern.GetItem(0, 1).Current.Name -cne $edit.target) {
+                            throw 'Runtime baseline transform preview differs from its expected proposal.'
+                        }
+                        $resetElapsed = [double]0
+                        if ($edit.id -cne 'no-op') {
+                            $resetStart = [Diagnostics.Stopwatch]::GetTimestamp()
+                            Reset-ObserverAppearanceProposals -Application $application -SessionId $SessionId `
+                                -WaitSeconds $WaitSeconds
+                            $resetElapsed = [Math]::Round((
+                                [Diagnostics.Stopwatch]::GetTimestamp() - $resetStart) * 1000.0 /
+                                [Diagnostics.Stopwatch]::Frequency, 3)
+                        }
+                        if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'ordinary-0000.txt') {
+                            throw 'Runtime baseline transform reset did not restore original proposal.'
+                        }
+                        $transforms.Add([ordered]@{ id=$edit.id; source='ordinary-0000.txt';
+                            proposal=$edit.target; reset='ordinary-0000.txt';
+                            edit_elapsed_ms=$editElapsed; reset_elapsed_ms=$resetElapsed;
+                            reset_required=($edit.id -cne 'no-op') })
+                    }
+                    $cell.transforms = $transforms.ToArray()
+                    $sampler.SetPhase('post')
+                    Start-Sleep -Milliseconds 400
+                    $cell.samples = @(Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
+                    $sampler = $null
+                    $cell.phase_summary = @(Get-ObserverPerformancePhaseSummary `
+                        -Samples $cell.samples -PhaseOrder @('empty-idle','import-1000',
+                            'icon-settlement','populated-idle','transform-grow',
+                            'transform-shrink','transform-no-op','post'))
+                }
+                if (@(Get-ChildItem -LiteralPath $ordinary -File -Force).Count -ne 1000) {
+                    throw 'Runtime baseline fixture count changed on disk.'
+                }
+                foreach ($index in 0..999) {
+                    if ([IO.File]::ReadAllText($paths[$index], [Text.Encoding]::ASCII) -cne
+                        ('runtime-ordinary-{0:D4}' -f $index)) {
+                        throw 'Runtime baseline fixture bytes changed on disk.'
+                    }
+                }
+                $cell.disk_unchanged = $true
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+                $cell.journal_residue_count = 0
+                $environment.appearance.pre_close_resolution = Get-ObserverRuntimeLightAppearance
+                $environment.appearance.pre_close_menu = Get-VmAutomatedAppearance `
+                    -Window $application.main -Process $application.process -ExpectedSession $SessionId
+                Assert-ObserverRuntimeSystemAppearanceMenu -Menu $environment.appearance.pre_close_menu
+                $cell.normal_exit_code = Close-AcceptanceApplication -Application $application `
+                    -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+                $finalPreference = if (Test-Path -LiteralPath $preferencePath) {
+                    $record = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+                    [ordered]@{ status='valid-saved'; value=$record.value; sha256=$record.sha256 }
+                } else { [ordered]@{ status='absent'; value=$null; sha256=$null } }
+                if (($finalPreference | ConvertTo-Json -Compress) -cne
+                    ($cell.preference_after | ConvertTo-Json -Compress)) {
+                    throw 'Runtime baseline preference changed before normal process exit.'
+                }
+                if (Test-Path -LiteralPath $appearancePreferencePath) {
+                    throw 'Runtime baseline wrote an appearance preference override.'
+                }
+                $environment.appearance.preference_after = 'absent'
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+            }
+            finally {
+                if ($null -ne $sampler) {
+                    try { [void]$sampler.Stop() } catch {}
+                }
+                if ($null -ne $application) {
+                    Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+                }
+            }
+        }
+    }
+    if ((Get-Date) -ge $deadline -or $cells.Count -ne 3 -or
+        @($cells | Where-Object { $_.normal_exit_code -ne 0 -or -not $_.disk_unchanged }).Count -ne 0) {
+        throw 'Runtime baseline cells did not complete inside the fixed deadline.'
+    }
+    $ObservationSink['cells'] = $cells.ToArray()
+    $ObservationSink['disk_unchanged'] = $true
+    $ObservationSink['journal_residue_count'] = 0
+    $ObservationSink['wakeups'] = [ordered]@{ status='not_run'; reason='no-supported-process-wakeup-counter' }
+    $ObservationSink['appearance'] = 'light'
+    return $ObservationSink
+}

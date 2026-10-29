@@ -116,6 +116,35 @@ try {
         $resolved = Get-ObserverResolvedSystemAppearance
         Assert-Equal $resolved.resolved_theme $case[2] 'Observed foreground and Forced Colors theme precedence'
     }
+    foreach ($case in @(@(0, 0, $true), @(0, 245, $false), @(1, 0, $false))) {
+        [DarkReNamerVmAcceptanceNative]::HighContrastFlags = $case[0]
+        [DarkReNamerVmAcceptanceNative]::Foreground = [byte[]]@(255, $case[1], $case[1], $case[1])
+        if ($case[2]) {
+            $light = Get-ObserverRuntimeLightAppearance
+            Assert-Equal $light.resolved_theme 'light' 'Runtime actual official foreground resolves Light'
+            Assert-Equal $light.system_visual_style.forced_colors $false 'Runtime Forced Colors is inactive'
+        }
+        else { Assert-Fails { Get-ObserverRuntimeLightAppearance } 'requires observed System Light' }
+    }
+    $runtimeMenu = [ordered]@{ menu_checked=@(
+        [ordered]@{command_id=0x9010;checked=$true},
+        [ordered]@{command_id=0x9011;checked=$false},
+        [ordered]@{command_id=0x9012;checked=$false}) }
+    Assert-ObserverRuntimeSystemAppearanceMenu -Menu $runtimeMenu
+    $runtimeMenu.menu_checked[0].checked=$false
+    $runtimeMenu.menu_checked[1].checked=$true
+    Assert-Fails { Assert-ObserverRuntimeSystemAppearanceMenu -Menu $runtimeMenu } 'fresh System selection'
+    $emptyPhase = @(Get-ObserverPerformancePhaseSummary -Samples @() -PhaseOrder @('transform-no-op'))
+    Assert-Equal $emptyPhase[0].sample_count 0 'Unsampled short phase has no fabricated timer callback'
+    if ($emptyPhase[0].max_sample_gap_ms -isnot [double] -or
+        $emptyPhase[0].max_resource_collection_ms -isnot [double]) {
+        throw 'Unsampled short phase lost real double zero summary values.'
+    }
+    $emptyJson = $emptyPhase[0] | ConvertTo-Json -Compress
+    if ($emptyJson -cnotmatch '"max_sample_gap_ms":0.0' -or
+        $emptyJson -cnotmatch '"max_resource_collection_ms":0.0') {
+        throw 'Unsampled short phase JSON does not retain the producer double zero shape.'
+    }
     [DarkReNamerVmAcceptanceNative]::HighContrastFlags = 0
     & {
         foreach ($case in @(@(96, '900,900,260'), @(120, '1125,1125,325'), @(144, '1350,1350,390'), @(192, '1800,1800,520'))) {

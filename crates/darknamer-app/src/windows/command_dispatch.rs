@@ -74,6 +74,51 @@ use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub(super) mod runtime_sort_profile {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Default)]
+    pub(in crate::windows) struct Counters {
+        pub(in crate::windows) snapshot_ns: u128,
+        pub(in crate::windows) sort_inclusive_ns: u128,
+        pub(in crate::windows) compare_nested_ns: u128,
+        pub(in crate::windows) comparisons: usize,
+        pub(in crate::windows) token_remap_ns: u128,
+        pub(in crate::windows) native_refresh_ns: u128,
+        pub(in crate::windows) selection_restore_ns: u128,
+        pub(in crate::windows) post_controls_ns: u128,
+    }
+
+    thread_local! {
+        static ACTIVE: Cell<Option<Counters>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn begin() {
+        ACTIVE.with(|active| {
+            assert!(active.get().is_none(), "nested runtime sort diagnostic");
+            active.set(Some(Counters::default()));
+        });
+    }
+
+    pub(super) fn record(update: impl FnOnce(&mut Counters)) {
+        ACTIVE.with(|active| {
+            if let Some(mut counters) = active.get() {
+                update(&mut counters);
+                active.set(Some(counters));
+            }
+        });
+    }
+
+    pub(super) fn finish() -> Counters {
+        ACTIVE.with(|active| {
+            let counters = active.take();
+            assert!(counters.is_some(), "runtime sort diagnostic is active");
+            counters.unwrap_or_default()
+        })
+    }
+}
+
 use super::{
     AppState, AppearanceDialogPlatform, DISCARD_STAGED_JOURNAL, EXPORT_RECOVERY_JOURNAL,
     ImportKind, PreparedAppearanceAction, PreparedDiscardTaskDialog, PreparedFileDialogKind,
@@ -971,13 +1016,31 @@ fn apply_command_outcome(
             update_controls(state);
         }
         UiEffect::AllRowsChanged => {
+            #[cfg(test)]
+            let started = std::time::Instant::now();
             if selection.is_some() {
                 clear_selection(state.list_window);
             }
             refresh_all_rows(state);
+            #[cfg(test)]
+            runtime_sort_profile::record(|counters| {
+                counters.native_refresh_ns = started.elapsed().as_nanos()
+            });
+            #[cfg(test)]
+            let started = std::time::Instant::now();
             restore_selection(state, selection);
+            #[cfg(test)]
+            runtime_sort_profile::record(|counters| {
+                counters.selection_restore_ns = started.elapsed().as_nanos()
+            });
+            #[cfg(test)]
+            let started = std::time::Instant::now();
             update_controls(state);
             state.set_status_item_count();
+            #[cfg(test)]
+            runtime_sort_profile::record(|counters| {
+                counters.post_controls_ns = started.elapsed().as_nanos()
+            });
         }
         UiEffect::ColumnsChanged(index) => {
             update_column_visibility(state, index);
@@ -1930,20 +1993,54 @@ fn finish_sort_command(
         LegacySortMode::CreatedDescending,
     ];
     if let Some(mode) = modes.get(choice) {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         let selected = selected_indices(state.list_window);
         let selection_snapshot = SelectionSnapshot::capture(&state.model);
         let tokens = selection_snapshot.tokens(&selected);
         let focused = focused_index(state.list_window)
             .and_then(|index| selection_snapshot.token(index).cloned());
+        #[cfg(test)]
+        runtime_sort_profile::record(|counters| {
+            counters.snapshot_ns = started.elapsed().as_nanos()
+        });
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let changed = state.model.sort_by_with_semantics_changed(
+            *mode,
+            SortSemantics::SafeActualSize,
+            |left, right| {
+                let compare_started = std::time::Instant::now();
+                let order = compare_windows(left, right);
+                let elapsed_ns = compare_started.elapsed().as_nanos();
+                runtime_sort_profile::record(|counters| {
+                    counters.compare_nested_ns += elapsed_ns;
+                    counters.comparisons += 1;
+                });
+                order
+            },
+        );
+        #[cfg(not(test))]
         let changed = state.model.sort_by_with_semantics_changed(
             *mode,
             SortSemantics::SafeActualSize,
             compare_windows,
         );
+        #[cfg(test)]
+        runtime_sort_profile::record(|counters| {
+            counters.sort_inclusive_ns = started.elapsed().as_nanos()
+        });
         let outcome = model_outcome(state, changed, UiEffect::AllRowsChanged);
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         let row_index = SelectionRowIndex::build(&state.model);
         let moved = row_index.rows(&tokens);
         let focused = focused.as_ref().and_then(|token| row_index.row(token));
+        #[cfg(test)]
+        runtime_sort_profile::record(|counters| {
+            counters.token_remap_ns = started.elapsed().as_nanos()
+        });
         return (
             outcome,
             Some(SelectionRestore {
@@ -1953,6 +2050,17 @@ fn finish_sort_command(
         );
     }
     (CommandOutcome::ui(UiEffect::None), None)
+}
+
+#[cfg(test)]
+pub(super) fn profile_runtime_sort_command(
+    window: HWND,
+    state: &mut AppState,
+) -> runtime_sort_profile::Counters {
+    runtime_sort_profile::begin();
+    let (outcome, selection) = finish_sort_command(state, 0);
+    apply_command_outcome(window, state, outcome, selection);
+    runtime_sort_profile::finish()
 }
 
 pub(super) fn clear_selection(list: HWND) {
