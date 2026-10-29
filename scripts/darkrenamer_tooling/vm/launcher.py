@@ -2845,7 +2845,8 @@ def run_refresh_profile(repo, args, tooling):
     root = resolve_prepare_output_root(repo, root)
     root.mkdir(mode=0o700)
     prepared = root / 'bundle'
-    manifest = build_bundle(repo, prepared, tooling, refresh_profile=True)
+    manifest = build_bundle(repo, prepared, tooling, refresh_profile=True,
+                            private_symbol_output=args.private_symbol_output)
     frozen = {path.relative_to(prepared): sha256(path) for path in prepared.rglob('*')
               if path.is_file() and not path.is_symlink()}
     if any(path.is_symlink() for path in prepared.rglob('*')):

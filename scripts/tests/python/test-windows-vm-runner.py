@@ -955,11 +955,14 @@ class VmRunnerTests(unittest.TestCase):
                 output = self.root / ('diagnostic-' + str(failure_pass))
                 args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
                                            '--profile-refresh-stages', '--output', str(output)])
+                if failure_pass is None:
+                    args.private_symbol_output = self.root / 'refresh-private-symbols'
                 args.acceptance_profile_sha256 = 'a' * 64
                 calls = []
 
-                def build(_repo, bundle, _tooling, *, refresh_profile):
+                def build(_repo, bundle, _tooling, *, refresh_profile, private_symbol_output):
                     self.assertTrue(refresh_profile)
+                    self.assertEqual(private_symbol_output, args.private_symbol_output)
                     bundle.mkdir()
                     (bundle / 'bundle.json').write_text('{}')
                     (bundle / 'binary.exe').write_bytes(b'one immutable binary')
