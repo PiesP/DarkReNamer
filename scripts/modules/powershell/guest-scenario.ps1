@@ -78,15 +78,22 @@ function Get-ProductionLanguageSpec {
 
 function Select-ProductionMessageBoxOkCandidate {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Candidates)
-    $matches = @($Candidates | Where-Object {
-        $_.native_handle -gt 0 -and $_.native_parent_bound -eq $true -and
-        $_.native_control_id -eq 1 -and $_.native_class -ceq 'Button' -and
-        $_.enabled -eq $true
+    $nativeButtons = @($Candidates | Where-Object {
+        $_.native_handle -gt 0 -and $_.native_live -eq $true -and
+        $_.native_parent_bound -eq $true -and $_.native_class -ceq 'Button'
     })
-    if ($matches.Count -gt 1) {
-        throw 'The exact MessageBox has more than one enabled native IDOK child.'
+    if ($nativeButtons.Count -gt 1) {
+        throw 'The exact MessageBox has more than one live native Button child.'
     }
-    if ($matches.Count -eq 1) { return $matches[0] }
+    if ($nativeButtons.Count -eq 1) {
+        if ($nativeButtons[0].native_control_id -le 0) {
+            throw 'The sole native MessageBox Button has an invalid control ID.'
+        }
+        if ($nativeButtons[0].enabled -ne $true) {
+            throw 'The sole native MessageBox Button is disabled.'
+        }
+        return $nativeButtons[0]
+    }
     $null
 }
 
@@ -141,15 +148,20 @@ function Find-ProductionMessageBoxOk {
             $candidate = [ordered]@{
                 element = $button
                 native_handle = [long]$handle
+                native_live = [bool]($handle -ne [IntPtr]::Zero -and
+                    [DarkReNamerVmNative]::IsWindow($handle))
                 native_parent_bound = [bool]$parentBound
                 native_control_id = [int]$id
                 native_class = [string]$nativeClass
                 enabled = [bool]$button.Current.IsEnabled
                 automation_id = $automationId
+                selection_contract = 'sole-native-messagebox-button'
+                native_button_count = 1
             }
             $candidates.Add($candidate)
             $metadata.Add([ordered]@{
                 native_handle = $candidate.native_handle
+                native_live = $candidate.native_live
                 native_parent_bound = $candidate.native_parent_bound
                 native_control_id = $candidate.native_control_id
                 native_class = $candidate.native_class
@@ -162,14 +174,18 @@ function Find-ProductionMessageBoxOk {
         if ($null -ne $selected) {
             Assert-AutomationBinding -Element $selected.element -Process $Process `
                 -ExpectedSession $ExpectedSession -Label $Label -RequireWindowHandle
+            $recheckedClass = [Text.StringBuilder]::new(64)
+            [void][DarkReNamerVmNative]::GetClassName(
+                [IntPtr]$selected.native_handle, $recheckedClass, $recheckedClass.Capacity)
             if (-not $selected.element.Current.IsEnabled -or
                 [IntPtr]$selected.element.Current.NativeWindowHandle -ne
                     [IntPtr]$selected.native_handle -or
+                $recheckedClass.ToString() -cne $selected.native_class -or
                 -not [DarkReNamerLanguageMenuReader]::IsChild($dialogHandle,
                     [IntPtr]$selected.native_handle) -or
                 [DarkReNamerLanguageMenuReader]::GetDlgCtrlID(
-                    [IntPtr]$selected.native_handle) -ne 1) {
-                throw "$Label native IDOK binding changed before invocation."
+                    [IntPtr]$selected.native_handle) -ne $selected.native_control_id) {
+                throw "$Label sole native Button binding changed before invocation."
             }
             return $selected
         }
@@ -181,7 +197,7 @@ function Find-ProductionMessageBoxOk {
     } while ((Get-Date) -lt $deadline)
     $summary = ConvertTo-Json -InputObject @($lastMetadata) -Depth 3 -Compress
     if ($summary.Length -gt 4096) { $summary = $summary.Substring(0, 4096) }
-    throw "$Label native IDOK=1 was not found before the bounded deadline; button metadata: $summary"
+    throw "$Label sole native MessageBox Button was not found before the bounded deadline; button metadata: $summary"
 }
 
 function Assert-ProductionApplyCopy {
@@ -299,6 +315,8 @@ function Invoke-ProductionOccupiedDestinationCheck {
             title = $labels.blocked_apply; reason = $labels.occupied
             bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
             ok_control = [ordered]@{
+                selection_contract = $ok.selection_contract
+                native_button_count = $ok.native_button_count
                 automation_id = $ok.automation_id; native_control_id = $ok.native_control_id
                 native_parent_bound = $ok.native_parent_bound; native_class = $ok.native_class
                 enabled = $ok.enabled
@@ -1636,6 +1654,8 @@ function Invoke-ProductionBlockedRecoveryCheck {
             notice_hwnd = [long]$noticeHandle
             lock_guidance = $labels.recovery_locked
             ok_control = [ordered]@{
+                selection_contract = $ok.selection_contract
+                native_button_count = $ok.native_button_count
                 automation_id = $ok.automation_id; native_control_id = $ok.native_control_id
                 native_parent_bound = $ok.native_parent_bound; native_class = $ok.native_class
                 enabled = $ok.enabled

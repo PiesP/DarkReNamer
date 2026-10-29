@@ -1190,8 +1190,11 @@ def verify_picker_checks(checks, gui):
 
 def verify_native_messagebox_ok(record):
     if (not isinstance(record, dict) or
+            record.get('selection_contract') != 'sole-native-messagebox-button' or
+            type(record.get('native_button_count')) is not int or
+            record['native_button_count'] != 1 or
             type(record.get('native_control_id')) is not int or
-            record['native_control_id'] != 1 or
+            record['native_control_id'] <= 0 or
             record.get('native_parent_bound') is not True or
             record.get('native_class') != 'Button' or
             record.get('enabled') is not True or
