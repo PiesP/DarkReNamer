@@ -1095,6 +1095,35 @@ foreach ($rawEvidence in @($true, $false)) {
         Assert-Fails {
             Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch -Startup $startup
         } 'The prelaunch production flow journal inventory is not empty'
+        Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+            -Startup $startup -ExpectExistingRuntimeLock
+        foreach ($mutation in @('missing', 'active', 'extra', 'bytes', 'boolean-bytes', 'kind')) {
+            $changedPrelaunch = $observedBefore | ConvertFrom-Json -Depth 8
+            switch ($mutation) {
+                missing { $changedPrelaunch.journal_entries = @() }
+                active { $changedPrelaunch.journal_entries[0].name = 'active.drj' }
+                extra { $changedPrelaunch.journal_entries += $changedPrelaunch.journal_entries[0] }
+                bytes { $changedPrelaunch.journal_entries[0].bytes = 1 }
+                boolean-bytes { $changedPrelaunch.journal_entries[0].bytes = $false }
+                kind { $changedPrelaunch.journal_entries[0].kind = 'reparse' }
+            }
+            Assert-Fails {
+                Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $changedPrelaunch `
+                    -Startup $startup -ExpectExistingRuntimeLock
+            } 'The reused production flow requires exactly one prelaunch runtime lock'
+        }
+        $startupWithoutLock = $observedBefore | ConvertFrom-Json -Depth 8
+        $startupWithoutLock.journal_entries = @()
+        Assert-Fails {
+            Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+                -Startup $startupWithoutLock -ExpectExistingRuntimeLock
+        } 'Startup left an unexpected production flow journal inventory'
+        $changedFixture = $observedBefore | ConvertFrom-Json -Depth 8
+        $changedFixture.fixture_entries[0].content_sha256 = 'f' * 64
+        Assert-Fails {
+            Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+                -Startup $changedFixture -ExpectExistingRuntimeLock
+        } 'Startup changed the production flow fixture inventory'
     }
     $injectedOwnedPath = [IO.Path]::GetFullPath($valid.root).TrimEnd('\\') +
         '\\injected-owned.exe'

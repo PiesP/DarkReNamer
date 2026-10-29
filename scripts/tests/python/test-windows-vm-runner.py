@@ -287,9 +287,11 @@ class VmRunnerTests(unittest.TestCase):
             destination = dict(source, name='vm-confirmed-vm-flow-source.txt')
             flow['checkpoints'] = [
                 {'phase': phase, 'fixture_entries': [copy.deepcopy(source if phase in
-                    ('initial', 'after_cancel') else destination)], 'journal_entries': []}
+                    ('initial', 'after_cancel') else destination)],
+                 'journal_entries': [{'name': 'runtime.lock', 'kind': 'file', 'bytes': 0}]}
                 for phase in ('initial', 'after_cancel', 'after_apply', 'post_close')
             ]
+            flow['prelaunch_checkpoints'] = [copy.deepcopy(flow['checkpoints'][0])]
             flows.append({'language': language, 'flow': flow})
         return {'schema_version': 1, 'status': 'passed',
                 'scope': 'source-built-three-language-native-menu',
@@ -545,6 +547,33 @@ class VmRunnerTests(unittest.TestCase):
         self.result['gui'].pop('language_checks')
         with self.assertRaisesRegex(ValueError, 'language acceptance'):
             self.verify()
+
+    def test_language_flow_reused_startup_requires_exact_runtime_lock(self):
+        checks = self.result['gui']['language_checks']
+        self.assertTrue(vm.verify_language_checks(self.root, self.manifest, checks,
+                                                  self.result['gui']['flow']))
+        mutations = (
+            lambda flow: flow.pop('prelaunch_checkpoints'),
+            lambda flow: flow['prelaunch_checkpoints'][0].update(journal_entries=[]),
+            lambda flow: flow['prelaunch_checkpoints'][0]['journal_entries'][0].update(
+                name='active.drj'),
+            lambda flow: flow['prelaunch_checkpoints'][0]['journal_entries'][0].update(bytes=1),
+            lambda flow: flow['prelaunch_checkpoints'][0]['journal_entries'][0].update(bytes=False),
+            lambda flow: flow['prelaunch_checkpoints'][0]['journal_entries'].append(
+                {'name': 'runtime.lock', 'kind': 'file', 'bytes': 0}),
+            lambda flow: flow['prelaunch_checkpoints'][0]['fixture_entries'][0].update(
+                file_identity_sha256='0' * 64),
+            lambda flow: flow['checkpoints'][0].update(journal_entries=[]),
+        )
+        for language in ('en', 'ja'):
+            for mutate in mutations:
+                with self.subTest(language=language, mutation=mutate.__code__.co_firstlineno):
+                    damaged = copy.deepcopy(checks)
+                    flow = damaged['flows'][0 if language == 'en' else 1]['flow']
+                    mutate(flow)
+                    with self.assertRaises(ValueError):
+                        vm.verify_language_checks(self.root, self.manifest, damaged,
+                                                  self.result['gui']['flow'])
 
     def test_language_capture_rejects_invalid_png_structure_and_digest(self):
         checks = self.result['gui']['language_checks']
