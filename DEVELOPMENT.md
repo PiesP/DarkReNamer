@@ -55,13 +55,13 @@ These are authoring defaults; the [safety model](SAFETY.md),
 
 ### Preference read authority
 
-Column and appearance files have independent write authority. A successful read
+Column, appearance and language files have independent write authority. A successful read
 or a genuinely absent file permits that file's writer; an initial read error
 uses safe display defaults but starts no writer for that file for the session.
 Edits and resets still affect the current UI, but are not persisted, and the UI
 reports that limitation. There is no in-session retry or reset that restores
 write authority: restart retries the read, and edits from the blocked session
-are discarded. The other file remains independently writable. Both normal close
+are discarded. The other files remain independently writable. Both normal close
 and message-loop failure retire all writers that were started. This preserves
 unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
@@ -553,6 +553,18 @@ Hyper-V guest. The controller reads the guest parameters from its own PSSession
 and rejects a different identity before guest staging or task execution.
 Without this option, ordinary source-built runs retain their existing behavior;
 candidate and observer runs still require the expected identity.
+
+Ordinary source-built runs also exercise the Korean, English and Japanese UI
+through normal restarts. The maintained VM must resolve System to Korean for
+the initial baseline; the observer reads Windows UI-language preferences and
+rejects a different baseline instead of changing them. It checks saved language
+selection, intact pending proposals, localized Apply/cancel and occupied-target
+refusal, corrupt-journal locking, and default Cancel for a valid active recovery
+journal made by the source-bound crash-test child. Original PNGs and independent
+file-content/identity checkpoints stay in the private result bundle. Candidate
+GUI-only and performance lanes retain their separate scopes. Repeat relevant
+display configurations and inspect the original captures; a focused language
+cycle does not establish the full GUI or release acceptance matrix.
 
 The default `--desktop-mode rdp` starts a managed RDP desktop before the SSH
 controller runs and disconnects its client after the controller finishes,
