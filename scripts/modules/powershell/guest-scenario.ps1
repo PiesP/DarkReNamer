@@ -39,21 +39,30 @@ function Get-ProductionLanguageSpec {
             apply = 'DarkReNamer - 안전한 적용 확인'; empty = '파일이나 폴더를 여기에 끌어오세요'
             menu = '언어(&L) · 다음 실행부터'; rail = '이름 앞에 문자열 붙이기...'
             system = '시스템 언어'; question = '계획된 파일 변경을 적용하시겠습니까?'
-            no_overwrite = '기존 파일을 덮어쓰지 않습니다.'; command = [int]0x9021; value = 1
+            no_overwrite = '기존 파일을 덮어쓰지 않습니다.'
+            recovery = 'DarkReNamer - 복구 상태'; recovery_locked = '새 적용은 잠겼습니다.'
+            blocked_apply = 'DarkReNamer - 적용 차단'; occupied = '대상 이름이 이미 사용 중입니다.'
+            command = [int]0x9021; value = 1
         } }
         'en' { [ordered]@{
             picker = 'Select files to rename'; prefix = 'Add a name prefix'
             apply = 'DarkReNamer - Confirm safe Apply'; empty = 'Drop files or folders here'
             menu = '&Language · next startup'; rail = 'Add a name prefix...'
             system = 'System language'; question = 'Apply the planned file changes?'
-            no_overwrite = 'Existing files will not be overwritten.'; command = [int]0x9022; value = 2
+            no_overwrite = 'Existing files will not be overwritten.'
+            recovery = 'DarkReNamer - Recovery status'; recovery_locked = 'Apply is locked.'
+            blocked_apply = 'DarkReNamer - Apply blocked'; occupied = 'The destination name is already in use.'
+            command = [int]0x9022; value = 2
         } }
         'ja' { [ordered]@{
             picker = '名前を変更するファイルを選択'; prefix = '名前の先頭に文字列を追加'
             apply = 'DarkReNamer - 安全な適用の確認'; empty = 'ファイルやフォルダーをここにドロップ'
             menu = '言語(&L) · 次回起動から'; rail = '名前の先頭に文字列を追加...'
             system = 'システム言語'; question = '計画されたファイル変更を適用しますか？'
-            no_overwrite = '既存のファイルは上書きしません。'; command = [int]0x9023; value = 3
+            no_overwrite = '既存のファイルは上書きしません。'
+            recovery = 'DarkReNamer - 復旧状態'; recovery_locked = '適用をロックしました。'
+            blocked_apply = 'DarkReNamer - 適用をブロック'; occupied = '変更先の名前はすでに使用されています。'
+            command = [int]0x9023; value = 3
         } }
     }
 }
@@ -94,6 +103,98 @@ function Assert-ProductionApplyCopy {
         question = $labels.question
         no_overwrite = $labels.no_overwrite
         bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+    }
+}
+
+function Invoke-ProductionOccupiedDestinationCheck {
+    param(
+        [Parameter(Mandatory)][object] $OwnedProcess,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][string] $SourcePath,
+        [Parameter(Mandatory)][string] $DestinationPath,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][ValidateSet('ko', 'en', 'ja')][string] $Language
+    )
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf) -or
+        (Test-Path -LiteralPath $DestinationPath)) {
+        throw 'Occupied-destination check requires an untouched source and absent target.'
+    }
+    $sourceHash = Get-LowerSha256 -Path $SourcePath
+    $sourceIdentity = [DarkReNamerVmNative]::GetFileIdentity($SourcePath)
+    [IO.File]::WriteAllBytes($DestinationPath,
+        [Text.Encoding]::ASCII.GetBytes('Existing destination must never be overwritten'))
+    $destinationHash = Get-LowerSha256 -Path $DestinationPath
+    $destinationIdentity = [DarkReNamerVmNative]::GetFileIdentity($DestinationPath)
+    $passed = $false
+    try {
+        $process = $OwnedProcess.process
+        $apply = Find-UniqueAutomationElement -Root $MainWindow -Process $process `
+            -ExpectedSession $Session -AutomationId ([string]0x8003) `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language occupied-destination Apply" `
+            -RequireEnabled -RequireWindowHandle
+        $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess -Element $apply `
+            -Label "$Language occupied-destination Apply"
+        $blocked = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $Session `
+            -MainWindowHandle $MainWindowHandle -Name $labels.blocked_apply `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language occupied-destination refusal"
+        $blockedHandle = [IntPtr]$blocked.Current.NativeWindowHandle
+        $bounds = $blocked.Current.BoundingRectangle
+        if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or
+            $bounds.Width -gt 16384 -or $bounds.Height -gt 16384) {
+            throw "$Language occupied-destination refusal has invalid bounds."
+        }
+        $children = $blocked.FindAll([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.Condition]::TrueCondition)
+        if ($children.Count -gt 512) { throw 'Occupied-destination refusal tree exceeds its bound.' }
+        $names = [Collections.Generic.List[string]]::new()
+        foreach ($element in $children) {
+            if ($element.Current.ProcessId -eq $process.Id -and $element.Current.Name) {
+                $names.Add([string]$element.Current.Name)
+            }
+        }
+        $copy = [string]::Join("`n", $names)
+        if ($copy.Length -gt 32768 -or
+            $copy.IndexOf($labels.occupied, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Language occupied-destination refusal lost its localized safety reason."
+        }
+        $ok = Find-UniqueAutomationElement -Root $blocked -Process $process -ExpectedSession $Session `
+            -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language occupied-destination OK" `
+            -RequireEnabled -RequireWindowHandle
+        Invoke-AutomationControl -Element $ok -Label "$Language occupied-destination OK"
+        Wait-WindowClosed -Handle $blockedHandle -TimeoutSeconds $TimeoutSeconds `
+            -Label "$Language occupied-destination refusal"
+        Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        if ((Get-LowerSha256 -Path $SourcePath) -cne $sourceHash -or
+            [DarkReNamerVmNative]::GetFileIdentity($SourcePath) -cne $sourceIdentity -or
+            (Get-LowerSha256 -Path $DestinationPath) -cne $destinationHash -or
+            [DarkReNamerVmNative]::GetFileIdentity($DestinationPath) -cne $destinationIdentity) {
+            throw "$Language occupied-destination refusal changed source or existing target."
+        }
+        $passed = $true
+        [ordered]@{
+            title = $labels.blocked_apply; reason = $labels.occupied
+            bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+            source_unchanged = $true; destination_unchanged = $true
+            journal_residue_count = 0
+        }
+    }
+    finally {
+        if ($passed) {
+            if ((Get-LowerSha256 -Path $DestinationPath) -cne $destinationHash -or
+                [DarkReNamerVmNative]::GetFileIdentity($DestinationPath) -cne $destinationIdentity) {
+                throw 'Owned collision fixture changed before exact cleanup.'
+            }
+            Remove-Item -LiteralPath $DestinationPath -Force
+            if (Test-Path -LiteralPath $DestinationPath) {
+                throw 'Owned collision fixture cleanup was incomplete.'
+            }
+        }
     }
 }
 
@@ -358,6 +459,15 @@ function Invoke-ProductionRenameFlow {
                 -LocalAppData $env:LOCALAPPDATA)
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+
+        if (-not $RawEvidence) {
+            $flow.failure_reason = 'occupied_destination_refusal_failed'
+            $flow['occupied_destination'] = Invoke-ProductionOccupiedDestinationCheck `
+                -OwnedProcess $OwnedProcess -MainWindow $MainWindow `
+                -MainWindowHandle $MainWindowHandle -SourcePath $sourcePath `
+                -DestinationPath $destinationPath -Session $ExpectedSession `
+                -TimeoutSeconds $TimeoutSeconds -Language $Language
+        }
 
         $flow.failure_reason = 'confirmed_apply_failed'
         $apply = Find-UniqueAutomationElement `
@@ -1135,6 +1245,139 @@ function Invoke-ProductionLanguageMenuChoice {
     }
 }
 
+function Invoke-ProductionBlockedRecoveryCheck {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][ValidateSet('ko', 'en', 'ja')][string] $Language
+    )
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
+    $journal = Get-Item -LiteralPath $journalRoot -Force -ErrorAction Stop
+    $journalEntries = @(Get-ChildItem -LiteralPath $journalRoot -Force)
+    if (-not $journal.PSIsContainer -or
+        ($journal.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $journalEntries.Count -gt 1 -or
+        ($journalEntries.Count -eq 1 -and (
+            $journalEntries[0].Name -cne 'runtime.lock' -or $journalEntries[0].PSIsContainer -or
+            ($journalEntries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $journalEntries[0].Length -ne 0))) {
+        throw 'Blocked recovery requires a task-isolated journal root with no prior transaction.'
+    }
+    $activePath = Join-Path $journalRoot 'active.drj'
+    $marker = [Text.Encoding]::ASCII.GetBytes('DarkReNamer bounded invalid active journal fixture')
+    [IO.File]::WriteAllBytes($activePath, $marker)
+    $before = Get-LowerSha256 -Path $activePath
+    $identity = [DarkReNamerVmNative]::GetFileIdentity($activePath)
+    $owned = $null
+    $passed = $false
+    try {
+        $applicationPath = Join-Path $Root $Application.file
+        if ((Get-LowerSha256 -Path $applicationPath) -cne $Application.sha256) {
+            throw 'Blocked recovery application changed after source-bound preflight.'
+        }
+        $owned = Start-JobBoundProcess -FilePath $applicationPath -Arguments '' -WorkingDirectory $Root
+        $process = $owned.process
+        $binding = Wait-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+            -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language blocked recovery startup"
+        $main = $binding.element
+        $handle = [IntPtr]$binding.handle
+        $notice = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $Session `
+            -MainWindowHandle $handle -Name $labels.recovery -TimeoutSeconds $TimeoutSeconds `
+            -Label "$Language blocked recovery notice"
+        $noticeHandle = [IntPtr]$notice.Current.NativeWindowHandle
+        $bounds = $notice.Current.BoundingRectangle
+        if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or
+            $bounds.Width -gt 16384 -or $bounds.Height -gt 16384) {
+            throw "$Language blocked recovery notice has invalid bounds."
+        }
+        $children = $notice.FindAll([Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.Condition]::TrueCondition)
+        if ($children.Count -gt 512) { throw 'Blocked recovery notice tree exceeds its bound.' }
+        $names = [Collections.Generic.List[string]]::new()
+        foreach ($element in $children) {
+            if ($element.Current.ProcessId -eq $process.Id -and $element.Current.Name) {
+                $names.Add([string]$element.Current.Name)
+            }
+        }
+        $copy = [string]::Join("`n", $names)
+        if ($copy.Length -gt 32768 -or
+            $copy.IndexOf('active.drj', [StringComparison]::Ordinal) -lt 0 -or
+            $copy.IndexOf($labels.recovery_locked, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Language blocked recovery notice lost its localized lock guidance."
+        }
+        $ok = Find-UniqueAutomationElement -Root $notice -Process $process -ExpectedSession $Session `
+            -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language recovery notice OK" `
+            -RequireEnabled -RequireWindowHandle
+        Invoke-AutomationControl -Element $ok -Label "$Language recovery notice OK"
+        Wait-WindowClosed -Handle $noticeHandle -TimeoutSeconds $TimeoutSeconds `
+            -Label "$Language blocked recovery notice"
+        $apply = Find-UniqueAutomationElement -Root $main -Process $process -ExpectedSession $Session `
+            -AutomationId ([string]0x8003) -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label "$Language recovery-locked Apply" -RequireWindowHandle
+        $grid = Find-UniqueAutomationElement -Root $main -Process $process -ExpectedSession $Session `
+            -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds -Label "$Language recovery-locked model" `
+            -RequireWindowHandle
+        $rows = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
+            [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
+        if ($apply.Current.IsEnabled -or $rows -ne 0 -or
+            (Get-LowerSha256 -Path $activePath) -cne $before -or
+            [DarkReNamerVmNative]::GetFileIdentity($activePath) -cne $identity) {
+            throw "$Language blocked recovery changed the retained journal or unlocked Apply."
+        }
+        Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+            -MainWindowHandle $handle -MainWindow $main -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' -Label "$Language blocked recovery normal close"
+        if (-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0) {
+            throw "$Language blocked recovery application did not close normally."
+        }
+        $job = Complete-AcceptanceOwnedProcessJob -Owned $owned
+        if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed -or
+            (Get-LowerSha256 -Path $activePath) -cne $before -or
+            [DarkReNamerVmNative]::GetFileIdentity($activePath) -cne $identity) {
+            throw "$Language blocked recovery did not retain exact journal bytes on close."
+        }
+        $passed = $true
+        [ordered]@{
+            language = $Language; pid = [int]$process.Id; session_id = [int]$Session
+            hwnd = [long]$handle; title = $labels.recovery
+            lock_guidance = $labels.recovery_locked
+            notice_bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+            apply_enabled = $false; model_rows = [int]$rows
+            journal_sha256 = $before; journal_unchanged = $true
+            normal_close = $true; process_job_clean = $true
+        }
+    }
+    finally {
+        if ($null -ne $owned) {
+            try {
+                if (-not $owned.job_closed) {
+                    $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $owned -StopActive
+                    if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
+                        throw 'Blocked recovery process job cleanup failed.'
+                    }
+                }
+            }
+            finally { $owned.process.Dispose() }
+        }
+        if ($passed) {
+            $active = Get-Item -LiteralPath $activePath -Force -ErrorAction Stop
+            if ($active.PSIsContainer -or
+                ($active.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                (Get-LowerSha256 -Path $activePath) -cne $before -or
+                [DarkReNamerVmNative]::GetFileIdentity($activePath) -cne $identity) {
+                throw 'Owned corrupt journal changed before exact cleanup.'
+            }
+            Remove-Item -LiteralPath $activePath -Force
+            if (Test-Path -LiteralPath $activePath) { throw 'Owned corrupt journal cleanup was incomplete.' }
+        }
+    }
+}
+
 function Invoke-ProductionLanguageCycle {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1165,7 +1408,13 @@ function Invoke-ProductionLanguageCycle {
         }
         $owned = $null
         $fixture = $null
+        $blocked = $null
         try {
+            if ($step.preference -in @(0, 2, 3) -and $null -ne $step.next) {
+                $blocked = Invoke-ProductionBlockedRecoveryCheck -Application $Application `
+                    -Root $Root -Session $Session -TimeoutSeconds $TimeoutSeconds `
+                    -Language $step.language
+            }
             if ($step.language -cin @('en', 'ja')) {
                 $fixture = New-PrivateDirectory -Parent $CaseRoot -Leaf ("language-$($step.language)")
                 $initial = Initialize-ProductionRenameFlowFixture -FixtureRoot $fixture `
@@ -1209,6 +1458,7 @@ function Invoke-ProductionLanguageCycle {
                 language = $step.language; pid = [int]$process.Id; hwnd = [long]$handle
                 session_id = [int]$Session; startup_preference = $saved
                 startup_menu = $menu; startup_rail = $rail; choice = $choice
+                blocked_recovery = $blocked
             })
             Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
                 -MainWindowHandle $handle -MainWindow $main -ExpectedClassName 'DarkReNamerWindow' `

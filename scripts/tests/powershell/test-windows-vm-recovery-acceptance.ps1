@@ -297,11 +297,11 @@ foreach ($contract in @(
     @{ Text = $windowsSource; Value = 'const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;' },
     @{ Text = $windowsSource; Value = 'const DISCARD_STAGED_JOURNAL: u16 = 0x9001;' },
     @{ Text = $windowsSource; Value = 'const SHOW_RECOVERY_STATUS: u16 = 0x9002;' },
-    @{ Text = $menuSource; Value = 'recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 및 문제 확인...")?' },
-    @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?' },
+    @{ Text = $menuSource; Value = 'recovery.item(SHOW_RECOVERY_STATUS, Text::MenuRecoveryStatus.get())?' },
+    @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, Text::MenuExportRecovery.get())?' },
     @{ Text = $menuSource; Value = 'recovery.separator()?' },
-    @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?' },
-    @{ Text = $dialogSource; Value = 'let title = wide("복구 저널 원본을 저장할 폴더 선택");' },
+    @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, Text::MenuDiscardStaged.get())?' },
+    @{ Text = $dialogSource; Value = 'let title = wide(Text::DialogExportFolderTitle.get());' },
     @{ Text = $librarySource; Value = 'pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;' },
     @{ Text = $librarySource; Value = 'pub(crate) const RECOVER_CONFIRM_BUTTON_ID: i32 = 1_202;' },
     @{ Text = $recoveryUiSource; Value = '.create_new_file(std::ffi::OsStr::new(leaf))' },
@@ -311,9 +311,9 @@ foreach ($contract in @(
     @{ Text = $recoveryUiSource; Value = '"active.drj.evidence"' },
     @{ Text = $recoveryUiSource; Value = '"candidate.drj.evidence"' },
     @{ Text = $recoveryUiSource; Value = 'if !state.can_discard_staged_intent() || !journal_matches {' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 진단 내보내기 완료"' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 활성화 전 계획 폐기".to_owned()' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 폐기 완료"' }
+    @{ Text = $recoveryUiSource; Value = 'RT::RecoveryExportCompleteTitle.get()' },
+    @{ Text = $recoveryUiSource; Value = 'RT::DiscardConfirmTitle.get().to_owned()' },
+    @{ Text = $recoveryUiSource; Value = 'RT::DiscardCompleteTitle.get()' }
 )) {
     if ($contract.Text.IndexOf($contract.Value, [StringComparison]::Ordinal) -lt 0) {
         throw "The recovery observer UI contract drifted from production source: $($contract.Value)"
@@ -2536,9 +2536,10 @@ $auditedInputSites = @{
     'Dismiss-AcceptanceMessage' = 1
     'Invoke-AcceptanceImportAndPrefix' = 1
     'Invoke-OwnedPickerAction' = 2
+    'Invoke-ProductionLanguageMenuChoice' = 6
 }
 $observedInputSites = @{}
-if ($sendKeys.Count -ne 4) { throw 'Recovery input sites changed without an ownership audit.' }
+if ($sendKeys.Count -ne 10) { throw 'Recovery input sites changed without an ownership audit.' }
 foreach ($inputCall in $sendKeys) {
     $owner = $inputCall.Parent
     while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
@@ -2564,6 +2565,25 @@ foreach ($inputCall in $sendKeys) {
             "[Windows.Forms.SendKeys]::SendWait('^l')",
             "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
         )) { throw 'Picker keyboard input exceeds the reviewed address navigation.' }
+    }
+    if ($owner.Name -ceq 'Invoke-ProductionLanguageMenuChoice') {
+        foreach ($fragment in @(
+            'Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow',
+            '[DarkReNamerVmNative]::GetForegroundWindow() -ne $handle',
+            'Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA'
+        )) {
+            if ($owner.Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+                throw "Language menu keyboard input lost its bound owner or durable readback: $fragment"
+            }
+        }
+        if ($inputCall.Extent.Text -cnotin @(
+            "[Windows.Forms.SendKeys]::SendWait('%v')",
+            "[Windows.Forms.SendKeys]::SendWait('{END}')",
+            "[Windows.Forms.SendKeys]::SendWait('{RIGHT}')",
+            "[Windows.Forms.SendKeys]::SendWait('{HOME}')",
+            "[Windows.Forms.SendKeys]::SendWait('{DOWN}')",
+            "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
+        )) { throw 'Language menu keyboard input exceeds the reviewed navigation.' }
     }
 }
 foreach ($name in $auditedInputSites.Keys) {

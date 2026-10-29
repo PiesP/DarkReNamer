@@ -1154,7 +1154,7 @@ def verify_picker_checks(checks, gui):
 
 
 def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None,
-                    screenshot_prefix='', language='ko'):
+                    screenshot_prefix='', language='ko', require_occupied=False):
     if not isinstance(flow, dict):
         raise ValueError('VM production GUI flow is missing or invalid.')
     if 'status' not in flow:
@@ -1216,6 +1216,20 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
             any(type(confirmation['bounds'].get(key)) not in (int, float) or
                 confirmation['bounds'][key] <= 0 for key in ('width', 'height'))):
         raise ValueError('VM production GUI flow lost localized Apply and no-overwrite copy.')
+    if require_occupied:
+        titles = {'ko': ('DarkReNamer - 적용 차단', '대상 이름이 이미 사용 중입니다.'),
+                  'en': ('DarkReNamer - Apply blocked', 'The destination name is already in use.'),
+                  'ja': ('DarkReNamer - 適用をブロック', '変更先の名前はすでに使用されています。')}
+        occupied = flow.get('occupied_destination')
+        if (not isinstance(occupied, dict) or
+                tuple(occupied.get(key) for key in ('title', 'reason')) != titles[language] or
+                occupied.get('source_unchanged') is not True or
+                occupied.get('destination_unchanged') is not True or
+                occupied.get('journal_residue_count') != 0 or
+                not isinstance(occupied.get('bounds'), dict) or
+                any(type(occupied['bounds'].get(key)) not in (int, float) or
+                    occupied['bounds'][key] <= 0 for key in ('width', 'height'))):
+            raise ValueError('VM production GUI flow did not prove localized no-overwrite refusal.')
     screenshots = flow.get('screenshots')
     if not isinstance(screenshots, list) or len(screenshots) != 2:
         raise ValueError('VM production GUI flow screenshots are incomplete.')
@@ -1276,6 +1290,11 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
         'en': ('&Language · next startup', 'System language', 'Add a name prefix...'),
         'ja': ('言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
     }
+    recovery_labels = {
+        'ko': ('DarkReNamer - 복구 상태', '새 적용은 잠겼습니다.'),
+        'en': ('DarkReNamer - Recovery status', 'Apply is locked.'),
+        'ja': ('DarkReNamer - 復旧状態', '適用をロックしました。'),
+    }
     locales = (
         ('ko', 0, 2, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
         ('en', 2, 3, '&Language · next startup', 'System language', 'Add a name prefix...'),
@@ -1306,6 +1325,26 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
                 any(type(rail['bounds'].get(key)) not in (int, float) or rail['bounds'][key] <= 0
                     for key in ('width', 'height'))):
             raise ValueError('Language accessible rail name or bounds are invalid.')
+        blocked = row.get('blocked_recovery')
+        if before in (0, 2, 3) and after is not None:
+            if (not isinstance(blocked, dict) or blocked.get('language') != language or
+                    tuple(blocked.get(key) for key in ('title', 'lock_guidance')) != recovery_labels[language] or
+                    any(type(blocked.get(key)) is not int or blocked[key] <= 0
+                        for key in ('pid', 'hwnd', 'session_id')) or
+                    blocked['session_id'] != row['session_id'] or
+                    not isinstance(blocked.get('journal_sha256'), str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', blocked['journal_sha256']) or
+                    blocked.get('journal_unchanged') is not True or
+                    blocked.get('normal_close') is not True or
+                    blocked.get('process_job_clean') is not True or
+                    blocked.get('apply_enabled') is not False or
+                    blocked.get('model_rows') != 0 or
+                    not isinstance(blocked.get('notice_bounds'), dict) or
+                    any(type(blocked['notice_bounds'].get(key)) not in (int, float) or
+                        blocked['notice_bounds'][key] <= 0 for key in ('width', 'height'))):
+                raise ValueError('Localized blocked recovery or retained-journal evidence is incomplete.')
+        elif blocked is not None:
+            raise ValueError('Language startup has an unexpected blocked-recovery probe.')
         if after is None:
             if choice is not None:
                 raise ValueError('System language readback unexpectedly changed the preference.')
@@ -1334,7 +1373,8 @@ def verify_language_checks(root, manifest, checks, baseline_flow):
         if not isinstance(row, dict) or row.get('language') != language:
             raise ValueError('Language file-flow order is invalid.')
         flow = row.get('flow')
-        verify_gui_flow(root, manifest, flow, screenshot_prefix=language + '-', language=language)
+        verify_gui_flow(root, manifest, flow, screenshot_prefix=language + '-',
+                        language=language, require_occupied=True)
         checkpoints = verify_flow_checkpoints(flow)
         if (flow.get('before_content_sha256') != baseline_flow.get('before_content_sha256') or
                 flow.get('after_content_sha256') != checkpoints['after_apply']['content_sha256'] or
@@ -1457,7 +1497,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
-        if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui):
+        if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui,
+                               require_occupied=not candidate):
             passed = False
         if not candidate:
             verify_picker_checks(gui.get('dialog_picker_checks'), gui)

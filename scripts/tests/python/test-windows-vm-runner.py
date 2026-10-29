@@ -54,6 +54,12 @@ class VmRunnerTests(unittest.TestCase):
                                        'question': '계획된 파일 변경을 적용하시겠습니까?',
                                        'no_overwrite': '기존 파일을 덮어쓰지 않습니다.',
                                        'bounds': {'width': 500, 'height': 300}},
+            'occupied_destination': {'title': 'DarkReNamer - 적용 차단',
+                                     'reason': '대상 이름이 이미 사용 중입니다.',
+                                     'bounds': {'width': 500, 'height': 300},
+                                     'source_unchanged': True,
+                                     'destination_unchanged': True,
+                                     'journal_residue_count': 0},
             'screenshots': [preview_screenshot, confirmation_screenshot],
             'diagnostic': None,
             'failure_reason': None,
@@ -95,16 +101,30 @@ class VmRunnerTests(unittest.TestCase):
                       'model_rows_before': 1, 'model_rows_after': 1,
                       'rail_before': copy.deepcopy(rail), 'rail_after': copy.deepcopy(rail),
                       'preference': saved}
+            blocked = None
+            if index < 3:
+                title, guidance = {
+                    'ko': ('DarkReNamer - 복구 상태', '새 적용은 잠겼습니다.'),
+                    'en': ('DarkReNamer - Recovery status', 'Apply is locked.'),
+                    'ja': ('DarkReNamer - 復旧状態', '適用をロックしました。'),
+                }[language]
+                blocked = {'language': language, 'pid': 300 + index, 'hwnd': 700 + index,
+                           'session_id': 2, 'title': title, 'lock_guidance': guidance,
+                           'notice_bounds': {'width': 500, 'height': 300},
+                           'apply_enabled': False, 'model_rows': 0,
+                           'journal_sha256': 'd' * 64, 'journal_unchanged': True,
+                           'normal_close': True, 'process_job_clean': True}
             selections.append({'language': language, 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
                                'startup_preference': preference, 'startup_menu': menu,
-                               'startup_rail': rail, 'choice': choice})
+                               'startup_rail': rail, 'choice': choice,
+                               'blocked_recovery': blocked})
         selections.append({'language': 'ko', 'pid': 204, 'hwnd': 604, 'session_id': 2,
                            'startup_preference': copy.deepcopy(selections[-1]['choice']['preference']),
                            'startup_menu': {'parent': '언어(&L) · 다음 실행부터',
                                             'options': ['시스템 언어', '한국어', 'English', '日本語'],
                                             'checked_command': 0x9020},
                            'startup_rail': copy.deepcopy(selections[0]['startup_rail']),
-                           'choice': None})
+                           'choice': None, 'blocked_recovery': None})
         flows = []
         for language in ('en', 'ja'):
             flow = copy.deepcopy(baseline_flow)
@@ -116,6 +136,11 @@ class VmRunnerTests(unittest.TestCase):
             }[language]
             flow['localized_confirmation'].update(title=title, question=question,
                                                   no_overwrite=no_overwrite)
+            blocked_title, occupied_reason = {
+                'en': ('DarkReNamer - Apply blocked', 'The destination name is already in use.'),
+                'ja': ('DarkReNamer - 適用をブロック', '変更先の名前はすでに使用されています。'),
+            }[language]
+            flow['occupied_destination'].update(title=blocked_title, reason=occupied_reason)
             flow['screenshots'] = [
                 dict(self.artifact(language + '-rename-preview.png', b'\x89PNG\r\n\x1a\npreview'),
                      width=900, height=700),
@@ -201,6 +226,8 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row.update(restored_preference={'value': 1, 'sha256': '0' * 64}),
             lambda row: row['system_resolution'].update(selected_tag='en-US'),
             lambda row: row['selections'][-1]['startup_rail'].update(name='Add a name prefix...'),
+            lambda row: row['selections'][1]['blocked_recovery'].update(journal_unchanged=False),
+            lambda row: row['flows'][0]['flow']['occupied_destination'].update(destination_unchanged=False),
         )
         for mutate in mutations:
             with self.subTest(mutation=mutate.__code__.co_firstlineno):
