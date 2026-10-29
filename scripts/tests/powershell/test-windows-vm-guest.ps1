@@ -232,25 +232,42 @@ try {
         }
     }
     $nativeOk = [ordered]@{
-        native_handle = 42; native_parent_bound = $true; native_control_id = 1
-        native_class = 'Button'; enabled = $true; automation_id = 'provider-specific'
+        native_handle = 42; native_live = $true; native_parent_bound = $true
+        native_control_id = 2; native_class = 'Button'; enabled = $true
+        automation_id = 'provider-specific'
     }
     $wrongId = [ordered]@{
-        native_handle = 43; native_parent_bound = $true; native_control_id = 0
-        native_class = 'Button'; enabled = $true; automation_id = '1'
+        native_handle = 43; native_live = $false; native_parent_bound = $true
+        native_control_id = 1; native_class = 'Button'; enabled = $true; automation_id = '1'
     }
     $wrongParent = [ordered]@{
-        native_handle = 44; native_parent_bound = $false; native_control_id = 1
-        native_class = 'Button'; enabled = $true; automation_id = '1'
+        native_handle = 44; native_live = $true; native_parent_bound = $false
+        native_control_id = 1; native_class = 'Button'; enabled = $true; automation_id = '1'
     }
-    $selectedOk = Select-ProductionMessageBoxOkCandidate -Candidates @($wrongId, $nativeOk, $wrongParent)
+    $wrongClass = [ordered]@{
+        native_handle = 47; native_live = $true; native_parent_bound = $true
+        native_control_id = 1; native_class = 'Static'; enabled = $true; automation_id = '1'
+    }
+    $selectedOk = Select-ProductionMessageBoxOkCandidate -Candidates @(
+        $wrongId, $nativeOk, $wrongParent, $wrongClass)
     if ($selectedOk.native_handle -ne 42 -or
-        $null -ne (Select-ProductionMessageBoxOkCandidate -Candidates @($wrongId, $wrongParent))) {
-        throw 'Native MessageBox IDOK selection accepted an unrelated child or AutomationId.'
+        $null -ne (Select-ProductionMessageBoxOkCandidate -Candidates @(
+            $wrongId, $wrongParent, $wrongClass))) {
+        throw 'Sole native MessageBox Button selection accepted a foreign or stale child.'
+    }
+    $disabled = [ordered]@{
+        native_handle = 45; native_live = $true; native_parent_bound = $true
+        native_control_id = 3; native_class = 'Button'; enabled = $false; automation_id = '3'
+    }
+    $invalidId = [ordered]@{
+        native_handle = 46; native_live = $true; native_parent_bound = $true
+        native_control_id = 0; native_class = 'Button'; enabled = $true; automation_id = '4'
     }
     Assert-Fails {
-        Select-ProductionMessageBoxOkCandidate -Candidates @($nativeOk, $nativeOk)
-    } 'more than one enabled native IDOK child'
+        Select-ProductionMessageBoxOkCandidate -Candidates @($nativeOk, $disabled)
+    } 'more than one live native Button child'
+    Assert-Fails { Select-ProductionMessageBoxOkCandidate -Candidates @($disabled) } 'disabled'
+    Assert-Fails { Select-ProductionMessageBoxOkCandidate -Candidates @($invalidId) } 'invalid control ID'
     $preferred = Resolve-ProductionSystemLanguage -Tags @('fr-FR', 'ja-JP', 'ko-KR')
     if ($preferred.language -cne 'ja' -or $preferred.selected_tag -cne 'ja-JP') {
         throw 'System language resolution did not select the first supported UI tag.'
