@@ -2303,11 +2303,13 @@ class VmRunnerTests(unittest.TestCase):
         repo = self.root / ('source-repo' + suffix)
         (repo / 'scripts').mkdir(parents=True)
         (repo / 'Cargo.lock').write_bytes(b'frozen lockfile')
+        (repo / 'rust-toolchain.toml').write_bytes(b'frozen toolchain')
         script_names = (
             'windows-vm-guest.ps1', 'run-windows-vm-tests.ps1',
             'windows-vm-acceptance.ps1', 'windows-vm-recovery-acceptance.ps1')
         for name in script_names:
             (repo / 'scripts' / name).write_bytes(('source ' + name).encode())
+        (repo / 'scripts' / 'measure-windows-binary.ps1').write_bytes(b'identity measurer fixture')
         target_directory = repo / 'target'
         artifact = target_directory / vm.TARGET / 'debug' / 'deps' / 'suite.exe'
         application = target_directory / vm.TARGET / 'release' / 'DarkReNamer.exe'
@@ -2322,7 +2324,8 @@ class VmRunnerTests(unittest.TestCase):
                             target_permissions=None, reported_artifact_path=None,
                             reported_metadata_target=None, focused_profile=None,
                             focused_case=None, focused_kind='icon',
-                            commands=None):
+                            commands=None, private_symbol_output=None,
+                            missing_pdb=False):
         outputs = outputs if outputs is not None else {}
         target_directories = target_directories if target_directories is not None else []
         target_permissions = target_permissions if target_permissions is not None else []
@@ -2338,6 +2341,8 @@ class VmRunnerTests(unittest.TestCase):
                 artifact = target_root / vm.TARGET / profile / 'deps' / 'suite.exe'
                 artifact.parent.mkdir(parents=True)
                 artifact.write_bytes(b'test executable bytes')
+                if private_symbol_output is not None and not missing_pdb:
+                    artifact.with_suffix('.pdb').write_bytes(b'test PDB bytes')
                 outputs['test'] = artifact
                 compiler_artifact = {
                     'reason': 'compiler-artifact', 'profile': {'test': True},
@@ -2349,6 +2354,8 @@ class VmRunnerTests(unittest.TestCase):
                 application = target_root / vm.TARGET / 'release' / 'DarkReNamer.exe'
                 application.parent.mkdir(parents=True, exist_ok=True)
                 application.write_bytes(b'application executable bytes')
+                if private_symbol_output is not None and not missing_pdb:
+                    application.with_suffix('.pdb').write_bytes(b'application PDB bytes')
                 outputs['application'] = application
             return subprocess.CompletedProcess(command, 0)
 
@@ -2369,7 +2376,69 @@ class VmRunnerTests(unittest.TestCase):
         with mock.patch.object(vm.subprocess, 'run', side_effect=run), \
              mock.patch.object(vm.subprocess, 'check_output', side_effect=check_output):
             return vm.build_bundle(repo, output, focused_profile=focused_profile,
-                                   focused_case=focused_case, focused_kind=focused_kind)
+                                   focused_case=focused_case, focused_kind=focused_kind,
+                                   private_symbol_output=private_symbol_output)
+
+    def test_private_symbols_are_external_and_bound_to_source_bundle(self):
+        repo, target, _, _, _ = self.source_build_inputs('-private-symbols')
+        bundle = self.root / 'private-bundle'
+        private = self.root / 'private-symbols'
+
+        def measure(_script, exe, pdb, output):
+            record = {'schema_version': 1,
+                      'executable': {'sha256': vm.sha256(exe)},
+                      'debug_symbols': {'pdb_sha256': vm.sha256(pdb),
+                                        'guid': '4f7eddc7-cf33-b9e9-4c4c-44205044422e',
+                                        'age': 1}}
+            output.write_text(json.dumps(record))
+            return record
+
+        with mock.patch.object(vm, 'measure_private_binary', side_effect=measure):
+            manifest = self.build_source_bundle(
+                repo, target, bundle, focused_profile='release',
+                private_symbol_output=private)
+        receipt = json.loads((private / 'private-symbols.json').read_text())
+        self.assertEqual(receipt['source_sha'], manifest['source_sha'])
+        self.assertEqual(receipt['bundle_manifest_sha256'], vm.sha256(bundle / 'bundle.json'))
+        self.assertEqual(receipt['test_profile'], 'release')
+        self.assertEqual(receipt['rust_toolchain_sha256'], vm.sha256(repo / 'rust-toolchain.toml'))
+        self.assertEqual([row['role'] for row in receipt['binaries']],
+                         ['application', 'test:suite.exe'])
+        self.assertEqual({path.name for path in private.iterdir()},
+                         {'DarkReNamer.exe', 'DarkReNamer.pdb', 'DarkReNamer.exe.measurement.json',
+                          'suite.exe', 'suite.pdb', 'suite.exe.measurement.json',
+                          'private-symbols.json'})
+        self.assertEqual(set(manifest['application']), {'file', 'sha256'})
+        self.assertEqual(set(manifest['test_binaries'][0]), {'name', 'file', 'sha256'})
+        self.assertFalse(any(path.suffix == '.pdb' for path in bundle.iterdir()))
+        self.assertEqual(vm.parse_arguments([
+            '--prepare-only', '--output', str(self.root / 'next-bundle'),
+            '--private-symbol-output', str(self.root / 'next-symbols')
+        ]).private_symbol_output, self.root / 'next-symbols')
+
+    def test_private_symbols_require_fresh_matching_inputs(self):
+        repo, target, _, _, _ = self.source_build_inputs('-private-failures')
+        bundle = self.root / 'failure-bundle'
+        private = self.root / 'failure-private'
+        with self.assertRaises(FileNotFoundError):
+            self.build_source_bundle(repo, target, bundle, private_symbol_output=private,
+                                     missing_pdb=True)
+        self.assertFalse(private.exists())
+        for path in (repo / 'inside', bundle / 'inside', bundle.parent):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                vm.resolve_private_symbol_output(repo, bundle, path)
+        with self.assertRaisesRegex(ValueError, 'absolute'):
+            vm.resolve_private_symbol_output(repo, bundle, Path('relative-symbols'))
+        private.mkdir()
+        with self.assertRaisesRegex(ValueError, 'new directory'):
+            vm.resolve_private_symbol_output(repo, bundle, private)
+
+        other = self.root / 'mismatch-private'
+        with mock.patch.object(vm, 'measure_private_binary', side_effect=RuntimeError('PDB GUID and age do not match')):
+            with self.assertRaisesRegex(RuntimeError, 'PDB GUID and age do not match'):
+                self.build_source_bundle(repo, target, self.root / 'mismatch-bundle',
+                                         private_symbol_output=other)
+        self.assertFalse((other / 'private-symbols.json').exists())
 
     def test_focused_icon_bundle_builds_only_selected_app_library_profile(self):
         for profile in ('debug', 'release'):
@@ -2564,6 +2633,9 @@ class VmRunnerTests(unittest.TestCase):
         ]
         prepared = vm.parse_arguments(['--prepare-only', '--output', '/external/new', *common])
         self.assertTrue(prepared.candidate_mode)
+        self.assert_arguments_rejected([
+            '--prepare-only', '--output', '/external/new',
+            '--private-symbol-output', '/external/symbols', *common])
         self.assert_arguments_rejected(['--prepare-only', '--output', '/external/new', *common[:-2]])
         self.assert_arguments_rejected(['--ssh-host', 'vm', *common])
         identity = '12345678-1234-5678-9abc-1234567890ab'
