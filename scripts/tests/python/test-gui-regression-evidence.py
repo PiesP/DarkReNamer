@@ -3774,7 +3774,7 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         cells, jobs, lives = [], [], []
         for index, name in enumerate(evidence.RUNTIME_BASELINE_PLAN['startup_cells']):
             ticks = 638965440000000000 + index * 1000000000
-            pid = 4242 + index
+            pid = (8224, 956, 17280)[index]
             value = 0 if index < 2 else 2
             preference = {'status': 'valid-saved', 'value': value,
                           'sha256': evidence.runtime_language_preference_hash(value)}
@@ -3880,7 +3880,15 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         transport['raw_cleanup'] = clean_controller_cleanup_v3(profile_sha256=profile_sha,
             process_jobs=jobs, source_sha=SOURCE,
             bundle_sha256=manifest['bundle_manifest']['sha256'])
+        # The controller canonicalizes inventory identities, independently of launch order.
+        declared = transport['raw_cleanup']['owned_resource_evidence']['declared_processes']
+        declared.sort(key=lambda row: f"{row['pid']}|{row['start_time_utc_ticks']}")
         write_json(transport_path, transport)
+        postlaunch_path = output / 'platform-postlaunch.json'
+        postlaunch = json.loads(postlaunch_path.read_text())
+        postlaunch['target']['process_id'] = cells[0]['process_id']
+        postlaunch['identity_observation']['target_process_id'] = cells[0]['process_id']
+        write_json(postlaunch_path, postlaunch)
         self.refresh_runtime(run)
         return run
 
@@ -3898,6 +3906,43 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                 '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
                 '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
         self.assertEqual(json.loads(output.getvalue())['status'], 'measured')
+
+    def test_canonical_inventory_is_unordered_but_cells_lifecycles_and_jobs_are_ordered(self):
+        run = self.runtime_run()
+        output = run / 'output'
+        raw_path, transport_path = output / 'acceptance-result.json', output / 'transport.json'
+        original_raw, original_transport = raw_path.read_bytes(), transport_path.read_bytes()
+        raw, transport = json.loads(original_raw), json.loads(original_transport)
+        owned = transport['raw_cleanup']['owned_resource_evidence']
+        self.assertEqual([cell['process_id'] for cell in raw['assertions']['scenario']['cells']],
+                         [8224, 956, 17280])
+        self.assertEqual([row['pid'] for row in owned['declared_processes']], [17280, 8224, 956])
+        evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        mutations = ('duplicate', 'missing', 'foreign', 'ticks', 'boolean-pid', 'integer-ticks',
+                     'reordered-cells', 'reordered-lifecycles', 'reordered-jobs')
+        for mutation in mutations:
+            raw, transport = json.loads(original_raw), json.loads(original_transport)
+            owned = transport['raw_cleanup']['owned_resource_evidence']
+            declared = owned['declared_processes']
+            if mutation == 'duplicate': declared[1] = deepcopy(declared[0])
+            elif mutation == 'missing': declared.pop()
+            elif mutation == 'foreign': declared[0]['pid'] = 27182
+            elif mutation == 'ticks': declared[0]['start_time_utc_ticks'] = str(int(declared[0]['start_time_utc_ticks']) + 1)
+            elif mutation == 'boolean-pid': declared[0]['pid'] = True
+            elif mutation == 'integer-ticks': declared[0]['start_time_utc_ticks'] = int(declared[0]['start_time_utc_ticks'])
+            elif mutation == 'reordered-cells': raw['assertions']['scenario']['cells'].reverse()
+            elif mutation == 'reordered-lifecycles': raw['process_lifecycles'].reverse()
+            else:
+                raw['process_job_cleanup'].reverse()
+                owned['process_job_cleanup'].reverse()
+            write_json(raw_path, raw)
+            write_json(transport_path, transport)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=mutation), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        raw_path.write_bytes(original_raw)
+        transport_path.write_bytes(original_transport)
+        self.refresh_runtime(run)
 
     def test_rehashed_missing_endpoints_wrong_language_samples_and_exit_fail(self):
         run = self.runtime_run()
