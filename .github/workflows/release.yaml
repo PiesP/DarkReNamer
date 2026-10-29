@@ -143,6 +143,37 @@ jobs:
           -SourceRoot $PWD
           -HandoffRoot (Join-Path $PWD 'dist')
 
+      - name: Compare public package layouts without publishing the alternative
+        shell: pwsh
+        run: |
+          $comparisonRoot = Join-Path $env:RUNNER_TEMP 'darkrenamer-combined-comparison'
+          New-Item -ItemType Directory -Path $comparisonRoot | Out-Null
+          foreach ($name in @(
+            'DarkReNamer.exe', 'LICENSE', 'release-handoff.json',
+            'THIRD_PARTY_LICENSES.html', 'THIRD_PARTY_NOTICES.md',
+            'DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json',
+            'DISTRIBUTION.md', 'release-metrics.json'
+          )) {
+            Copy-Item -LiteralPath (Join-Path dist $name) -Destination $comparisonRoot
+          }
+          Copy-Item -LiteralPath scripts/release-run-instructions.txt `
+            -Destination (Join-Path $comparisonRoot 'RUN.txt')
+          $combinedPath = Join-Path $env:RUNNER_TEMP 'DarkReNamer-combined-comparison.zip'
+          Compress-Archive -Path (Join-Path $comparisonRoot '*') `
+            -DestinationPath $combinedPath -CompressionLevel Optimal
+          $userBytes = (Get-Item -LiteralPath dist/DarkReNamer-windows-x64.zip).Length
+          $supportBytes = (Get-Item -LiteralPath dist/DarkReNamer-support-windows-x64.zip).Length
+          $checksumBytes = (Get-Item -LiteralPath dist/SHA256SUMS.txt).Length
+          $combinedBytes = (Get-Item -LiteralPath $combinedPath).Length
+          @(
+            '## Public package layout comparison (candidate bytes)'
+            ''
+            "Chosen four-upload layout: user ZIP $userBytes bytes + support ZIP $supportBytes bytes + checksums $checksumBytes bytes + later hosted statement."
+            "Alternative three-upload layout: combined ZIP $combinedBytes bytes + a comparable checksum file + later hosted statement."
+            'The combined ZIP is comparison-only and is not part of the handoff or published assets. GitHub adds two automatic source archives to either layout.'
+            'The chosen layout lets ordinary users download the executable without the debug symbols.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
       - name: Summarize information-only release metrics
         shell: pwsh
         run: |

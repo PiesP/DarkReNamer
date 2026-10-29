@@ -21,6 +21,31 @@ function Write-DarkReNamerReleaseFiles {
         [string] $DetailOutputPath
     )
 
+    function Write-ReleasePackage {
+        param([string] $Path, [string[]] $Names, [string] $HandoffRoot,
+            [string] $InstructionsPath)
+        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Create,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $archive = [IO.Compression.ZipArchive]::new(
+                $stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+            try {
+                foreach ($name in $Names) {
+                    $source = if ($name -ceq 'RUN.txt') { $InstructionsPath }
+                        else { Join-Path $HandoffRoot $name }
+                    $entry = $archive.CreateEntry($name, [IO.Compression.CompressionLevel]::Optimal)
+                    $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+                    $inputStream = [IO.File]::OpenRead($source)
+                    $entryStream = $entry.Open()
+                    try { $inputStream.CopyTo($entryStream) }
+                    finally { $entryStream.Dispose(); $inputStream.Dispose() }
+                }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $stream.Dispose() }
+    }
+
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
 
@@ -99,9 +124,11 @@ function Write-DarkReNamerReleaseFiles {
             -Algorithm SHA256 `
             -LiteralPath $executablePath).Hash.ToLowerInvariant()
     $handoff = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = $SourceSha
         workflow_run = $RunId
+        workflow_attempt = $RunAttempt
+        package_layout = 'portable-windows-x64-v1'
         executable = [ordered]@{
             filename = 'DarkReNamer.exe'
             sha256 = $executableHash
@@ -112,12 +139,24 @@ function Write-DarkReNamerReleaseFiles {
         (($handoff | ConvertTo-Json -Depth 4) + "`n"),
         [Text.UTF8Encoding]::new($false)
     )
-    $files = Get-ChildItem -LiteralPath $HandoffRoot -File |
-        Where-Object Name -NotIn @('DarkReNamer.pdb', 'SHA256SUMS.txt') |
-        Sort-Object Name
-    $lines = foreach ($file in $files) {
+    $instructionsPath = Join-Path $SourceRoot 'scripts/release-run-instructions.txt'
+    if (-not (Test-Path -LiteralPath $instructionsPath -PathType Leaf)) {
+        throw 'Release run instructions are missing from the source.'
+    }
+    $userPackage = 'DarkReNamer-windows-x64.zip'
+    $supportPackage = 'DarkReNamer-support-windows-x64.zip'
+    Write-ReleasePackage -Path (Join-Path $HandoffRoot $userPackage) -HandoffRoot $HandoffRoot `
+        -InstructionsPath $instructionsPath -Names @('DarkReNamer.exe', 'LICENSE',
+            'release-handoff.json', 'RUN.txt', 'THIRD_PARTY_LICENSES.html',
+            'THIRD_PARTY_NOTICES.md')
+    Write-ReleasePackage -Path (Join-Path $HandoffRoot $supportPackage) -HandoffRoot $HandoffRoot `
+        -InstructionsPath $instructionsPath -Names @('DarkReNamer-debug-symbols.zip',
+            'DarkReNamer.cdx.json', 'DISTRIBUTION.md', 'release-handoff.json',
+            'release-metrics.json')
+    $lines = foreach ($name in @($supportPackage, $userPackage)) {
+        $file = Get-Item -LiteralPath (Join-Path $HandoffRoot $name)
         $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
-        "$hash *$($file.Name)"
+        "$hash *$name"
     }
     [IO.File]::WriteAllText(
         (Join-Path $HandoffRoot 'SHA256SUMS.txt'),

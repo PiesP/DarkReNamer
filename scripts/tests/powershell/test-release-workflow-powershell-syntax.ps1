@@ -1507,6 +1507,11 @@ function Invoke-PromotionChannelFixture {
     [void](New-Item -ItemType Directory -Path $fixtureRoot)
     $fixtureScripts = Join-Path $fixtureRoot 'scripts'
     [void](New-Item -ItemType Directory -Path $fixtureScripts)
+    $fixtureDist = Join-Path $fixtureRoot 'dist'
+    [void](New-Item -ItemType Directory -Path $fixtureDist)
+    foreach ($name in 'DarkReNamer-windows-x64.zip', 'DarkReNamer-support-windows-x64.zip') {
+        [IO.File]::WriteAllBytes((Join-Path $fixtureDist $name), [byte[]](1, 2, 3))
+    }
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts/get-release-product-notes.ps1') -Destination $fixtureScripts
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'Cargo.toml'), "[workspace.package]`nversion = `"0.2.0`"`n")
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'DISTRIBUTION.md'), "## Prepared 0.2.0 release notes`n`nProposed names can be reset; existing settings remain compatible.`n`n## Historical observations`nOld release only.`n")
@@ -1521,11 +1526,9 @@ function Invoke-PromotionChannelFixture {
         $global:LASTEXITCODE = 0
         if ($args -contains 'list') {
             @(
-                'dist/DarkReNamer.exe', 'dist/DarkReNamer.cdx.json',
-                'dist/DarkReNamer-debug-symbols.zip', 'dist/SHA256SUMS.txt',
-                'dist/LICENSE', 'dist/THIRD_PARTY_LICENSES.html',
-                'dist/THIRD_PARTY_NOTICES.md', 'dist/DISTRIBUTION.md',
-                'dist/release-handoff.json', 'dist/release-metrics.json'
+                'dist/DarkReNamer-windows-x64.zip',
+                'dist/DarkReNamer-support-windows-x64.zip',
+                'dist/SHA256SUMS.txt'
             )
         }
     }
@@ -1537,6 +1540,11 @@ function Invoke-PromotionChannelFixture {
         $expectedLabel = if ($Channel -ceq 'release') { 'stable release' } else { 'prerelease' }
         if (-not $notes.Contains("VM-Automated Windows $expectedLabel.", [StringComparison]::Ordinal)) {
             throw 'The release notes must disclose the selected channel.'
+        }
+        if (-not $notes.StartsWith('**Download for Windows 11 or later (x64):', [StringComparison]::Ordinal) -or
+            -not $notes.Contains('DarkReNamer-windows-x64.zip', [StringComparison]::Ordinal) -or
+            -not $notes.Contains('DarkReNamer-support-windows-x64.zip', [StringComparison]::Ordinal)) {
+            throw 'The release notes must lead with a direct user download and explain the support package.'
         }
         if (-not $notes.Contains('Proposed names can be reset; existing settings remain compatible.', [StringComparison]::Ordinal) -or
             $notes.Contains('Old release only.', [StringComparison]::Ordinal)) {

@@ -14,12 +14,14 @@ README の英語版と韓国語版は、アプリケーションがそれらの�
 
 ## ダウンロード
 
-[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases) から最新の
-ポータブルなリリースとチェックサムをダウンロードしてください。実行
-可能な製品は、インストール不要の `DarkReNamer.exe` 1 ファイルです。現在の
-ビルドは署名されていません。使用前に
-[配布ポリシー（英語）](DISTRIBUTION.md#current-unsigned-handoff)を読み、同梱の
-チェックサムと来歴を検証してください。
+[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases) からダウンロード
+してください。新しいパッケージ形式のリリースでは、推奨ファイルの
+`DarkReNamer-windows-x64.zip` を選び、`SHA256SUMS.txt` で検証してから
+展開し、管理者権限なしで `DarkReNamer.exe` を起動します。サポート用 ZIP は
+診断とリリース証拠用で、実行には不要です。公開済みの v0.1.9 は EXE を
+含む従来の個別アセットを維持します。現在のビルドは署名されていません。
+使用前に[配布ポリシー（英語）](DISTRIBUTION.md#current-unsigned-handoff)に
+従って来歴を検証してください。
 
 正式リリースは文書化された対応範囲内で一般利用者向けに配布し、
 プレリリースは別に表示します。両チャネルとも既存の自動検証を使用し、

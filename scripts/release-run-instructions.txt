@@ -1,0 +1,12 @@
+DarkReNamer for Windows 11 or later (x64)
+
+Extract all files from this ZIP to a folder you control, then run DarkReNamer.exe
+normally, without administrator elevation. No installer or support ZIP is needed.
+
+The executable is intentionally unsigned. Verify this ZIP against SHA256SUMS.txt
+from the same GitHub release before use. release-handoff.json records the source
+commit, candidate workflow and executable SHA-256. For the full verification
+procedure and supported filesystem scope, see the release notes and
+https://github.com/PiesP/DarkReNamer/blob/master/DISTRIBUTION.md.
+
+Preferences are stored separately in %LOCALAPPDATA%\DarkReNamer.

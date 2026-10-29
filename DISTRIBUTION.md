@@ -162,24 +162,23 @@ this optimization and remains unchanged.
 ## Current unsigned handoff
 
 The current executable is intentionally Authenticode `NotSigned`. The packaging
-workflow fails if that status changes without an explicit policy update. A
-published release or prerelease contains:
+workflow fails if that status changes without an explicit policy update. Future
+releases prepared under this source publish four uploaded assets:
 
-- `DarkReNamer.exe`;
-- `SHA256SUMS.txt`;
-- `release-handoff.json`, binding the source SHA and Actions workflow run to the
-  executable filename and SHA-256;
-- `release-metrics.json`, recording the source, toolchain, target, executable and
-  `.text` raw byte sizes, raw and compressed debug-symbol sizes, SBOM size, and
-  Cargo lockfile package count for that build;
-- a CycloneDX JSON SBOM;
-- a zipped PDB;
-- the project license, source attribution, generated Rust dependency license
-  texts, and this distribution policy;
-- the original candidate workflow's GitHub build-provenance and SBOM
-  attestations;
-- `validation-statement.json`, the canonical VM-Automated profile verdict,
-  whose separate hosted validation attestation is verified before promotion.
+- `DarkReNamer-windows-x64.zip` is the recommended download. It contains the
+  single executable, license, attribution and generated dependency-license
+  materials, concise `RUN.txt` instructions, and `release-handoff.json` with
+  the source SHA, candidate run/attempt, and executable SHA-256.
+- `DarkReNamer-support-windows-x64.zip` contains the zipped PDB, CycloneDX
+  SBOM, handoff, metrics, and distribution policy for diagnosis and audit.
+- `SHA256SUMS.txt` covers the finalized two candidate ZIPs only.
+- `validation-statement.json` is the separately produced canonical
+  VM-Automated verdict. Its hosted validation attestation is verified before
+  promotion; it cannot be included in the earlier candidate checksum file.
+
+GitHub also shows two automatic source archives. They contain source, not the
+Windows application. Published v0.1.9 retains its original eleven uploaded
+assets and source archives; this layout does not relabel or replace them.
 
 `DarkReNamer.exe` is the only runnable product file and requires no adjacent
 configuration file. “Portable” means an installer-free executable; it does not
@@ -187,8 +186,12 @@ make preferences self-contained with the download. UI preferences remain in the
 current user's `%LOCALAPPDATA%\DarkReNamer` directory, while the executable can
 be replaced or moved independently.
 
-Every successful packaging run also retains the complete Actions handoff,
-including the raw PDB. The handoff validator checks the exact file layout,
+Every successful packaging run also retains the complete 13-file Actions
+handoff, including the raw EXE, PDB, SBOM, notices, metadata, both public ZIPs,
+and candidate checksums. The `release-handoff.json` schema version 2 and fixed
+`portable-windows-x64-v1` marker reject historical handoffs from this path.
+The handoff validator checks the exact file layout, bounded public ZIP member
+sets and extracted bytes against the raw handoff and source instructions,
 symbol archive contents, SBOM format, checksums, unsigned Authenticode status,
 provenance and metrics shape, source and toolchain bindings, recorded artifact
 sizes, Cargo lockfile package count, executable bytes, and byte-identical copies
@@ -210,12 +213,13 @@ source, executable hash, target, toolchain, profile and inputs before calculatin
 a delta. If an older artifact lacks the detail or build conditions differ, record
 the missing fields and treat the interval as descriptive, not a causal saving.
 
-Verify the checksum before running the executable. Verify candidate provenance
-against the repository, signer workflow, pinned master ref, and exact source
-digest recorded in `release-handoff.json`:
+Verify the downloaded user ZIP against `SHA256SUMS.txt` before extracting and
+running the executable. Inspect its `release-handoff.json` to identify the
+source and executable digests. Verify original candidate provenance against the
+repository, signer workflow, pinned master ref, and exact source digest:
 
 ```text
-gh attestation verify DarkReNamer.exe \
+gh attestation verify DarkReNamer-windows-x64.zip \
   --repo PiesP/DarkReNamer \
   --signer-workflow PiesP/DarkReNamer/.github/workflows/release.yaml \
   --source-ref refs/heads/master \
@@ -223,6 +227,8 @@ gh attestation verify DarkReNamer.exe \
   --deny-self-hosted-runners
 ```
 
+The authenticated original handoff also retains a separate raw EXE subject and
+the complete Actions artifact ID/ZIP digest; neither is the user ZIP digest.
 Repository-only verification is not the release policy because another ref or
 workflow can produce a different attestation. A valid checksum or strict
 attestation identifies the produced bytes; it does not replace Authenticode
@@ -246,7 +252,7 @@ source, and attests the unchanged files and executable SBOM. It does not install
 Cargo tools, execute candidate code, rebuild files, or upload another handoff.
 A failed or skipped signing job cannot produce a successful candidate run.
 
-Candidate extraction preflights the fixed 11 flat ASCII files before opening a
+Candidate extraction preflights the fixed 13 flat ASCII files before opening a
 decompressor. Compressed bytes and total expanded bytes are each limited to
 512 MiB, one member to 256 MiB, and central-directory bytes to 32 KiB. Names
 are at most 64 bytes; member extra fields/comments and the archive comment are
@@ -254,7 +260,12 @@ at most 1024 bytes each. ZIP64, encryption, unsupported compression, links,
 directories, collisions and incomplete layouts fail closed. Extraction counts
 actual output using a 64 KiB buffer and a 300-second deadline, refuses existing
 destinations, and leaves failed partial files only in the new task directory.
-Existing metadata/digest, complete handoff and attestation checks remain required.
+The two public ZIPs use the same bounded extractor with their own fixed member
+lists. The user ZIP runs without the support ZIP or an adjacent configuration
+file. Existing metadata/digest, complete handoff and attestation checks remain
+required. The public upload list has one source owner in
+`scripts/validate-release-publication.py`; its three candidate assets and the
+later hosted statement are read back byte-for-byte after publication.
 
 Candidate builds use `config/release-tool-integrity.json` to approve the official
 Windows Rust components and Cargo utility archives by SHA-256 before extraction,
@@ -309,8 +320,9 @@ bytes, the original candidate attestations, and the existing remote tag. The
 authenticated artifact API digest and the actual downloaded original ZIP bytes
 must both match the approved digest; a re-created ZIP or executable digest is
 not an equivalent artifact selection. Every candidate-derived public asset,
-including checksums and generated metadata, must pass the original candidate
-provenance gate. The publication list and verified subject list have one owner.
+including both ZIPs and checksums, must pass the original candidate provenance
+gate. Raw metadata remains in the immutable handoff and inside the packages.
+The publication list and verified subject list have one owner.
 The validation statement retains its separate hosted verifier attestation.
 
 Before collecting new raw evidence, use the local POSIX owner-only destination

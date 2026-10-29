@@ -7,22 +7,21 @@ import json
 from pathlib import Path
 
 
-# This is the sole promotion file list. The candidate handoff additionally retains
-# the raw PDB, which is published only inside the debug-symbols ZIP.
+# This is the sole promotion file list. Raw candidate files remain in the
+# immutable Actions handoff for VM tests and original producer attestation.
 CANDIDATE_ASSETS = (
-    "DarkReNamer.exe",
-    "DarkReNamer.cdx.json",
-    "DarkReNamer-debug-symbols.zip",
+    "DarkReNamer-windows-x64.zip",
+    "DarkReNamer-support-windows-x64.zip",
     "SHA256SUMS.txt",
-    "LICENSE",
-    "THIRD_PARTY_LICENSES.html",
-    "THIRD_PARTY_NOTICES.md",
-    "DISTRIBUTION.md",
-    "release-handoff.json",
-    "release-metrics.json",
 )
+RAW_PROVENANCE_ASSETS = ("DarkReNamer.exe", "DarkReNamer.cdx.json")
+PROVENANCE_ASSETS = (*CANDIDATE_ASSETS, *RAW_PROVENANCE_ASSETS)
 VALIDATION_ASSET = "validation-statement.json"
-HANDOFF_ASSETS = frozenset((*CANDIDATE_ASSETS, "DarkReNamer.pdb"))
+HANDOFF_ASSETS = frozenset((*CANDIDATE_ASSETS,
+    "DarkReNamer.exe", "DarkReNamer.cdx.json", "DarkReNamer-debug-symbols.zip",
+    "DarkReNamer.pdb", "LICENSE", "THIRD_PARTY_LICENSES.html",
+    "THIRD_PARTY_NOTICES.md", "DISTRIBUTION.md", "release-handoff.json",
+    "release-metrics.json"))
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 
@@ -59,12 +58,12 @@ def verify_candidate(candidate_root, verified_root, repository, source_sha,
             run_attempt.isdecimal() and int(run_attempt) > 0,
             "Invalid candidate run identity.")
     require({p.name for p in verified_root.iterdir()} ==
-            {f"{index}.json" for index in range(len(CANDIDATE_ASSETS))},
+            {f"{index}.json" for index in range(len(PROVENANCE_ASSETS))},
             "Candidate verification output set differs from publication list.")
     uri = f"https://github.com/{repository}"
     signer = f"{uri}/.github/workflows/release.yaml@refs/heads/master"
     invocation = f"{uri}/actions/runs/{run_id}/attempts/{run_attempt}"
-    for index, name in enumerate(CANDIDATE_ASSETS):
+    for index, name in enumerate(PROVENANCE_ASSETS):
         path = candidate_root / name
         require(path.is_file() and not path.is_symlink(),
                 f"Candidate publication file missing or unsupported: {name}")
@@ -146,6 +145,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     listed = commands.add_parser("list")
     listed.add_argument("--candidate-root", type=Path, required=True)
+    provenance = commands.add_parser("list-provenance")
+    provenance.add_argument("--candidate-root", type=Path, required=True)
     candidate = commands.add_parser("verify-candidate")
     candidate.add_argument("--candidate-root", type=Path, required=True)
     candidate.add_argument("--verified-root", type=Path, required=True)
@@ -162,6 +163,9 @@ def main():
     args = parser.parse_args()
     if args.command == "list":
         for name in CANDIDATE_ASSETS:
+            print(args.candidate_root / name)
+    elif args.command == "list-provenance":
+        for name in PROVENANCE_ASSETS:
             print(args.candidate_root / name)
     elif args.command == "verify-candidate":
         verify_candidate(args.candidate_root, args.verified_root, args.repository,

@@ -10,10 +10,8 @@ $root = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-public-readback-$([Gui
 $candidate = Join-Path $root 'candidate'
 $statement = Join-Path $root 'validation-statement.json'
 $names = @(
-    'DarkReNamer.exe', 'DarkReNamer.cdx.json', 'DarkReNamer-debug-symbols.zip',
-    'SHA256SUMS.txt', 'LICENSE', 'THIRD_PARTY_LICENSES.html',
-    'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md', 'release-handoff.json',
-    'release-metrics.json', 'validation-statement.json'
+    'DarkReNamer-windows-x64.zip', 'DarkReNamer-support-windows-x64.zip',
+    'SHA256SUMS.txt', 'validation-statement.json'
 )
 $previousToken = $env:GH_TOKEN
 $env:GH_TOKEN = 'fixture-token'
