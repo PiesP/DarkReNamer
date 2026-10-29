@@ -1043,6 +1043,7 @@ function Invoke-ObserverPrefix {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [string] $ExpectedFirstSourceName = 'item-00000.txt',
         [object] $Command,
+        [ValidateRange(0, 1000)][int] $PromptSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents
     )
     if ($null -ne $TimelineEvents -and $TimelineEvents.Count + 5 -gt 128) {
@@ -1057,6 +1058,15 @@ function Invoke-ObserverPrefix {
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
     $promptFoundTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle
+    $promptClass = [string]$prompt.Current.ClassName
+    $promptVisible = -not [bool]$prompt.Current.IsOffscreen
+    $promptEnabled = [bool]$prompt.Current.IsEnabled
+    if ($PromptSettleMilliseconds -gt 0) {
+        if ($promptClass -cne 'DarkReNamerInputWindow' -or -not $promptVisible -or -not $promptEnabled) {
+            throw 'Focused custom input prompt class or visible/enabled state differs.'
+        }
+        Start-Sleep -Milliseconds $PromptSettleMilliseconds
+    }
     $edit = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix edit' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $Prefix -Label 'large smoke prefix edit'
     $ok = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix OK' -RequireEnabled -RequireWindowHandle
@@ -1087,7 +1097,11 @@ function Invoke-ObserverPrefix {
                 ticks=[long]$boundary[1]; window_handle=[long]$boundary[2] })
         }
     }
-    [ordered]@{ elapsed_ms = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3); expected_first_name = $expected }
+    [ordered]@{ elapsed_ms = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3);
+        expected_first_name = $expected; prompt_handle = $handle.ToInt64();
+        prompt_class = $promptClass; prompt_visible = $promptVisible;
+        prompt_enabled = $promptEnabled; prompt_found_ticks = $promptFoundTicks;
+        prompt_closed_ticks = $promptClosedTicks }
 }
 function Get-ObserverReadOnlyDetails {
     param(

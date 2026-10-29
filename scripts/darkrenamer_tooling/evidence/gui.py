@@ -62,11 +62,21 @@ FIRST_CLEAR_SCOPE = "first-clear-observation-v1"
 PICKER_MODE = "picker-identity-observation"
 PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
 PICKER_SCOPE = "picker-identity-observation-v1"
+CUSTOM_MODE = "custom-input-identity-observation"
+CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
+CUSTOM_SCOPE = "custom-input-identity-observation-v1"
 PICKER_PLAN = {
     "ordinary_rows": [100], "idle_ms": 1000, "picker_settle_ms": 350,
     "sample_interval_ms": 200,
     "maximum_seconds": 120, "command_timeout_ms": 5000,
     "fixture_file_limit": 100, "full_performance_sample": False,
+}
+CUSTOM_PLAN = {
+    "ordinary_rows": [100], "idle_ms": 1000, "sample_interval_ms": 200,
+    "maximum_seconds": 120, "command_timeout_ms": 5000,
+    "fixture_file_limit": 100, "prompt_settle_ms": 350,
+    "confirmed_prefix": "confirmed-", "cancelled_prefix": "cancelled-",
+    "prompt_count": 2, "full_performance_sample": False,
 }
 
 
@@ -352,7 +362,9 @@ def validate_picker_failure(value: object, *, main_handle: int, process_id: int,
         "popup_after"}, "picker sampler failure")
     require(schema_version in {1, 2, 3} and type(failure["schema_version"]) is int and
             failure["schema_version"] == schema_version and
-            failure["phase"] in {"empty-idle", "ordinary-100", "post"} and
+            failure["phase"] in ({"empty-idle", "ordinary-100", "custom-confirm",
+                                  "custom-cancel", "post"} if schema_version == 3 else
+                                 {"empty-idle", "ordinary-100", "post"}) and
             failure["error_type"] in {"InvalidOperationException", "Win32Exception"} and
             isinstance(failure["message"], str) and 0 < len(failure["message"]) <= 256,
             "Picker sampler failure schema or status is invalid.")
@@ -764,12 +776,14 @@ def validate_request(value: object) -> dict:
         fields.add("first_clear_observation_plan")
     if isinstance(value, dict) and value.get("mode") == PICKER_MODE:
         fields.add("picker_identity_plan")
+    if isinstance(value, dict) and value.get("mode") == CUSTOM_MODE:
+        fields.add("custom_input_plan")
     if isinstance(value, dict) and value.get("mode") == ICON_SETTLEMENT_MODE:
         fields.update({"settlement_plan", "endpoint_method"})
         if value.get("endpoint_method") == ICON_BASELINE_METHOD:
             fields.add("baseline_product_source_sha")
     request = exact_keys(value, fields, "request")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE},
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
@@ -808,6 +822,11 @@ def validate_request(value: object) -> dict:
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
                 typed_equal(request["picker_identity_plan"], PICKER_PLAN),
                 "Picker observation request differs from its fixed plan.")
+    elif request["mode"] == CUSTOM_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                typed_equal(request["custom_input_plan"], CUSTOM_PLAN),
+                "Custom input observation request differs from its fixed plan.")
     elif request["mode"] == ICON_SETTLEMENT_MODE:
         require(request["appearance"] == "light" and
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
@@ -862,7 +881,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
-            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance):
+            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance):
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID or value["request"].get("mode") == FIRST_CLEAR_MODE:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -887,9 +906,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE} or fixed_v2 or owned_performance else
+                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE} or fixed_v2 or owned_performance else
                  {V1_PROFILE_ID} if request["mode"] == FIRST_CLEAR_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
         if request["mode"] == FIRST_CLEAR_MODE:
@@ -910,9 +929,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
             require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
                     profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 3),
                     "Appearance V2 profile definition is invalid.")
-            if fixed_v2 or owned_performance or request["mode"] == PICKER_MODE:
+            if fixed_v2 or owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE}:
                 require(expected_profile_sha256 == profile_artifact["sha256"] and
-                        (not (owned_performance or request["mode"] == PICKER_MODE) or
+                        (not (owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE}) or
                          profile_artifact["sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256),
                         "Fixed GUI V2 profile differs from the selected source blob.")
     if request["mode"] == FIRST_CLEAR_MODE:
@@ -929,7 +948,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE} or fixed_v2 or owned_performance:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -1087,17 +1106,17 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--expected-prepared-application-sha256", prepared["application_sha256"],
                             "--acceptance-profile-id", V1_PROFILE_ID],
                 "First-clear manifest identity or prepared executable differs.")
-    if request["mode"] == PICKER_MODE:
+    if request["mode"] in {PICKER_MODE, CUSTOM_MODE}:
         prepared = exact_keys(manifest.get("prepared_bundle"),
                               {"origin", "bundle_manifest_sha256", "application_sha256"},
                               "picker prepared bundle")
         require(prepared["origin"] == "external-prepared-source-built-bundle" and
                 prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
                 prepared["application_sha256"] == artifacts["application"]["sha256"] and
-                manifest["run_id"] == PICKER_RUN_ID and
+                manifest["run_id"] == (PICKER_RUN_ID if request["mode"] == PICKER_MODE else CUSTOM_RUN_ID) and
                 command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
                             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
-                            "--diagnostic", PICKER_MODE,
+                            "--diagnostic", request["mode"],
                             "--prepared-bundle-root", "<external-prepared-bundle-root>",
                             "--expected-prepared-application-sha256", prepared["application_sha256"],
                             "--acceptance-profile-id", V2_PROFILE_ID] and
@@ -1125,7 +1144,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--acceptance-profile-id", V2_PROFILE_ID, *method_args],
                 "Icon settlement manifest identity or command is invalid.")
     else:
-        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE}:
+        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE}:
             require("prepared_bundle" not in manifest,
                     "Prepared bundle provenance is restricted to performance and focused clear runs.")
     if request["mode"] == "tooltip":
@@ -4579,8 +4598,10 @@ def validate_picker_collection(run_root: Path, input_hash: str, failed: bool) ->
     collection, _ = read_json(run_root, Path("collection.json"), "picker collection")
     collection = exact_keys(collection, {"schema_version", "run_id", "input_manifest_sha256", "files"},
                             "picker collection")
+    custom = run_root.name == CUSTOM_RUN_ID
+    capture = "custom-100-after.png" if custom else "picker-100-after.png"
     require(int_equals(collection["schema_version"], 1) and
-            collection["run_id"] == PICKER_RUN_ID and
+            collection["run_id"] == run_root.name and
             collection["input_manifest_sha256"] == input_hash,
             "Picker collection identity differs.")
     rows = collection["files"]
@@ -4600,8 +4621,8 @@ def validate_picker_collection(run_root: Path, input_hash: str, failed: bool) ->
         files[name] = row
         total += len(data)
     require(total <= 32 * 1024 * 1024 and
-            {name for name in files if name.endswith(".png")} <= {"picker-100-after.png"} and
-            (failed or "picker-100-after.png" in files),
+            {name for name in files if name.endswith(".png")} <= {capture} and
+            (failed or capture in files),
             "Picker output exceeds its 32 MiB/one-PNG envelope.")
     require({"acceptance-result.json", "acceptance-observations.json", "transport.json",
              "cleanup.json", "platform-preflight.json", "controller.stdout.txt",
@@ -4621,15 +4642,23 @@ def validate_picker_collection(run_root: Path, input_hash: str, failed: bool) ->
 
 
 def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) -> dict:
-    require(run_id == PICKER_RUN_ID, "Picker run ID differs.")
+    require(run_id in {PICKER_RUN_ID, CUSTOM_RUN_ID}, "Popup run ID differs.")
+    custom = run_id == CUSTOM_RUN_ID
+    mode = CUSTOM_MODE if custom else PICKER_MODE
+    scope = CUSTOM_SCOPE if custom else PICKER_SCOPE
+    plan = CUSTOM_PLAN if custom else PICKER_PLAN
+    plan_key = "custom_input_plan" if custom else "picker_identity_plan"
+    capture = "custom-100-after.png" if custom else "picker-100-after.png"
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(), "Picker run directory is unsafe.")
     manifest, input_bytes = validate_input_manifest(
         run_root, source_sha, expected_profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
-    require(manifest["request"]["mode"] == PICKER_MODE and
-            typed_equal(manifest["request"]["picker_identity_plan"], PICKER_PLAN),
-            "Picker source-bound request differs.")
+    require(manifest["request"]["mode"] == mode and
+            typed_equal(manifest["request"][plan_key], plan),
+            "Popup source-bound request differs.")
     schema_version = selected_picker_failure_schema(repo, source_sha)
+    require(not custom or schema_version == 3,
+            "Custom input observation requires source-selected popup schema 3.")
     input_hash = sha256_bytes(input_bytes)
     failed = not (run_root / "output" / "run-result.json").exists()
     files = validate_picker_collection(run_root, input_hash, failed)
@@ -4652,11 +4681,11 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
             raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
             raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
-            (failed or nested(raw, "assertions", "scope") == PICKER_SCOPE),
+            (failed or nested(raw, "assertions", "scope") == scope),
             "Picker observer identity or protected observations differ.")
     scenario = observations.get("scenario")
-    require(isinstance(scenario, dict) and scenario.get("mode") == PICKER_MODE and
-            typed_equal(scenario.get("plan"), PICKER_PLAN) and
+    require(isinstance(scenario, dict) and scenario.get("mode") == mode and
+            typed_equal(scenario.get("plan"), plan) and
             scenario.get("executable_sha256") == artifacts["application"]["sha256"] and
             (failed or int_equals(scenario.get("process_id"), postlaunch["target"]["process_id"])) and
             nested(scenario, "environment", "main_window", "process_id") == scenario["process_id"] and
@@ -4675,33 +4704,49 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
     require(int_equals(timeline["schema_version"], 1), "Picker response timeline schema differs.")
     frequency = checked_int(timeline["qpc_frequency"], 1, 10**10, "picker QPC frequency")
     events = timeline["events"]
-    require(isinstance(events, list) and len(events) <= 6, "Picker boundary count exceeds one import.")
+    require(isinstance(events, list) and len(events) <= (15 if custom else 6),
+            "Popup boundary count exceeds its fixed diagnostic.")
+    expected_boundaries = ([('ordinary-100', step) for step in PERFORMANCE_IMPORT_BOUNDARIES] +
+                           [('full-preview', step) for step in PERFORMANCE_PREVIEW_BOUNDARIES[:5]] +
+                           [('custom-cancel', step) for step in
+                            ('prompt_request', 'prompt_found', 'cancel_invoke', 'prompt_closed')]
+                           if custom else
+                           [('ordinary-100', step) for step in PERFORMANCE_IMPORT_BOUNDARIES])
     previous = 0
     for index, event in enumerate(events):
         event = exact_keys(event, {"operation", "step", "ticks", "window_handle"},
                            f"picker boundary {index}")
-        require(event["operation"] == "ordinary-100" and
-                event["step"] == PERFORMANCE_IMPORT_BOUNDARIES[index],
-                "Picker boundaries are reordered or incomplete.")
+        require((event["operation"], event["step"]) == expected_boundaries[index],
+                "Popup boundaries are reordered or incomplete.")
         tick = checked_int(event["ticks"], 1, 2**63 - 1, "picker boundary QPC")
         require(tick > previous, "Picker boundary QPC regressed.")
         previous = tick
         handle = checked_int(event["window_handle"], 0, 2**63 - 1, "picker boundary HWND")
-        require((handle > 0) == (event["step"] in {"picker_found", "open_invoke", "dialog_closed"}),
-                "Picker boundary HWND is missing.")
+        require((handle > 0) == (event["step"] in {"picker_found", "open_invoke", "dialog_closed",
+                                                "prompt_found", "commit_invoke", "cancel_invoke",
+                                                "prompt_closed"}),
+                "Popup boundary HWND is missing.")
     if len(events) >= 3:
         require(events[1]["window_handle"] == events[2]["window_handle"],
                 "Picker found and invoked HWND identities differ.")
     if len(events) >= 4:
         require(events[2]["window_handle"] == events[3]["window_handle"],
                 "Picker invoked and closed HWND identities differ.")
+    if custom and len(events) >= 15:
+        require(events[7]["window_handle"] == events[8]["window_handle"] ==
+                events[9]["window_handle"] > 0 and
+                events[12]["window_handle"] == events[13]["window_handle"] ==
+                events[14]["window_handle"] > 0,
+                "Custom input prompt handles or retirement sequence differ.")
     samples = scenario.get("partial_samples") if failed else scenario.get("samples")
     require(isinstance(samples, list) and 1 <= len(samples) <= 650,
             "Picker samples are empty, missing, or exceed the bounded observer.")
     last_probe = 0
     for index, sample in enumerate(samples):
         require(isinstance(sample, dict), "Picker sample is malformed.")
-        require(sample.get("phase") in {"empty-idle", "ordinary-100", "post"} and
+        require(sample.get("phase") in ({"empty-idle", "ordinary-100", "custom-confirm",
+                                         "custom-cancel", "post"} if custom else
+                                        {"empty-idle", "ordinary-100", "post"}) and
                 int_equals(sample.get("process_id"), scenario["process_id"]) and
                 int_equals(sample.get("process_start_utc_ticks"), start_ticks) and
                 int_equals(sample.get("main_window_handle"), main_handle) and
@@ -4780,16 +4825,23 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 "retained_samples": len(samples), "resource_cleanup": "owned-clean",
                 "postlaunch": "unavailable", "acceptance": "rejected",
                 "full_performance_sample": "not-run"}
-    require(failure is None and len(events) == 6 and
+    require(failure is None and len(events) == len(expected_boundaries) and
             samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
             events[-1]["ticks"] < samples[-1]["probe_end_ticks"] and
             raw.get("status") == "review_required" and
             nested(raw, "assertions", "overall") == "passed" and
             raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True,
             "Picker successful observer or complete timeline differs.")
-    picker = exact_keys(scenario.get("picker"), {"expected_rows", "observed_rows",
-        "import_command_ready", "picker_closed", "import_elapsed_ms", "fixture_files"},
-        "picker one-import result")
+    picker = exact_keys(scenario.get("custom_input" if custom else "picker"),
+        ({"expected_rows", "observed_rows", "import_command_ready", "picker_closed",
+          "fixture_files", "confirmed_prompt_handle", "confirmed_prompt_class",
+          "confirmed_prompt_visible", "confirmed_prompt_enabled", "confirmed_preview",
+          "cancelled_prompt_handle", "cancelled_prompt_class", "cancelled_prompt_visible",
+          "cancelled_prompt_enabled", "cancelled_preview", "confirmed_then_reset",
+          "cancellation_retired"} if custom else
+         {"expected_rows", "observed_rows", "import_command_ready", "picker_closed",
+          "import_elapsed_ms", "fixture_files"}),
+        "custom input result" if custom else "picker one-import result")
     timings = scenario.get("timings")
     require(isinstance(timings, list) and len(timings) == 1 and
             isinstance(timings[0], dict) and
@@ -4802,12 +4854,39 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             "Picker receipt includes missing or later performance workload stages.")
     require(picker["expected_rows"] == picker["observed_rows"] == picker["fixture_files"] == 100 and
             picker["import_command_ready"] is True and picker["picker_closed"] is True and
-            type(picker["import_elapsed_ms"]) in (int, float) and
-            0 < picker["import_elapsed_ms"] <= 120000 and
+            (custom or type(picker["import_elapsed_ms"]) in (int, float) and
+             0 < picker["import_elapsed_ms"] <= 120000) and
             scenario.get("disk_unchanged") is True and
             int_equals(scenario.get("journal_residue_count"), 0) and
             int_equals(scenario.get("normal_exit_code"), 0),
             "Picker one-import completion or fixture readback differs.")
+    if custom:
+        require(picker["confirmed_prompt_handle"] == events[7]["window_handle"] and
+                picker["cancelled_prompt_handle"] == events[12]["window_handle"] and
+                picker["confirmed_prompt_class"] == picker["cancelled_prompt_class"] ==
+                    "DarkReNamerInputWindow" and
+                all(picker[name] is True for name in
+                    ("confirmed_prompt_visible", "confirmed_prompt_enabled",
+                     "cancelled_prompt_visible", "cancelled_prompt_enabled",
+                     "confirmed_then_reset", "cancellation_retired")) and
+                picker["confirmed_preview"] == "confirmed-ordinary-00000.txt" and
+                picker["cancelled_preview"] == "ordinary-00000.txt",
+                "Custom input confirm, cancel, or retirement result differs.")
+        for phase, found, invoke, handle in (
+            ("custom-confirm", 7, 8, picker["confirmed_prompt_handle"]),
+            ("custom-cancel", 12, 13, picker["cancelled_prompt_handle"])):
+            visible = [popup for row in samples if row["phase"] == phase
+                       for popup in (row["popup_before"], row["popup_after"])
+                       if popup["disposition"] == "owned-popup" and
+                       popup["raw_popup_handle"] == handle and
+                       popup["popup_class"] == "DarkReNamerInputWindow" and
+                       popup["main_enabled_at_lookup"] is False and
+                       events[found]["ticks"] <= popup["begin_ticks"] <
+                       popup["end_ticks"] <= events[invoke]["ticks"]]
+            require(visible, f"The {phase} custom input was not sampled while shown.")
+        require(any(row["phase"] == "post" and row["main_enabled"] is True and
+                    row["owned_popup_handle"] == 0 for row in samples),
+                "Custom input did not retire before normal close.")
     snapshots = [row[key] for row in samples for key in ("popup_before", "popup_after")
                  if row["phase"] == "ordinary-100"]
     visible = [popup for popup in snapshots
@@ -4824,7 +4903,7 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
     result = exact_keys(result, {"schema_version", "diagnostic", "run_id", "input_manifest_sha256",
         "collection_sha256", "cleanup_sha256", "source_sha", "application_sha256",
         "observer_sha256", "observer_result_sha256", "status", "exit_code"}, "picker result")
-    require(int_equals(result["schema_version"], 1) and result["diagnostic"] == PICKER_MODE and
+    require(int_equals(result["schema_version"], 1) and result["diagnostic"] == mode and
             result["run_id"] == run_id and result["input_manifest_sha256"] == input_hash and
             result["collection_sha256"] == sha256_bytes(collection_bytes) and
             result["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
@@ -4841,12 +4920,13 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                                    artifacts["application"]["sha256"])
     captures = raw.get("screenshots")
     require(isinstance(captures, list) and len(captures) == 1 and
-            captures[0].get("file") == "picker-100-after.png" and
-            captures[0].get("sha256") == files["picker-100-after.png"]["sha256"],
+            captures[0].get("file") == capture and
+            captures[0].get("sha256") == files[capture]["sha256"],
             "Picker one original screenshot is missing or unbound.")
     return {"run_id": run_id, "status": "observed", "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
-            "sample_count": len(samples), "picker_interval_sampled": True,
+            "sample_count": len(samples),
+            ("custom_prompt_intervals_sampled" if custom else "picker_interval_sampled"): True,
             "full_performance_sample": "not-run", **owned_verdict}
 
 
@@ -5194,7 +5274,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, ICON_SETTLEMENT_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -5204,20 +5284,22 @@ def main(repo: Path, argv=None) -> int:
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
     require(args.acceptance_profile_id is None or args.diagnostic is None or
-            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
+            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
             "Fixed GUI profile selection cannot be used for this diagnostic.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
-    if args.diagnostic == PICKER_MODE:
+    if args.diagnostic in {PICKER_MODE, CUSTOM_MODE}:
+        custom = args.diagnostic == CUSTOM_MODE
         require(not args.require_complete_set and args.configuration_set is None and
-                args.runs == [PICKER_RUN_ID] and args.acceptance_profile_id == V2_PROFILE_ID,
-                "Picker observation requires one V2-owned source-bound run.")
+                args.runs == [CUSTOM_RUN_ID if custom else PICKER_RUN_ID] and
+                args.acceptance_profile_id == V2_PROFILE_ID,
+                "Popup observation requires one V2-owned source-bound run.")
         blob = subprocess.run(["git", "show", f"{args.expected_source_sha}:config/vm-automated-v2.json"],
                               cwd=repo, capture_output=True, check=False)
         require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
                 "Picker source profile differs from reviewed V2 revision-3 bytes.")
         observed = validate_picker_run(root, args.runs[0], args.expected_source_sha, repo)
-        print(json.dumps({"schema_version": 1, "diagnostic": PICKER_MODE,
+        print(json.dumps({"schema_version": 1, "diagnostic": args.diagnostic,
                           "status": observed["status"], "source_sha": args.expected_source_sha,
                           "runs": [observed], "full_four_run_regression": "not-run",
                           "performance_batch": "not-run", "release_campaign": "not-run"},

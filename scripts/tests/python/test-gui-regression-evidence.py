@@ -2365,8 +2365,133 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
         self.refresh_owned(run)
         result_path = run / 'output/run-result.json'
         result = json.loads(result_path.read_text())
-        result['diagnostic'] = evidence.PICKER_MODE
+        result['diagnostic'] = (evidence.CUSTOM_MODE if run.name == evidence.CUSTOM_RUN_ID
+                                else evidence.PICKER_MODE)
         write_json(result_path, result)
+
+    def custom_run(self):
+        run = self.picker_v2_run().rename(self.root / evidence.CUSTOM_RUN_ID)
+        output = run / 'output'
+        manifest_path = run / 'input-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['run_id'] = evidence.CUSTOM_RUN_ID
+        manifest['request']['mode'] = evidence.CUSTOM_MODE
+        manifest['request'].pop('picker_identity_plan')
+        manifest['request']['custom_input_plan'] = deepcopy(evidence.CUSTOM_PLAN)
+        manifest['command'][manifest['command'].index(evidence.PICKER_MODE)] = evidence.CUSTOM_MODE
+        write_json(manifest_path, manifest)
+        for name in ('cleanup.json', 'platform-preflight.json', 'platform-postlaunch.json',
+                     'acceptance-observations.json'):
+            path = output / name
+            document = json.loads(path.read_text())
+            document['run_id'] = evidence.CUSTOM_RUN_ID
+            write_json(path, document)
+        (output / 'picker-100-after.png').rename(output / 'custom-100-after.png')
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        scenario = raw['assertions']['scenario']
+        scenario['mode'] = evidence.CUSTOM_MODE
+        scenario['plan'] = deepcopy(evidence.CUSTOM_PLAN)
+        scenario['popup_diagnostic_schema_version'] = 3
+        scenario.pop('picker')
+        scenario['custom_input'] = {'expected_rows': 100, 'observed_rows': 100,
+            'import_command_ready': True, 'picker_closed': True, 'fixture_files': 100,
+            'confirmed_prompt_handle': 901, 'confirmed_prompt_class': 'DarkReNamerInputWindow',
+            'confirmed_prompt_visible': True, 'confirmed_prompt_enabled': True,
+            'confirmed_preview': 'confirmed-ordinary-00000.txt',
+            'cancelled_prompt_handle': 902, 'cancelled_prompt_class': 'DarkReNamerInputWindow',
+            'cancelled_prompt_visible': True, 'cancelled_prompt_enabled': True,
+            'cancelled_preview': 'ordinary-00000.txt', 'confirmed_then_reset': True,
+            'cancellation_retired': True}
+        events = scenario['response_timeline']['events']
+        events.extend({'operation': operation, 'step': step, 'ticks': tick,
+                       'window_handle': handle}
+                      for operation, step, tick, handle in (
+                          ('full-preview', 'prompt_request', 320, 0),
+                          ('full-preview', 'prompt_found', 330, 901),
+                          ('full-preview', 'commit_invoke', 370, 901),
+                          ('full-preview', 'prompt_closed', 380, 901),
+                          ('full-preview', 'first_row_observed', 390, 0),
+                          ('custom-cancel', 'prompt_request', 400, 0),
+                          ('custom-cancel', 'prompt_found', 410, 902),
+                          ('custom-cancel', 'cancel_invoke', 450, 902),
+                          ('custom-cancel', 'prompt_closed', 460, 902)))
+        def custom_sample(phase, begin, end, handle):
+            row = deepcopy(scenario['samples'][2])
+            row.update(phase=phase, probe_begin_ticks=begin, probe_end_ticks=end,
+                       owned_popup_handle_before=handle, owned_popup_handle=handle,
+                       main_enabled_before=False, main_enabled=False)
+            for key, start, stop in (('popup_before', begin - 10, begin - 1),
+                                     ('popup_after', end + 1, end + 10)):
+                row[key].update(begin_ticks=start, end_ticks=stop, raw_popup_handle=handle,
+                                accepted_popup_handle=handle,
+                                popup_class='DarkReNamerInputWindow')
+            return row
+        scenario['samples'].insert(3, custom_sample('custom-confirm', 340, 350, 901))
+        scenario['samples'].insert(4, custom_sample('custom-cancel', 420, 430, 902))
+        scenario['samples'][-1]['probe_begin_ticks'] = 500
+        scenario['samples'][-1]['probe_end_ticks'] = 510
+        for key, start, stop in (('popup_before', 490, 499), ('popup_after', 511, 520)):
+            scenario['samples'][-1][key].update(begin_ticks=start, end_ticks=stop)
+        raw['assertions']['scope'] = evidence.CUSTOM_SCOPE
+        raw['screenshots'] = [{'file': 'custom-100-after.png',
+            'sha256': digest((output / 'custom-100-after.png').read_bytes())}]
+        write_json(raw_path, raw)
+        self.refresh_picker(run)
+        return run
+
+    def test_custom_input_lifecycle_is_independently_bound_to_popup_samples(self):
+        run = self.custom_run()
+        raw_path = run / 'output/acceptance-result.json'
+        with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3):
+            self.assertTrue(evidence.validate_picker_run(
+                self.root, run.name, SOURCE, SCRIPT_ROOT.parent)['custom_prompt_intervals_sampled'])
+            collection = vm_gui.collection_document(
+                run, digest((run / 'input-manifest.json').read_bytes()), run.name)
+            self.assertIn('custom-100-after.png',
+                          {row['relative_path'] for row in collection['files']})
+            profile = (SCRIPT_ROOT.parent / 'config/vm-automated-v2.json').read_bytes()
+            with mock.patch.object(evidence.subprocess, 'run', return_value=SimpleNamespace(
+                    returncode=0, stdout=profile)), redirect_stdout(io.StringIO()) as report:
+                self.assertEqual(evidence.main(SCRIPT_ROOT.parent, [
+                    '--result-root', str(self.root), '--expected-source-sha', SOURCE,
+                    '--run', run.name, '--diagnostic', evidence.CUSTOM_MODE,
+                    '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
+                self.assertEqual(json.loads(report.getvalue())['status'], 'observed')
+            original = raw_path.read_bytes()
+            reused = json.loads(original)
+            reused_scenario = reused['assertions']['scenario']
+            reused_scenario['custom_input']['cancelled_prompt_handle'] = 901
+            for event in reused_scenario['response_timeline']['events'][12:15]:
+                event['window_handle'] = 901
+            reused_sample = reused_scenario['samples'][4]
+            reused_sample['owned_popup_handle_before'] = 901
+            reused_sample['owned_popup_handle'] = 901
+            for key in ('popup_before', 'popup_after'):
+                reused_sample[key]['raw_popup_handle'] = 901
+                reused_sample[key]['accepted_popup_handle'] = 901
+            write_json(raw_path, reused)
+            self.refresh_picker(run)
+            self.assertEqual(evidence.validate_picker_run(
+                self.root, run.name, SOURCE, SCRIPT_ROOT.parent)['status'], 'observed')
+            for index, mutation in enumerate((
+                lambda s: s['samples'][3]['popup_after'].__setitem__('popup_process_id', 4243),
+                lambda s: s['samples'][4]['popup_before'].__setitem__('direct_owner', 999),
+                lambda s: [s['samples'][4][key].__setitem__('popup_class', '#32770')
+                           for key in ('popup_before', 'popup_after')],
+                lambda s: s['samples'][3]['popup_before'].__setitem__('class_lookup', 'failed'),
+                lambda s: s['custom_input'].__setitem__('cancellation_retired', False),
+                lambda s: s['samples'].pop(4),
+            )):
+                with self.subTest(index=index):
+                    raw = json.loads(original)
+                    mutation(raw['assertions']['scenario'])
+                    write_json(raw_path, raw)
+                    self.refresh_picker(run)
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
+            raw_path.write_bytes(original)
+            self.refresh_picker(run)
 
     def test_picker_v2_success_requires_visible_bound_picker_and_postlaunch(self):
         run = self.picker_v2_run()
