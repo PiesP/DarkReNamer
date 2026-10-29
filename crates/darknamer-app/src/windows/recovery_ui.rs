@@ -631,7 +631,7 @@ pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
         state
             .blocked_journals
             .iter()
-            .map(StartupJournalBlock::status_korean),
+            .map(StartupJournalBlock::status_text),
     );
     if state.can_export_recovery_journal() {
         lines.push(RT::ExportRecoveryAvailable.get().to_owned());

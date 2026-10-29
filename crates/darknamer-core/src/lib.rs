@@ -1335,7 +1335,7 @@ impl LegacyList {
         from: &LegacyText,
         to: &LegacyText,
     ) -> Result<Box<[usize]>, ProposalMutationError> {
-        try_changed_proposals(
+        try_changed_proposals_optional(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
@@ -1422,8 +1422,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (_stem, extension) = split_stem_extension(item);
-                extension
+                let (_stem, extension) = stem_extension_units(item);
+                LegacyText::from_units(extension.to_vec())
             },
         )
     }
@@ -1453,7 +1453,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 if start <= stem.len() {
                     let last = if end > 0 && end < stem.len() {
                         end
@@ -1462,7 +1463,7 @@ impl LegacyList {
                     };
                     stem.units.drain(start - 1..last);
                 }
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         ))
@@ -1483,10 +1484,11 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 let count = count.min(stem.len());
                 stem.units.truncate(stem.len() - count);
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         )
@@ -1520,7 +1522,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 if let Some(start_index) = stem.units.iter().position(|unit| *unit == start) {
                     let search_start = start_index + 1;
                     if let Some(relative_end) = stem.units[search_start..]
@@ -1531,7 +1534,7 @@ impl LegacyList {
                         stem.units.drain(start_index..=end_index);
                     }
                 }
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         ))
@@ -1549,10 +1552,11 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 stem.units
                     .retain(|unit| (b'0' as u16..=b'9' as u16).contains(unit));
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         )
@@ -1712,8 +1716,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (stem, _extension) = split_stem_extension(item);
-                stem
+                let (stem, _extension) = stem_extension_units(item);
+                LegacyText::from_units(stem.to_vec())
             },
         )
     }
@@ -2151,14 +2155,34 @@ fn try_changed_proposals(
     planned_path_utf16_units: &mut usize,
     mut proposal: impl FnMut(&[LegacyListItem], usize) -> Result<LegacyText, ProposalMutationError>,
 ) -> Result<Box<[usize]>, ProposalMutationError> {
+    try_changed_proposals_optional(
+        items,
+        proposed_name_utf16_units,
+        planned_path_utf16_units,
+        |items, row| proposal(items, row).map(Some),
+    )
+}
+
+fn try_changed_proposals_optional(
+    items: &mut [LegacyListItem],
+    proposed_name_utf16_units: &mut usize,
+    planned_path_utf16_units: &mut usize,
+    mut proposal: impl FnMut(
+        &[LegacyListItem],
+        usize,
+    ) -> Result<Option<LegacyText>, ProposalMutationError>,
+) -> Result<Box<[usize]>, ProposalMutationError> {
     let mut staged = Vec::<StagedProposal>::new();
     let mut total_units = 0_usize;
     let mut total_planned_path_units = 0_usize;
     for row in 0..items.len() {
         let next = proposal(items, row)?;
-        validate_proposal_units(row, next.len())?;
+        let next_len = next
+            .as_ref()
+            .map_or(items[row].proposed_name.len(), LegacyText::len);
+        validate_proposal_units(row, next_len)?;
         total_units = total_units
-            .checked_add(next.len())
+            .checked_add(next_len)
             .ok_or(ProposalMutationError::ArithmeticOverflow)?;
         if total_units > MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS {
             return Err(ProposalMutationError::AggregateBudgetExceeded {
@@ -2168,11 +2192,11 @@ fn try_changed_proposals(
         }
         total_planned_path_units = total_planned_path_units
             .checked_add(
-                checked_planned_path_units(items[row].destination_parent.units(), next.len())
+                checked_planned_path_units(items[row].destination_parent.units(), next_len)
                     .ok_or(ProposalMutationError::ArithmeticOverflow)?,
             )
             .ok_or(ProposalMutationError::ArithmeticOverflow)?;
-        if items[row].proposed_name != next {
+        if let Some(next) = next.filter(|next| items[row].proposed_name != *next) {
             staged
                 .try_reserve(1)
                 .map_err(|_| ProposalMutationError::AllocationFailed)?;
@@ -2396,14 +2420,6 @@ fn path_name(path: &LegacyText) -> LegacyText {
     LegacyText::from_units(path.units[start..].to_vec())
 }
 
-fn split_stem_extension(item: &LegacyListItem) -> (LegacyText, LegacyText) {
-    let (stem, extension) = stem_extension_units(item);
-    (
-        LegacyText::from_units(stem.to_vec()),
-        LegacyText::from_units(extension.to_vec()),
-    )
-}
-
 fn stem_extension_units(item: &LegacyListItem) -> (&[u16], &[u16]) {
     let name_start = item
         .proposed_name
@@ -2434,16 +2450,16 @@ fn replaced_units(
     source: &[u16],
     needle: &[u16],
     replacement: &[u16],
-) -> Result<LegacyText, ProposalMutationError> {
+) -> Result<Option<LegacyText>, ProposalMutationError> {
     if needle.is_empty() || needle.len() > source.len() {
-        return try_build_proposal(row, source.len(), |output| {
-            output.extend_from_slice(source);
-        });
+        return Ok(None);
     }
     let mut requested_units = 0_usize;
     let mut index = 0_usize;
+    let mut matched = false;
     while index < source.len() {
         let segment_units = if source[index..].starts_with(needle) {
+            matched = true;
             index = index
                 .checked_add(needle.len())
                 .ok_or(ProposalMutationError::ArithmeticOverflow)?;
@@ -2460,6 +2476,10 @@ fn replaced_units(
         validate_proposal_units(row, requested_units)?;
     }
 
+    if !matched || needle == replacement {
+        return Ok(None);
+    }
+
     try_build_proposal(row, requested_units, |output| {
         let mut index = 0_usize;
         while index < source.len() {
@@ -2472,6 +2492,7 @@ fn replaced_units(
             }
         }
     })
+    .map(Some)
 }
 
 fn try_normalized_extension(
