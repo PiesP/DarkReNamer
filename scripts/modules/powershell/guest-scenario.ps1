@@ -2271,6 +2271,62 @@ function Assert-ProductionValidActiveLiveCheckpoint {
     Assert-ProductionLiveJournalCheckpoint -Expected $Expected.journal -Actual $Actual.journal
 }
 
+function Get-ProductionCrashChildEnvironmentSnapshot {
+    $current = [Environment]::GetEnvironmentVariables('Process')
+    $saved = [ordered]@{}
+    foreach ($name in @(
+        'DARKRENAMER_TEST_CHILD_MODE', 'DARKRENAMER_TEST_CHILD_ROOT',
+        'DARKRENAMER_TEST_FIXTURE_NONCE', 'DARKRENAMER_TEST_GRAPH',
+        'DARKRENAMER_TEST_CRASH_POINT', 'DARKRENAMER_TEST_FORCE_ROLLBACK',
+        'DARKRENAMER_TEST_FAILURE_ROLLBACK', 'DARKRENAMER_TEST_RECOVERY_MODE'
+    )) {
+        $present = $current.Contains($name)
+        $saved[$name] = [ordered]@{
+            present = $present
+            value = if ($present) { [string]$current[$name] } else { $null }
+        }
+    }
+    $saved
+}
+
+function Clear-ProductionCrashChildOptionalFlags {
+    foreach ($name in @(
+        'DARKRENAMER_TEST_FORCE_ROLLBACK', 'DARKRENAMER_TEST_FAILURE_ROLLBACK',
+        'DARKRENAMER_TEST_RECOVERY_MODE'
+    )) {
+        [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+        if ([Environment]::GetEnvironmentVariables('Process').Contains($name)) {
+            throw "Crash child optional flag $name remains present."
+        }
+    }
+}
+
+function Restore-ProductionCrashChildEnvironmentSnapshot {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $Snapshot)
+    $errors = [Collections.Generic.List[string]]::new()
+    foreach ($name in $Snapshot.Keys) {
+        try {
+            if ($Snapshot[$name].present) {
+                [Environment]::SetEnvironmentVariable($name, $Snapshot[$name].value, 'Process')
+            }
+            else {
+                [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+            }
+            $restored = [Environment]::GetEnvironmentVariables('Process')
+            if ($restored.Contains($name) -ne $Snapshot[$name].present -or
+                ($Snapshot[$name].present -and
+                    [string]$restored[$name] -cne $Snapshot[$name].value)) {
+                throw 'The original presence or value was not restored.'
+            }
+        }
+        catch { $errors.Add("$name restore: $($_.Exception.Message)") }
+    }
+    if ($errors.Count -gt 0) {
+        throw ('Crash child environment restoration failed: ' +
+            [string]::Join(' | ', $errors))
+    }
+}
+
 function Invoke-ProductionValidActiveRecoveryCheck {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -2306,16 +2362,7 @@ function Invoke-ProductionValidActiveRecoveryCheck {
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'fixture-nonce.txt'),
         $nonce, [Text.UTF8Encoding]::new($false))
     $originalLocalAppData = $env:LOCALAPPDATA
-    $childVariables = @(
-        'DARKRENAMER_TEST_CHILD_MODE', 'DARKRENAMER_TEST_CHILD_ROOT',
-        'DARKRENAMER_TEST_FIXTURE_NONCE', 'DARKRENAMER_TEST_GRAPH',
-        'DARKRENAMER_TEST_CRASH_POINT', 'DARKRENAMER_TEST_FORCE_ROLLBACK',
-        'DARKRENAMER_TEST_FAILURE_ROLLBACK', 'DARKRENAMER_TEST_RECOVERY_MODE'
-    )
-    $originalChildVariables = @{}
-    foreach ($name in $childVariables) {
-        $originalChildVariables[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-    }
+    $originalChildVariables = Get-ProductionCrashChildEnvironmentSnapshot
     $child = $null
     $fullyVerified = $false
     $observations = [Collections.Generic.List[object]]::new()
@@ -2326,13 +2373,10 @@ function Invoke-ProductionValidActiveRecoveryCheck {
         [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_FIXTURE_NONCE', $nonce, 'Process')
         [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_GRAPH', 'swap', 'Process')
         [Environment]::SetEnvironmentVariable('DARKRENAMER_TEST_CRASH_POINT', 'forward-completed-0', 'Process')
-        foreach ($name in @('DARKRENAMER_TEST_FORCE_ROLLBACK',
-            'DARKRENAMER_TEST_FAILURE_ROLLBACK', 'DARKRENAMER_TEST_RECOVERY_MODE')) {
-            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
-        }
         $stdoutPath = Join-Path $fixtureRoot 'crash-child.stdout.txt'
         $stderrPath = Join-Path $fixtureRoot 'crash-child.stderr.txt'
         $arguments = '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1'
+        Clear-ProductionCrashChildOptionalFlags
         $child = Start-JobBoundProcess -FilePath $binaryPath -Arguments $arguments `
             -WorkingDirectory $Root -StdoutPath $stdoutPath -StderrPath $stderrPath `
             -SingleProcessOnly -AggregateOutputLimitBytes 65536
@@ -2357,9 +2401,7 @@ function Invoke-ProductionValidActiveRecoveryCheck {
             exit_semantics = 'expected-abrupt-crash-point'; single_process_job = $true
             job_clean = $true; job_had_survivors = $false; job_forced_termination = $false
         }
-        foreach ($name in $childVariables) {
-            [Environment]::SetEnvironmentVariable($name, $originalChildVariables[$name], 'Process')
-        }
+        Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalChildVariables
         $partial = Get-ProductionValidActiveCheckpoint -FixtureRoot $fixtureRoot
         $contentHashes = @($partial.files | ForEach-Object { $_.content_sha256 } | Sort-Object)
         $partialNames = @($partial.files | ForEach-Object { $_.name })
@@ -2523,12 +2565,8 @@ function Invoke-ProductionValidActiveRecoveryCheck {
     }
     finally {
         $cleanupErrors = [Collections.Generic.List[string]]::new()
-        foreach ($name in $childVariables) {
-            try {
-                [Environment]::SetEnvironmentVariable($name, $originalChildVariables[$name], 'Process')
-            }
-            catch { $cleanupErrors.Add("$name restore: $($_.Exception.Message)") }
-        }
+        try { Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalChildVariables }
+        catch { $cleanupErrors.Add($_.Exception.Message) }
         try { $env:LOCALAPPDATA = $originalLocalAppData }
         catch { $cleanupErrors.Add("LOCALAPPDATA restore: $($_.Exception.Message)") }
         if ($null -ne $child) {

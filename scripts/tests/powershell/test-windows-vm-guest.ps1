@@ -2582,6 +2582,48 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
             Get-FullFileIdentity -Path $valid.root
         } 'requires Windows'
     }
+    $originalCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+    try {
+        $names = @($originalCrashEnvironment.Keys)
+        if ($names.Count -ne 8) { throw 'The crash child environment snapshot omitted a controlled variable.' }
+        for ($index = 0; $index -lt $names.Count; $index++) {
+            $name = $names[$index]
+            switch ($index % 3) {
+                0 { [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process') }
+                1 { [Environment]::SetEnvironmentVariable($name, '', 'Process') }
+                2 { [Environment]::SetEnvironmentVariable($name, "fixture-$index", 'Process') }
+            }
+        }
+        $fixtureCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+        Clear-ProductionCrashChildOptionalFlags
+        $cleared = [Environment]::GetEnvironmentVariables('Process')
+        foreach ($name in @(
+            'DARKRENAMER_TEST_FORCE_ROLLBACK', 'DARKRENAMER_TEST_FAILURE_ROLLBACK',
+            'DARKRENAMER_TEST_RECOVERY_MODE'
+        )) {
+            if ($cleared.Contains($name)) {
+                throw "The actual crash child helper left optional flag $name present."
+            }
+        }
+        foreach ($name in $names[0..4]) {
+            if ($cleared.Contains($name) -ne $fixtureCrashEnvironment[$name].present -or
+                ($fixtureCrashEnvironment[$name].present -and
+                    [string]$cleared[$name] -cne $fixtureCrashEnvironment[$name].value)) {
+                throw "Clearing crash child optional flags changed required variable $name."
+            }
+        }
+        Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $fixtureCrashEnvironment
+        $restoredCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+        foreach ($name in $names) {
+            if ($restoredCrashEnvironment[$name].present -ne $fixtureCrashEnvironment[$name].present -or
+                $restoredCrashEnvironment[$name].value -cne $fixtureCrashEnvironment[$name].value) {
+                throw "Crash child environment restoration lost the original state of $name."
+            }
+        }
+    }
+    finally {
+        Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalCrashEnvironment
+    }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
     [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
@@ -4754,10 +4796,11 @@ function Test-DrValidActiveLanguageCrashContract {
         'DARKRENAMER_TEST_FIXTURE_NONCE',
         'forward-completed-0',
         '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1',
+        'Clear-ProductionCrashChildOptionalFlags',
         '-SingleProcessOnly -AggregateOutputLimitBytes 65536',
         '$child.process.ExitCode -ne 86',
         'expected-abrupt-crash-point',
-        'SetEnvironmentVariable($name, $originalChildVariables[$name]',
+        'Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalChildVariables',
         '$env:LOCALAPPDATA = $originalLocalAppData',
         'Complete-AcceptanceOwnedProcessJob -Owned $child',
         'cancel.Current.HasKeyboardFocus',
