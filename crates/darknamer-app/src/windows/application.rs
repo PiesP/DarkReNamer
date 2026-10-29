@@ -2104,7 +2104,11 @@ mod tests {
                 // SAFETY: the message storage is initialized and belongs to this UI thread.
                 while unsafe { IsWindow(window) } != 0 && Instant::now() < deadline {
                     let mut message = MSG::default();
+                    // SAFETY: message is writable for this thread-owned queue read;
+                    // a null HWND selects this test thread's messages.
                     while unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                        // SAFETY: PeekMessageW initialized message and both calls
+                        // borrow it only for the duration of this dispatch.
                         unsafe {
                             TranslateMessage(&message);
                             DispatchMessageW(&message);
@@ -2112,6 +2116,8 @@ mod tests {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
+                // SAFETY: IsWindow accepts a possibly retired scalar HWND and
+                // does not dereference Rust-owned memory.
                 if unsafe { IsWindow(window) } != 0 {
                     return Err(io::Error::other("production close did not retire"));
                 }
