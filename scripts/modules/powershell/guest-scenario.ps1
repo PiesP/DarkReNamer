@@ -31,6 +31,72 @@
     }
 }
 
+function Get-ProductionLanguageSpec {
+    param([Parameter(Mandatory)][ValidateSet('ko', 'en', 'ja')][string] $Language)
+    switch ($Language) {
+        'ko' { [ordered]@{
+            picker = '이름 붙일 파일 불러오기'; prefix = '이름 앞에 문자열 붙이기'
+            apply = 'DarkReNamer - 안전한 적용 확인'; empty = '파일이나 폴더를 여기에 끌어오세요'
+            menu = '언어(&L) · 다음 실행부터'; rail = '이름 앞에 문자열 붙이기...'
+            system = '시스템 언어'; question = '계획된 파일 변경을 적용하시겠습니까?'
+            no_overwrite = '기존 파일을 덮어쓰지 않습니다.'; command = [int]0x9021; value = 1
+        } }
+        'en' { [ordered]@{
+            picker = 'Select files to rename'; prefix = 'Add a name prefix'
+            apply = 'DarkReNamer - Confirm safe Apply'; empty = 'Drop files or folders here'
+            menu = '&Language · next startup'; rail = 'Add a name prefix...'
+            system = 'System language'; question = 'Apply the planned file changes?'
+            no_overwrite = 'Existing files will not be overwritten.'; command = [int]0x9022; value = 2
+        } }
+        'ja' { [ordered]@{
+            picker = '名前を変更するファイルを選択'; prefix = '名前の先頭に文字列を追加'
+            apply = 'DarkReNamer - 安全な適用の確認'; empty = 'ファイルやフォルダーをここにドロップ'
+            menu = '言語(&L) · 次回起動から'; rail = '名前の先頭に文字列を追加...'
+            system = 'システム言語'; question = '計画されたファイル変更を適用しますか？'
+            no_overwrite = '既存のファイルは上書きしません。'; command = [int]0x9023; value = 3
+        } }
+    }
+}
+
+function Assert-ProductionApplyCopy {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $Language
+    )
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    Assert-AutomationBinding -Element $Window -Process $Process -ExpectedSession $Session `
+        -Label "$Language Apply confirmation" -RequireWindowHandle
+    $bounds = $Window.Current.BoundingRectangle
+    if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or
+        $bounds.Width -gt 16384 -or $bounds.Height -gt 16384) {
+        throw "$Language Apply confirmation has invalid native bounds."
+    }
+    $children = $Window.FindAll([Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)
+    if ($children.Count -gt 512) { throw "$Language Apply confirmation tree exceeds its bound." }
+    $names = [Collections.Generic.List[string]]::new()
+    foreach ($element in $children) {
+        if ($element.Current.ProcessId -eq $Process.Id -and
+            -not [string]::IsNullOrEmpty($element.Current.Name)) {
+            $names.Add([string]$element.Current.Name)
+        }
+    }
+    $copy = [string]::Join("`n", $names)
+    if ($copy.Length -gt 32768 -or
+        $copy.IndexOf($labels.question, [StringComparison]::Ordinal) -lt 0 -or
+        $copy.IndexOf($labels.no_overwrite, [StringComparison]::Ordinal) -lt 0) {
+        throw "$Language Apply confirmation lost its localized question or no-overwrite guidance."
+    }
+    [ordered]@{
+        title = [string]$Window.Current.Name
+        question = $labels.question
+        no_overwrite = $labels.no_overwrite
+        bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+    }
+}
+
 function Invoke-ProductionRenameFlow {
     param(
         [Parameter(Mandatory)][object] $OwnedProcess,
@@ -41,10 +107,13 @@ function Invoke-ProductionRenameFlow {
         [Parameter(Mandatory)][string] $OutputRoot,
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
-        [switch] $RawEvidence
+        [switch] $RawEvidence,
+        [ValidateSet('ko', 'en', 'ja')][string] $Language = 'ko'
     )
 
     $Process = $OwnedProcess.process
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    $artifactPrefix = if ($Language -ceq 'ko') { '' } else { "$Language-" }
     $sourceName = 'vm-flow-source.txt'
     $prefix = 'vm-confirmed-'
     $previewName = $prefix + $sourceName
@@ -125,7 +194,7 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -MainWindowHandle $MainWindowHandle `
-            -Name '이름 붙일 파일 불러오기' `
+            -Name $labels.picker `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'production file dialog'
         $fileDialogHandle = [IntPtr]$fileDialog.Current.NativeWindowHandle
@@ -178,7 +247,7 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -MainWindowHandle $MainWindowHandle `
-            -Name '이름 앞에 문자열 붙이기' `
+            -Name $labels.prefix `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'prefix prompt'
         $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
@@ -218,7 +287,7 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -Root $OutputRoot `
-            -Leaf 'rename-preview.png' `
+            -Leaf "${artifactPrefix}rename-preview.png" `
             -Label 'production rename preview' `
             -ForegroundObservations $foregroundObservations))
         $flow.screenshots = $screenshots.ToArray()
@@ -240,16 +309,18 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -MainWindowHandle $MainWindowHandle `
-            -Name 'DarkReNamer - 안전한 적용 확인' `
+            -Name $labels.apply `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'apply confirmation task dialog'
+        $flow['localized_confirmation'] = Assert-ProductionApplyCopy `
+            -Window $confirmation -Process $Process -Session $ExpectedSession -Language $Language
         $confirmationHandle = [IntPtr]$confirmation.Current.NativeWindowHandle
         $screenshots.Add((Save-WindowScreenshot `
             -Window $confirmation `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -Root $OutputRoot `
-            -Leaf 'apply-confirmation.png' `
+            -Leaf "${artifactPrefix}apply-confirmation.png" `
             -Label 'apply confirmation task dialog' `
             -ForegroundObservations $foregroundObservations))
         $flow.screenshots = $screenshots.ToArray()
@@ -307,7 +378,7 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -MainWindowHandle $MainWindowHandle `
-            -Name 'DarkReNamer - 안전한 적용 확인' `
+            -Name $labels.apply `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'second apply confirmation task dialog'
         $confirmationHandle = [IntPtr]$confirmation.Current.NativeWindowHandle
@@ -578,10 +649,10 @@ function Invoke-OwnedPickerAction {
                 $values += @(([Windows.Automation.SelectionPattern]$pattern).Current.GetSelection() | ForEach-Object { $_.Current.Name })
             }
             $comboObservations += @{ id=$candidate.Current.AutomationId; values=$values }
-            if ($values -ccontains 'Text Files (*.txt)' -or $values -ccontains 'Text Files') { $candidates += $candidate }
+            if ($values -ccontains '텍스트 파일 (*.txt)' -or $values -ccontains '텍스트 파일') { $candidates += $candidate }
         }
         if ($candidates.Count -ne 1) {
-            throw "Picker has no unique selected Text Files filter: $($comboObservations | ConvertTo-Json -Depth 4 -Compress)"
+            throw "Picker has no unique selected text-file filter: $($comboObservations | ConvertTo-Json -Depth 4 -Compress)"
         }
         $combo = $candidates[0]
         $expand = [Windows.Automation.ExpandCollapsePattern]$combo.GetCurrentPattern(
@@ -594,11 +665,11 @@ function Invoke-OwnedPickerAction {
                     [Windows.Automation.ControlType]::ListItem))
             if ($items.Count -gt 512) { throw 'Picker ListItem inventory exceeds its bound.' }
             $filterNames = @($items | ForEach-Object { $_.Current.Name } | Where-Object {
-                $_ -cin @('Text Files', 'Text Files (*.txt)', 'All Files', 'All Files (*.*)')
+                $_ -cin @('텍스트 파일', '텍스트 파일 (*.txt)', '모든 파일', '모든 파일 (*.*)')
             })
             if ($filterNames.Count -ne 2) { throw 'Text picker did not expose both maintained filters.' }
-            if ($filterNames[0] -cnotin @('Text Files', 'Text Files (*.txt)') -or
-                $filterNames[1] -cnotin @('All Files', 'All Files (*.*)')) {
+            if ($filterNames[0] -cnotin @('텍스트 파일', '텍스트 파일 (*.txt)') -or
+                $filterNames[1] -cnotin @('모든 파일', '모든 파일 (*.*)')) {
                 throw "Text picker filters changed: $($filterNames -join ', ')."
             }
         }
@@ -830,6 +901,359 @@ public static class DarkReNamerVmGuiObserverDpi {
     Assert-GuiObserverProcessDpiResult -NativeError ([DarkReNamerVmGuiObserverDpi]::Configure())
 }
 
+function Initialize-ProductionLanguageMenuReader {
+    if ('DarkReNamerLanguageMenuReader' -as [type]) { return }
+    Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarkReNamerLanguageMenuReader {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserPreferredUILanguages(uint flags, out uint count, [Out] char[] buffer, ref uint size);
+    [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr GetMenu(IntPtr window);
+    [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr GetSubMenu(IntPtr menu, int position);
+    [DllImport("user32.dll", SetLastError=true)] private static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuItemID(IntPtr menu, int position);
+    [DllImport("user32.dll", SetLastError=true)] private static extern uint GetMenuState(IntPtr menu, uint position, uint flags);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern int GetMenuStringW(IntPtr menu, uint position, StringBuilder text, int capacity, uint flags);
+
+    private static IntPtr Child(IntPtr parent, int position) {
+        IntPtr value = GetSubMenu(parent, position);
+        if (value == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return value;
+    }
+    private static string Text(IntPtr menu, int position) {
+        StringBuilder text = new StringBuilder(256);
+        int length = GetMenuStringW(menu, (uint)position, text, text.Capacity, 0x400);
+        if (length <= 0 || length >= text.Capacity - 1) throw new InvalidOperationException("Language menu text is empty or over bound.");
+        return text.ToString();
+    }
+    public static string[] Read(IntPtr window) {
+        IntPtr bar = GetMenu(window);
+        if (bar == IntPtr.Zero || GetMenuItemCount(bar) != 6) throw new InvalidOperationException("Language menu has no fixed source-bound menu bar.");
+        IntPtr view = Child(bar, 2);
+        if (GetMenuItemCount(view) != 10) throw new InvalidOperationException("View menu layout changed.");
+        IntPtr language = Child(view, 9);
+        if (GetMenuItemCount(language) != 4) throw new InvalidOperationException("Language menu layout changed.");
+        string[] rows = new string[6];
+        rows[0] = Text(view, 9);
+        for (int index = 0; index < 4; index++) {
+            uint command = GetMenuItemID(language, index);
+            uint state = GetMenuState(language, (uint)index, 0x400);
+            if (command != 0x9020 + index || state == UInt32.MaxValue)
+                throw new InvalidOperationException("Language menu command identity changed.");
+            rows[index + 1] = Text(language, index);
+            if ((state & 0x8) != 0) rows[5] = command.ToString();
+        }
+        if (rows[5] == null) throw new InvalidOperationException("Language menu has no selected preference.");
+        return rows;
+    }
+    public static string[] PreferredLanguages() {
+        uint count, size = 0;
+        if (!GetUserPreferredUILanguages(0x8, out count, null, ref size))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (size < 2 || size > 65536 || count > 4096)
+            throw new InvalidOperationException("Windows preferred UI-language list exceeds its bound.");
+        char[] buffer = new char[size];
+        uint capacity = size;
+        if (!GetUserPreferredUILanguages(0x8, out count, buffer, ref size))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (size < 2 || size > capacity || count > 4096 ||
+            buffer[size - 1] != '\0' || buffer[size - 2] != '\0')
+            throw new InvalidOperationException("Windows preferred UI-language list is malformed.");
+        var tags = new System.Collections.Generic.List<string>();
+        int start = 0;
+        for (int index = 0; index < size - 1; index++) {
+            if (buffer[index] == '\0') {
+                if (index > start) tags.Add(new string(buffer, start, index - start));
+                start = index + 1;
+            }
+        }
+        if (tags.Count != count)
+            throw new InvalidOperationException("Windows preferred UI-language count differs from its tags.");
+        return tags.ToArray();
+    }
+}
+'@
+}
+
+function Resolve-ProductionSystemLanguage {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]] $Tags)
+    foreach ($tag in $Tags) {
+        if ($tag -match '^(ko|en|ja)(-|$)') {
+            return [ordered]@{
+                language = $Matches[1].ToLowerInvariant()
+                selected_tag = $tag
+                preferred_tags = @($Tags)
+            }
+        }
+    }
+    [ordered]@{ language = 'en'; selected_tag = $null; preferred_tags = @($Tags) }
+}
+
+function Read-ProductionLanguagePreference {
+    param([Parameter(Mandatory)][string] $LocalAppData)
+    $path = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'ui-language-v1'
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -ne 20) { throw 'The owned language preference is not an ordinary 20-byte record.' }
+    $bytes = [IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -ne 20 -or
+        [Text.Encoding]::ASCII.GetString($bytes, 0, 8) -cne "DRLANG`0`0" -or
+        $bytes[8] -ne 1 -or $bytes[9] -ne 0 -or $bytes[10] -ne 0 -or $bytes[11] -ne 0 -or
+        $bytes[13] -ne 0 -or $bytes[14] -ne 0 -or $bytes[15] -ne 0 -or
+        $bytes[12] -gt 3) { throw 'The owned language preference has an invalid header.' }
+    $hash = [uint32]2166136261
+    foreach ($index in 0..15) {
+        $hash = [uint32]((([uint64]($hash -bxor [uint32]$bytes[$index])) * [uint64]16777619) -band [uint64]4294967295)
+    }
+    if ([BitConverter]::ToUInt32($bytes, 16) -ne $hash) {
+        throw 'The owned language preference checksum is invalid.'
+    }
+    [ordered]@{ value = [int]$bytes[12]; sha256 = Get-LowerSha256 -Path $path }
+}
+
+function Read-ProductionLanguageMenu {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $Language
+    )
+    Initialize-ProductionLanguageMenuReader
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $handle -MainWindow $MainWindow -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' -Label 'language menu owner'
+    $items = [DarkReNamerLanguageMenuReader]::Read($handle)
+    if ($items[0] -cne $labels.menu -or $items[1] -cne $labels.system -or
+        $items[2] -cne '한국어' -or $items[3] -cne 'English' -or $items[4] -cne '日本語') {
+        throw "Language menu text differs from $Language catalog."
+    }
+    [ordered]@{ parent = $items[0]; options = @($items[1..4]); checked_command = [int]$items[5] }
+}
+
+function Get-ProductionLanguageRail {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Language
+    )
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    $rail = Find-UniqueAutomationElement -Root $MainWindow -Process $Process `
+        -ExpectedSession $Session -AutomationId ([string]0x8005) `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $TimeoutSeconds -Label "$Language prefix rail" -RequireWindowHandle
+    $bounds = $rail.Current.BoundingRectangle
+    $ownerBounds = $MainWindow.Current.BoundingRectangle
+    if ($rail.Current.Name -cne $labels.rail -or $rail.Current.IsOffscreen -or
+        $bounds.Width -le 0 -or $bounds.Height -le 0 -or
+        $bounds.Width -gt 4096 -or $bounds.Height -gt 4096 -or
+        $bounds.Left -lt $ownerBounds.Left -or $bounds.Top -lt $ownerBounds.Top -or
+        $bounds.Right -gt $ownerBounds.Right -or $bounds.Bottom -gt $ownerBounds.Bottom) {
+        throw "$Language prefix rail has unexpected accessible text or bounds."
+    }
+    [ordered]@{
+        automation_id = [string]$rail.Current.AutomationId
+        name = [string]$rail.Current.Name
+        bounds = [ordered]@{ x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height }
+    }
+}
+
+function Invoke-ProductionLanguageMenuChoice {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][string] $CurrentLanguage,
+        [Parameter(Mandatory)][ValidateSet('system', 'ko', 'en', 'ja')][string] $NextPreference,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+    $before = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Language $CurrentLanguage
+    $target = if ($NextPreference -ceq 'system') { [int]0x9020 } else {
+        (Get-ProductionLanguageSpec -Language $NextPreference).command
+    }
+    $grid = Find-UniqueAutomationElement -Root $MainWindow -Process $Process -ExpectedSession $Session `
+        -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds -Label 'language model grid' -RequireWindowHandle
+    $rowsBefore = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
+    $railBefore = Get-ProductionLanguageRail -Process $Process -MainWindow $MainWindow `
+        -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $CurrentLanguage
+    $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
+    $MainWindow.SetFocus()
+    [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+        throw 'Language menu owner is not the exact foreground application.'
+    }
+    $saved = $null
+    Add-Type -AssemblyName System.Windows.Forms
+    [Windows.Forms.SendKeys]::SendWait('%v')
+    [Windows.Forms.SendKeys]::SendWait('{END}')
+    [Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    [Windows.Forms.SendKeys]::SendWait('{HOME}')
+    for ($index = 0; $index -lt ($target - 0x9020); $index++) {
+        [Windows.Forms.SendKeys]::SendWait('{DOWN}')
+    }
+    [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        try {
+            $saved = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+            if ($saved.value -eq ($target - 0x9020)) { break }
+        }
+        catch {}
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ($null -eq $saved -or $saved.value -ne ($target - 0x9020)) {
+        throw 'Language preference was not durably saved after the real menu selection.'
+    }
+    $Process.Refresh()
+    $after = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Language $CurrentLanguage
+    $railAfter = Get-ProductionLanguageRail -Process $Process -MainWindow $MainWindow `
+        -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $CurrentLanguage
+    $rowsAfter = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
+    if ($Process.HasExited -or $after.checked_command -ne $target -or
+        $rowsAfter -ne $rowsBefore -or $railAfter.name -cne $railBefore.name) {
+        throw 'Language choice restarted the application, reset the model, or changed the current UI.'
+    }
+    [ordered]@{
+        input = 'native-menu-keyboard'; pid = [int]$Process.Id; session_id = [int]$Session
+        hwnd = [long]$handle; before = $before; after = $after
+        model_rows_before = [int]$rowsBefore; model_rows_after = [int]$rowsAfter
+        rail_before = $railBefore; rail_after = $railAfter
+        preference = $saved
+    }
+}
+
+function Invoke-ProductionLanguageCycle {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $CaseRoot,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+    $applicationPath = Join-Path $Root $Application.file
+    Initialize-ProductionLanguageMenuReader
+    $systemResolution = Resolve-ProductionSystemLanguage `
+        -Tags @([DarkReNamerLanguageMenuReader]::PreferredLanguages())
+    if ($systemResolution.language -cne 'ko') {
+        throw 'The maintained Korean VM baseline differs from the first supported Windows UI language.'
+    }
+    $observations = [Collections.Generic.List[object]]::new()
+    $flows = [Collections.Generic.List[object]]::new()
+    foreach ($step in @(
+        @{ language='ko'; preference=0; next='en' },
+        @{ language='en'; preference=2; next='ja' },
+        @{ language='ja'; preference=3; next='ko' },
+        @{ language='ko'; preference=1; next='system' },
+        @{ language=$systemResolution.language; preference=0; next=$null }
+    )) {
+        if ((Get-LowerSha256 -Path $applicationPath) -cne $Application.sha256) {
+            throw 'Language acceptance application changed after source-bound preflight.'
+        }
+        $owned = $null
+        $fixture = $null
+        try {
+            if ($step.language -cin @('en', 'ja')) {
+                $fixture = New-PrivateDirectory -Parent $CaseRoot -Leaf ("language-$($step.language)")
+                $initial = Initialize-ProductionRenameFlowFixture -FixtureRoot $fixture `
+                    -ApplicationRoot $Root -LocalAppData $env:LOCALAPPDATA
+            }
+            $owned = Start-JobBoundProcess -FilePath $applicationPath -Arguments '' -WorkingDirectory $Root
+            $process = $owned.process
+            $binding = Wait-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+                -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `
+                -TimeoutSeconds $TimeoutSeconds -Label "$($step.language) language startup"
+            $main = $binding.element
+            $handle = [IntPtr]$binding.handle
+            $saved = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+            if ($saved.value -ne $step.preference) {
+                throw "$($step.language) startup did not reload the exact prior menu selection."
+            }
+            $menu = Read-ProductionLanguageMenu -Process $process -MainWindow $main `
+                -Session $Session -Language $step.language
+            if ($menu.checked_command -ne (0x9020 + $step.preference)) {
+                throw "$($step.language) startup did not restore the selected menu radio item."
+            }
+            $rail = Get-ProductionLanguageRail -Process $process -MainWindow $main `
+                -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $step.language
+            $flow = $null
+            if ($null -ne $fixture) {
+                $flow = Invoke-ProductionRenameFlow -OwnedProcess $owned -InitialFixture $initial `
+                    -MainWindow $main -MainWindowHandle $handle -FixtureRoot $fixture `
+                    -OutputRoot $OutputRoot -ExpectedSession $Session -TimeoutSeconds $TimeoutSeconds `
+                    -Language $step.language
+                if ($flow.status -cne 'passed') {
+                    throw "$($step.language) production rename flow failed: $($flow.failure_reason)"
+                }
+                $flows.Add([ordered]@{ language=$step.language; flow=$flow })
+            }
+            $choice = if ($null -eq $step.next) { $null } else {
+                Invoke-ProductionLanguageMenuChoice -Process $process -MainWindow $main `
+                    -Session $Session -CurrentLanguage $step.language `
+                    -NextPreference $step.next -TimeoutSeconds $TimeoutSeconds
+            }
+            $observations.Add([ordered]@{
+                language = $step.language; pid = [int]$process.Id; hwnd = [long]$handle
+                session_id = [int]$Session; startup_preference = $saved
+                startup_menu = $menu; startup_rail = $rail; choice = $choice
+            })
+            Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
+                -MainWindowHandle $handle -MainWindow $main -ExpectedClassName 'DarkReNamerWindow' `
+                -ExpectedTitle 'DarkReNamer' -Label "$($step.language) language normal close"
+            if (-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0) {
+                throw "$($step.language) language application did not close normally."
+            }
+            $job = Complete-AcceptanceOwnedProcessJob -Owned $owned
+            if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed) {
+                throw "$($step.language) language application process job did not close cleanly."
+            }
+            if ($null -ne $flow) {
+                $flow.checkpoints += (Get-FlowCheckpoint -Phase post_close -FixtureRoot $fixture `
+                    -LocalAppData $env:LOCALAPPDATA)
+            }
+            Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        }
+        finally {
+            if ($null -ne $owned) {
+                try {
+                    if (-not $owned.job_closed) {
+                        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $owned -StopActive
+                        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
+                            throw 'Language acceptance process job cleanup failed.'
+                        }
+                    }
+                }
+                finally { $owned.process.Dispose() }
+            }
+            if ($null -ne $fixture -and (Test-Path -LiteralPath $fixture)) {
+                Assert-OrdinaryDirectoryTree -Path $fixture
+                Remove-Item -LiteralPath $fixture -Recurse -Force
+                if (Test-Path -LiteralPath $fixture) { throw 'Language fixture cleanup was incomplete.' }
+            }
+        }
+    }
+    [ordered]@{
+        schema_version = 1; status = 'passed'; scope = 'source-built-three-language-native-menu'
+        application_sha256 = $Application.sha256
+        selections = $observations.ToArray(); flows = $flows.ToArray()
+        system_resolution = $systemResolution
+        restored_preference = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
+    }
+}
+
 function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -865,6 +1289,7 @@ function Invoke-GuiSmoke {
         screenshot = $null
         flow = $null
         dialog_picker_checks = $null
+        language_checks = $null
         error_detail = $null
         failure_reason = 'process_start_failed'
     }
@@ -1129,6 +1554,13 @@ function Invoke-GuiSmoke {
                         -Phase post_close `
                         -FixtureRoot $flowFixtureRoot `
                         -LocalAppData $env:LOCALAPPDATA)
+                }
+                if (-not $RawEvidence) {
+                    $row.failure_reason = 'production_language_checks_failed'
+                    $row.language_checks = Invoke-ProductionLanguageCycle `
+                        -Application $Application -Root $Root -CaseRoot $caseRoot `
+                        -OutputRoot $OutputRoot -Session $ExpectedSession `
+                        -TimeoutSeconds $TimeoutSeconds
                 }
                 $row.status = 'passed'
                 $row.failure_reason = $null

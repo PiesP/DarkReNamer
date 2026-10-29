@@ -1,5 +1,6 @@
 """Contract tests for the host VM bundle and returned native evidence."""
 from contextlib import contextmanager, redirect_stderr
+import copy
 import hashlib
 import io
 import json
@@ -49,6 +50,10 @@ class VmRunnerTests(unittest.TestCase):
             'confirmed_source_present': False,
             'confirmed_destination_present': True,
             'journal_residue_count': 0,
+            'localized_confirmation': {'title': 'DarkReNamer - 안전한 적용 확인',
+                                       'question': '계획된 파일 변경을 적용하시겠습니까?',
+                                       'no_overwrite': '기존 파일을 덮어쓰지 않습니다.',
+                                       'bounds': {'width': 500, 'height': 300}},
             'screenshots': [preview_screenshot, confirmation_screenshot],
             'diagnostic': None,
             'failure_reason': None,
@@ -65,7 +70,74 @@ class VmRunnerTests(unittest.TestCase):
             window_handle=456,
         )
         gui['dialog_picker_checks'] = self.picker_checks()
+        gui['language_checks'] = self.language_checks(flow)
         self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True, 'raw_cleanup': clean_controller_cleanup()})
+
+    def language_checks(self, baseline_flow):
+        locales = (
+            ('ko', 0, 2, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+            ('en', 2, 3, '&Language · next startup', 'System language', 'Add a name prefix...'),
+            ('ja', 3, 1, '言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
+            ('ko', 1, 0, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        )
+        selections = []
+        for index, (language, before, after, label, system, rail_name) in enumerate(locales):
+            preference = {'value': before, 'sha256': format(before + 1, '064x')}
+            saved = {'value': after, 'sha256': format(after + 1, '064x')}
+            menu = {'parent': label, 'options': [system, '한국어', 'English', '日本語'],
+                    'checked_command': 0x9020 + before}
+            rail = {'automation_id': '32773', 'name': rail_name,
+                    'bounds': {'x': 30, 'y': 50, 'width': 90, 'height': 40}}
+            pid, hwnd = 200 + index, 600 + index
+            choice = {'input': 'native-menu-keyboard', 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
+                      'before': copy.deepcopy(menu),
+                      'after': dict(menu, checked_command=0x9020 + after),
+                      'model_rows_before': 1, 'model_rows_after': 1,
+                      'rail_before': copy.deepcopy(rail), 'rail_after': copy.deepcopy(rail),
+                      'preference': saved}
+            selections.append({'language': language, 'pid': pid, 'hwnd': hwnd, 'session_id': 2,
+                               'startup_preference': preference, 'startup_menu': menu,
+                               'startup_rail': rail, 'choice': choice})
+        selections.append({'language': 'ko', 'pid': 204, 'hwnd': 604, 'session_id': 2,
+                           'startup_preference': copy.deepcopy(selections[-1]['choice']['preference']),
+                           'startup_menu': {'parent': '언어(&L) · 다음 실행부터',
+                                            'options': ['시스템 언어', '한국어', 'English', '日本語'],
+                                            'checked_command': 0x9020},
+                           'startup_rail': copy.deepcopy(selections[0]['startup_rail']),
+                           'choice': None})
+        flows = []
+        for language in ('en', 'ja'):
+            flow = copy.deepcopy(baseline_flow)
+            title, question, no_overwrite = {
+                'en': ('DarkReNamer - Confirm safe Apply', 'Apply the planned file changes?',
+                       'Existing files will not be overwritten.'),
+                'ja': ('DarkReNamer - 安全な適用の確認', '計画されたファイル変更を適用しますか？',
+                       '既存のファイルは上書きしません。'),
+            }[language]
+            flow['localized_confirmation'].update(title=title, question=question,
+                                                  no_overwrite=no_overwrite)
+            flow['screenshots'] = [
+                dict(self.artifact(language + '-rename-preview.png', b'\x89PNG\r\n\x1a\npreview'),
+                     width=900, height=700),
+                dict(self.artifact(language + '-apply-confirmation.png', b'\x89PNG\r\n\x1a\nconfirmation'),
+                     width=500, height=300),
+            ]
+            source = {'name': 'vm-flow-source.txt', 'kind': 'file', 'bytes': 70,
+                      'content_sha256': 'c' * 64, 'file_identity_sha256': 'e' * 64}
+            destination = dict(source, name='vm-confirmed-vm-flow-source.txt')
+            flow['checkpoints'] = [
+                {'phase': phase, 'fixture_entries': [copy.deepcopy(source if phase in
+                    ('initial', 'after_cancel') else destination)], 'journal_entries': []}
+                for phase in ('initial', 'after_cancel', 'after_apply', 'post_close')
+            ]
+            flows.append({'language': language, 'flow': flow})
+        return {'schema_version': 1, 'status': 'passed',
+                'scope': 'source-built-three-language-native-menu',
+                'application_sha256': self.app['sha256'],
+                'selections': selections, 'flows': flows,
+                'system_resolution': {'language': 'ko', 'selected_tag': 'ko-KR',
+                                      'preferred_tags': ['fr-FR', 'ko-KR', 'en-US']},
+                'restored_preference': selections[-2]['choice']['preference']}
 
     @staticmethod
     def picker_checks():
@@ -81,7 +153,7 @@ class VmRunnerTests(unittest.TestCase):
                                     process_id=123, session_id=2, owner_handle=456, dialog_handle=789,
                                     native_owner_disabled=True, owner_enabled_after=True,
                                     foreground_restored=True, focus_process_bound=True,
-                                    filters=[] if acceptance == 'folder' else ['Text Files (*.txt)', 'All Files (*.*)'],
+                                    filters=[] if acceptance == 'folder' else ['텍스트 파일 (*.txt)', '모든 파일 (*.*)'],
                                     **({'model_unchanged': True, 'model_before': model, 'model_after': model}
                                        if action == 'cancel' else {'expected_model_observed': True, 'default_extension_exercised': command == 0x801C, 'expected_model': selected, 'observed_model': selected})))
         return dict(schema_version=1, status='passed', actions=actions,
@@ -114,6 +186,32 @@ class VmRunnerTests(unittest.TestCase):
                 checks['actions'][1][key] = value
                 with self.assertRaises(ValueError):
                     vm.verify_picker_checks(checks, gui)
+
+    def test_language_acceptance_requires_bound_menu_persistence_and_file_outcomes(self):
+        checks = self.result['gui']['language_checks']
+        self.assertTrue(vm.verify_language_checks(self.root, self.manifest, checks,
+                                                  self.result['gui']['flow']))
+        mutations = (
+            lambda row: row['selections'][1]['startup_menu'].update(parent='언어(&L) · 다음 실행부터'),
+            lambda row: row['selections'][2]['choice'].update(model_rows_after=2),
+            lambda row: row['selections'][1]['choice']['preference'].update(value=1),
+            lambda row: row['flows'][0]['flow'].update(confirmed_destination_present=False),
+            lambda row: row['flows'][1]['flow']['checkpoints'][2]['fixture_entries'][0].update(
+                content_sha256='0' * 64),
+            lambda row: row.update(restored_preference={'value': 1, 'sha256': '0' * 64}),
+            lambda row: row['system_resolution'].update(selected_tag='en-US'),
+            lambda row: row['selections'][-1]['startup_rail'].update(name='Add a name prefix...'),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate.__code__.co_firstlineno):
+                damaged = copy.deepcopy(checks)
+                mutate(damaged)
+                with self.assertRaises(ValueError):
+                    vm.verify_language_checks(self.root, self.manifest, damaged,
+                                              self.result['gui']['flow'])
+        self.result['gui'].pop('language_checks')
+        with self.assertRaisesRegex(ValueError, 'language acceptance'):
+            self.verify()
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)

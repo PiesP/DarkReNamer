@@ -1128,8 +1128,8 @@ def verify_picker_checks(checks, gui):
             filters = row.get('filters')
             valid_filters = filters == [] if acceptance == 'folder' else (
                 isinstance(filters, list) and len(filters) == 2 and
-                filters[0] in ('Text Files', 'Text Files (*.txt)') and
-                filters[1] in ('All Files', 'All Files (*.*)'))
+                filters[0] in ('텍스트 파일', '텍스트 파일 (*.txt)') and
+                filters[1] in ('모든 파일', '모든 파일 (*.*)'))
             if not valid_filters:
                 raise ValueError('VM production picker filters differ from the maintained policy.')
             if action == 'cancel':
@@ -1153,7 +1153,8 @@ def verify_picker_checks(checks, gui):
                     raise ValueError('VM production picker observed model differs from its expected result.')
 
 
-def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None):
+def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None,
+                    screenshot_prefix='', language='ko'):
     if not isinstance(flow, dict):
         raise ValueError('VM production GUI flow is missing or invalid.')
     if 'status' not in flow:
@@ -1200,10 +1201,26 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
         raise ValueError('VM production GUI flow left journal residue.')
     if flow.get('diagnostic') is not None:
         raise ValueError('Passing VM production GUI flow unexpectedly has a diagnostic artifact.')
+    copy = {
+        'ko': ('DarkReNamer - 안전한 적용 확인', '계획된 파일 변경을 적용하시겠습니까?',
+               '기존 파일을 덮어쓰지 않습니다.'),
+        'en': ('DarkReNamer - Confirm safe Apply', 'Apply the planned file changes?',
+               'Existing files will not be overwritten.'),
+        'ja': ('DarkReNamer - 安全な適用の確認', '計画されたファイル変更を適用しますか？',
+               '既存のファイルは上書きしません。'),
+    }
+    confirmation = flow.get('localized_confirmation')
+    if (not isinstance(confirmation, dict) or language not in copy or
+            tuple(confirmation.get(key) for key in ('title', 'question', 'no_overwrite')) != copy[language] or
+            not isinstance(confirmation.get('bounds'), dict) or
+            any(type(confirmation['bounds'].get(key)) not in (int, float) or
+                confirmation['bounds'][key] <= 0 for key in ('width', 'height'))):
+        raise ValueError('VM production GUI flow lost localized Apply and no-overwrite copy.')
     screenshots = flow.get('screenshots')
     if not isinstance(screenshots, list) or len(screenshots) != 2:
         raise ValueError('VM production GUI flow screenshots are incomplete.')
-    expected_screenshots = {'rename-preview.png', 'apply-confirmation.png'}
+    expected_screenshots = {screenshot_prefix + 'rename-preview.png',
+                            screenshot_prefix + 'apply-confirmation.png'}
     if {row.get('file') for row in screenshots if isinstance(row, dict)} != expected_screenshots:
         raise ValueError('VM production GUI flow screenshots are missing or unexpected.')
     for row in screenshots:
@@ -1237,6 +1254,92 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
                 type(flow.get('journal_residue_count')) is not int or
                 flow['journal_residue_count'] != 0):
             raise ValueError('VM candidate GUI summary contradicts raw checkpoints.')
+    return True
+
+
+def verify_language_checks(root, manifest, checks, baseline_flow):
+    if (not isinstance(checks, dict) or checks.get('schema_version') != 1 or
+            checks.get('status') != 'passed' or
+            checks.get('scope') != 'source-built-three-language-native-menu' or
+            checks.get('application_sha256') != application_record(manifest)['sha256']):
+        raise ValueError('Source-built language acceptance is missing or unbound.')
+    system = checks.get('system_resolution')
+    if not isinstance(system, dict) or not isinstance(system.get('preferred_tags'), list) or len(system['preferred_tags']) > 4096 or any(
+            not isinstance(tag, str) or not 1 <= len(tag) <= 256 for tag in system['preferred_tags']):
+        raise ValueError('Windows preferred UI-language inventory is invalid.')
+    selected = next((tag for tag in system['preferred_tags'] if re.match(r'^(ko|en|ja)(-|$)', tag, re.I)), None)
+    resolved = selected[:2].lower() if selected else 'en'
+    if system.get('selected_tag') != selected or system.get('language') != resolved:
+        raise ValueError('System language restart does not match the Windows preferred UI-language order.')
+    labels = {
+        'ko': ('언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        'en': ('&Language · next startup', 'System language', 'Add a name prefix...'),
+        'ja': ('言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
+    }
+    locales = (
+        ('ko', 0, 2, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        ('en', 2, 3, '&Language · next startup', 'System language', 'Add a name prefix...'),
+        ('ja', 3, 1, '言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
+        ('ko', 1, 0, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        (resolved, 0, None, *labels[resolved]),
+    )
+    selections = checks.get('selections')
+    if not isinstance(selections, list) or len(selections) != len(locales):
+        raise ValueError('Language startup and menu selection inventory is incomplete.')
+    for row, (language, before, after, menu_label, system_label, rail_name) in zip(selections, locales):
+        if not isinstance(row, dict) or row.get('language') != language:
+            raise ValueError('Language startup order is invalid.')
+        for key in ('pid', 'hwnd', 'session_id'):
+            if type(row.get(key)) is not int or row[key] <= 0:
+                raise ValueError('Language process, window, or session binding is invalid.')
+        preference, menu, rail, choice = (row.get(key) for key in
+                                           ('startup_preference', 'startup_menu', 'startup_rail', 'choice'))
+        if (not isinstance(preference, dict) or preference.get('value') != before or
+                not isinstance(preference.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', preference['sha256']) or
+                not isinstance(menu, dict) or menu.get('parent') != menu_label or
+                menu.get('options') != [system_label, '한국어', 'English', '日本語'] or
+                menu.get('checked_command') != 0x9020 + before):
+            raise ValueError('Language preference or translated menu did not survive startup.')
+        if (not isinstance(rail, dict) or rail.get('automation_id') != '32773' or
+                rail.get('name') != rail_name or not isinstance(rail.get('bounds'), dict) or
+                any(type(rail['bounds'].get(key)) not in (int, float) or rail['bounds'][key] <= 0
+                    for key in ('width', 'height'))):
+            raise ValueError('Language accessible rail name or bounds are invalid.')
+        if after is None:
+            if choice is not None:
+                raise ValueError('System language readback unexpectedly changed the preference.')
+        elif (not isinstance(choice, dict) or choice.get('input') != 'native-menu-keyboard' or
+              any(choice.get(key) != row[binding] for key, binding in
+                  (('pid', 'pid'), ('hwnd', 'hwnd'), ('session_id', 'session_id'))) or
+              choice.get('before') != menu or
+              not isinstance(choice.get('after'), dict) or
+              choice['after'].get('checked_command') != 0x9020 + after or
+              choice['after'].get('parent') != menu_label or
+              choice['after'].get('options') != menu['options'] or
+              type(choice.get('model_rows_before')) is not int or
+              choice.get('model_rows_after') != choice['model_rows_before'] or
+              choice.get('rail_before') != rail or choice.get('rail_after') != rail or
+              not isinstance(choice.get('preference'), dict) or
+              choice['preference'].get('value') != after):
+            raise ValueError('Language menu selection changed the current UI or model.')
+    restored = checks.get('restored_preference')
+    if (not isinstance(restored, dict) or restored != selections[-2]['choice']['preference'] or
+            restored != selections[-1]['startup_preference']):
+        raise ValueError('Language acceptance did not restore the original System preference.')
+    flows = checks.get('flows')
+    if not isinstance(flows, list) or len(flows) != 2:
+        raise ValueError('English and Japanese actual file-flow evidence is incomplete.')
+    for row, language in zip(flows, ('en', 'ja')):
+        if not isinstance(row, dict) or row.get('language') != language:
+            raise ValueError('Language file-flow order is invalid.')
+        flow = row.get('flow')
+        verify_gui_flow(root, manifest, flow, screenshot_prefix=language + '-', language=language)
+        checkpoints = verify_flow_checkpoints(flow)
+        if (flow.get('before_content_sha256') != baseline_flow.get('before_content_sha256') or
+                flow.get('after_content_sha256') != checkpoints['after_apply']['content_sha256'] or
+                flow.get('after_file_identity_sha256') != checkpoints['after_apply']['file_identity_sha256']):
+            raise ValueError('Language file outcomes differ from the source-bound baseline.')
     return True
 
 
@@ -1358,6 +1461,7 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
             passed = False
         if not candidate:
             verify_picker_checks(gui.get('dialog_picker_checks'), gui)
+            verify_language_checks(root, manifest, gui.get('language_checks'), gui['flow'])
         if candidate:
             if type(gui.get('exit_code')) is not int or gui['exit_code'] != 0:
                 raise ValueError('VM candidate GUI process exit code is invalid.')
