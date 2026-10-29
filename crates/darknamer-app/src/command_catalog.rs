@@ -193,14 +193,29 @@ pub struct CommandUiSpec {
     pub enable_rule: CommandEnableRule,
     pub mutation: CommandMutationClass,
     pub display: CommandUiPolicy,
+    rail_text: crate::i18n::commands::Text,
+    menu_text: crate::i18n::commands::Text,
+    tooltip_text: crate::i18n::commands::Text,
 }
 
 impl CommandUiSpec {
+    #[must_use]
+    pub fn localized_rail_label(self) -> &'static str {
+        self.rail_text.get()
+    }
+    #[must_use]
+    pub fn localized_menu_label(self) -> &'static str {
+        self.menu_text.get()
+    }
+    #[must_use]
+    pub fn localized_tooltip_label(self) -> &'static str {
+        self.tooltip_text.get()
+    }
     /// Returns the spoken one-line name exposed by a standard rail button's
     /// catalog-owned window text.
     #[must_use]
     pub fn rail_spoken_label(self) -> String {
-        self.rail_label.replace('\n', " ")
+        self.localized_rail_label().replace('\n', " ")
     }
 }
 
@@ -229,15 +244,21 @@ const fn legacy(
 }
 
 macro_rules! command_ui_spec {
-    ($id:ident, $rail:expr, $rail_label:literal, $menu:expr, $menu_label:literal,
-     $tooltip:literal, $shortcut:expr, $enable:ident, $mutation:ident, $display:ident) => {
+    ($id:ident, $rail:expr, $rail_label:ident, $menu:expr, $menu_label:ident,
+     $tooltip:ident, $shortcut:expr, $enable:ident, $mutation:ident, $display:ident) => {
         CommandUiSpec {
             id: $id,
             rail: $rail,
-            rail_label: $rail_label,
+            rail_label: crate::i18n::commands::Text::$rail_label
+                .in_language(crate::i18n::Language::Korean),
             menu: $menu,
-            menu_label: $menu_label,
-            tooltip_label: $tooltip,
+            menu_label: crate::i18n::commands::Text::$menu_label
+                .in_language(crate::i18n::Language::Korean),
+            tooltip_label: crate::i18n::commands::Text::$tooltip
+                .in_language(crate::i18n::Language::Korean),
+            rail_text: crate::i18n::commands::Text::$rail_label,
+            menu_text: crate::i18n::commands::Text::$menu_label,
+            tooltip_text: crate::i18n::commands::Text::$tooltip,
             legacy_shortcut: $shortcut,
             enable_rule: CommandEnableRule::$enable,
             mutation: CommandMutationClass::$mutation,
@@ -251,10 +272,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         APPLY,
         rail(RailSide::Left, 0, 0),
-        "변경\n적용",
+        ApplyRail,
         menu(MenuGroup::File, 1, 0),
-        "변경 사항 적용",
-        "미리 본 이름 및 대상 폴더 변경을 실제 파일에 적용합니다.",
+        ApplyMenu,
+        ApplyTooltip,
         legacy(
             LegacyVirtualKey::Character(b'S' as u16),
             LegacyShortcutModifiers::Control,
@@ -267,10 +288,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         REPLACE,
         rail(RailSide::Left, 1, 0),
-        "찾아\n바꾸기",
+        ReplaceRail,
         menu(MenuGroup::Transform, 0, 0),
-        "문자열 찾아 바꾸기...",
-        "파일 이름에서 문자열을 찾아 다른 문자열로 바꿉니다.",
+        ReplaceMenu,
+        ReplaceTooltip,
         None,
         Rows,
         Model,
@@ -279,10 +300,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         PREFIX,
         rail(RailSide::Left, 1, 1),
-        "앞에\n붙이기",
+        PrefixRail,
         menu(MenuGroup::Transform, 0, 1),
-        "이름 앞에 문자열 붙이기...",
-        "파일 이름 앞에 입력한 문자열을 붙입니다.",
+        PrefixMenu,
+        PrefixTooltip,
         None,
         Rows,
         Model,
@@ -291,10 +312,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SUFFIX,
         rail(RailSide::Left, 1, 2),
-        "뒤에\n붙이기",
+        SuffixRail,
         menu(MenuGroup::Transform, 0, 2),
-        "이름 뒤에 문자열 붙이기...",
-        "확장자 앞의 파일 이름 뒤에 입력한 문자열을 붙입니다.",
+        SuffixMenu,
+        SuffixTooltip,
         None,
         Rows,
         Model,
@@ -303,10 +324,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         CLEAR_NAME,
         rail(RailSide::Left, 2, 0),
-        "이름 본체\n지우기",
+        ClearNameRail,
         menu(MenuGroup::Transform, 1, 0),
-        "이름 본체 지우기",
-        "확장자는 유지하고 파일 이름 본체를 지웁니다.",
+        ClearNameMenu,
+        ClearNameTooltip,
         None,
         Rows,
         Model,
@@ -315,10 +336,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         DELETE_POSITION,
         rail(RailSide::Left, 2, 1),
-        "범위\n지우기",
+        DeletePositionRail,
         menu(MenuGroup::Transform, 1, 1),
-        "지정 위치 범위 지우기...",
-        "파일 이름의 지정한 위치 범위를 지웁니다.",
+        DeletePositionMenu,
+        DeletePositionTooltip,
         None,
         Rows,
         Model,
@@ -327,10 +348,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         DELETE_DELIMITED,
         rail(RailSide::Left, 2, 2),
-        "사이\n지우기",
+        DeleteDelimitedRail,
         menu(MenuGroup::Transform, 1, 2),
-        "구분자 사이 지우기...",
-        "파일 이름에서 지정한 두 구분자와 그 사이를 지웁니다.",
+        DeleteDelimitedMenu,
+        DeleteDelimitedTooltip,
         None,
         Rows,
         Model,
@@ -339,10 +360,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         KEEP_DIGITS,
         rail(RailSide::Left, 3, 0),
-        "숫자만\n남기기",
+        KeepDigitsRail,
         menu(MenuGroup::Transform, 2, 0),
-        "이름 본체에 숫자만 남기기",
-        "확장자는 유지하고 파일 이름 본체에 ASCII 숫자만 남깁니다.",
+        KeepDigitsMenu,
+        KeepDigitsTooltip,
         None,
         Rows,
         Model,
@@ -351,10 +372,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         PAD_DIGITS,
         rail(RailSide::Left, 3, 1),
-        "자릿수\n맞추기",
+        PadDigitsRail,
         menu(MenuGroup::Transform, 2, 1),
-        "숫자 자릿수 맞추기...",
-        "파일 이름에 있는 숫자의 자릿수를 0으로 맞춥니다.",
+        PadDigitsMenu,
+        PadDigitsTooltip,
         None,
         Rows,
         Model,
@@ -363,10 +384,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SEQUENCE,
         rail(RailSide::Left, 3, 2),
-        "일련번호\n붙이기",
+        SequenceRail,
         menu(MenuGroup::Transform, 2, 2),
-        "일련번호 붙이기...",
-        "목록 순서에 따라 파일 이름에 일련번호를 붙입니다.",
+        SequenceMenu,
+        SequenceTooltip,
         None,
         Rows,
         Model,
@@ -375,10 +396,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         RESET,
         rail(RailSide::Right, 0, 0),
-        "제안명\n초기화",
+        ResetRail,
         menu(MenuGroup::Edit, 2, 0),
-        "제안 이름 초기화",
-        "모든 제안 이름을 현재 이름으로 되돌립니다. 대상 폴더 변경은 유지되며, 완료된 파일 작업은 취소하지 않습니다.",
+        ResetMenu,
+        ResetTooltip,
         None,
         Rows,
         Model,
@@ -387,10 +408,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         CLEAR_LIST,
         None,
-        "목록\n지우기",
+        ClearListRail,
         menu(MenuGroup::Edit, 3, 0),
-        "목록 비우기",
-        "목록에서 모든 항목을 제거합니다. 실제 파일은 삭제하지 않습니다.",
+        ClearListMenu,
+        ClearListTooltip,
         legacy(
             LegacyVirtualKey::Character(b'L' as u16),
             LegacyShortcutModifiers::Control,
@@ -403,10 +424,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         MANUAL_CHANGE,
         rail(RailSide::Right, 1, 0),
-        "직접\n바꾸기",
+        ManualChangeRail,
         menu(MenuGroup::Edit, 0, 0),
-        "선택 항목 이름 직접 변경...",
-        "선택한 한 항목의 제안 이름을 직접 변경합니다.",
+        ManualChangeMenu,
+        ManualChangeTooltip,
         legacy(LegacyVirtualKey::F2, LegacyShortcutModifiers::None, "F2"),
         Selection,
         Model,
@@ -415,10 +436,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SORT,
         rail(RailSide::Right, 1, 2),
-        "목록\n정렬",
+        SortRail,
         menu(MenuGroup::Edit, 1, 2),
-        "목록 정렬...",
-        "선택한 기준으로 목록 순서를 정렬합니다.",
+        SortMenu,
+        SortTooltip,
         None,
         Rows,
         Model,
@@ -427,10 +448,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         PARENT_PREFIX,
         rail(RailSide::Right, 3, 0),
-        "폴더명\n앞에",
+        ParentPrefixRail,
         menu(MenuGroup::Transform, 4, 0),
-        "대상 폴더명을 이름 앞에 붙이기",
-        "제안된 대상 폴더의 마지막 이름을 밑줄과 함께 파일 이름 앞에 붙입니다.",
+        ParentPrefixMenu,
+        ParentPrefixTooltip,
         None,
         Rows,
         Model,
@@ -439,10 +460,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         PARENT_SUFFIX,
         rail(RailSide::Right, 3, 1),
-        "폴더명\n뒤에",
+        ParentSuffixRail,
         menu(MenuGroup::Transform, 4, 1),
-        "대상 폴더명을 이름 뒤에 붙이기",
-        "제안된 대상 폴더의 마지막 이름을 밑줄과 함께 파일 이름 뒤에 붙입니다.",
+        ParentSuffixMenu,
+        ParentSuffixTooltip,
         None,
         Rows,
         Model,
@@ -451,10 +472,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         UNIFY_PATH,
         None,
-        "경로\n통일",
+        UnifyPathRail,
         menu(MenuGroup::Edit, 2, 1),
-        "모든 파일의 대상 폴더 지정...",
-        "목록의 모든 일반 파일을 선택한 기존 폴더로 이동하도록 예약합니다. 적용 전에는 실제 파일을 이동하지 않습니다.",
+        UnifyPathMenu,
+        UnifyPathTooltip,
         None,
         Rows,
         Model,
@@ -463,10 +484,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         EXT_DELETE,
         rail(RailSide::Right, 2, 0),
-        "확장자\n지우기",
+        ExtDeleteRail,
         menu(MenuGroup::Transform, 3, 0),
-        "확장자 지우기",
-        "파일 이름의 확장자를 지웁니다.",
+        ExtDeleteMenu,
+        ExtDeleteTooltip,
         None,
         Rows,
         Model,
@@ -475,10 +496,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         EXT_ADD,
         rail(RailSide::Right, 2, 1),
-        "확장자\n추가",
+        ExtAddRail,
         menu(MenuGroup::Transform, 3, 1),
-        "확장자 추가...",
-        "파일 이름에 확장자를 추가합니다.",
+        ExtAddMenu,
+        ExtAddTooltip,
         None,
         Rows,
         Model,
@@ -487,10 +508,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         EXT_REPLACE,
         rail(RailSide::Right, 2, 2),
-        "확장자\n변경",
+        ExtReplaceRail,
         menu(MenuGroup::Transform, 3, 2),
-        "확장자 변경...",
-        "파일 이름의 확장자를 바꿉니다.",
+        ExtReplaceMenu,
+        ExtReplaceTooltip,
         None,
         Rows,
         Model,
@@ -499,10 +520,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         ADD_FILES,
         None,
-        "파일 추가",
+        AddFilesRail,
         menu(MenuGroup::File, 0, 0),
-        "파일 추가...",
-        "파일 선택기를 열어 목록에 파일을 추가합니다.",
+        AddFilesMenu,
+        AddFilesTooltip,
         legacy(
             LegacyVirtualKey::Character(b'O' as u16),
             LegacyShortcutModifiers::Control,
@@ -515,10 +536,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         COPY_NAMES,
         None,
-        "이름 복사",
+        CopyNamesRail,
         menu(MenuGroup::File, 2, 0),
-        "변경 후 이름 목록 복사",
-        "모든 항목의 변경 후 이름을 클립보드에 복사합니다.",
+        CopyNamesMenu,
+        CopyNamesTooltip,
         None,
         Rows,
         None,
@@ -527,10 +548,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SAVE_NAMES,
         None,
-        "이름 저장",
+        SaveNamesRail,
         menu(MenuGroup::File, 2, 1),
-        "변경 후 이름 목록 저장...",
-        "모든 항목의 변경 후 이름을 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
+        SaveNamesMenu,
+        SaveNamesTooltip,
         None,
         Rows,
         Filesystem,
@@ -539,10 +560,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         COPY_PATHS,
         None,
-        "경로 복사",
+        CopyPathsRail,
         menu(MenuGroup::File, 3, 0),
-        "현재 경로 목록 복사",
-        "모든 항목의 현재 실제 경로를 클립보드에 복사합니다.",
+        CopyPathsMenu,
+        CopyPathsTooltip,
         legacy(
             LegacyVirtualKey::Character(b'C' as u16),
             LegacyShortcutModifiers::ControlShift,
@@ -555,10 +576,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SAVE_PATHS,
         None,
-        "경로 저장",
+        SavePathsRail,
         menu(MenuGroup::File, 3, 1),
-        "현재 경로 목록 저장...",
-        "모든 항목의 현재 실제 경로를 새 텍스트 파일로 저장합니다. 기존 파일은 덮어쓰지 않습니다.",
+        SavePathsMenu,
+        SavePathsTooltip,
         legacy(
             LegacyVirtualKey::Character(b'X' as u16),
             LegacyShortcutModifiers::ControlShift,
@@ -571,10 +592,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         IMPORT_NAMES,
         None,
-        "이름 불러오기",
+        ImportNamesRail,
         menu(MenuGroup::File, 4, 0),
-        "변경 후 이름 목록 가져오기...",
-        "텍스트 파일의 이름을 목록 순서대로 변경 후 이름으로 가져옵니다.",
+        ImportNamesMenu,
+        ImportNamesTooltip,
         None,
         Rows,
         Model,
@@ -583,10 +604,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         IMPORT_PATHS,
         None,
-        "경로 불러오기",
+        ImportPathsRail,
         menu(MenuGroup::File, 4, 1),
-        "경로 목록에서 추가...",
-        "텍스트 파일에 적힌 현재 경로의 항목을 목록에 추가합니다.",
+        ImportPathsMenu,
+        ImportPathsTooltip,
         legacy(
             LegacyVirtualKey::Character(b'V' as u16),
             LegacyShortcutModifiers::ControlShift,
@@ -599,10 +620,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         MOVE_UP,
         None,
-        "위로 올림",
+        MoveUpRail,
         menu(MenuGroup::Edit, 1, 0),
-        "목록 순서 위로",
-        "선택 항목을 목록 순서에서 한 칸 위로 이동합니다.",
+        MoveUpMenu,
+        MoveUpTooltip,
         legacy(LegacyVirtualKey::Up, LegacyShortcutModifiers::Alt, "Alt+↑"),
         Selection,
         Model,
@@ -611,10 +632,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         MOVE_DOWN,
         None,
-        "아래로 내림",
+        MoveDownRail,
         menu(MenuGroup::Edit, 1, 1),
-        "목록 순서 아래로",
-        "선택 항목을 목록 순서에서 한 칸 아래로 이동합니다.",
+        MoveDownMenu,
+        MoveDownTooltip,
         legacy(
             LegacyVirtualKey::Down,
             LegacyShortcutModifiers::Alt,
@@ -627,10 +648,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SHOW_FULL_PATH,
         None,
-        "전체 경로 표시",
+        ShowFullPathRail,
         menu(MenuGroup::View, 0, 0),
-        "현재 전체 경로",
-        "현재 실제 원본의 전체 경로 열을 표시합니다.",
+        ShowFullPathMenu,
+        ShowFullPathTooltip,
         None,
         Always,
         None,
@@ -639,10 +660,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SHOW_SIZE,
         None,
-        "파일 크기 표시",
+        ShowSizeRail,
         menu(MenuGroup::View, 0, 1),
-        "파일 크기",
-        "파일 크기 열을 표시합니다.",
+        ShowSizeMenu,
+        ShowSizeTooltip,
         None,
         Always,
         None,
@@ -651,10 +672,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SHOW_MODIFIED,
         None,
-        "변경 시각 표시",
+        ShowModifiedRail,
         menu(MenuGroup::View, 0, 2),
-        "수정 시각",
-        "파일 수정 시각 열을 표시합니다.",
+        ShowModifiedMenu,
+        ShowModifiedTooltip,
         None,
         Always,
         None,
@@ -663,10 +684,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         SHOW_CREATED,
         None,
-        "생성 시각 표시",
+        ShowCreatedRail,
         menu(MenuGroup::View, 0, 3),
-        "생성 시각",
-        "파일 생성 시각 열을 표시합니다.",
+        ShowCreatedMenu,
+        ShowCreatedTooltip,
         None,
         Always,
         None,
@@ -675,10 +696,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         VERSION,
         None,
-        "버전",
+        VersionRail,
         menu(MenuGroup::Help, 0, 0),
-        "DarkReNamer 정보...",
-        "DarkReNamer 버전 및 저작권 정보를 표시합니다.",
+        VersionMenu,
+        VersionTooltip,
         None,
         Always,
         None,
@@ -687,10 +708,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         RESET_PATH,
         None,
-        "원래 위치로",
+        ResetPathRail,
         menu(MenuGroup::Edit, 2, 2),
-        "대상 폴더 미리보기 초기화",
-        "각 파일의 대상 폴더를 현재 폴더로 되돌립니다. 제안 이름은 유지되며, 완료된 파일 작업은 취소하지 않습니다.",
+        ResetPathMenu,
+        ResetPathTooltip,
         None,
         Rows,
         Model,
@@ -701,10 +722,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
 pub const DELETE_SELECTED_UI_SPEC: CommandUiSpec = command_ui_spec!(
     DELETE_SELECTED_COMMAND,
     rail(RailSide::Right, 1, 1),
-    "선택\n제거",
+    DeleteSelectedCommandRail,
     menu(MenuGroup::Edit, 0, 1),
-    "선택 항목을 목록에서 제거",
-    "선택한 항목을 목록에서만 제거합니다. 실제 파일은 삭제하지 않습니다.",
+    DeleteSelectedCommandMenu,
+    DeleteSelectedCommandTooltip,
     legacy(
         LegacyVirtualKey::Delete,
         LegacyShortcutModifiers::None,
@@ -827,8 +848,8 @@ pub fn command_ui_spec(id: CommandId) -> Option<&'static CommandUiSpec> {
 #[must_use]
 pub fn command_menu_label(spec: &CommandUiSpec) -> String {
     spec.legacy_shortcut.map_or_else(
-        || spec.menu_label.to_owned(),
-        |shortcut| format!("{}\t{}", spec.menu_label, shortcut.display),
+        || spec.localized_menu_label().to_owned(),
+        |shortcut| format!("{}\t{}", spec.localized_menu_label(), shortcut.display),
     )
 }
 
@@ -877,7 +898,7 @@ pub fn rail_tool_spec(command: CommandId) -> Option<ToolSpec> {
     command_ui_spec(command).and_then(|spec| {
         spec.rail.map(|_| ToolSpec {
             id: spec.id,
-            label: spec.rail_label,
+            label: spec.localized_rail_label(),
         })
     })
 }

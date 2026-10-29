@@ -578,7 +578,7 @@ fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
+            crate::i18n::common::Text::ElevationBlocked.get(),
         ));
     }
     // SAFETY: OleInitialize requires a null reserved pointer, initializes the
@@ -627,6 +627,7 @@ fn run_unsafe() -> io::Result<()> {
     if unsafe { RegisterClassExW(&window_class) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    let startup_language = super::language::initialize_startup_language()?;
     let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
     let startup_recovery_pending = runtime.recovery_locked
@@ -637,7 +638,8 @@ fn run_unsafe() -> io::Result<()> {
     let startup_notice = (!startup_recovery_pending)
         .then(|| runtime.status.clone())
         .flatten();
-    let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
+    let state: *mut AppStateSlot =
+        CallbackState::into_raw(AppState::new_with_language(runtime, Some(startup_language)));
     let mut adopted = false;
     let mut init = WindowInit {
         state,
@@ -744,7 +746,11 @@ fn run_unsafe() -> io::Result<()> {
     if startup_recovery_pending {
         confirm_startup_recovery(window);
     } else if let Some(notice) = startup_notice {
-        message(window, &notice, "DarkReNamer - 복구 상태");
+        message(
+            window,
+            &notice,
+            crate::i18n::common::Text::RecoveryCaption.get(),
+        );
     }
     let mut message = MSG::default();
     loop {
@@ -1286,6 +1292,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: child creation succeeded and this callback retains the
             // allocation's sole AppState lease.
             start_preferences_writers(window, state_lease.state_mut());
+            state_lease.state_mut().start_language_writer(window);
             // SetWindowPos can synchronously reenter the callback graph. The
             // copied ListView HWND is sufficient for the z-order repair, so end
             // the AppState lease before placing it behind every direct sibling.
@@ -1390,8 +1397,8 @@ unsafe extern "system" fn window_proc(
                         if attached.is_null() {
                             super::message(
                                 window,
-                                &format!("메뉴를 화면에 표시하지 못했습니다: {error}"),
-                                "DarkReNamer - 시작 실패",
+                                &crate::i18n::common::menu_display_failed(&(error)),
+                                crate::i18n::common::Text::StartupCaption.get(),
                             );
                             drop(attached_owner_data);
                             // SAFETY: no state lease remains. Normal destruction
@@ -1403,8 +1410,8 @@ unsafe extern "system" fn window_proc(
                             let state = lease.state_mut();
                             state.menu = attached;
                             state.menu_owner_data = attached_owner_data;
-                            state.set_transient_status(format!(
-                                "메뉴 배색을 적용하지 못해 이전 표시를 유지합니다: {error}"
+                            state.set_transient_status(crate::i18n::common::menu_theme_failed(
+                                &(error),
                             ));
                         }
                         attached
@@ -1473,8 +1480,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 DPI의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 표시 설정",
+                    &crate::i18n::common::dpi_minimum_failed(&(error)),
+                    crate::i18n::common::Text::DisplayCaption.get(),
                 );
             }
             arrange(window, state);
@@ -1491,8 +1498,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 표시 설정의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 표시 설정",
+                    &crate::i18n::common::display_minimum_failed(&(error)),
+                    crate::i18n::common::Text::DisplayCaption.get(),
                 );
             }
             update_controls(state);
@@ -1516,8 +1523,8 @@ unsafe extern "system" fn window_proc(
                 let released = finish_appearance_dialog(window, state, wparam, lparam);
                 if released.is_some() {
                     if let Err(error) = ensure_minimum_track_size(window, state) {
-                        state.set_transient_status(format!(
-                            "모양 설정의 최소 창 크기를 적용하지 못했습니다: {error}"
+                        state.set_transient_status(crate::i18n::common::appearance_minimum_failed(
+                            &(error),
                         ));
                     }
                     arrange(window, state);
@@ -1537,8 +1544,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 글꼴의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 글꼴 설정",
+                    &crate::i18n::common::font_minimum_failed(&(error)),
+                    crate::i18n::common::Text::FontCaption.get(),
                 );
             }
             arrange(window, state);

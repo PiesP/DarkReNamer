@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::i18n::LanguagePreference;
 use crate::{AppThemeMode, ColumnState, PreviewEmphasis, RailDensityPreference, UiAppearance};
 
 #[path = "preference_lifecycle.rs"]
@@ -31,6 +32,9 @@ const APPEARANCE_SERIALIZED_LEN: usize =
     APPEARANCE_HEADER_LEN + APPEARANCE_PAYLOAD_LEN + APPEARANCE_CHECKSUM_LEN;
 const APPEARANCE_MAX_INPUT_BYTES: usize = 64;
 const APPEARANCE_SETTINGS_LEAF: &str = "ui-appearance-v1";
+const LANGUAGE_SETTINGS_LEAF: &str = "ui-language-v1";
+const LANGUAGE_MAGIC: [u8; 8] = *b"DRLANG\0\0";
+const LANGUAGE_SERIALIZED_LEN: usize = 20;
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct ColumnPreferencesLoad {
@@ -41,6 +45,144 @@ pub(crate) struct ColumnPreferencesLoad {
 pub(crate) struct AppearancePreferencesLoad {
     pub(crate) appearance: UiAppearance,
     pub(crate) failure: Option<io::Error>,
+}
+
+pub(crate) struct LanguagePreferencesLoad {
+    pub(crate) preference: LanguagePreference,
+    pub(crate) missing: bool,
+    pub(crate) failure: Option<io::Error>,
+}
+
+pub(crate) fn language_path_for_journal_root(journal_root: &Path) -> PathBuf {
+    journal_root
+        .parent()
+        .unwrap_or(journal_root)
+        .join(LANGUAGE_SETTINGS_LEAF)
+}
+
+/// A separate versioned record leaves existing reserved bytes and decoders intact.
+pub(crate) fn load_language_or_default(journal_root: &Path) -> LanguagePreferencesLoad {
+    let path = language_path_for_journal_root(journal_root);
+    let loaded = (|| {
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((LANGUAGE_SERIALIZED_LEN + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        decode_language(&bytes).map(Some)
+    })();
+    match loaded {
+        Ok(Some(preference)) => LanguagePreferencesLoad {
+            preference,
+            missing: false,
+            failure: None,
+        },
+        Ok(None) => {
+            // Only a successfully decoded old record establishes a legacy user.
+            let legacy = matches!(read(&path_for_journal_root(journal_root)), Ok(Some(_)))
+                || matches!(
+                    read_appearance(&appearance_path_for_journal_root(journal_root)),
+                    Ok(Some(_))
+                );
+            LanguagePreferencesLoad {
+                preference: if legacy {
+                    LanguagePreference::Korean
+                } else {
+                    LanguagePreference::System
+                },
+                missing: true,
+                failure: None,
+            }
+        }
+        Err(error) => LanguagePreferencesLoad {
+            preference: LanguagePreference::System,
+            missing: false,
+            failure: Some(error),
+        },
+    }
+}
+
+fn encode_language(preference: LanguagePreference) -> [u8; LANGUAGE_SERIALIZED_LEN] {
+    let mut bytes = [0; LANGUAGE_SERIALIZED_LEN];
+    bytes[..8].copy_from_slice(&LANGUAGE_MAGIC);
+    bytes[8] = 1;
+    bytes[12] = match preference {
+        LanguagePreference::System => 0,
+        LanguagePreference::Korean => 1,
+        LanguagePreference::English => 2,
+        LanguagePreference::Japanese => 3,
+    };
+    let digest = checksum(&bytes[..16]);
+    bytes[16..].copy_from_slice(&digest.to_le_bytes());
+    bytes
+}
+
+fn decode_language(bytes: &[u8]) -> io::Result<LanguagePreference> {
+    if bytes.len() != LANGUAGE_SERIALIZED_LEN
+        || bytes[..8] != LANGUAGE_MAGIC
+        || bytes[8] != 1
+        || bytes[9..12] != [0, 0, 0]
+        || bytes[13..16] != [0, 0, 0]
+        || bytes[16..] != checksum(&bytes[..16]).to_le_bytes()
+    {
+        return Err(invalid_data("invalid language preference record"));
+    }
+    match bytes[12] {
+        0 => Ok(LanguagePreference::System),
+        1 => Ok(LanguagePreference::Korean),
+        2 => Ok(LanguagePreference::English),
+        3 => Ok(LanguagePreference::Japanese),
+        _ => Err(invalid_data("unsupported language preference")),
+    }
+}
+
+pub(crate) fn save_language(path: &Path, preference: LanguagePreference) -> io::Result<()> {
+    persist_encoded(
+        path,
+        &encode_language(preference),
+        LANGUAGE_SETTINGS_LEAF,
+        "language preference path has no parent",
+        "could not allocate a unique language preference temporary file",
+    )
+}
+
+/// Language has an independent queue and authority; closing never creates a new request.
+pub(crate) struct LanguagePreferencesWriter {
+    writer: CoalescingWriter<LanguagePreference>,
+}
+
+impl LanguagePreferencesWriter {
+    pub(crate) fn spawn(
+        path: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            writer: CoalescingWriter::spawn(path, "darkrenamer-language", wake, save_language)?,
+        })
+    }
+    pub(crate) fn submit(&mut self, preference: LanguagePreference) -> io::Result<u64> {
+        self.writer.submit(
+            preference,
+            "language preference writer has stopped",
+            "language preference writer is shutting down",
+        )
+    }
+    pub(crate) fn request_shutdown(&mut self) {
+        self.writer.request_shutdown();
+    }
+    pub(crate) fn drain_events(&self) -> Vec<PreferenceWriteEvent> {
+        self.writer.drain_events()
+    }
+    pub(crate) fn is_finished(&self) -> bool {
+        self.writer.is_finished()
+    }
+    pub(crate) fn join(&mut self) -> thread::Result<()> {
+        self.writer.join()
+    }
 }
 
 struct PreferenceRequest<T> {
@@ -1478,5 +1620,139 @@ mod tests {
             ]
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn new_defaults_and_valid_legacy_records_have_distinct_language_policies() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let journal = temp.path().join("journal");
+        let fresh = load_language_or_default(&journal);
+        assert_eq!(fresh.preference, LanguagePreference::System);
+        assert!(fresh.missing && fresh.failure.is_none());
+        save(
+            &path_for_journal_root(&journal),
+            &crate::default_column_states(),
+        )?;
+        assert_eq!(
+            load_language_or_default(&journal).preference,
+            LanguagePreference::Korean
+        );
+        save_language(
+            &language_path_for_journal_root(&journal),
+            LanguagePreference::System,
+        )?;
+        let current = load_language_or_default(&journal);
+        assert_eq!(current.preference, LanguagePreference::System);
+        assert!(!current.missing && current.failure.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_language_records_fail_without_changing_existing_settings() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let journal = temp.path().join("journal");
+        let path = language_path_for_journal_root(&journal);
+        for preference in [
+            LanguagePreference::System,
+            LanguagePreference::Korean,
+            LanguagePreference::English,
+            LanguagePreference::Japanese,
+        ] {
+            save_language(&path, preference)?;
+            assert_eq!(load_language_or_default(&journal).preference, preference);
+        }
+        let original = encode_language(LanguagePreference::Japanese);
+        let mut invalid_cases = vec![
+            Vec::new(),
+            original[..19].to_vec(),
+            [original.as_slice(), &[0]].concat(),
+        ];
+        for index in [0, 8, 9, 12, 15, 16] {
+            let mut bytes = original;
+            bytes[index] = 255;
+            // Reserved/version/value cases also fail when their checksum is valid.
+            if index < 16 {
+                let digest = checksum(&bytes[..16]);
+                bytes[16..].copy_from_slice(&digest.to_le_bytes());
+            }
+            invalid_cases.push(bytes.to_vec());
+        }
+        for bytes in invalid_cases {
+            fs::write(&path, &bytes)?;
+            let loaded = load_language_or_default(&journal);
+            assert_eq!(loaded.preference, LanguagePreference::System);
+            assert!(!loaded.missing && loaded.failure.is_some());
+            assert_eq!(fs::read(&path)?, bytes);
+        }
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+        assert!(load_language_or_default(&journal).failure.is_some());
+        assert!(save_language(&path, LanguagePreference::English).is_err());
+        assert!(path.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn language_writer_flushes_selection_before_close_and_reports_failure() -> io::Result<()> {
+        crate::i18n::with_language(crate::i18n::Language::English, || {
+            let temp = tempfile::tempdir()?;
+            let journal = temp.path().join("journal");
+            let path = language_path_for_journal_root(&journal);
+            let (sender, receiver) = channel();
+            let writer = LanguagePreferencesWriter::spawn(path.clone(), move || {
+                let _sent = sender.send(());
+            })?;
+            let mut lifecycle = lifecycle::PreferencePersistence::new(None, None);
+            lifecycle.install_language_writer(writer);
+            assert!(!lifecycle.is_joined());
+            lifecycle.submit_language(LanguagePreference::English)?;
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(io::Error::other)?;
+            assert!(
+                lifecycle
+                    .drain(false)
+                    .iter()
+                    .any(|message| message.contains("next normal startup"))
+            );
+            assert_eq!(
+                load_language_or_default(&journal).preference,
+                LanguagePreference::English
+            );
+            lifecycle.submit_language(LanguagePreference::Japanese)?;
+            lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
+            assert!(lifecycle.is_joined());
+            assert_eq!(
+                load_language_or_default(&journal).preference,
+                LanguagePreference::Japanese
+            );
+            fs::remove_file(&path)?;
+            fs::create_dir(&path)?;
+            let (sender, receiver) = channel();
+            let writer = LanguagePreferencesWriter::spawn(path.clone(), move || {
+                let _sent = sender.send(());
+            })?;
+            let mut lifecycle = lifecycle::PreferencePersistence::new(None, None);
+            lifecycle.install_language_writer(writer);
+            lifecycle.submit_language(LanguagePreference::Korean)?;
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(io::Error::other)?;
+            assert!(
+                lifecycle
+                    .drain(false)
+                    .iter()
+                    .any(|message| message.contains("may not survive"))
+            );
+            lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
+            assert!(path.is_dir());
+            Ok(())
+        })
     }
 }

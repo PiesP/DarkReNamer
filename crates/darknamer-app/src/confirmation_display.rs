@@ -5,7 +5,9 @@ use std::fmt::Write;
 pub(crate) const COMPACT_UNITS: usize = 56;
 // Four sampled paths, four leaves and labels remain below the native details limit.
 pub(crate) const DETAIL_FIELD_UNITS: usize = 49_152;
-pub(crate) const DISPLAY_NOTE: &str = "[U+XXXX]는 원본 UTF-16 코드 단위의 표시이며 입력할 이름이 아닙니다. 대괄호와 원본 …도 코드로 표시합니다.";
+pub(crate) fn display_note() -> &'static str {
+    crate::i18n::common::Text::Utf16Explanation.get()
+}
 
 #[derive(Clone, Copy)]
 enum Glyph {
@@ -199,15 +201,18 @@ pub(crate) fn tail(units: &[u16], budget: usize) -> String {
 
 pub(crate) fn difference_evidence(before: &[u16], after: &[u16]) -> String {
     let index = before.iter().zip(after).take_while(|(a, b)| a == b).count();
-    let value =
-        |unit: Option<&u16>| unit.map_or_else(|| "끝".to_owned(), |unit| format!("U+{unit:04X}"));
-    format!(
-        "원본 UTF-16 길이: {} → {} · 첫 차이: {}번째 코드 단위 {} → {}",
-        before.len(),
-        after.len(),
-        index + 1,
-        value(before.get(index)),
-        value(after.get(index))
+    let value = |unit: Option<&u16>| {
+        unit.map_or_else(
+            || crate::i18n::common::Text::End.get().to_owned(),
+            |unit| format!("U+{unit:04X}"),
+        )
+    };
+    crate::i18n::common::difference_evidence(
+        &(before.len()),
+        &(after.len()),
+        &(index + 1),
+        &(value(before.get(index))),
+        &(value(after.get(index))),
     )
 }
 

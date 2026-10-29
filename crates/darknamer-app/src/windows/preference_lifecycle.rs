@@ -1,6 +1,9 @@
 use std::io;
 
-use super::{AppearancePreferencesWriter, PreferenceWriteEvent, PreferencesWriter};
+use super::{
+    AppearancePreferencesWriter, LanguagePreferencesWriter, PreferenceWriteEvent, PreferencesWriter,
+};
+use crate::i18n::LanguagePreference;
 use crate::{ColumnState, UiAppearance};
 
 /// Owns independent settings writes, diagnostics and their final close handoff.
@@ -10,6 +13,10 @@ pub(crate) struct PreferencePersistence {
     appearance: Option<AppearancePreferencesWriter>,
     column_status: WriterStatus,
     appearance_status: WriterStatus,
+    language: Option<LanguagePreferencesWriter>,
+    language_terminal_observed: bool,
+    language_notify_saved: bool,
+    language_requested: Option<u64>,
 }
 
 #[derive(Default)]
@@ -27,8 +34,8 @@ enum PreferenceKind {
 impl PreferenceKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Columns => "열 표시 설정",
-            Self::Appearance => "모양 설정",
+            Self::Columns => crate::i18n::common::Text::ColumnPreferences.get(),
+            Self::Appearance => crate::i18n::common::Text::AppearancePreferences.get(),
         }
     }
 }
@@ -49,7 +56,8 @@ impl WriterStatus {
                         .is_some_and(|failed| generation >= failed)
                     {
                         self.failed_generation = None;
-                        (!closing).then(|| format!("{}을 다시 저장했습니다.", kind.label()))
+                        (!closing)
+                            .then(|| crate::i18n::common::preference_saved_again(&(kind.label())))
                     } else {
                         None
                     }
@@ -57,10 +65,7 @@ impl WriterStatus {
                 PreferenceWriteEvent::Failed { generation, error } => {
                     self.failed_generation = Some(generation);
                     (!closing).then(|| {
-                        format!(
-                            "{}을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}",
-                            kind.label()
-                        )
+                        crate::i18n::common::preference_save_failed(&(kind.label()), &(error))
                     })
                 }
                 PreferenceWriteEvent::Stopped => {
@@ -69,12 +74,8 @@ impl WriterStatus {
                 }
                 PreferenceWriteEvent::Panicked => {
                     self.terminal_observed = true;
-                    (!closing).then(|| {
-                        format!(
-                            "{} writer가 비정상 종료되었습니다. 현재 작업에는 영향이 없습니다.",
-                            kind.label()
-                        )
-                    })
+                    (!closing)
+                        .then(|| crate::i18n::common::preference_writer_stopped(&(kind.label())))
                 }
             };
             if let Some(message) = message {
@@ -86,6 +87,21 @@ impl WriterStatus {
 }
 
 impl PreferencePersistence {
+    pub(crate) fn install_language_writer(&mut self, writer: LanguagePreferencesWriter) {
+        self.language = Some(writer);
+    }
+
+    pub(crate) fn submit_language(&mut self, preference: LanguagePreference) -> io::Result<()> {
+        let generation = self
+            .language
+            .as_mut()
+            .ok_or_else(|| io::Error::other("language preference writer is unavailable"))?
+            .submit(preference)?;
+        self.language_requested = Some(generation);
+        self.language_notify_saved = true;
+        Ok(())
+    }
+
     /// Either writer may be absent after its independent startup failure.
     pub(crate) fn new(
         columns: Option<PreferencesWriter>,
@@ -134,6 +150,36 @@ impl PreferencePersistence {
             appearance,
             closing,
         ));
+        if let Some(writer) = &self.language {
+            for event in writer.drain_events() {
+                match event {
+                    PreferenceWriteEvent::Saved { generation }
+                        if !closing
+                            && self.language_notify_saved
+                            && self
+                                .language_requested
+                                .is_some_and(|requested| generation >= requested) =>
+                    {
+                        messages.push(crate::i18n::common::Text::LanguageSaved.get().to_owned());
+                        self.language_notify_saved = false;
+                    }
+                    PreferenceWriteEvent::Failed { error, .. } if !closing => {
+                        messages.push(crate::i18n::common::language_save_failed(&(error)))
+                    }
+                    PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
+                        self.language_terminal_observed = true;
+                        if !closing && matches!(event, PreferenceWriteEvent::Panicked) {
+                            messages.push(
+                                crate::i18n::common::Text::LanguageWriterStopped
+                                    .get()
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         messages
     }
 
@@ -144,19 +190,18 @@ impl PreferencePersistence {
         appearance: UiAppearance,
     ) -> Vec<String> {
         let mut messages = Vec::new();
+        if let Some(writer) = self.language.as_mut() {
+            writer.request_shutdown();
+        }
         if let Some(writer) = self.columns.as_mut()
             && let Err(error) = writer.shutdown_with(columns)
         {
-            messages.push(format!(
-                "종료 전 열 표시 설정을 저장하도록 요청하지 못했습니다: {error}"
-            ));
+            messages.push(crate::i18n::common::column_close_failed(&(error)));
         }
         if let Some(writer) = self.appearance.as_mut()
             && let Err(error) = writer.shutdown_with(appearance)
         {
-            messages.push(format!(
-                "종료 전 모양 설정을 저장하도록 요청하지 못했습니다: {error}"
-            ));
+            messages.push(crate::i18n::common::appearance_close_failed(&(error)));
         }
         messages
     }
@@ -171,6 +216,10 @@ impl PreferencePersistence {
             || self.appearance.as_ref().is_some_and(|writer| {
                 !self.appearance_status.terminal_observed && !writer.is_finished()
             })
+            || self
+                .language
+                .as_ref()
+                .is_some_and(|writer| !self.language_terminal_observed && !writer.is_finished())
         {
             return false;
         }
@@ -189,10 +238,13 @@ impl PreferencePersistence {
     }
 
     pub(crate) fn is_joined(&self) -> bool {
-        self.columns.is_none() && self.appearance.is_none()
+        self.columns.is_none() && self.appearance.is_none() && self.language.is_none()
     }
 
     fn join(&mut self) {
+        if let Some(mut writer) = self.language.take() {
+            let _joined = writer.join();
+        }
         if let Some(mut writer) = self.columns.take() {
             let _joined = writer.join();
             let _messages =

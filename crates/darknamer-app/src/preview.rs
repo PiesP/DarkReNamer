@@ -80,14 +80,27 @@ pub(crate) enum PreviewRowIssue {
     DuplicateDestination,
 }
 
-const RENAME_STATUS: &str = "이름 변경 예정";
-const MOVE_STATUS: &str = "이동 예정";
-const MOVE_AND_RENAME_STATUS: &str = "이동·이름 변경 예정";
-const EMPTY_STEM_STATUS: &str = "주의: 이름 본체";
-const INVALID_NAME_STATUS: &str = "차단: 이름";
-const DUPLICATE_DESTINATION_STATUS: &str = "차단: 충돌";
+#[cfg(test)]
+const RENAME_STATUS: &str =
+    crate::i18n::common::Text::PreviewRename.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
+const MOVE_STATUS: &str =
+    crate::i18n::common::Text::PreviewMove.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
+const MOVE_AND_RENAME_STATUS: &str =
+    crate::i18n::common::Text::PreviewMoveRename.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
+const EMPTY_STEM_STATUS: &str =
+    crate::i18n::common::Text::PreviewEmptyBase.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
+const INVALID_NAME_STATUS: &str =
+    crate::i18n::common::Text::PreviewBadName.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
+const DUPLICATE_DESTINATION_STATUS: &str =
+    crate::i18n::common::Text::PreviewCollision.in_language(crate::i18n::Language::Korean);
 
 /// Every nonempty row label measured by the native Status column.
+#[cfg(test)]
 pub(crate) const PREVIEW_STATUS_LABELS: [&str; 6] = [
     RENAME_STATUS,
     MOVE_STATUS,
@@ -97,22 +110,37 @@ pub(crate) const PREVIEW_STATUS_LABELS: [&str; 6] = [
     DUPLICATE_DESTINATION_STATUS,
 ];
 
+pub(crate) fn preview_status_labels() -> [&'static str; 6] {
+    [
+        crate::i18n::common::Text::PreviewRename.get(),
+        crate::i18n::common::Text::PreviewMove.get(),
+        crate::i18n::common::Text::PreviewMoveRename.get(),
+        crate::i18n::common::Text::PreviewEmptyBase.get(),
+        crate::i18n::common::Text::PreviewBadName.get(),
+        crate::i18n::common::Text::PreviewCollision.get(),
+    ]
+}
+
 /// Short, non-authorizing text rendered in the fixed native Status column.
 #[must_use]
-pub(crate) const fn preview_status_label(
+pub(crate) fn preview_status_label(
     issue: PreviewRowIssue,
     change: PlannedChangeKind,
 ) -> &'static str {
     match issue {
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => RENAME_STATUS,
-        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => MOVE_STATUS,
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => {
+            crate::i18n::common::Text::PreviewRename.get()
+        }
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => {
+            crate::i18n::common::Text::PreviewMove.get()
+        }
         PreviewRowIssue::None if matches!(change, PlannedChangeKind::MoveAndRename) => {
-            MOVE_AND_RENAME_STATUS
+            crate::i18n::common::Text::PreviewMoveRename.get()
         }
         PreviewRowIssue::None => "",
-        PreviewRowIssue::EmptyStem => EMPTY_STEM_STATUS,
-        PreviewRowIssue::InvalidName(_) => INVALID_NAME_STATUS,
-        PreviewRowIssue::DuplicateDestination => DUPLICATE_DESTINATION_STATUS,
+        PreviewRowIssue::EmptyStem => crate::i18n::common::Text::PreviewEmptyBase.get(),
+        PreviewRowIssue::InvalidName(_) => crate::i18n::common::Text::PreviewBadName.get(),
+        PreviewRowIssue::DuplicateDestination => crate::i18n::common::Text::PreviewCollision.get(),
     }
 }
 
@@ -120,15 +148,14 @@ pub(crate) const fn preview_status_label(
 #[must_use]
 pub(crate) fn preview_issue_description(issue: PreviewRowIssue) -> Option<String> {
     match issue {
-        PreviewRowIssue::InvalidName(error) => Some(format!(
-            "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
-            windows_leaf_name_error_korean(error)
+        PreviewRowIssue::InvalidName(error) => Some(crate::i18n::common::bad_name_advice(
+            &(windows_leaf_name_error_korean(error)),
         )),
-        PreviewRowIssue::DuplicateDestination => Some(
-            "목록의 다른 항목과 대상 경로가 겹칩니다. 이름이나 대상 위치를 수정하세요.".to_owned(),
-        ),
+        PreviewRowIssue::DuplicateDestination => {
+            Some(crate::i18n::common::Text::CollisionAdvice.get().to_owned())
+        }
         PreviewRowIssue::EmptyStem => {
-            Some("이름 본체가 비어 있습니다. 의도한 이름인지 확인하세요.".to_owned())
+            Some(crate::i18n::common::Text::EmptyBaseAdvice.get().to_owned())
         }
         PreviewRowIssue::None => None,
     }
@@ -141,7 +168,7 @@ pub(crate) fn preview_item_details(
 ) -> String {
     let status = preview_status_label(issue, item.planned_change_kind());
     let status = if status.is_empty() {
-        "변경 없음"
+        crate::i18n::common::Text::NoChange.get()
     } else {
         status
     };
@@ -157,29 +184,30 @@ pub(crate) fn preview_item_details(
         destination.units(),
         crate::confirmation_display::DETAIL_FIELD_UNITS,
     );
-    let mut text = format!(
-        "{status}\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n대상 전체 경로: {}",
-        names.before, names.after, paths.before, paths.after,
+    let mut text = crate::i18n::common::preview_details(
+        &(status),
+        &(names.before),
+        &(names.after),
+        &(paths.before),
+        &(paths.after),
     );
     if names.elided || paths.elided {
-        text.push_str(
-            "\n\n표시 길이를 넘는 부분은 …으로 생략합니다. 복사한 정보에도 같은 축약이 적용됩니다.",
-        );
+        text.push_str(crate::i18n::common::Text::CopyElided.get());
     }
     if names.hidden || paths.hidden {
-        text.push_str("\n축약문에 차이가 드러나지 않습니다.\n");
+        text.push_str(crate::i18n::common::Text::HiddenDifference.get());
         text.push_str(&crate::confirmation_display::difference_evidence(
             source.units(),
             destination.units(),
         ));
     }
     text.push_str("\n\n");
-    text.push_str(crate::confirmation_display::DISPLAY_NOTE);
+    text.push_str(crate::confirmation_display::display_note());
     if let Some(description) = preview_issue_description(issue) {
         text.push_str("\n\n");
         text.push_str(&description);
     }
-    text.push_str("\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.");
+    text.push_str(crate::i18n::common::Text::ApplyChecksLater.get());
     text
 }
 
@@ -467,20 +495,14 @@ impl PreviewIssueCache {
     }
 
     #[must_use]
-    pub(crate) const fn blocker_explanation(&self) -> Option<&'static str> {
+    pub(crate) fn blocker_explanation(&self) -> Option<&'static str> {
         match (
             self.invalid_name_rows != 0,
             self.duplicate_destination_rows != 0,
         ) {
-            (true, true) => Some(
-                "Windows에서 사용할 수 없는 대상 이름과 대상 경로 충돌이 있습니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요.",
-            ),
-            (true, false) => Some(
-                "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요.",
-            ),
-            (false, true) => Some(
-                "둘 이상의 항목이 같은 대상 경로를 사용합니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요.",
-            ),
+            (true, true) => Some(crate::i18n::common::Text::BadNamesAndCollisions.get()),
+            (true, false) => Some(crate::i18n::common::Text::BadNames.get()),
+            (false, true) => Some(crate::i18n::common::Text::Collisions.get()),
             (false, false) => None,
         }
     }
@@ -489,27 +511,25 @@ impl PreviewIssueCache {
     pub(crate) fn notice(&self) -> Option<String> {
         let mut counts = Vec::new();
         if self.invalid_name_rows != 0 {
-            counts.push(format!("잘못된 대상 이름 {}개", self.invalid_name_rows));
+            counts.push(crate::i18n::common::bad_name_count(
+                &(self.invalid_name_rows),
+            ));
         }
         if self.duplicate_destination_rows != 0 {
-            counts.push(format!(
-                "대상 경로 충돌 {}개",
-                self.duplicate_destination_rows
+            counts.push(crate::i18n::common::collision_count(
+                &(self.duplicate_destination_rows),
             ));
         }
         if self.warning_rows != 0 {
-            counts.push(format!(
-                "이름 본체가 비어 있는 항목 {}개",
-                self.warning_rows
-            ));
+            counts.push(crate::i18n::common::empty_base_count(&(self.warning_rows)));
         }
         if counts.is_empty() {
             return None;
         }
         let action = if self.blocker_rows != 0 {
-            "변경 적용이 차단되었습니다."
+            crate::i18n::common::Text::ApplyBlocked.get()
         } else {
-            "변경 전에 확인하세요."
+            crate::i18n::common::Text::CheckBeforeApply.get()
         };
         Some(format!("{} · {action}", counts.join(" · ")))
     }
@@ -548,15 +568,15 @@ fn resolved_preview_issue(
 #[must_use]
 pub(crate) fn windows_leaf_name_error_korean(error: WindowsLeafNameError) -> &'static str {
     match error {
-        WindowsLeafNameError::Empty => "이름이 비어 있음",
-        WindowsLeafNameError::ContainsNul => "NUL 문자가 포함됨",
-        WindowsLeafNameError::ContainsSeparator => "경로 구분자가 포함됨",
-        WindowsLeafNameError::DotComponent => "점 경로 구성 요소(.) 또는 (..)임",
-        WindowsLeafNameError::InvalidCharacter => "Windows에서 금지된 문자가 포함됨",
-        WindowsLeafNameError::ReservedDeviceName => "Windows 예약 장치 이름임",
-        WindowsLeafNameError::TrailingDotOrSpace => "점 또는 공백으로 끝남",
-        WindowsLeafNameError::TooLong => "Windows 이름 길이 제한을 초과함",
-        _ => "Windows 이름 규칙에 맞지 않음",
+        WindowsLeafNameError::Empty => crate::i18n::common::Text::NameEmpty.get(),
+        WindowsLeafNameError::ContainsNul => crate::i18n::common::Text::NameNul.get(),
+        WindowsLeafNameError::ContainsSeparator => crate::i18n::common::Text::NameSeparator.get(),
+        WindowsLeafNameError::DotComponent => crate::i18n::common::Text::NameDot.get(),
+        WindowsLeafNameError::InvalidCharacter => crate::i18n::common::Text::NameForbidden.get(),
+        WindowsLeafNameError::ReservedDeviceName => crate::i18n::common::Text::NameReserved.get(),
+        WindowsLeafNameError::TrailingDotOrSpace => crate::i18n::common::Text::NameTrailing.get(),
+        WindowsLeafNameError::TooLong => crate::i18n::common::Text::NameTooLong.get(),
+        _ => crate::i18n::common::Text::NameInvalid.get(),
     }
 }
 

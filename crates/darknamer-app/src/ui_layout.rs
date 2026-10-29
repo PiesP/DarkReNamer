@@ -8,8 +8,8 @@ use crate::command_catalog::{APPLY, command_ui_spec};
 use crate::command_catalog::{CommandId, CommandRailSpec, LEFT_RAIL, RIGHT_RAIL};
 #[cfg(any(windows, test))]
 use crate::{
-    EMPTY_STATE_SAFETY, EMPTY_STATE_SAFETY_RAILS, LIST_COLUMN_FIT_GUTTER_DIP,
-    LOCATION_COLUMN_MINIMUM, NAME_COLUMN_MINIMUM, NATIVE_STATUS_COLUMN_WIDTH_DIP,
+    LIST_COLUMN_FIT_GUTTER_DIP, LOCATION_COLUMN_MINIMUM, NAME_COLUMN_MINIMUM,
+    NATIVE_STATUS_COLUMN_WIDTH_DIP,
 };
 
 /// Scales one 96-DPI logical coordinate with nearest-integer rounding.
@@ -703,10 +703,12 @@ pub(crate) enum RailMode {
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn empty_state_safety_copy(mode: RailMode) -> &'static str {
+pub(crate) fn empty_state_safety_copy(mode: RailMode) -> &'static str {
     match mode {
-        RailMode::Comfortable | RailMode::Compact => EMPTY_STATE_SAFETY_RAILS,
-        RailMode::MenuOnly => EMPTY_STATE_SAFETY,
+        RailMode::Comfortable | RailMode::Compact => {
+            crate::i18n::common::Text::EmptySafetyWrapped.get()
+        }
+        RailMode::MenuOnly => crate::i18n::common::Text::EmptySafety.get(),
     }
 }
 
@@ -2038,35 +2040,51 @@ pub(crate) fn minimum_main_client_width(
 pub struct ColumnSpec {
     pub label: &'static str,
     pub default_width: i32,
+    text: crate::i18n::common::Text,
+}
+
+impl ColumnSpec {
+    #[must_use]
+    pub fn localized_label(self) -> &'static str {
+        self.text.get()
+    }
 }
 
 pub const COLUMNS: [ColumnSpec; 7] = [
     ColumnSpec {
-        label: "현재 이름",
+        label: crate::i18n::common::Text::CurrentName.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::CurrentName,
         default_width: 150,
     },
     ColumnSpec {
-        label: "변경 후 이름",
+        label: crate::i18n::common::Text::ProposedName.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::ProposedName,
         default_width: 150,
     },
     ColumnSpec {
-        label: "대상 폴더",
+        label: crate::i18n::common::Text::DestinationFolder
+            .in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::DestinationFolder,
         default_width: 100,
     },
     ColumnSpec {
-        label: "현재 전체 경로",
+        label: crate::i18n::common::Text::CurrentPath.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::CurrentPath,
         default_width: 0,
     },
     ColumnSpec {
-        label: "파일 크기",
+        label: crate::i18n::common::Text::FileSize.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::FileSize,
         default_width: 0,
     },
     ColumnSpec {
-        label: "수정 시각",
+        label: crate::i18n::common::Text::ModifiedTime.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::ModifiedTime,
         default_width: 0,
     },
     ColumnSpec {
-        label: "생성 시각",
+        label: crate::i18n::common::Text::CreatedTime.in_language(crate::i18n::Language::Korean),
+        text: crate::i18n::common::Text::CreatedTime,
         default_width: 0,
     },
 ];
@@ -2075,7 +2093,8 @@ pub const COLUMNS: [ColumnSpec; 7] = [
 /// the seven-column `ui-columns-v1` persistence contract.
 #[cfg(any(windows, test))]
 pub(crate) const NATIVE_STATUS_COLUMN: ColumnSpec = ColumnSpec {
-    label: "상태",
+    label: crate::i18n::common::Text::Status.in_language(crate::i18n::Language::Korean),
+    text: crate::i18n::common::Text::Status,
     default_width: NATIVE_STATUS_COLUMN_WIDTH_DIP,
 };
 /// Report-mode index of the fixed native-only Status column.

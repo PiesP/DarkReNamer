@@ -1,17 +1,23 @@
 //! Embedded presentation text. The startup language never changes file semantics.
 
 use std::sync::OnceLock;
+pub(crate) mod commands;
+pub(crate) mod common;
 
 #[cfg(windows)]
 pub(crate) mod native_ui;
-#[cfg(windows)]
 pub(crate) mod runtime;
 
+#[cfg(any(windows, test))]
 pub(crate) const LANGUAGE_SYSTEM: u16 = 0x9020;
+#[cfg(any(windows, test))]
 pub(crate) const LANGUAGE_KOREAN: u16 = 0x9021;
+#[cfg(any(windows, test))]
 pub(crate) const LANGUAGE_ENGLISH: u16 = 0x9022;
+#[cfg(any(windows, test))]
 pub(crate) const LANGUAGE_JAPANESE: u16 = 0x9023;
 
+#[cfg(any(windows, test))]
 impl LanguagePreference {
     pub(crate) const fn from_command(command: u16) -> Option<Self> {
         match command {
@@ -90,6 +96,7 @@ static STARTUP_LANGUAGE: OnceLock<Language> = OnceLock::new();
 
 /// Called before app-owned startup diagnostics are formatted. Reinitializing a
 /// process with a different language is intentionally unsupported.
+#[cfg(windows)]
 pub(crate) fn initialize(language: Language) -> Result<(), Language> {
     match STARTUP_LANGUAGE.set(language) {
         Ok(()) => Ok(()),
@@ -104,7 +111,7 @@ pub fn current_language() -> Language {
     if let Some(language) = TEST_LANGUAGE.with(std::cell::Cell::get) {
         return language;
     }
-    STARTUP_LANGUAGE.get().copied().unwrap_or_else(|| {
+    STARTUP_LANGUAGE.get().copied().unwrap_or({
         // Existing unit fixtures describe the legacy Korean UI. Test overrides
         // are thread-local, so parallel language assertions cannot race.
         #[cfg(test)]
@@ -145,7 +152,9 @@ macro_rules! catalog {
             ($msg_ko:literal, $msg_en:literal, $msg_ja:literal); )* }
     ) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[cfg_attr(not(windows), allow(dead_code, reason = "catalogs also embed Windows-only presentation"))]
         pub(crate) enum Text { $( $key, )* }
+        #[cfg_attr(not(windows), allow(dead_code, reason = "catalogs also embed Windows-only presentation"))]
         impl Text {
             pub(crate) const fn in_language(self, language: $crate::i18n::Language) -> &'static str {
                 match (self, language) {
@@ -158,7 +167,8 @@ macro_rules! catalog {
                 self.in_language($crate::i18n::current_language())
             }
         }
-        $( pub(crate) fn $name( $( $arg: $kind ),* ) -> String {
+        $( #[cfg_attr(not(windows), allow(dead_code, reason = "catalogs also embed Windows-only presentation"))]
+        pub(crate) fn $name( $( $arg: $kind ),* ) -> String {
             match $crate::i18n::current_language() {
                 $crate::i18n::Language::Korean => format!($msg_ko, $( $arg = $arg ),*),
                 $crate::i18n::Language::English => format!($msg_en, $( $arg = $arg ),*),
@@ -182,6 +192,17 @@ mod tests {
 
     #[test]
     fn explicit_choice_precedes_ui_preferences_and_system_has_a_stable_fallback() {
+        for preference in [
+            LanguagePreference::System,
+            LanguagePreference::Korean,
+            LanguagePreference::English,
+            LanguagePreference::Japanese,
+        ] {
+            assert_eq!(
+                LanguagePreference::from_command(preference.command()),
+                Some(preference)
+            );
+        }
         assert_eq!(
             LanguagePreference::Japanese.resolve(&["ko-KR"]),
             Language::Japanese
