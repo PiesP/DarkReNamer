@@ -128,6 +128,8 @@ function Invoke-ProductionOccupiedDestinationCheck {
         [Text.Encoding]::ASCII.GetBytes('Existing destination must never be overwritten'))
     $destinationHash = Get-LowerSha256 -Path $DestinationPath
     $destinationIdentity = [DarkReNamerVmNative]::GetFileIdentity($DestinationPath)
+    $sourceIdentityHash = Get-LowerTextSha256 -Value $sourceIdentity
+    $destinationIdentityHash = Get-LowerTextSha256 -Value $destinationIdentity
     $passed = $false
     try {
         $process = $OwnedProcess.process
@@ -181,6 +183,14 @@ function Invoke-ProductionOccupiedDestinationCheck {
             title = $labels.blocked_apply; reason = $labels.occupied
             bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
             source_unchanged = $true; destination_unchanged = $true
+            source_before_sha256 = $sourceHash
+            source_after_sha256 = Get-LowerSha256 -Path $SourcePath
+            source_before_file_identity_sha256 = $sourceIdentityHash
+            source_after_file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($SourcePath))
+            destination_before_sha256 = $destinationHash
+            destination_after_sha256 = Get-LowerSha256 -Path $DestinationPath
+            destination_before_file_identity_sha256 = $destinationIdentityHash
+            destination_after_file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($DestinationPath))
             journal_residue_count = 0
         }
     }
@@ -196,6 +206,20 @@ function Invoke-ProductionOccupiedDestinationCheck {
             }
         }
     }
+}
+
+function Set-ProductionCaptureByteCount {
+    param(
+        [Parameter(Mandatory)][object] $Capture,
+        [Parameter(Mandatory)][string] $Root
+    )
+    $item = Get-Item -LiteralPath (Join-Path $Root $Capture.file) -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -lt 45 -or $item.Length -gt (8 * 1024 * 1024)) {
+        throw 'Language PNG capture exceeds its ordinary-file byte bound.'
+    }
+    $Capture['bytes'] = [long]$item.Length
 }
 
 function Invoke-ProductionRenameFlow {
@@ -226,6 +250,10 @@ function Invoke-ProductionRenameFlow {
         status = 'failed'
         scope = 'production-file-add-prefix-cancel-confirm'
         input_mode = 'uia-functional'
+        process_id = [int]$Process.Id
+        session_id = [int]$ExpectedSession
+        window_handle = [long]$MainWindowHandle
+        process_start_time_utc_ticks = $Process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
         application_file = 'DarkReNamer.exe'
         application_sha256 = $null
         source_name = $sourceName
@@ -352,6 +380,7 @@ function Invoke-ProductionRenameFlow {
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'prefix prompt'
         $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+        $flow['prefix_prompt_hwnd'] = [long]$promptHandle
         $prefixEdit = Find-UniqueAutomationElement `
             -Root $prompt `
             -Process $Process `
@@ -362,6 +391,13 @@ function Invoke-ProductionRenameFlow {
             -Label 'prefix prompt edit' `
             -RequireWindowHandle
         Set-AutomationControlValue -Element $prefixEdit -Value $prefix -Label 'prefix prompt edit'
+        if (-not $RawEvidence) {
+            $flow['prefix_prompt_capture'] = Save-WindowScreenshot `
+                -Window $prompt -Process $Process -ExpectedSession $ExpectedSession `
+                -Root $OutputRoot -Leaf "$Language-prefix-prompt.png" `
+                -Label 'prefix prompt' -ForegroundObservations $foregroundObservations
+            Set-ProductionCaptureByteCount -Capture $flow.prefix_prompt_capture -Root $OutputRoot
+        }
         $promptOk = Find-UniqueAutomationElement `
             -Root $prompt `
             -Process $Process `
@@ -1177,6 +1213,97 @@ function Get-ProductionLanguageRail {
     }
 }
 
+function Assert-ProductionLanguageMenuForeground {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session
+    )
+    Assert-AutomationBinding -Element $MainWindow -Process $Process `
+        -ExpectedSession $Session -Label 'language menu owner' -RequireWindowHandle
+    $foreground = Get-ForegroundObservation
+    if ($foreground.hwnd -ne [long]$MainWindow.Current.NativeWindowHandle -or
+        $foreground.process_id -ne $Process.Id -or
+        $foreground.session_id -ne $Session -or
+        $foreground.window_class -cne 'DarkReNamerWindow') {
+        throw 'Language menu owner lost exact foreground process, window, or session binding.'
+    }
+}
+
+function Get-ProductionLanguageModelSnapshot {
+    param([Parameter(Mandatory)][Windows.Automation.GridPattern] $Grid)
+    $rows = $Grid.Current.RowCount
+    if ($rows -lt 0 -or $rows -gt 1 -or $Grid.Current.ColumnCount -lt 4) {
+        throw 'Language model requires at most one owned row and four path/name columns.'
+    }
+    [ordered]@{
+        rows = [int]$rows
+        cells = @(
+            if ($rows -eq 1) {
+                0..3 | ForEach-Object { [string]$Grid.GetItem(0, $_).Current.Name }
+            }
+        )
+    }
+}
+
+function Set-ProductionPendingPrefix {
+    param(
+        [Parameter(Mandatory)][object] $OwnedProcess,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][ValidateSet('ko', 'en', 'ja')][string] $Language
+    )
+    $process = $OwnedProcess.process
+    $gridElement = Find-UniqueAutomationElement -Root $MainWindow -Process $process `
+        -ExpectedSession $Session -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds `
+        -Label 'pending language model grid' -RequireWindowHandle
+    $grid = [Windows.Automation.GridPattern]$gridElement.GetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern)
+    $before = Get-ProductionLanguageModelSnapshot -Grid $grid
+    if ($before.rows -ne 1) { throw 'Pending language selection requires the applied owned row.' }
+    $button = Find-UniqueAutomationElement -Root $MainWindow -Process $process `
+        -ExpectedSession $Session -AutomationId ([string]0x8005) `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $TimeoutSeconds -Label 'pending prefix command' `
+        -RequireEnabled -RequireWindowHandle
+    $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess -Element $button `
+        -Label 'pending prefix command'
+    $labels = Get-ProductionLanguageSpec -Language $Language
+    $prompt = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $Session `
+        -MainWindowHandle $MainWindowHandle -Name $labels.prefix `
+        -TimeoutSeconds $TimeoutSeconds -Label 'pending prefix prompt'
+    $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+    $edit = Find-UniqueAutomationElement -Root $prompt -Process $process `
+        -ExpectedSession $Session -AutomationId '1004' `
+        -ControlType ([Windows.Automation.ControlType]::Edit) `
+        -TimeoutSeconds $TimeoutSeconds -Label 'pending prefix edit' -RequireWindowHandle
+    Set-AutomationControlValue -Element $edit -Value 'pending-' -Label 'pending prefix edit'
+    $ok = Find-UniqueAutomationElement -Root $prompt -Process $process `
+        -ExpectedSession $Session -AutomationId '1' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $TimeoutSeconds -Label 'pending prefix OK' `
+        -RequireEnabled -RequireWindowHandle
+    Invoke-AutomationControl -Element $ok -Label 'pending prefix OK'
+    Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $TimeoutSeconds `
+        -Label 'pending prefix prompt'
+    Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $after = Get-ProductionLanguageModelSnapshot -Grid $grid
+        if ($after.rows -eq 1 -and $after.cells[1] -cne $before.cells[1]) { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ($after.rows -ne 1 -or $after.cells[0] -cne $before.cells[0] -or
+        $after.cells[2] -cne $before.cells[2] -or
+        $after.cells[3] -cne $before.cells[3] -or
+        $after.cells[1] -cne ('pending-' + $before.cells[1])) {
+        throw 'Pending prefix did not create an exact unapplied name proposal.'
+    }
+    $after
+}
+
 function Invoke-ProductionLanguageMenuChoice {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1184,7 +1311,8 @@ function Invoke-ProductionLanguageMenuChoice {
         [Parameter(Mandatory)][int] $Session,
         [Parameter(Mandatory)][string] $CurrentLanguage,
         [Parameter(Mandatory)][ValidateSet('system', 'ko', 'en', 'ja')][string] $NextPreference,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [object] $PendingBefore
     )
     $before = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
         -Session $Session -Language $CurrentLanguage
@@ -1195,6 +1323,13 @@ function Invoke-ProductionLanguageMenuChoice {
         -AutomationId '1000' -TimeoutSeconds $TimeoutSeconds -Label 'language model grid' -RequireWindowHandle
     $rowsBefore = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
         [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
+    $cellsBefore = Get-ProductionLanguageModelSnapshot -Grid ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern))
+    if ($null -ne $PendingBefore -and
+        ($cellsBefore | ConvertTo-Json -Depth 4 -Compress) -cne
+        ($PendingBefore | ConvertTo-Json -Depth 4 -Compress)) {
+        throw 'Pending proposal changed before the language menu selection.'
+    }
     $railBefore = Get-ProductionLanguageRail -Process $Process -MainWindow $MainWindow `
         -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $CurrentLanguage
     $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
@@ -1203,15 +1338,22 @@ function Invoke-ProductionLanguageMenuChoice {
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
         throw 'Language menu owner is not the exact foreground application.'
     }
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     $saved = $null
     Add-Type -AssemblyName System.Windows.Forms
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('%v')
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{END}')
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{HOME}')
     for ($index = 0; $index -lt ($target - 0x9020); $index++) {
+        Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
         [Windows.Forms.SendKeys]::SendWait('{DOWN}')
     }
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     [Windows.Forms.SendKeys]::SendWait('{ENTER}')
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
@@ -1225,21 +1367,37 @@ function Invoke-ProductionLanguageMenuChoice {
     if ($null -eq $saved -or $saved.value -ne ($target - 0x9020)) {
         throw 'Language preference was not durably saved after the real menu selection.'
     }
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
+        $after = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Language $CurrentLanguage
+        if ($after.parent -cne $before.parent -or
+            ($after.options | ConvertTo-Json -Compress) -cne
+            ($before.options | ConvertTo-Json -Compress)) {
+            throw 'Language menu changed visible current-language labels before restart.'
+        }
+        if ($after.checked_command -eq $target) { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
     $Process.Refresh()
-    $after = Read-ProductionLanguageMenu -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Language $CurrentLanguage
     $railAfter = Get-ProductionLanguageRail -Process $Process -MainWindow $MainWindow `
         -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $CurrentLanguage
     $rowsAfter = ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
         [Windows.Automation.GridPattern]::Pattern)).Current.RowCount
+    $cellsAfter = Get-ProductionLanguageModelSnapshot -Grid ([Windows.Automation.GridPattern]$grid.GetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern))
     if ($Process.HasExited -or $after.checked_command -ne $target -or
-        $rowsAfter -ne $rowsBefore -or $railAfter.name -cne $railBefore.name) {
+        $rowsAfter -ne $rowsBefore -or $railAfter.name -cne $railBefore.name -or
+        ($cellsAfter | ConvertTo-Json -Depth 4 -Compress) -cne
+        ($cellsBefore | ConvertTo-Json -Depth 4 -Compress)) {
         throw 'Language choice restarted the application, reset the model, or changed the current UI.'
     }
     [ordered]@{
         input = 'native-menu-keyboard'; pid = [int]$Process.Id; session_id = [int]$Session
         hwnd = [long]$handle; before = $before; after = $after
         model_rows_before = [int]$rowsBefore; model_rows_after = [int]$rowsAfter
+        model_before = $cellsBefore; model_after = $cellsAfter
         rail_before = $railBefore; rail_after = $railAfter
         preference = $saved
     }
@@ -1249,6 +1407,7 @@ function Invoke-ProductionBlockedRecoveryCheck {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $OutputRoot,
         [Parameter(Mandatory)][int] $Session,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [Parameter(Mandatory)][ValidateSet('ko', 'en', 'ja')][string] $Language
@@ -1309,6 +1468,13 @@ function Invoke-ProductionBlockedRecoveryCheck {
             $copy.IndexOf($labels.recovery_locked, [StringComparison]::Ordinal) -lt 0) {
             throw "$Language blocked recovery notice lost its localized lock guidance."
         }
+        $captureObservations = [Collections.Generic.List[object]]::new()
+        $noticeCapture = Save-WindowScreenshot -Window $notice -Process $process `
+            -ExpectedSession $Session -Root $OutputRoot `
+            -Leaf "$Language-blocked-recovery.png" `
+            -Label "$Language blocked recovery notice" `
+            -ForegroundObservations $captureObservations
+        Set-ProductionCaptureByteCount -Capture $noticeCapture -Root $OutputRoot
         $ok = Find-UniqueAutomationElement -Root $notice -Process $process -ExpectedSession $Session `
             -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) `
             -TimeoutSeconds $TimeoutSeconds -Label "$Language recovery notice OK" `
@@ -1345,8 +1511,11 @@ function Invoke-ProductionBlockedRecoveryCheck {
         [ordered]@{
             language = $Language; pid = [int]$process.Id; session_id = [int]$Session
             hwnd = [long]$handle; title = $labels.recovery
+            notice_hwnd = [long]$noticeHandle
             lock_guidance = $labels.recovery_locked
             notice_bounds = [ordered]@{ width = $bounds.Width; height = $bounds.Height }
+            notice_capture = $noticeCapture
+            notice_capture_foreground = $captureObservations[0]
             apply_enabled = $false; model_rows = [int]$rows
             journal_sha256 = $before; journal_unchanged = $true
             normal_close = $true; process_job_clean = $true
@@ -1407,12 +1576,13 @@ function Invoke-ProductionLanguageCycle {
             throw 'Language acceptance application changed after source-bound preflight.'
         }
         $owned = $null
+        $ownedCleanupClean = $false
         $fixture = $null
         $blocked = $null
         try {
             if ($step.preference -in @(0, 2, 3) -and $null -ne $step.next) {
                 $blocked = Invoke-ProductionBlockedRecoveryCheck -Application $Application `
-                    -Root $Root -Session $Session -TimeoutSeconds $TimeoutSeconds `
+                    -Root $Root -OutputRoot $OutputRoot -Session $Session -TimeoutSeconds $TimeoutSeconds `
                     -Language $step.language
             }
             if ($step.language -cin @('en', 'ja')) {
@@ -1438,6 +1608,18 @@ function Invoke-ProductionLanguageCycle {
             }
             $rail = Get-ProductionLanguageRail -Process $process -MainWindow $main `
                 -Session $Session -TimeoutSeconds $TimeoutSeconds -Language $step.language
+            $startupCapture = $null
+            $startupCaptureForeground = $null
+            if ($step.preference -in @(0, 2, 3) -and $null -ne $step.next) {
+                $captureObservations = [Collections.Generic.List[object]]::new()
+                $startupCapture = Save-WindowScreenshot -Window $main -Process $process `
+                    -ExpectedSession $Session -Root $OutputRoot `
+                    -Leaf "$($step.language)-language-main.png" `
+                    -Label "$($step.language) language main workbench" `
+                    -ForegroundObservations $captureObservations
+                Set-ProductionCaptureByteCount -Capture $startupCapture -Root $OutputRoot
+                $startupCaptureForeground = $captureObservations[0]
+            }
             $flow = $null
             if ($null -ne $fixture) {
                 $flow = Invoke-ProductionRenameFlow -OwnedProcess $owned -InitialFixture $initial `
@@ -1449,15 +1631,45 @@ function Invoke-ProductionLanguageCycle {
                 }
                 $flows.Add([ordered]@{ language=$step.language; flow=$flow })
             }
+            $pendingBefore = $null
+            $pendingFileBefore = $null
+            if ($step.language -ceq 'en' -and $step.next -ceq 'ja') {
+                $pendingBefore = Set-ProductionPendingPrefix -OwnedProcess $owned `
+                    -MainWindow $main -MainWindowHandle $handle -Session $Session `
+                    -TimeoutSeconds $TimeoutSeconds -Language $step.language
+                $pendingPath = Join-Path $fixture 'vm-confirmed-vm-flow-source.txt'
+                $pendingFileBefore = [ordered]@{
+                    content_sha256 = Get-LowerSha256 -Path $pendingPath
+                    file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($pendingPath))
+                }
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+            }
             $choice = if ($null -eq $step.next) { $null } else {
                 Invoke-ProductionLanguageMenuChoice -Process $process -MainWindow $main `
                     -Session $Session -CurrentLanguage $step.language `
-                    -NextPreference $step.next -TimeoutSeconds $TimeoutSeconds
+                    -NextPreference $step.next -TimeoutSeconds $TimeoutSeconds `
+                    -PendingBefore $pendingBefore
+            }
+            if ($null -ne $pendingFileBefore) {
+                $choice['pending_file_before'] = $pendingFileBefore
+                $choice['pending_file_after'] = [ordered]@{
+                    content_sha256 = Get-LowerSha256 -Path $pendingPath
+                    file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($pendingPath))
+                }
+                if (($choice.pending_file_before | ConvertTo-Json -Compress) -cne
+                    ($choice.pending_file_after | ConvertTo-Json -Compress)) {
+                    throw 'Language selection changed the pending proposal file.'
+                }
+                Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
             }
             $observations.Add([ordered]@{
                 language = $step.language; pid = [int]$process.Id; hwnd = [long]$handle
-                session_id = [int]$Session; startup_preference = $saved
+                session_id = [int]$Session
+                process_start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+                startup_preference = $saved
                 startup_menu = $menu; startup_rail = $rail; choice = $choice
+                startup_capture = $startupCapture
+                startup_capture_foreground = $startupCaptureForeground
                 blocked_recovery = $blocked
             })
             Close-ExactApplicationMainWindow -Process $process -ExpectedSession $Session `
@@ -1470,6 +1682,7 @@ function Invoke-ProductionLanguageCycle {
             if ($job.status -cne 'clean' -or -not $job.job_empty -or -not $job.job_closed) {
                 throw "$($step.language) language application process job did not close cleanly."
             }
+            $ownedCleanupClean = $true
             if ($null -ne $flow) {
                 $flow.checkpoints += (Get-FlowCheckpoint -Phase post_close -FixtureRoot $fixture `
                     -LocalAppData $env:LOCALAPPDATA)
@@ -1484,11 +1697,12 @@ function Invoke-ProductionLanguageCycle {
                         if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
                             throw 'Language acceptance process job cleanup failed.'
                         }
+                        $ownedCleanupClean = $true
                     }
                 }
                 finally { $owned.process.Dispose() }
             }
-            if ($null -ne $fixture -and (Test-Path -LiteralPath $fixture)) {
+            if ($ownedCleanupClean -and $null -ne $fixture -and (Test-Path -LiteralPath $fixture)) {
                 Assert-OrdinaryDirectoryTree -Path $fixture
                 Remove-Item -LiteralPath $fixture -Recurse -Force
                 if (Test-Path -LiteralPath $fixture) { throw 'Language fixture cleanup was incomplete.' }
