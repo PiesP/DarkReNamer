@@ -39,6 +39,8 @@ function Invoke-DrWindowsVmGuest {
     [ValidateSet('hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
     [switch] $FocusedIconTests,
     [switch] $FocusedRefreshTests,
+    [ValidateSet(0, 100, 1000, 10000)][int] $VirtualExecutionCount,
+    [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
     [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
         'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
     [string] $FocusedIconCase,
@@ -132,13 +134,20 @@ if ($null -eq $verified) {
 }
 $refreshProfile = $PSBoundParameters.ContainsKey('RefreshProfileOrder')
 $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
+$virtualExecution = $PSBoundParameters.ContainsKey('VirtualExecutionCount') -and
+    $VirtualExecutionCount -ne 0
 $focusedCase = if ($FocusedIconTests) { $FocusedIconCase } else { $FocusedRefreshCase }
 $focusedFilter = if ($FocusedIconTests) {
     'windows::list_view::native_tests::icon_worker_'
 } else { 'windows::list_view::native_tests::full_refresh_' }
 $focusedKind = if ($FocusedIconTests) { 'focused-icon-tests' } else { 'focused-refresh-tests' }
-if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests)) {
+if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests) -or
+    ($virtualExecution -and ($refreshProfile -or $focusedTests))) {
     throw 'A core test run cannot select two fixed native diagnostic modes.'
+}
+if ($PSBoundParameters.ContainsKey('VirtualExecutionIteration') -ne
+    $PSBoundParameters.ContainsKey('VirtualExecutionCount')) {
+    throw 'Virtual execution count and iteration must be selected together.'
 }
 if ($FocusedIconCase -and -not $FocusedIconTests) {
     throw 'A single focused icon case requires its fixed test selector.'
@@ -168,6 +177,20 @@ elseif ($focusedTests) {
         $verified.tests.Count -ne 1 -or $TestTimeoutSeconds -ne 600 -or
         $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
         throw 'The guest focused native selection is invalid.'
+    }
+}
+elseif ($virtualExecution) {
+    if ($verified.manifest.schema_version -ne 1 -or
+        $verified.manifest.diagnostic.kind -cne 'virtual-execution' -or
+        $verified.manifest.diagnostic.test_profile -cne 'release' -or
+        $verified.manifest.diagnostic.test_name -cne 'benchmark_durable_production_path' -or
+        $verified.manifest.diagnostic.count -ne $VirtualExecutionCount -or
+        $verified.manifest.diagnostic.iteration -ne $VirtualExecutionIteration -or
+        $verified.tests.Count -ne 1 -or
+        $verified.tests[0].name -cne 'rename_windows_backend' -or
+        $TestTimeoutSeconds -ne 1200 -or
+        $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources') {
+        throw 'The guest virtual execution selection is invalid.'
     }
 }
 elseif ($null -ne $verified.manifest.PSObject.Properties['diagnostic']) {
@@ -284,6 +307,20 @@ elseif ($focusedTests) {
             @($verified.manifest.diagnostic.test_names)
     }
 }
+elseif ($virtualExecution) {
+    $result['diagnostic'] = [ordered]@{
+        kind = 'virtual-execution'
+        test_profile = 'release'
+        test_name = 'benchmark_durable_production_path'
+        count = $VirtualExecutionCount
+        iteration = $VirtualExecutionIteration
+        media = 'virtual'
+        evidence_class = 'virtual-execution'
+        scope = 'vm-durable'
+        variant = 'baseline'
+        topology = 'same-parent'
+    }
+}
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     $result.failure_reason = 'unsupported_platform'
     Initialize-TrustedResultWriter -Root $verified.root
@@ -388,6 +425,9 @@ try {
             -RefreshProfileOrder $RefreshProfileOrder `
             -FocusedIconTests:$FocusedIconTests `
             -FocusedRefreshTests:$FocusedRefreshTests `
+            -VirtualExecutionCount $VirtualExecutionCount `
+            -VirtualExecutionIteration $VirtualExecutionIteration `
+            -VirtualExecutionSourceSha $verified.manifest.source_sha `
             -OutputBudgetBytes $testOutputBudgetBytes @focusedCaseArguments
         $testOutputBytes = [long]0
         foreach ($channel in @('stdout', 'stderr')) {
@@ -409,7 +449,7 @@ try {
     } else {
         $verified.manifest.application
     }
-    if (-not $refreshProfile -and -not $focusedTests) {
+    if (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution) {
         $result.gui = Invoke-GuiSmoke `
             -Application $applicationArtifact `
             -Root $verified.root `
@@ -423,10 +463,10 @@ try {
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
     if ($testFailures.Count -eq 0 -and
-        ((($refreshProfile -or $focusedTests) -and
+        ((($refreshProfile -or $focusedTests -or $virtualExecution) -and
           $result.tests.Count -eq $testInvocations.Count -and $null -eq $result.gui -and
           $null -eq $result.failure_reason) -or
-         (-not $refreshProfile -and -not $focusedTests -and
+         (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution -and
           $result.gui.status -ceq 'passed' -and
           ($candidateLane -or $result.tests.Count -gt 0)))) {
         $result.status = 'passed'

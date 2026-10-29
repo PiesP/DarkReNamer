@@ -12,6 +12,7 @@
         [switch] $RefreshProfile,
         [switch] $FocusedIconTests,
         [switch] $FocusedRefreshTests,
+        [switch] $VirtualExecution,
         [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
             'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
         [string] $FocusedIconCase,
@@ -31,7 +32,8 @@
     $ignored = [int]::Parse($summary.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture)
     $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
     $focusedTests = [bool]($FocusedIconTests -or $FocusedRefreshTests)
-    if (($RefreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests)) {
+    if (($RefreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests) -or
+        ($VirtualExecution -and ($RefreshProfile -or $focusedTests))) {
         throw 'A Rust test summary cannot use two selectors.'
     }
     if ($FocusedIconCase -and -not $FocusedIconTests) {
@@ -46,13 +48,18 @@
     if ($FocusedRefreshTests -and -not $FocusedRefreshCase) {
         throw 'Focused refresh summary requires one fixed exact case.'
     }
-    if (-not $RefreshProfile -and -not $focusedTests -and $filtered -ne 0) {
+    if (-not $RefreshProfile -and -not $focusedTests -and -not $VirtualExecution -and $filtered -ne 0) {
         throw 'The final Rust test harness must not filter tests.'
     }
     if ($RefreshProfile -and ($passed + $failed -ne 1 -or
         $ignored -ne 0 -or $filtered -lt 1 -or
         ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
         throw 'The fixed refresh diagnostic must select exactly one ignored test.'
+    }
+    if ($VirtualExecution -and ($passed + $failed -ne 1 -or
+        $ignored -ne 0 -or $filtered -lt 1 -or
+        ($summary.Groups[1].Value -ceq 'ok') -ne ($failed -eq 0))) {
+        throw 'The virtual execution diagnostic must select exactly one ignored test.'
     }
     if ($focusedTests -and ($passed + $failed -ne 1 -or
         $ignored -ne 0 -or $filtered -lt 1 -or
@@ -2028,7 +2035,10 @@ function Invoke-WithIsolatedEnvironment {
         [Parameter(Mandatory)][scriptblock] $Action,
         [string] $TemporaryRoot,
         [string] $CaseSensitiveFixtureRoot,
-        [string] $RefreshProfileOrder
+        [string] $RefreshProfileOrder,
+        [ValidateSet(0, 100, 1000, 10000)][int] $VirtualExecutionCount,
+        [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
+        [string] $VirtualExecutionSourceSha
     )
 
     $temporary = if ([string]::IsNullOrWhiteSpace($TemporaryRoot)) {
@@ -2057,11 +2067,21 @@ function Invoke-WithIsolatedEnvironment {
     $localAppData = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'localappdata'
     $names = @(
         'TEMP', 'TMP', 'LOCALAPPDATA', 'DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES',
-        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT', 'DARKRENAMER_REFRESH_PROFILE_ORDER'
+        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT', 'DARKRENAMER_REFRESH_PROFILE_ORDER',
+        'DARKRENAMER_BENCH_ROOT', 'DARKRENAMER_BENCH_ROOT_PRIVATE',
+        'DARKRENAMER_BENCH_EVIDENCE_CLASS', 'DARKRENAMER_BENCH_MEDIA',
+        'DARKRENAMER_BENCH_VARIANT', 'DARKRENAMER_BENCH_TOPOLOGY',
+        'DARKRENAMER_BENCH_COUNT', 'DARKRENAMER_BENCH_ITERATION',
+        'DARKRENAMER_BENCH_SOURCE_SHA'
     )
+    $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
     $original = @{}
     foreach ($name in $names) {
-        $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        $present = $currentEnvironment.Contains($name)
+        $original[$name] = [ordered]@{
+            present = $present
+            value = if ($present) { [string]$currentEnvironment[$name] } else { $null }
+        }
     }
     try {
         [Environment]::SetEnvironmentVariable('TEMP', $temporary, 'Process')
@@ -2074,11 +2094,58 @@ function Invoke-WithIsolatedEnvironment {
         [Environment]::SetEnvironmentVariable(
             'DARKRENAMER_REFRESH_PROFILE_ORDER', $RefreshProfileOrder, 'Process'
         )
+        $benchmarkValues = @{
+            'DARKRENAMER_BENCH_ROOT' = [NullString]::Value
+            'DARKRENAMER_BENCH_ROOT_PRIVATE' = [NullString]::Value
+            'DARKRENAMER_BENCH_EVIDENCE_CLASS' = [NullString]::Value
+            'DARKRENAMER_BENCH_MEDIA' = [NullString]::Value
+            'DARKRENAMER_BENCH_VARIANT' = [NullString]::Value
+            'DARKRENAMER_BENCH_TOPOLOGY' = [NullString]::Value
+            'DARKRENAMER_BENCH_COUNT' = [NullString]::Value
+            'DARKRENAMER_BENCH_ITERATION' = [NullString]::Value
+            'DARKRENAMER_BENCH_SOURCE_SHA' = [NullString]::Value
+        }
+        if ($VirtualExecutionCount) {
+            if ($VirtualExecutionSourceSha -cnotmatch '^[0-9a-f]{40}$') {
+                throw 'Virtual execution source SHA is invalid.'
+            }
+            $benchmarkValues['DARKRENAMER_BENCH_ROOT'] = $temporary
+            $benchmarkValues['DARKRENAMER_BENCH_ROOT_PRIVATE'] = '1'
+            $benchmarkValues['DARKRENAMER_BENCH_EVIDENCE_CLASS'] = 'virtual-execution'
+            $benchmarkValues['DARKRENAMER_BENCH_MEDIA'] = 'virtual'
+            $benchmarkValues['DARKRENAMER_BENCH_VARIANT'] = 'baseline'
+            $benchmarkValues['DARKRENAMER_BENCH_TOPOLOGY'] = 'same-parent'
+            $benchmarkValues['DARKRENAMER_BENCH_COUNT'] = [string]$VirtualExecutionCount
+            $benchmarkValues['DARKRENAMER_BENCH_ITERATION'] = [string]$VirtualExecutionIteration
+            $benchmarkValues['DARKRENAMER_BENCH_SOURCE_SHA'] = $VirtualExecutionSourceSha
+        }
+        foreach ($name in $benchmarkValues.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $benchmarkValues[$name], 'Process')
+        }
         & $Action
     }
     finally {
+        $restoreErrors = [Collections.Generic.List[string]]::new()
         foreach ($name in $names) {
-            [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process')
+            try {
+                $value = if ($original[$name].present) {
+                    $original[$name].value
+                } else {
+                    [NullString]::Value
+                }
+                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+                $restored = [Environment]::GetEnvironmentVariables('Process')
+                if ($restored.Contains($name) -ne $original[$name].present -or
+                    ($original[$name].present -and
+                        [string]$restored[$name] -cne $original[$name].value)) {
+                    throw 'The original presence or value was not restored.'
+                }
+            }
+            catch { $restoreErrors.Add("$name restore: $($_.Exception.Message)") }
+        }
+        if ($restoreErrors.Count -gt 0) {
+            throw ('Isolated environment restoration failed: ' +
+                [string]::Join(' | ', $restoreErrors))
         }
     }
 }
@@ -2131,6 +2198,9 @@ function Invoke-RustTestBinary {
         [ValidateSet('', 'hidden-visible', 'visible-hidden')][string] $RefreshProfileOrder,
         [switch] $FocusedIconTests,
         [switch] $FocusedRefreshTests,
+        [ValidateSet(0, 100, 1000, 10000)][int] $VirtualExecutionCount,
+        [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
+        [string] $VirtualExecutionSourceSha,
         [ValidateSet('bootstrap_and_miss_keep_ui_responsive', 'bounds_eviction_and_stale_results',
             'close_and_forced_destroy_retire', 'failures_and_message_loop_retire')]
         [string] $FocusedIconCase,
@@ -2147,6 +2217,11 @@ function Invoke-RustTestBinary {
     if ([bool]$FocusedRefreshTests -ne [bool]$FocusedRefreshCase -or
         ($FocusedIconTests -and $FocusedRefreshTests)) {
         throw 'Focused refresh launch requires one fixed exact case.'
+    }
+    if ($VirtualExecutionCount -and ($RefreshProfileOrder -or $FocusedIconTests -or
+        $FocusedRefreshTests -or $Test.name -cne 'rename_windows_backend' -or
+        $VirtualExecutionSourceSha -cnotmatch '^[0-9a-f]{40}$')) {
+        throw 'Virtual execution requires one exact backend test binary and source SHA.'
     }
 
     $stdoutLeaf = 'test-{0:D3}.stdout.txt' -f $Index
@@ -2180,6 +2255,9 @@ function Invoke-RustTestBinary {
         $row['test_name'] =
             'windows::list_view::native_tests::full_refresh_' + $FocusedRefreshCase
     }
+    if ($VirtualExecutionCount) {
+        $row['test_name'] = 'benchmark_durable_production_path'
+    }
     $processState = [pscustomobject]@{ process = $null }
     try {
         do {
@@ -2207,6 +2285,9 @@ function Invoke-RustTestBinary {
                 -TemporaryRoot $temporaryRoot `
                 -CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot `
                 -RefreshProfileOrder $RefreshProfileOrder `
+                -VirtualExecutionCount $VirtualExecutionCount `
+                -VirtualExecutionIteration $VirtualExecutionIteration `
+                -VirtualExecutionSourceSha $VirtualExecutionSourceSha `
                 -Action {
                 $testArguments = if ($RefreshProfileOrder) {
                     '--exact windows::list_view::native_tests::profile_refresh_stages --ignored --nocapture --test-threads=1'
@@ -2216,6 +2297,8 @@ function Invoke-RustTestBinary {
                 } elseif ($FocusedRefreshCase) {
                     '--exact windows::list_view::native_tests::full_refresh_' +
                         $FocusedRefreshCase + ' --nocapture --test-threads=1'
+                } elseif ($VirtualExecutionCount) {
+                    '--exact benchmark_durable_production_path --ignored --nocapture --test-threads=1'
                 } else { '--nocapture --test-threads=1' }
                 $ownedProcess = Start-JobBoundProcess `
                     -FilePath $binaryPath `
@@ -2259,7 +2342,8 @@ function Invoke-RustTestBinary {
                         -AllowZeroTests:($Test.name -ceq 'DarkReNamer') `
                         -RefreshProfile:([bool]$RefreshProfileOrder) `
                         -FocusedIconTests:$FocusedIconTests `
-                        -FocusedRefreshTests:$FocusedRefreshTests @focusedCaseArguments
+                        -FocusedRefreshTests:$FocusedRefreshTests `
+                        -VirtualExecution:([bool]$VirtualExecutionCount) @focusedCaseArguments
                     $row.passed = $summary.passed
                     $row.failed = $summary.failed
                     $row.ignored = $summary.ignored

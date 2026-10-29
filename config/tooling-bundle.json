@@ -180,7 +180,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "44556161ef80818b8384d3a9ff023b3ec7d3b1ef30657029d5bb1c816a5fb4d0",
+      "sha256": "eef43955858a35fb3b37e84484b9ab47e934b034dd65aca3727b307a6b8ea2bc",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -464,7 +464,7 @@
       "bundle": "guest-contracts.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "f17b19c20421a7b1b407d0c38351c8797633282f9697999c88a9d4a795c21c36",
+      "sha256": "71aac5270c761225ab37b90b8822d61429b15ba873a5b7c6f059c952fc29f9d3",
       "dependencies": []
     },
     {
@@ -473,7 +473,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "7541d1e7f586a88e8f4cf7801cab54313abc5b5aa32568600912ed818b8ff791",
+      "sha256": "88ee4e9c0bab8148ef0cf61485b4b091e1314983b93870975bf7acaecfc2b03f",
       "dependencies": []
     },
     {
@@ -536,7 +536,7 @@
       "bundle": "guest-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "6e59324d55f85335e751fb1343c5928ebb4c2e6c8ef8d2feb42f57b063aeda08",
+      "sha256": "a32b62cb4191e06fa070d27f4109619a2de413ad56f1f30267e8530cb571d996",
       "dependencies": [
         "powershell-loader",
         "powershell-guest-contracts",
@@ -799,7 +799,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "4355440e26348df8d60c9978d2a03862cc960f98cc0aa0b46d4c2362a2d26217",
+      "sha256": "023ef6292c5a110a4a5c2b46daa5be5b8552a88da8b485a8e834dc15497c495a",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

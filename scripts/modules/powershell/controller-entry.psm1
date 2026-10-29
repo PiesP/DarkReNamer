@@ -1453,6 +1453,8 @@ function Invoke-DrWindowsVmController {
     [ValidateSet('native_rows_and_proposals', 'native_fallback_and_apply_lock',
         'native_dates_follow_locale_and_timezone', 'native_viewport_focus_and_close')]
     [string] $FocusedRefreshCase,
+    [ValidateSet(100, 1000, 10000)][int] $VirtualExecutionCount,
+    [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
     [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement')]
@@ -1519,6 +1521,16 @@ $focusedFilter = if ($FocusedIconTests) {
     'windows::list_view::native_tests::icon_worker_'
 } else { 'windows::list_view::native_tests::full_refresh_' }
 $focusedKind = if ($FocusedIconTests) { 'focused-icon-tests' } else { 'focused-refresh-tests' }
+$virtualExecution = $PSBoundParameters.ContainsKey('VirtualExecutionCount')
+if ($virtualExecution -ne $PSBoundParameters.ContainsKey('VirtualExecutionIteration')) {
+    throw 'Virtual execution requires both fixed count and iteration.'
+}
+if ($virtualExecution -and ($refreshProfile -or $focusedTests -or
+    $taskSelection.kind -cne 'core' -or $TestTimeoutSeconds -ne 1200 -or
+    $SuiteTimeoutSeconds -ne 1200 -or $ExpectedGuestVmId -eq [guid]::Empty -or
+    $AcceptanceProfileId -cne 'vm-automated-v2-owned-resources')) {
+    throw 'Virtual execution requires a distinct source-built core v2 selection and exact VM identity.'
+}
 if (($refreshProfile -and $focusedTests) -or ($FocusedIconTests -and $FocusedRefreshTests)) {
     throw 'A core test run cannot select two fixed native diagnostic modes.'
 }
@@ -1647,6 +1659,7 @@ try {
     $manifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
     $candidateLane = $manifest.schema_version -eq 2 -and $manifest.lane -ceq 'candidate-gui-only'
     if ($candidateLane) {
+        if ($virtualExecution) { throw 'Virtual execution does not accept release candidates.' }
         if ($manifest.product.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
             $manifest.product.source_state -cne 'clean' -or
             $manifest.harness.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
@@ -1735,6 +1748,23 @@ try {
                 @($manifest.test_binaries).Count -ne 1 -or
                 $manifest.test_binaries[0].name -cne 'darknamer_app') {
                 throw 'Focused native bundle identity is invalid.'
+            }
+        }
+        elseif ($virtualExecution) {
+            if (@($manifest.diagnostic.PSObject.Properties).Count -ne 10 -or
+                $manifest.diagnostic.kind -cne 'virtual-execution' -or
+                $manifest.diagnostic.test_profile -cne 'release' -or
+                $manifest.diagnostic.test_name -cne 'benchmark_durable_production_path' -or
+                $manifest.diagnostic.count -ne $VirtualExecutionCount -or
+                $manifest.diagnostic.iteration -ne $VirtualExecutionIteration -or
+                $manifest.diagnostic.media -cne 'virtual' -or
+                $manifest.diagnostic.evidence_class -cne 'virtual-execution' -or
+                $manifest.diagnostic.scope -cne 'vm-durable' -or
+                $manifest.diagnostic.variant -cne 'baseline' -or
+                $manifest.diagnostic.topology -cne 'same-parent' -or
+                @($manifest.test_binaries).Count -ne 1 -or
+                $manifest.test_binaries[0].name -cne 'rename_windows_backend') {
+                throw 'Virtual execution bundle identity is invalid.'
             }
         }
         elseif ($null -ne $manifest.PSObject.Properties['diagnostic']) {
@@ -5909,8 +5939,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
     $candidateTaskMayHaveStarted = $true
-    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$FocusedIconTests),$FocusedIconCase,([bool]$FocusedRefreshTests),$FocusedRefreshCase -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$focusedIcon,$focusedIconCase,$focusedRefresh,$focusedRefreshCase)
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256,$trustedBundleRecords,$guestRuntimeRoot,$ownedV2,$v2Engine,$RefreshProfileOrder,([bool]$FocusedIconTests),$FocusedIconCase,([bool]$FocusedRefreshTests),$FocusedRefreshCase,$VirtualExecutionCount,$VirtualExecutionIteration -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash,$bundleRecords,$runtimeRoot,$v2,$preflightEngine,$refreshOrder,$focusedIcon,$focusedIconCase,$focusedRefresh,$focusedRefreshCase,$virtualCount,$virtualIteration)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
         $powerShell = Get-DrVmTrustedPowerShellPath
@@ -5942,6 +5972,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         if ($focusedIconCase) { $arguments += ' -FocusedIconCase ' + $focusedIconCase }
         if ($focusedRefresh) { $arguments += ' -FocusedRefreshTests' }
         if ($focusedRefreshCase) { $arguments += ' -FocusedRefreshCase ' + $focusedRefreshCase }
+        if ($virtualCount) {
+            $arguments += ' -VirtualExecutionCount ' + $virtualCount +
+                ' -VirtualExecutionIteration ' + $virtualIteration
+        }
         $registeredTask = Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
@@ -6085,7 +6119,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
-        (-not $refreshProfile -and -not $focusedTests -and
+        (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution -and
          ($result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup))) {
         throw 'Guest process jobs were not empty and closed before result collection.'
     }
@@ -6093,6 +6127,21 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         $result.diagnostic.order -cne $RefreshProfileOrder -or
         @($result.tests).Count -ne 1 -or $null -ne $result.gui)) {
         throw 'Refresh diagnostic result selection is invalid.'
+    }
+    if ($virtualExecution -and ($result.diagnostic.kind -cne 'virtual-execution' -or
+        $result.diagnostic.test_profile -cne 'release' -or
+        $result.diagnostic.test_name -cne 'benchmark_durable_production_path' -or
+        $result.diagnostic.count -ne $VirtualExecutionCount -or
+        $result.diagnostic.iteration -ne $VirtualExecutionIteration -or
+        $result.diagnostic.media -cne 'virtual' -or
+        $result.diagnostic.evidence_class -cne 'virtual-execution' -or
+        $result.diagnostic.scope -cne 'vm-durable' -or
+        $result.diagnostic.variant -cne 'baseline' -or
+        $result.diagnostic.topology -cne 'same-parent' -or
+        @($result.tests).Count -ne 1 -or
+        $result.tests[0].test_name -cne 'benchmark_durable_production_path' -or
+        $null -ne $result.gui)) {
+        throw 'Virtual execution result selection is invalid.'
     }
     $resultNamesMatch = $true
     if ($focusedTests -and -not $focusedCase) {
