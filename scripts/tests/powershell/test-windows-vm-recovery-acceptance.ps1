@@ -2646,7 +2646,7 @@ function Test-ProductionLanguageNativeInputAudit {
         $node -is [Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -ceq 'Send-ProductionLanguageNativeInput'
     }, $true))
-    $actions = @('alt-v', 'language-mnemonic', 'down', 'down', 'enter')
+    $actions = @('alt-v', 'language-mnemonic', 'down', 'enter')
     if ($calls.Count -ne $actions.Count) { return $false }
     for ($index = 0; $index -lt $actions.Count; $index++) {
         $call = $calls[$index].Extent.Text
@@ -2679,8 +2679,8 @@ function Test-ProductionLanguageNativeInputAudit {
     }
     if ($senderText.IndexOf('finally {', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('Wait-ProductionLanguageMenuStage', [StringComparison]::Ordinal) -lt 0 -or
-        $choiceText.IndexOf("-Phase 'language-open' -RequireViewLanguageHighlight", [StringComparison]::Ordinal) -lt 0 -or
-        $choiceText.IndexOf('Get-ProductionLanguageHighlightedIndex -Stage $languageOpen -AllowNone', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf("-Phase 'language-open' -RequireViewLanguageHighlight -ExpectedHighlight 0", [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('$current = 0', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $preEnter', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('Get-ProductionLanguageChoiceObservation -Process $Process', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('SendWait', [StringComparison]::Ordinal) -ge 0) { return $false }
@@ -2718,6 +2718,20 @@ function Test-ProductionLanguageNativeInputAudit {
 }
 if (-not (Test-ProductionLanguageNativeInputAudit -SourceAst $fromFile)) {
     throw 'Language menu native input lost its reviewed keys, foreground guard, or SendInput ABI.'
+}
+$unreadyLanguageSource = $recoveryModuleSource.Replace(
+    "-Phase 'language-open' -RequireViewLanguageHighlight -ExpectedHighlight 0",
+    "-Phase 'language-open' -RequireViewLanguageHighlight")
+if ($unreadyLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Language first-highlight negative fixture no longer matches the source.'
+}
+$unreadyTokens = $null
+$unreadyErrors = $null
+$unreadyAst = [Management.Automation.Language.Parser]::ParseInput(
+    $unreadyLanguageSource, [ref]$unreadyTokens, [ref]$unreadyErrors)
+if ($unreadyErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $unreadyAst)) {
+    throw 'Unready language submenu unexpectedly passed the source audit.'
 }
 $nonExtendedLanguageSource = $recoveryModuleSource.Replace(
     '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)',

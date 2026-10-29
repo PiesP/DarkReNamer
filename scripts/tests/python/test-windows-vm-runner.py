@@ -425,27 +425,19 @@ class VmRunnerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.verify_picker_checks(checks, gui)
 
-    def test_language_menu_trace_accepts_first_down_and_bounded_wrap(self):
+    def test_language_menu_trace_requires_settled_system_before_first_down(self):
         choice = copy.deepcopy(self.result['gui']['language_checks']['selections'][0]['choice'])
         trace = choice['input_trace']
-        first = copy.deepcopy(trace[1])
         trace[1]['states'] = [0] * 4
         trace[1]['highlighted_indices'] = []
-        first.update(phase='down-1', view_language_state=0,
-                     view_states=[0] * 10)
-        trace.insert(2, first)
-        for step, stage in enumerate(trace[3:-1], start=2):
-            stage['phase'] = f'down-{step}'
+        with self.assertRaisesRegex(ValueError, 'settle on enabled System'):
+            vm.verify_language_menu_input_trace(choice, 0x9022)
+        trace[1]['states'] = [0x80, 0, 0, 0]
+        trace[1]['highlighted_indices'] = [0]
         vm.verify_language_menu_input_trace(choice, 0x9022)
-
-        wrap = copy.deepcopy(self.result['gui']['language_checks']['selections'][3]['choice'])
-        trace = wrap['input_trace']
-        trace[1]['states'] = [0, 0, 0, 0x80]
-        trace[1]['highlighted_indices'] = [3]
-        moved = copy.deepcopy(trace[-1])
-        moved['phase'] = 'down-1'
-        trace.insert(-1, moved)
-        vm.verify_language_menu_input_trace(wrap, 0x9020)
+        trace.insert(2, copy.deepcopy(trace[2]))
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            vm.verify_language_menu_input_trace(choice, 0x9022)
 
     def test_language_acceptance_requires_bound_menu_persistence_and_file_outcomes(self):
         checks = self.result['gui']['language_checks']

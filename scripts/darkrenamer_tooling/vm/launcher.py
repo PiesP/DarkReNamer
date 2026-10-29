@@ -1541,9 +1541,9 @@ def verify_valid_active_recovery(root, manifest, record):
 def verify_language_menu_input_trace(choice, target):
     trace = choice.get('input_trace')
     target_index = target - 0x9020
-    if not isinstance(trace, list) or not 3 <= len(trace) <= 7:
+    if not isinstance(trace, list) or len(trace) != target_index + 3:
         raise ValueError('Real language menu keyboard stage trace is incomplete.')
-    down_count = len(trace) - 3
+    down_count = target_index
     phases = ['alt-v', 'language-open'] + [
         'down-' + str(index) for index in range(1, down_count + 1)] + ['pre-enter']
     current_highlight = None
@@ -1605,14 +1605,14 @@ def verify_language_menu_input_trace(choice, target):
         if stage.get('highlighted_indices') != highlighted:
             raise ValueError('Real language menu highlighted indices contradict native states.')
         if phase == 'language-open':
-            if (stage['view_language_state'] & 0x80 == 0 or len(highlighted) > 1 or
-                    highlighted and stage['states'][highlighted[0]] & 0x3):
-                raise ValueError('Language mnemonic did not open the selected native submenu.')
-            current_highlight = highlighted[0] if highlighted else None
+            if (stage['view_language_state'] & 0x80 == 0 or highlighted != [0] or
+                    stage['states'][0] & 0x3):
+                raise ValueError('Language mnemonic did not settle on enabled System item.')
+            current_highlight = 0
         elif phase.startswith('down-'):
             if current_highlight == target_index:
                 raise ValueError('Language navigation continued after reaching its target.')
-            expected = 0 if current_highlight is None else (current_highlight + 1) % 4
+            expected = (current_highlight + 1) % 4
             if highlighted != [expected] or stage['states'][expected] & 0x3:
                 raise ValueError('Real language menu Down did not move to its enabled next item.')
             current_highlight = expected

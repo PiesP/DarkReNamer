@@ -1668,17 +1668,6 @@ function Test-ProductionLanguageMenuStage {
     $true
 }
 
-function Get-ProductionLanguageHighlightedIndex {
-    param([Parameter(Mandatory)][object] $Stage, [switch] $AllowNone)
-    $highlighted = @($Stage.highlighted_indices)
-    if ($highlighted.Count -eq 0 -and $AllowNone) { return -1 }
-    if ($highlighted.Count -ne 1 -or $highlighted[0] -notin 0..3 -or
-        ($Stage.states[$highlighted[0]] -band 0x3) -ne 0) {
-        throw 'Language submenu has no unique enabled native highlight.'
-    }
-    [int]$highlighted[0]
-}
-
 function Assert-ProductionLanguagePopupContinuity {
     param([Parameter(Mandatory)][object] $Open, [Parameter(Mandatory)][object] $Stage)
     $openHandles = @($Open.popups | ForEach-Object { [long]$_.hwnd } | Sort-Object)
@@ -1892,24 +1881,14 @@ function Invoke-ProductionLanguageMenuChoice {
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
         -Session $Session -Action 'language-mnemonic'
     $languageOpen = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-        -Session $Session -Phase 'language-open' -RequireViewLanguageHighlight
+        -Session $Session -Phase 'language-open' -RequireViewLanguageHighlight -ExpectedHighlight 0
     if ($languageOpen.language_handle -ne $viewOpen.language_handle -or
         @($languageOpen.popups | Where-Object { $_.hwnd -eq $viewOpen.popups[0].hwnd }).Count -ne 1) {
         throw 'Language mnemonic opened a different native View menu.'
     }
     $trace.Add($languageOpen)
-    $current = Get-ProductionLanguageHighlightedIndex -Stage $languageOpen -AllowNone
+    $current = 0
     $step = 0
-    if ($current -eq -1) {
-        $step++
-        Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
-            -Session $Session -Action 'down'
-        $first = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
-            -Session $Session -Phase "down-$step" -ExpectedHighlight 0
-        Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $first
-        $trace.Add($first)
-        $current = 0
-    }
     while ($current -ne ($target - 0x9020)) {
         if ($step -ge 4) { throw 'Language submenu navigation exceeded four native Down inputs.' }
         $next = ($current + 1) % 4
