@@ -251,6 +251,17 @@ try {
         phase = 'pre-enter'; pid = 10; session_id = 2; hwnd = [long]100
         thread_id = [long]20; language_handle = [long]200; menu_owner = [long]100
         gui_flags = [long]0x14; view_language_state = [long]0
+        top_states = @(0, 0, 0x80, 0, 0, 0)
+        view_states = @(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        popup_count = 2
+        popups = @(
+            [ordered]@{ hwnd = [long]301; owner = [long]100; process_id = 10
+                class = '#32768'; visible = $true
+                bounds = [ordered]@{ left = 10; top = 10; right = 200; bottom = 200 } },
+            [ordered]@{ hwnd = [long]302; owner = [long]100; process_id = 10
+                class = '#32768'; visible = $true
+                bounds = [ordered]@{ left = 200; top = 10; right = 400; bottom = 200 } }
+        )
         commands = @(0x9020, 0x9021, 0x9022, 0x9023)
         states = @(0, 0, 0x80, 0); highlighted_indices = @(2)
     }
@@ -272,6 +283,21 @@ try {
         throw 'Disabled native language target was accepted.'
     }
     $menuStage.states[2] = 0x80
+    $menuStage.popups = @($menuStage.popups[0])
+    $menuStage.popup_count = 1
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Language target without its visible submenu popup was accepted.'
+    }
+    $menuStage.popups = @(
+        [ordered]@{ hwnd = [long]301; owner = [long]100; process_id = 10
+            class = '#32768'; visible = $true
+            bounds = [ordered]@{ left = 10; top = 10; right = 200; bottom = 200 } },
+        [ordered]@{ hwnd = [long]302; owner = [long]100; process_id = 10
+            class = '#32768'; visible = $true
+            bounds = [ordered]@{ left = 200; top = 10; right = 400; bottom = 200 } }
+    )
+    $menuStage.popup_count = 2
     $menuStage.menu_owner = [long]999
     if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
         -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {

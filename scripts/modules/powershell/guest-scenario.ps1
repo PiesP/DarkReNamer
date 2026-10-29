@@ -1213,6 +1213,19 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class DarkReNamerLanguageMenuReader {
+    [StructLayout(LayoutKind.Sequential)] private struct KeyInput {
+        public ushort VirtualKey, ScanCode;
+        public uint Flags, Time;
+        public UIntPtr ExtraInfo;
+    }
+    [StructLayout(LayoutKind.Explicit)] private struct InputUnion {
+        [FieldOffset(0)] public KeyInput Keyboard;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct Input {
+        public uint Type;
+        public InputUnion Value;
+    }
+    [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetUserPreferredUILanguages(uint flags, out uint count, [Out] char[] buffer, ref uint size);
@@ -1238,7 +1251,22 @@ public static class DarkReNamerLanguageMenuReader {
         public uint ThreadId, ProcessId, GuiFlags;
         public long MenuOwner, LanguageHandle;
         public uint ViewLanguageState;
-        public uint[] Commands, States;
+        public uint[] Commands, States, TopStates, ViewStates;
+    }
+
+    private static void SendKey(ushort virtualKey, uint flags) {
+        Input input = new Input { Type = 1, Value = new InputUnion {
+            Keyboard = new KeyInput { VirtualKey = virtualKey, ScanCode = 0,
+                Flags = flags, Time = 0, ExtraInfo = UIntPtr.Zero }
+        } };
+        if (SendInput(1, new [] { input }, Marshal.SizeOf(typeof(Input))) != 1)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+    public static void KeyDown(ushort virtualKey) { SendKey(virtualKey, 0); }
+    public static void KeyUp(ushort virtualKey) { SendKey(virtualKey, 2); }
+    public static void Tap(ushort virtualKey) {
+        try { KeyDown(virtualKey); }
+        finally { KeyUp(virtualKey); }
     }
 
     private static IntPtr Child(IntPtr parent, int position) {
@@ -1293,10 +1321,21 @@ public static class DarkReNamerLanguageMenuReader {
             ThreadId = thread, ProcessId = processId, GuiFlags = gui.Flags,
             MenuOwner = gui.MenuOwner.ToInt64(), LanguageHandle = language.ToInt64(),
             ViewLanguageState = GetMenuState(view, 9, 0x400),
-            Commands = new uint[4], States = new uint[4]
+            Commands = new uint[4], States = new uint[4],
+            TopStates = new uint[6], ViewStates = new uint[10]
         };
         if (stage.ViewLanguageState == UInt32.MaxValue)
             throw new InvalidOperationException("View Language item state is unreadable.");
+        for (int index = 0; index < 6; index++) {
+            stage.TopStates[index] = GetMenuState(bar, (uint)index, 0x400);
+            if (stage.TopStates[index] == UInt32.MaxValue)
+                throw new InvalidOperationException("Top-level menu item state is unreadable.");
+        }
+        for (int index = 0; index < 10; index++) {
+            stage.ViewStates[index] = GetMenuState(view, (uint)index, 0x400);
+            if (stage.ViewStates[index] == UInt32.MaxValue)
+                throw new InvalidOperationException("View menu item state is unreadable.");
+        }
         for (int index = 0; index < 4; index++) {
             stage.Commands[index] = GetMenuItemID(language, index);
             stage.States[index] = GetMenuState(language, (uint)index, 0x400);
@@ -1459,6 +1498,34 @@ function Assert-ProductionLanguageMenuForeground {
     }
 }
 
+function Send-ProductionLanguageNativeInput {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session,
+        [Parameter(Mandatory)][ValidateSet('alt-v', 'end', 'right', 'home', 'down', 'enter')][string] $Action
+    )
+    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
+    if ($Action -ceq 'alt-v') {
+        try {
+            [DarkReNamerLanguageMenuReader]::KeyDown([uint16]0x12)
+            [DarkReNamerLanguageMenuReader]::Tap([uint16]0x56)
+        }
+        finally {
+            [DarkReNamerLanguageMenuReader]::KeyUp([uint16]0x12)
+        }
+        return
+    }
+    $virtualKey = switch ($Action) {
+        'end'   { 0x23 }
+        'right' { 0x27 }
+        'home'  { 0x24 }
+        'down'  { 0x28 }
+        'enter' { 0x0D }
+    }
+    [DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)
+}
+
 function Get-ProductionLanguageMenuStage {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1469,6 +1536,20 @@ function Get-ProductionLanguageMenuStage {
     Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
     $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
     $native = [DarkReNamerLanguageMenuReader]::Observe($handle, [uint32]$Process.Id)
+    $popups = @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id) |
+        Where-Object { $_.Visible -and $_.ClassName -ceq '#32768' } |
+        ForEach-Object {
+            [ordered]@{
+                hwnd = [long]$_.Handle; owner = [long]$_.Owner
+                process_id = [int]$_.ProcessId; class = [string]$_.ClassName
+                visible = [bool]$_.Visible
+                bounds = [ordered]@{
+                    left = [int]$_.Left; top = [int]$_.Top
+                    right = [int]$_.Right; bottom = [int]$_.Bottom
+                }
+            }
+        })
+    if ($popups.Count -gt 2) { throw 'Language menu has more than two owned visible native popups.' }
     $states = @($native.States | ForEach-Object { [int64]$_ })
     $highlighted = @(0..3 | Where-Object { ($states[$_] -band 0x80) -ne 0 })
     [ordered]@{
@@ -1477,6 +1558,10 @@ function Get-ProductionLanguageMenuStage {
         menu_owner = [long]$native.MenuOwner; language_handle = [long]$native.LanguageHandle
         gui_flags = [long]$native.GuiFlags
         view_language_state = [long]$native.ViewLanguageState
+        top_states = @($native.TopStates | ForEach-Object { [int64]$_ })
+        view_states = @($native.ViewStates | ForEach-Object { [int64]$_ })
+        popup_count = [int]$popups.Count
+        popups = $popups
         commands = @($native.Commands | ForEach-Object { [int]$_ })
         states = $states
         highlighted_indices = $highlighted
@@ -1496,9 +1581,28 @@ function Test-ProductionLanguageMenuStage {
         $Stage.hwnd -ne $ExpectedWindow -or $Stage.menu_owner -ne $ExpectedWindow -or
         $Stage.thread_id -le 0 -or $Stage.language_handle -le 0 -or
         ($Stage.gui_flags -band 0x4) -ne 0x4 -or
+        @($Stage.top_states).Count -ne 6 -or
+        @($Stage.view_states).Count -ne 10 -or
+        $Stage.view_states[9] -ne $Stage.view_language_state -or
+        ($Stage.top_states[2] -band 0x80) -eq 0 -or
+        $Stage.popup_count -ne @($Stage.popups).Count -or
+        @($Stage.popups).Count -ne $(if ($Stage.phase -cin @('alt-v', 'end')) { 1 } else { 2 }) -or
         @($Stage.commands).Count -ne 4 -or
         (@($Stage.commands) -join ',') -cne '36896,36897,36898,36899' -or
         @($Stage.states).Count -ne 4) {
+        return $false
+    }
+    foreach ($popup in $Stage.popups) {
+        if ($popup.hwnd -le 0 -or $popup.process_id -ne $ExpectedProcessId -or
+            $popup.class -cne '#32768' -or $popup.visible -ne $true -or
+            $popup.bounds.right -le $popup.bounds.left -or
+            $popup.bounds.bottom -le $popup.bounds.top -or
+            ($popup.bounds.right - $popup.bounds.left) -gt 4096 -or
+            ($popup.bounds.bottom - $popup.bounds.top) -gt 4096) {
+            return $false
+        }
+    }
+    if (@($Stage.popups).Count -eq 2 -and $Stage.popups[0].hwnd -eq $Stage.popups[1].hwnd) {
         return $false
     }
     if ($RequireViewLanguageHighlight -and ($Stage.view_language_state -band 0x80) -eq 0) {
@@ -1706,34 +1810,33 @@ function Invoke-ProductionLanguageMenuChoice {
         -TimeoutSeconds $TimeoutSeconds -Label 'language save status' -RequireWindowHandle
     $statusBefore = [string]$status.Current.Name
     if ($statusBefore.Length -gt 512) { $statusBefore = $statusBefore.Substring(0, 512) }
-    Add-Type -AssemblyName System.Windows.Forms
-    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-    [Windows.Forms.SendKeys]::SendWait('%v')
+    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Action 'alt-v'
     $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'alt-v'))
-    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-    [Windows.Forms.SendKeys]::SendWait('{END}')
+    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Action 'end'
     $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'end' -RequireViewLanguageHighlight))
-    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-    [Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Action 'right'
     $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'right'))
-    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-    [Windows.Forms.SendKeys]::SendWait('{HOME}')
+    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Action 'home'
     $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'home' -ExpectedHighlight 0))
     for ($index = 0; $index -lt ($target - 0x9020); $index++) {
-        Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-        [Windows.Forms.SendKeys]::SendWait('{DOWN}')
+        Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+            -Session $Session -Action 'down'
         $trace.Add((Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
             -Session $Session -Phase "down-$($index + 1)" -ExpectedHighlight ($index + 1)))
     }
     $preEnter = Wait-ProductionLanguageMenuStage -Process $Process -MainWindow $MainWindow `
         -Session $Session -Phase 'pre-enter' -ExpectedHighlight ($target - 0x9020)
     $trace.Add($preEnter)
-    Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session
-    [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
+        -Session $Session -Action 'enter'
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
         $observation = Get-ProductionLanguageChoiceObservation -Process $Process `
