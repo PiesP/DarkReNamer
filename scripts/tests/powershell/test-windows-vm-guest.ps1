@@ -4506,4 +4506,51 @@ function Test-DrControllerSpotlightPreflightTransport {
 
 Test-DrControllerSpotlightPreflightTransport
 
+function Test-DrValidActiveLanguageCrashContract {
+    $source = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-scenario.ps1') -Raw
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'Valid-active language scenario must parse.' }
+    $crash = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionValidActiveRecoveryCheck'
+    }, $true))
+    if ($crash.Count -ne 1) { throw 'Valid-active language crash scenario is missing.' }
+    foreach ($fragment in @(
+        "`$TestBinary.name -cne 'darknamer_app'",
+        'Get-LowerSha256 -Path $binaryPath',
+        'DARKRENAMER_TEST_CHILD_ROOT',
+        'DARKRENAMER_TEST_FIXTURE_NONCE',
+        'forward-completed-0',
+        '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1',
+        '-SingleProcessOnly -AggregateOutputLimitBytes 65536',
+        '$child.process.ExitCode -ne 86',
+        'expected-abrupt-crash-point',
+        'SetEnvironmentVariable($name, $originalChildVariables[$name]',
+        '$env:LOCALAPPDATA = $originalLocalAppData',
+        'Complete-AcceptanceOwnedProcessJob -Owned $child',
+        'cancel.Current.HasKeyboardFocus',
+        'Invoke-AutomationControl -Element $cancel',
+        'Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterCancel',
+        'Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterClose',
+        'if ($fullyVerified -and (Test-Path -LiteralPath $fixtureRoot))'
+    )) {
+        if ($crash[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+            throw "Valid-active language crash contract lost $fragment"
+        }
+    }
+    $gui = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-GuiSmoke'
+    }, $true))
+    if ($gui.Count -ne 1 -or
+        $gui[0].Extent.Text.IndexOf('Resolve-VerifiedBundle -Root $Root', [StringComparison]::Ordinal) -lt 0 -or
+        $gui[0].Extent.Text.IndexOf('-TestBinary $appTests[0]', [StringComparison]::Ordinal) -lt 0) {
+        throw 'GUI language cycle lost the manifest-verified source test binary.'
+    }
+}
+
+Test-DrValidActiveLanguageCrashContract
+
 Write-Host 'Windows VM guest runner tests passed.'

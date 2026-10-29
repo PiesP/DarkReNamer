@@ -49,7 +49,8 @@ class VmRunnerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.test = self.artifact('tests.exe', b'test executable')
+        self.test = dict(self.artifact('darknamer_app-0123456789abcdef.exe', b'test executable'),
+                         name='darknamer_app')
         self.app = self.artifact('DarkReNamer.exe', b'app executable')
         stdout = self.output_artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
         stderr = self.output_artifact('tests.stderr.log', b'')
@@ -244,9 +245,77 @@ class VmRunnerTests(unittest.TestCase):
                 'scope': 'source-built-three-language-native-menu',
                 'application_sha256': self.app['sha256'],
                 'selections': selections, 'flows': flows,
+                'valid_active_recovery': self.valid_active_recovery(selections),
                 'system_resolution': {'language': 'ko', 'selected_tag': 'ko-KR',
                                       'preferred_tags': ['fr-FR', 'ko-KR', 'en-US']},
                 'restored_preference': selections[-2]['choice']['preference']}
+
+    def valid_active_recovery(self, selections):
+        files = [
+            {'name': name, 'bytes': len(content),
+             'content_sha256': hashlib.sha256(content).hexdigest(),
+             'file_identity_sha256': str(index + 1) * 64}
+            for index, (name, content) in enumerate((
+                ('.__darknamer_0000000000000001_00000000000000000000000000000001_00000000_00.tmp',
+                 b'entry-a'), ('b.txt', b'entry-b'),
+                ('sentinel.txt', b'sentinel-work')))
+        ]
+        partial = {'files': files, 'journal': {'bytes': 128, 'sha256': 'a' * 64,
+                                               'file_identity_sha256': 'b' * 64}}
+        rows = []
+        for index, (language, preference, next_preference, title, question, guidance) in enumerate((
+                ('ko', 0, 2, 'DarkReNamer - 이전 변경 복구 확인',
+                 '이전 실행에서 중단된 이름 변경을 복구하시겠습니까?',
+                 '복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.'),
+                ('en', 2, 3, 'DarkReNamer - Confirm recovery',
+                 'Recover name changes interrupted in the previous run?',
+                 'Recover checks the retained journal and current file identities again before reversing changes as needed. Cancel changes no files and keeps recovery locked.'),
+                ('ja', 3, None, 'DarkReNamer - 復旧の確認',
+                 '前回の実行で中断された名前変更を復旧しますか？',
+                 '復旧を選ぶと、保持されたジャーナルと現在のファイル識別情報を再検証して必要な逆方向の名前変更を行います。キャンセルするとファイルは変更されず、復旧ロックが維持されます。'))):
+            pid, main_hwnd, notice_hwnd = 400 + index, 1000 + index, 1100 + index
+            choice = None
+            if next_preference is not None:
+                source = selections[index]['choice']
+                choice = copy.deepcopy(source)
+                choice.update(pid=pid, hwnd=main_hwnd, session_id=2,
+                              model_rows_before=0, model_rows_after=0,
+                              model_before={'rows': 0, 'cells': []},
+                              model_after={'rows': 0, 'cells': []})
+                choice.pop('pending_file_before', None)
+                choice.pop('pending_file_after', None)
+            rows.append({
+                'language': language,
+                'startup_preference': {'value': preference,
+                                       'sha256': format(preference + 1, '064x')},
+                'pid': pid, 'session_id': 2,
+                'process_start_time_utc_ticks': str(638975000000000000 + index),
+                'main_hwnd': main_hwnd, 'notice_hwnd': notice_hwnd,
+                'title': title, 'question': question, 'cancel_guidance': guidance,
+                'cancel_default_focused': True, 'apply_locked_after_cancel': True,
+                'notice_bounds': {'x': 100, 'y': 100, 'width': 540, 'height': 320},
+                'cancel_bounds': {'x': 520, 'y': 350, 'width': 80, 'height': 30},
+                'before': copy.deepcopy(partial), 'at_startup': copy.deepcopy(partial),
+                'after_cancel': copy.deepcopy(partial), 'after_choice': copy.deepcopy(partial),
+                'after_close': copy.deepcopy(partial),
+                'choice': choice, 'normal_close': True, 'process_job_clean': True,
+                'notice_capture': self.language_capture(language + '-valid-active-recovery.png'),
+                'notice_capture_foreground': self.foreground_observation(
+                    language + ' valid-active recovery confirmation', pid, notice_hwnd, 2, '#32770'),
+            })
+        return {'schema_version': 1, 'status': 'passed',
+                'scope': 'authentic-crash-child-three-language-default-cancel',
+                'child': {'test_name': 'windows::tests::crash_recovery_child',
+                          'test_file': self.test['file'], 'test_sha256': self.test['sha256'],
+                          'arguments': '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1',
+                          'graph': 'swap', 'crash_point': 'forward-completed-0',
+                          'exit_code': 86, 'pid': 399,
+                          'process_start_time_utc_ticks': '638975000000000099',
+                          'exit_semantics': 'expected-abrupt-crash-point',
+                          'single_process_job': True, 'job_clean': True,
+                          'job_had_survivors': False, 'job_forced_termination': False},
+                'partial': partial, 'observations': rows, 'final': copy.deepcopy(partial),
+                'fixture_cleanup': 'verified-owned-root'}
 
     @staticmethod
     def picker_checks():
@@ -324,6 +393,24 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['selections'][2]['blocked_recovery'].update(notice_hwnd=999),
             lambda row: row['flows'][1]['flow']['prefix_prompt_capture'].update(sha256='0' * 64),
             lambda row: row['flows'][1]['flow'].update(prefix_prompt_hwnd=999),
+            lambda row: row['valid_active_recovery']['child'].update(exit_code=0),
+            lambda row: row['valid_active_recovery']['child'].update(test_sha256='0' * 64),
+            lambda row: row['valid_active_recovery']['partial']['files'][0].update(
+                content_sha256='0' * 64),
+            lambda row: row['valid_active_recovery']['observations'][1]['after_cancel']['journal'].update(
+                sha256='0' * 64),
+            lambda row: row['valid_active_recovery']['observations'][2].update(
+                cancel_default_focused=False),
+            lambda row: row['valid_active_recovery']['observations'][0]['notice_capture'].update(
+                width=999),
+            lambda row: row['valid_active_recovery']['observations'][1]['notice_capture_foreground']['final'].update(
+                process_id=999),
+            lambda row: row['valid_active_recovery']['observations'][2].update(
+                apply_locked_after_cancel=False),
+            lambda row: row['valid_active_recovery']['observations'][1]['cancel_bounds'].update(
+                x=700),
+            lambda row: row['valid_active_recovery']['observations'][1]['startup_preference'].update(
+                value=1),
         )
         for mutate in mutations:
             with self.subTest(mutation=mutate.__code__.co_firstlineno):
