@@ -1422,8 +1422,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (_stem, extension) = split_stem_extension(item);
-                extension
+                let (_stem, extension) = stem_extension_units(item);
+                LegacyText::from_units(extension.to_vec())
             },
         )
     }
@@ -1453,7 +1453,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 if start <= stem.len() {
                     let last = if end > 0 && end < stem.len() {
                         end
@@ -1462,7 +1463,7 @@ impl LegacyList {
                     };
                     stem.units.drain(start - 1..last);
                 }
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         ))
@@ -1483,10 +1484,11 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 let count = count.min(stem.len());
                 stem.units.truncate(stem.len() - count);
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         )
@@ -1520,7 +1522,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 if let Some(start_index) = stem.units.iter().position(|unit| *unit == start) {
                     let search_start = start_index + 1;
                     if let Some(relative_end) = stem.units[search_start..]
@@ -1531,7 +1534,7 @@ impl LegacyList {
                         stem.units.drain(start_index..=end_index);
                     }
                 }
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         ))
@@ -1549,10 +1552,11 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (mut stem, extension) = split_stem_extension(item);
+                let (stem_units, extension) = stem_extension_units(item);
+                let mut stem = LegacyText::from_units(stem_units.to_vec());
                 stem.units
                     .retain(|unit| (b'0' as u16..=b'9' as u16).contains(unit));
-                stem.push(&extension);
+                stem.units.extend_from_slice(extension);
                 stem
             },
         )
@@ -1712,8 +1716,8 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             &mut self.planned_path_utf16_units,
             |item| {
-                let (stem, _extension) = split_stem_extension(item);
-                stem
+                let (stem, _extension) = stem_extension_units(item);
+                LegacyText::from_units(stem.to_vec())
             },
         )
     }
@@ -2394,14 +2398,6 @@ fn path_name(path: &LegacyText) -> LegacyText {
         .rposition(|unit| *unit == BACKSLASH)
         .map_or(0, |index| index + 1);
     LegacyText::from_units(path.units[start..].to_vec())
-}
-
-fn split_stem_extension(item: &LegacyListItem) -> (LegacyText, LegacyText) {
-    let (stem, extension) = stem_extension_units(item);
-    (
-        LegacyText::from_units(stem.to_vec()),
-        LegacyText::from_units(extension.to_vec()),
-    )
 }
 
 fn stem_extension_units(item: &LegacyListItem) -> (&[u16], &[u16]) {
