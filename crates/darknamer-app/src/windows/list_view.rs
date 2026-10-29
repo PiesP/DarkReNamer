@@ -7870,8 +7870,9 @@ mod native_tests {
                         _ => "case-İ.TXT".to_owned(),
                     };
                     let started = Instant::now();
-                    assert!(model.manual_change_changed(0, proposal)?);
+                    let edited = model.manual_change_changed(0, proposal);
                     let model_edit_ns = started.elapsed().as_nanos();
+                    assert!(edited?);
                     let started = Instant::now();
                     let update = cache.refresh_one_by(
                         count,
@@ -7879,9 +7880,9 @@ mod native_tests {
                         preview_input(&model.items()[0]),
                         preview_destination_key,
                     );
+                    let preview_cache_ns = started.elapsed().as_nanos();
                     assert!(update.is_some(), "fresh cache must accept one-row edit");
                     let update = update.unwrap_or_default();
-                    let preview_cache_ns = started.elapsed().as_nanos();
                     let expected_affected = match operation {
                         "enter_collision" | "leave_collision" => 2,
                         "large_group_leave" => group_size,
