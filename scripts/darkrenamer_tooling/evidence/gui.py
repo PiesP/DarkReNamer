@@ -5876,8 +5876,13 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
     expected = [(cell["process_id"], cell["process_start_utc_ticks"])
                 for cell in scenario["cells"]]
     verify_process_job_cleanup(jobs, expected_processes=expected)
-    require(owned["declared_processes"] ==
-            [{"pid": pid, "start_time_utc_ticks": str(ticks)} for pid, ticks in expected] and
+    # The controller inventory is unordered; cells, lifecycles and Jobs retain launch order.
+    require([(job["pid"], job["process_start_time_utc_ticks"]) for job in jobs] ==
+            [(pid, str(ticks)) for pid, ticks in expected],
+            "Runtime baseline owned Jobs differ from launch order.")
+    require(len(owned["declared_processes"]) == 3 and
+            {(row["pid"], row["start_time_utc_ticks"]) for row in owned["declared_processes"]} ==
+            {(pid, str(ticks)) for pid, ticks in expected} and
             owned["task_execution"]["terminal"] is True and
             owned["task_execution"]["exit_code"] == 0 and
             postlaunch["target"]["process_id"] in {pid for pid, _ in expected},

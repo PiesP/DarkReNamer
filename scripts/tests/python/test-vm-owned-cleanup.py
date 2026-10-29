@@ -868,7 +868,7 @@ class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
         evidence = self.original['raw_cleanup']['owned_resource_evidence']
         cells, lifecycles, jobs = [], [], []
         for index, name in enumerate(RUNTIME_BASELINE_PLAN['startup_cells']):
-            pid, ticks = 3101 + index, 639268888530000000 + index * 100000000
+            pid, ticks = (8224, 956, 17280)[index], 639268888530000000 + index * 100000000
             cells.append({'id': name, 'process_id': pid, 'process_start_utc_ticks': ticks,
                           'normal_exit_code': 0, 'environment': {'main_window': {'process_id': pid}}})
             lifecycles.append({'process_lifecycle': {
@@ -897,6 +897,8 @@ class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
         evidence['declared_processes'] = [
             {'pid': cell['process_id'], 'start_time_utc_ticks': str(cell['process_start_utc_ticks'])}
             for cell in cells]
+        evidence['declared_processes'].sort(
+            key=lambda row: f"{row['pid']}|{row['start_time_utc_ticks']}")
         self.original.update(task_kind='ui', observer_process={'state': 'exited', 'exit_code': 1})
         self.original['owned_cleanup_failure_context'].update(task_kind='ui',
             observer_sha256='8' * 64, acceptance_mode='runtime-baseline',
@@ -958,6 +960,35 @@ class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
     def test_complete_runtime_failure_keeps_acceptance_rejected(self):
         self.assertEqual(self.verify(), {'environment': 'strict-failed',
                                         'owned_cleanup': 'owned-clean', 'acceptance': 'rejected'})
+
+    def test_runtime_inventory_membership_keeps_ordered_process_proofs_strict(self):
+        evidence = self.original['raw_cleanup']['owned_resource_evidence']
+        self.assertEqual([row['pid'] for row in evidence['declared_processes']], [17280, 8224, 956])
+        self.assertEqual([row['pid'] for row in self.result['process_job_cleanup']], [8224, 956, 17280])
+        self.verify()
+        seeds = deepcopy((self.original, self.observations, self.result))
+        for mutation in ('duplicate', 'missing', 'foreign', 'ticks', 'boolean-pid', 'integer-ticks',
+                         'reordered-cells', 'reordered-lifecycles', 'reordered-jobs', 'null-primary-exit'):
+            self.original, self.observations, self.result = deepcopy(seeds)
+            evidence = self.original['raw_cleanup']['owned_resource_evidence']
+            declared = evidence['declared_processes']
+            if mutation == 'duplicate': declared[1] = deepcopy(declared[0])
+            elif mutation == 'missing': declared.pop()
+            elif mutation == 'foreign': declared[0]['pid'] = 27182
+            elif mutation == 'ticks': declared[0]['start_time_utc_ticks'] = str(int(declared[0]['start_time_utc_ticks']) + 1)
+            elif mutation == 'boolean-pid': declared[0]['pid'] = True
+            elif mutation == 'integer-ticks': declared[0]['start_time_utc_ticks'] = int(declared[0]['start_time_utc_ticks'])
+            elif mutation == 'reordered-cells': self.observations['scenario']['cells'].reverse()
+            elif mutation == 'reordered-lifecycles': self.result['process_lifecycles'].reverse()
+            elif mutation == 'reordered-jobs':
+                self.result['process_job_cleanup'].reverse()
+                evidence['process_job_cleanup'].reverse()
+            else:
+                for jobs in (self.result['process_job_cleanup'], evidence['process_job_cleanup']):
+                    jobs[0]['active_processes_at_primary_exit'] = None
+            self.freeze()
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify()
 
     def test_runtime_cells_and_lifetimes_must_match_all_three_owned_jobs(self):
         seed_observations, seed_result = deepcopy(self.observations), deepcopy(self.result)
