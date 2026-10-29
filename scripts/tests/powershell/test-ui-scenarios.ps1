@@ -134,6 +134,55 @@ try {
     $runtimeMenu.menu_checked[0].checked=$false
     $runtimeMenu.menu_checked[1].checked=$true
     Assert-Fails { Assert-ObserverRuntimeSystemAppearanceMenu -Menu $runtimeMenu } 'fresh System selection'
+    $appearancePath = Join-Path $root 'runtime-ui-appearance-v1'
+    $defaultAppearanceBytes = [Convert]::FromHexString('4452415050520000010800000000010101010000e950f7f9')
+    [IO.File]::WriteAllBytes($appearancePath, $defaultAppearanceBytes)
+    $defaultAppearance = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+    Assert-Equal $defaultAppearance.sha256 'b4371b6a8cb9748700ca1b99c7bd6afdac28f08a53365031a70fc690b0b6d5b8' 'Default System product record hash'
+    Assert-Equal $defaultAppearance.bytes_hex ([Convert]::ToHexString($defaultAppearanceBytes).ToLowerInvariant()) 'Retained exact persisted bytes'
+    Assert-ObserverRuntimeDefaultAppearancePreference -Record $defaultAppearance
+    # Exact production golden from preferences.rs::both_formats_keep_independent_golden_bytes.
+    $darkGolden = [byte[]]@(68,82,65,80,80,82,0,0,1,8,0,0,2,2,2,0,1,0,0,0,254,181,216,140)
+    [IO.File]::WriteAllBytes($appearancePath, $darkGolden)
+    $darkAppearance = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+    Assert-Equal $darkAppearance.value.theme 2 'Product Dark golden theme decoder parity'
+    Assert-Equal $darkAppearance.value.density 2 'Product Dark golden density decoder parity'
+    Assert-Equal $darkAppearance.value.show_separators $false 'Product Dark golden flag decoder parity'
+    Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $darkAppearance } 'default System snapshot'
+    foreach ($case in @(@(0,0),@(8,2),@(9,9),@(10,1),@(11,1),@(12,3),@(13,4),@(14,3),
+                        @(15,2),@(16,2),@(17,2),@(18,1),@(19,1))) {
+        $bad = [byte[]]$defaultAppearanceBytes.Clone()
+        $bad[$case[0]] = [byte]$case[1]
+        $hash = [uint32]2166136261
+        foreach ($index in 0..19) {
+            $hash = [uint32]((([uint64]($hash -bxor [uint32]$bad[$index])) *
+                [uint64]16777619) -band [uint64]4294967295)
+        }
+        [BitConverter]::GetBytes($hash).CopyTo($bad, 20)
+        [IO.File]::WriteAllBytes($appearancePath, $bad)
+        Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'Runtime appearance preference'
+    }
+    foreach ($case in @(@(12,1),@(12,2),@(13,1),@(14,2),@(15,0),@(16,0),@(17,0))) {
+        $bad = [byte[]]$defaultAppearanceBytes.Clone()
+        $bad[$case[0]] = [byte]$case[1]
+        $hash = [uint32]2166136261
+        foreach ($index in 0..19) {
+            $hash = [uint32]((([uint64]($hash -bxor [uint32]$bad[$index])) *
+                [uint64]16777619) -band [uint64]4294967295)
+        }
+        [BitConverter]::GetBytes($hash).CopyTo($bad, 20)
+        [IO.File]::WriteAllBytes($appearancePath, $bad)
+        $nonDefault = Read-ObserverRuntimeAppearancePreference -Path $appearancePath
+        Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $nonDefault } 'default System snapshot'
+    }
+    [IO.File]::WriteAllBytes($appearancePath, [byte[]]$defaultAppearanceBytes[0..22])
+    Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'length'
+    $bad = [byte[]]$defaultAppearanceBytes.Clone()
+    $bad[23] = $bad[23] -bxor 1
+    [IO.File]::WriteAllBytes($appearancePath, $bad)
+    Assert-Fails { Read-ObserverRuntimeAppearancePreference -Path $appearancePath } 'checksum'
+    $defaultAppearance.value.theme = $false
+    Assert-Fails { Assert-ObserverRuntimeDefaultAppearancePreference -Record $defaultAppearance } 'default System snapshot'
     $emptyPhase = @(Get-ObserverPerformancePhaseSummary -Samples @() -PhaseOrder @('transform-no-op'))
     Assert-Equal $emptyPhase[0].sample_count 0 'Unsampled short phase has no fabricated timer callback'
     if ($emptyPhase[0].max_sample_gap_ms -isnot [double] -or

@@ -3484,6 +3484,62 @@ function New-ObserverRuntimeLanguagePreference {
     return $record
 }
 
+function Read-ObserverRuntimeAppearancePreference {
+    param([Parameter(Mandatory)][string] $Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -ne 24) { throw 'Runtime appearance preference length or file kind is invalid.' }
+    $bytes = [byte[]]::new(24)
+    $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    try {
+        if ($stream.Length -ne 24) { throw 'Runtime appearance preference length changed.' }
+        $count = 0
+        while ($count -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $count, $bytes.Length - $count)
+            if ($read -eq 0) { break }
+            $count += $read
+        }
+        if ($count -ne 24 -or $stream.ReadByte() -ne -1) {
+            throw 'Runtime appearance preference changed during its bounded read.'
+        }
+    }
+    finally { $stream.Dispose() }
+    if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -cne "DRAPPR`0`0" -or
+        $bytes[8] -ne 1 -or $bytes[9] -ne 8 -or $bytes[10] -ne 0 -or $bytes[11] -ne 0) {
+        throw 'Runtime appearance preference header is invalid.'
+    }
+    $checksum = [uint32]2166136261
+    foreach ($index in 0..19) {
+        $checksum = [uint32]((([uint64]($checksum -bxor [uint32]$bytes[$index])) *
+            [uint64]16777619) -band [uint64]4294967295)
+    }
+    if ([BitConverter]::ToUInt32($bytes, 20) -ne $checksum) {
+        throw 'Runtime appearance preference checksum is invalid.'
+    }
+    if ($bytes[18] -ne 0 -or $bytes[19] -ne 0 -or $bytes[12] -gt 2 -or
+        $bytes[13] -gt 3 -or $bytes[14] -gt 2 -or $bytes[15] -gt 1 -or
+        $bytes[16] -gt 1 -or $bytes[17] -gt 1) {
+        throw 'Runtime appearance preference reserved bytes, enums, or flags are invalid.'
+    }
+    [ordered]@{ status='valid-saved'; bytes=24;
+        sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        bytes_hex=[Convert]::ToHexString($bytes).ToLowerInvariant()
+        value=[ordered]@{ theme=[int]$bytes[12]; density=[int]$bytes[13]; emphasis=[int]$bytes[14];
+            show_separators=($bytes[15] -eq 1); show_preview_tint=($bytes[16] -eq 1);
+            show_empty_safety=($bytes[17] -eq 1) }
+    }
+}
+
+function Assert-ObserverRuntimeDefaultAppearancePreference {
+    param([Parameter(Mandatory)] $Record)
+    $expected = [ordered]@{ theme=0; density=0; emphasis=1; show_separators=$true;
+        show_preview_tint=$true; show_empty_safety=$true }
+    if (($Record.value | ConvertTo-Json -Compress) -cne ($expected | ConvertTo-Json -Compress)) {
+        throw 'Runtime persisted appearance differs from the default System snapshot.'
+    }
+}
+
 function Get-ObserverRuntimeLightAppearance {
     $resolution = Get-ObserverResolvedSystemAppearance
     if ($resolution.resolved_theme -cne 'light' -or
@@ -3781,10 +3837,14 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     ($cell.preference_after | ConvertTo-Json -Compress)) {
                     throw 'Runtime baseline preference changed before normal process exit.'
                 }
-                if (Test-Path -LiteralPath $appearancePreferencePath) {
-                    throw 'Runtime baseline wrote an appearance preference override.'
+                # Normal close flushes a final appearance snapshot even without edits.
+                $environment.appearance.preference_after = if (Test-Path -LiteralPath $appearancePreferencePath) {
+                    Read-ObserverRuntimeAppearancePreference -Path $appearancePreferencePath
+                } else { 'absent' }
+                if ($environment.appearance.preference_after -isnot [string]) {
+                    Assert-ObserverRuntimeDefaultAppearancePreference `
+                        -Record $environment.appearance.preference_after
                 }
-                $environment.appearance.preference_after = 'absent'
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
             }
             finally {

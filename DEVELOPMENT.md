@@ -1644,13 +1644,20 @@ creation bracket, bound main window, empty list, enabled path-list import
 command, exact preference record hash, localized menu radio state, VM region,
 normal close, and owned process Job cleanup.
 
-Each cell requires absent `ui-appearance-v1` records before launch and after
-normal exit, with the product's System appearance radio selected on its bound
+Each cell requires an absent `ui-appearance-v1` record before launch, with
+the product's System appearance radio selected on its bound
 PID/HWND/session. Existing native probes observe the official UISettings
 foreground color and `SPI_GETHIGHCONTRAST` before launch, after readiness, and
 before close. The verifier derives Light from the same foreground luminance
 threshold used by the product and rejects dark, Forced Colors, missing probes,
-or appearance overrides. These observations do not change startup preferences
+or startup appearance overrides. After normal exit, the record may remain
+absent or contain exactly the default System appearance: Automatic density,
+Standard emphasis, and separators, preview tint, and empty safety enabled. The
+24-byte `DRAPPR` version-1 record must pass length, header, enum, flag, reserved
+byte, and FNV-1a checksum checks. Evidence retains its raw hex bytes, SHA-256,
+and decoded values. Normal close queues and flushes a final appearance snapshot
+even when the user made no appearance edits; file presence after close alone
+does not establish an override. These observations do not change startup preferences
 or OS appearance settings; appearance probes are outside the startup clock.
 
 Only the first cell performs the workload: 30 seconds empty idle; one ordinary
