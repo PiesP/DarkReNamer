@@ -542,6 +542,14 @@ def resolve_private_symbol_output(repo, bundle_root, requested):
     return target
 
 
+def verify_private_symbol_root(root):
+    if os.name == 'posix':
+        info = root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o700):
+            raise RuntimeError('Private symbol output must be an owned mode-0700 directory.')
+
+
 def measure_private_binary(script, executable, pdb, output):
     subprocess.run([
         require_pwsh74(), '-NoProfile', '-NonInteractive', '-File', str(script),
@@ -2408,14 +2416,16 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         frozen = {name: sha256(path) for name, path in sources.items()}
         private_pairs = []
         if private_root is not None:
-            selected = [('application', application)]
-            if refresh_profile or focused_profile:
-                selected.extend(('test:' + row['file'], Path(row['path'])) for row in artifacts)
+            selected = [('application', application)] + [
+                ('test:' + row['file'], Path(row['path'])) for row in artifacts]
             for role, executable in selected:
-                pdb = build_output_file(target_root, executable.with_suffix('.pdb'),
-                                        role + ' PDB')
+                pdb_path = executable.with_suffix('.pdb')
+                if not pdb_path.is_file():
+                    raise RuntimeError(role + ' PDB is missing from the fresh Cargo target directory.')
+                pdb = build_output_file(target_root, pdb_path, role + ' PDB')
                 private_pairs.append((role, executable, pdb))
-            private_root.mkdir()
+            private_root.mkdir(mode=0o700)
+            verify_private_symbol_root(private_root)
             for role, executable, pdb in private_pairs:
                 private_exe = private_root / executable.name
                 private_pdb = private_root / pdb.name
@@ -2493,6 +2503,11 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
                                  'pdb_sha256': measurement['debug_symbols']['pdb_sha256'],
                                  'codeview_guid': measurement['debug_symbols']['guid'],
                                  'codeview_age': measurement['debug_symbols']['age']})
+        if (sha256(measure_script) != measure_digest or
+                subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() != source_sha or
+                subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip()):
+            raise RuntimeError('Checkout or measurement script changed during private symbol measurement.')
+        verify_private_symbol_root(private_root)
         receipt = {
             'schema_version': 1, 'source_sha': source_sha, 'source_state': 'clean',
             'build_kind': 'cargo-xwin-source-built',
