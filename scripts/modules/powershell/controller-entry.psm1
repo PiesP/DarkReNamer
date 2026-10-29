@@ -429,9 +429,9 @@ function New-DrControllerOwnedPerformancePredelete {
             $input.request.picker_identity_plan.full_performance_sample -isnot [bool] -or
             $input.request.picker_identity_plan.full_performance_sample -or
             $null -ne $input.request.PSObject.Properties['performance_plan'])) -or
-        ($customRun -and ($input.request.custom_input_plan.PSObject.Properties.Name.Count -ne 11 -or
+        ($customRun -and ($input.request.custom_input_plan.PSObject.Properties.Name.Count -ne 12 -or
             (@($input.request.custom_input_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
-                'cancelled_prefix,command_timeout_ms,confirmed_prefix,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,prompt_count,prompt_settle_ms,sample_interval_ms' -or
+                'cancelled_prefix,command_timeout_ms,confirmed_prefix,controlled_hidden_ms,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,prompt_count,prompt_settle_ms,sample_interval_ms' -or
             $input.request.custom_input_plan.ordinary_rows.Count -ne 1 -or
             $input.request.custom_input_plan.ordinary_rows[0] -ne 100 -or
             $input.request.custom_input_plan.idle_ms -ne 1000 -or
@@ -440,6 +440,7 @@ function New-DrControllerOwnedPerformancePredelete {
             $input.request.custom_input_plan.command_timeout_ms -ne 5000 -or
             $input.request.custom_input_plan.fixture_file_limit -ne 100 -or
             $input.request.custom_input_plan.prompt_settle_ms -ne 350 -or
+            $input.request.custom_input_plan.controlled_hidden_ms -ne 700 -or
             $input.request.custom_input_plan.confirmed_prefix -cne 'confirmed-' -or
             $input.request.custom_input_plan.cancelled_prefix -cne 'cancelled-' -or
             $input.request.custom_input_plan.prompt_count -ne 2 -or

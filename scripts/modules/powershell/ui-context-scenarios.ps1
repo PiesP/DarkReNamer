@@ -1804,6 +1804,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     $nativeLifetimeCheckpoints = [Collections.Generic.List[object]]::new()
     $resetControl = $null
     $prefixControl = $null
+    $postStopStage = $null
     $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
         elseif ($ObservePicker) { 'picker-identity-observation' }
         elseif ($ObserveCustomInput) { 'custom-input-identity-observation' }
@@ -1814,7 +1815,8 @@ function Invoke-ObserverPerformanceSampleScenario {
     $ObservationSink['plan'] = if ($ObserveCustomInput) {
         [ordered]@{ ordinary_rows=@(100); idle_ms=1000; sample_interval_ms=200;
             maximum_seconds=120; command_timeout_ms=5000; fixture_file_limit=100;
-            prompt_settle_ms=350; confirmed_prefix='confirmed-'; cancelled_prefix='cancelled-';
+            prompt_settle_ms=350; controlled_hidden_ms=700;
+            confirmed_prefix='confirmed-'; cancelled_prefix='cancelled-';
             prompt_count=2; full_performance_sample=$false }
     } elseif ($ObservePicker) {
         [ordered]@{ ordinary_rows=@(100); idle_ms=1000; picker_settle_ms=350; sample_interval_ms=200;
@@ -1936,7 +1938,9 @@ function Invoke-ObserverPerformanceSampleScenario {
                 $sampler.SetPhase('custom-confirm')
                 $confirmed = Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'confirmed-' `
                     -SessionId $SessionId -WaitSeconds $WaitSeconds -ExpectedFirstSourceName 'ordinary-00000.txt' `
-                    -Command $prefixControl -PromptSettleMilliseconds 350 -TimelineEvents $activeTimelineEvents
+                    -Command $prefixControl -PromptSettleMilliseconds 350 `
+                    -ControlledHiddenMilliseconds 700 -Sampler $sampler -TimelineEvents $activeTimelineEvents
+                $ObservationSink['controlled_hidden_input'] = $confirmed.hidden_control
                 if ($grid.pattern.GetItem(0, 1).Current.Name -cne 'confirmed-ordinary-00000.txt') {
                     throw 'Focused confirmed input did not update the preview.'
                 }
@@ -1995,8 +1999,9 @@ function Invoke-ObserverPerformanceSampleScenario {
                 $nativeLifetimeCheckpoints.Add([ordered]@{ phase='post'; creation_filetime=[long]$check[0] })
                 Start-Sleep -Milliseconds 400
                 $samples = @($sampler.Stop())
-                $sampler = $null
                 $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline -Picker)
+                $sampler = $null
+                $postStopStage = 'capture'
                 [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
                     -Window $application.main -Process $application.process -ExpectedSession $SessionId `
                     -Root $EvidenceRoot -Leaf 'custom-100-after.png' -Label 'focused custom input rows'))
@@ -2013,6 +2018,7 @@ function Invoke-ObserverPerformanceSampleScenario {
                     cancelled_prompt_visible=$true; cancelled_prompt_enabled=$true;
                     cancelled_preview='ordinary-00000.txt';
                     confirmed_then_reset=$true; cancellation_retired=$true }
+                $postStopStage = 'fixture-readback'
                 $ObservationSink['disk_unchanged'] = $false
                 if (@(Get-ChildItem -LiteralPath $ordinary -File -Force).Count -ne 100) {
                     throw 'Focused custom fixture file count changed on disk.'
@@ -2024,10 +2030,13 @@ function Invoke-ObserverPerformanceSampleScenario {
                     }
                 }
                 $ObservationSink['disk_unchanged'] = $true
+                $postStopStage = 'journal-readback'
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
                 $ObservationSink['journal_residue_count'] = 0
+                $postStopStage = 'normal-close'
                 $ObservationSink['normal_exit_code'] = Close-AcceptanceApplication `
                     -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+                $postStopStage = 'native-exit'
                 $terminal = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
                     [IntPtr]$application.process.Handle,[uint32]$application.process.Id,$nativeCreationFileTime,$true)
                 $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
@@ -2415,6 +2424,16 @@ function Invoke-ObserverPerformanceSampleScenario {
             else { 'performance-sample' }
         return $ObservationSink
     }
+    catch {
+        if ($ObserveCustomInput -and $null -eq $sampler -and $null -ne $postStopStage -and
+            $ObservationSink.Contains('samples')) {
+            $retained = @($ObservationSink['samples'])
+            $ObservationSink['post_stop_failure'] = [ordered]@{
+                schema_version=1; stage=$postStopStage; sample_count=$retained.Count;
+                last_probe_end_ticks=[long]$retained[-1].probe_end_ticks }
+        }
+        throw
+    }
     finally {
         if ($null -ne $sampler) {
             try {
@@ -2432,7 +2451,18 @@ function Invoke-ObserverPerformanceSampleScenario {
             }
         }
         if ($null -ne $application) {
-            Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+            try { Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned }
+            catch {
+                if ($ObserveCustomInput -and $null -eq $sampler -and
+                    $ObservationSink.Contains('samples') -and
+                    -not $ObservationSink.Contains('post_stop_failure')) {
+                    $retained = @($ObservationSink['samples'])
+                    $ObservationSink['post_stop_failure'] = [ordered]@{
+                        schema_version=1; stage='owned-dispose'; sample_count=$retained.Count;
+                        last_probe_end_ticks=[long]$retained[-1].probe_end_ticks }
+                }
+                throw
+            }
         }
     }
 }

@@ -2403,36 +2403,52 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             'cancelled_prompt_visible': True, 'cancelled_prompt_enabled': True,
             'cancelled_preview': 'ordinary-00000.txt', 'confirmed_then_reset': True,
             'cancellation_retired': True}
+        scenario['controlled_hidden_input'] = {'schema_version': 1, 'prompt_handle': 901,
+            'hide_request_ticks': 1020000, 'hidden_observed_ticks': 1030000,
+            'restore_request_ticks': 1730000, 'restored_observed_ticks': 1740000}
         events = scenario['response_timeline']['events']
         events.extend({'operation': operation, 'step': step, 'ticks': tick,
                        'window_handle': handle}
                       for operation, step, tick, handle in (
-                          ('full-preview', 'prompt_request', 320, 0),
-                          ('full-preview', 'prompt_found', 330, 901),
-                          ('full-preview', 'commit_invoke', 370, 901),
-                          ('full-preview', 'prompt_closed', 380, 901),
-                          ('full-preview', 'first_row_observed', 390, 0),
-                          ('custom-cancel', 'prompt_request', 400, 0),
-                          ('custom-cancel', 'prompt_found', 410, 902),
-                          ('custom-cancel', 'cancel_invoke', 450, 902),
-                          ('custom-cancel', 'prompt_closed', 460, 902)))
-        def custom_sample(phase, begin, end, handle):
+                          ('full-preview', 'prompt_request', 1000000, 0),
+                          ('full-preview', 'prompt_found', 1010000, 901),
+                          ('full-preview', 'commit_invoke', 1900000, 901),
+                          ('full-preview', 'prompt_closed', 1910000, 901),
+                          ('full-preview', 'first_row_observed', 1920000, 0),
+                          ('custom-cancel', 'prompt_request', 2000000, 0),
+                          ('custom-cancel', 'prompt_found', 2010000, 902),
+                          ('custom-cancel', 'cancel_invoke', 2500000, 902),
+                          ('custom-cancel', 'prompt_closed', 2510000, 902)))
+        def custom_sample(phase, begin, end, handle, hidden=False):
             row = deepcopy(scenario['samples'][2])
             row.update(phase=phase, probe_begin_ticks=begin, probe_end_ticks=end,
-                       owned_popup_handle_before=handle, owned_popup_handle=handle,
+                       owned_popup_handle_before=0 if hidden else handle,
+                       owned_popup_handle=0 if hidden else handle,
                        main_enabled_before=False, main_enabled=False)
             for key, start, stop in (('popup_before', begin - 10, begin - 1),
                                      ('popup_after', end + 1, end + 10)):
                 row[key].update(begin_ticks=start, end_ticks=stop, raw_popup_handle=handle,
-                                accepted_popup_handle=handle,
-                                popup_class='DarkReNamerInputWindow')
+                                accepted_popup_handle=0 if hidden else handle,
+                                popup_class='DarkReNamerInputWindow',
+                                popup_visible=not hidden,
+                                visibility_lookup='hidden' if hidden else 'visible',
+                                disposition='owned-hidden-inactive' if hidden else 'owned-popup',
+                                observed_predicates=['hidden'] if hidden else [])
+            if hidden:
+                row.update(owned_popup_thread_id_before=0, owned_popup_thread_id=0,
+                           owned_popup_class_before='', owned_popup_class='')
             return row
-        scenario['samples'].insert(3, custom_sample('custom-confirm', 340, 350, 901))
-        scenario['samples'].insert(4, custom_sample('custom-cancel', 420, 430, 902))
-        scenario['samples'][-1]['probe_begin_ticks'] = 500
-        scenario['samples'][-1]['probe_end_ticks'] = 510
-        for key, start, stop in (('popup_before', 490, 499), ('popup_after', 511, 520)):
+        scenario['samples'].insert(3, custom_sample('custom-confirm', 1200000, 1200010, 901, True))
+        scenario['samples'].insert(4, custom_sample('custom-confirm', 1800000, 1800010, 901))
+        scenario['samples'].insert(5, custom_sample('custom-cancel', 2200000, 2200010, 902))
+        scenario['samples'][-1]['probe_begin_ticks'] = 2700000
+        scenario['samples'][-1]['probe_end_ticks'] = 2700010
+        for key, start, stop in (('popup_before', 2699990, 2699999),
+                                 ('popup_after', 2700011, 2700020)):
             scenario['samples'][-1][key].update(begin_ticks=start, end_ticks=stop)
+        for row in scenario['samples']:
+            row['probe_error_code'] = 0
+            row['ui_response_ms'] = (row['probe_end_ticks'] - row['probe_begin_ticks']) / 1000
         raw['assertions']['scope'] = evidence.CUSTOM_SCOPE
         raw['screenshots'] = [{'file': 'custom-100-after.png',
             'sha256': digest((output / 'custom-100-after.png').read_bytes())}]
@@ -2464,7 +2480,7 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
             reused_scenario['custom_input']['cancelled_prompt_handle'] = 901
             for event in reused_scenario['response_timeline']['events'][12:15]:
                 event['window_handle'] = 901
-            reused_sample = reused_scenario['samples'][4]
+            reused_sample = reused_scenario['samples'][5]
             reused_sample['owned_popup_handle_before'] = 901
             reused_sample['owned_popup_handle'] = 901
             for key in ('popup_before', 'popup_after'):
@@ -2480,6 +2496,12 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                 lambda s: [s['samples'][4][key].__setitem__('popup_class', '#32770')
                            for key in ('popup_before', 'popup_after')],
                 lambda s: s['samples'][3]['popup_before'].__setitem__('class_lookup', 'failed'),
+                lambda s: s['samples'][3]['popup_before'].__setitem__('disposition', 'main'),
+                lambda s: s['controlled_hidden_input'].__setitem__('restore_request_ticks', 1200005),
+                lambda s: s['samples'][4].__setitem__('probe_error_code', 5),
+                lambda s: s['samples'][4].__setitem__('probe_status', 'failure_unknown'),
+                lambda s: s['samples'][4].update(probe_status='timeout', probe_error_code=0),
+                lambda s: s['samples'][4].__setitem__('ui_response_ms', 50.0),
                 lambda s: s['custom_input'].__setitem__('cancellation_retired', False),
                 lambda s: s['samples'].pop(4),
             )):
@@ -2492,6 +2514,84 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                         evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
             raw_path.write_bytes(original)
             self.refresh_picker(run)
+
+    def custom_completed_failed_run(self, failure_kind):
+        run = self.custom_run()
+        output = run / 'output'
+        raw_path = output / 'acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        scenario = raw['assertions']['scenario']
+        if failure_kind in {'post-stop-observer', 'owned-dispose'}:
+            raw['status'] = 'failed'
+            raw['failure_reason'] = 'gui_regression_observer_failed'
+            raw['assertions']['overall'] = 'failed'
+            if failure_kind == 'post-stop-observer':
+                scenario['native_process_lifetime']['terminal_exit_filetime'] = None
+                scenario.pop('custom_input')
+                raw['screenshots'] = []
+                (output / 'custom-100-after.png').unlink()
+            scenario['post_stop_failure'] = {'schema_version': 1,
+                'stage': 'capture' if failure_kind == 'post-stop-observer' else 'owned-dispose',
+                'sample_count': len(scenario['samples']),
+                'last_probe_end_ticks': scenario['samples'][-1]['probe_end_ticks']}
+        elif failure_kind == 'observer-cleanup':
+            raw['status'] = 'failed'
+            raw['failure_reason'] = 'runtime_cleanup_failed'
+        elif failure_kind != 'controller-cleanup':
+            raise AssertionError(failure_kind)
+        write_json(raw_path, raw)
+        transport_path = output / 'transport.json'
+        transport = json.loads(transport_path.read_text())
+        transport.update(status='failed', guest_cleanup=False)
+        write_json(transport_path, transport)
+        cleanup_path = output / 'cleanup.json'
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup.update(status='failed', guest=False, controller_exit_code=1)
+        write_json(cleanup_path, cleanup)
+        if failure_kind != 'controller-cleanup':
+            (output / 'platform-postlaunch.json').unlink()
+        self.fixture.refresh(run)
+        (output / 'run-result.json').unlink()
+        return run
+
+    def test_custom_completed_failures_retain_samples_and_require_cleanup_proof(self):
+        proof = {'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
+                 'acceptance': 'rejected'}
+        for kind in ('post-stop-observer', 'owned-dispose', 'observer-cleanup',
+                     'controller-cleanup'):
+            with self.subTest(kind=kind):
+                self.reset_fixture()
+                run = self.custom_completed_failed_run(kind)
+                with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3), \
+                     mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                                       return_value=proof):
+                    verdict = evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                           SCRIPT_ROOT.parent)
+                    self.assertEqual(verdict['status'], 'failure-observed')
+                    self.assertEqual(verdict['failure']['kind'],
+                                     'post-stop-observer' if kind == 'owned-dispose' else kind)
+                    self.assertEqual(verdict['retained_samples'], 7)
+                    self.assertEqual(verdict['acceptance'], 'rejected')
+                with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3), \
+                     mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                                       side_effect=evidence.EvidenceError('missing cleanup proof')):
+                    with self.assertRaisesRegex(evidence.EvidenceError, 'missing cleanup proof'):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                     SCRIPT_ROOT.parent)
+                if kind == 'post-stop-observer':
+                    raw_path = run / 'output/acceptance-result.json'
+                    original = raw_path.read_bytes()
+                    altered = json.loads(original)
+                    altered['assertions']['scenario']['post_stop_failure']['stage'] = 'sampler'
+                    write_json(raw_path, altered)
+                    self.fixture.refresh(run)
+                    with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3), \
+                         mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                                           return_value=proof):
+                        with self.assertRaises(evidence.EvidenceError):
+                            evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                         SCRIPT_ROOT.parent)
+                    raw_path.write_bytes(original)
 
     def test_picker_v2_success_requires_visible_bound_picker_and_postlaunch(self):
         run = self.picker_v2_run()

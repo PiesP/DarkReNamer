@@ -74,7 +74,7 @@ PICKER_PLAN = {
 CUSTOM_PLAN = {
     "ordinary_rows": [100], "idle_ms": 1000, "sample_interval_ms": 200,
     "maximum_seconds": 120, "command_timeout_ms": 5000,
-    "fixture_file_limit": 100, "prompt_settle_ms": 350,
+    "fixture_file_limit": 100, "prompt_settle_ms": 350, "controlled_hidden_ms": 700,
     "confirmed_prefix": "confirmed-", "cancelled_prefix": "cancelled-",
     "prompt_count": 2, "full_performance_sample": False,
 }
@@ -4662,12 +4662,12 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
     input_hash = sha256_bytes(input_bytes)
     failed = not (run_root / "output" / "run-result.json").exists()
     files = validate_picker_collection(run_root, input_hash, failed)
-    if failed:
-        require("platform-postlaunch.json" not in files,
-                "Failed picker postlaunch identity is present without a qualified target.")
+    has_failed_postlaunch = failed and "platform-postlaunch.json" in files
+    if has_failed_postlaunch:
+        require(custom, "Failed picker postlaunch identity is present without a qualified target.")
     artifacts = manifest["artifacts"]
     _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash,
-                                               require_postlaunch=not failed)
+                                               require_postlaunch=not failed or has_failed_postlaunch)
     raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"), "picker observer")
     observations, observation_bytes = read_json(run_root / "output", Path("acceptance-observations.json"),
                                                 "picker observations")
@@ -4738,7 +4738,11 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 events[12]["window_handle"] == events[13]["window_handle"] ==
                 events[14]["window_handle"] > 0,
                 "Custom input prompt handles or retirement sequence differ.")
-    samples = scenario.get("partial_samples") if failed else scenario.get("samples")
+    failure = scenario.get("sampler_failure")
+    post_stop = scenario.get("post_stop_failure") if custom else None
+    retained_complete = custom and failed and failure is None and isinstance(scenario.get("samples"), list)
+    samples = (scenario.get("samples") if retained_complete or not failed else
+               scenario.get("partial_samples"))
     require(isinstance(samples, list) and 1 <= len(samples) <= 650,
             "Picker samples are empty, missing, or exceed the bounded observer.")
     last_probe = 0
@@ -4758,6 +4762,16 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
         end = checked_int(sample.get("probe_end_ticks"), 1, 2**63 - 1, "picker probe end")
         require(last_probe < begin < end and (end - begin) / frequency <= 0.1,
                 "Picker probe bracket is invalid or exceeds its 50 ms timeout tolerance.")
+        if custom:
+            error_code = sample.get("probe_error_code")
+            response_ms = sample.get("ui_response_ms")
+            require(type(error_code) is int and
+                    ((sample["probe_status"] == "success" and error_code == 0) or
+                     (sample["probe_status"] == "timeout" and error_code == 1460)) and
+                    type(response_ms) in (int, float) and math.isfinite(response_ms) and
+                    0 <= response_ms <= 100 and
+                    abs((end - begin) * 1000 / frequency - response_ms) < 0.05,
+                    "Custom input probe native status or QPC duration differs.")
         last_probe = end
         before = validate_picker_popup(sample.get("popup_before"), "before-probe", main_handle,
                                        scenario["process_id"], sample["main_thread_id"],
@@ -4777,17 +4791,83 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 require(sample.get(f"owned_popup_thread_id{suffix}") == 0 and
                         sample.get(f"owned_popup_class{suffix}") == "",
                         "Picker hidden inactive popup leaked into the active endpoint.")
-    failure = scenario.get("sampler_failure")
+    if custom and (not failed or retained_complete):
+        control = exact_keys(scenario.get("controlled_hidden_input"),
+                             {"schema_version", "prompt_handle", "hide_request_ticks",
+                              "hidden_observed_ticks", "restore_request_ticks",
+                              "restored_observed_ticks"}, "controlled hidden custom input")
+        require(control["schema_version"] == 1 and
+                control["prompt_handle"] == events[7]["window_handle"] and
+                events[7]["ticks"] < control["hide_request_ticks"] <
+                control["hidden_observed_ticks"] < control["restore_request_ticks"] <
+                control["restored_observed_ticks"] < events[8]["ticks"] and
+                (control["restore_request_ticks"] - control["hidden_observed_ticks"]) /
+                frequency >= 0.65,
+                "Controlled custom input hide and restore bracket differs.")
+        confirm_popups = [popup for row in samples if row["phase"] == "custom-confirm"
+                          for popup in (row["popup_before"], row["popup_after"])]
+        require(any(popup["disposition"] == "owned-hidden-inactive" and
+                    popup["raw_popup_handle"] == control["prompt_handle"] and
+                    popup["popup_class"] == "DarkReNamerInputWindow" and
+                    not popup["main_enabled_at_lookup"] and
+                    control["hidden_observed_ticks"] <= popup["begin_ticks"] <
+                    popup["end_ticks"] <= control["restore_request_ticks"]
+                    for popup in confirm_popups) and
+                any(popup["disposition"] == "owned-popup" and
+                    popup["raw_popup_handle"] == control["prompt_handle"] and
+                    popup["popup_class"] == "DarkReNamerInputWindow" and
+                    control["restored_observed_ticks"] <= popup["begin_ticks"] <
+                    popup["end_ticks"] <= events[8]["ticks"]
+                    for popup in confirm_popups),
+                "Controlled custom input lacks bound hidden and restored popup samples.")
     if failed:
-        require(raw.get("status") == "failed" and failure is not None,
-                "Picker failed receipt omits its sampler failure record.")
-        detail = validate_picker_failure(failure, main_handle=main_handle,
-                                         process_id=scenario["process_id"],
-                                         process_start_utc_ticks=start_ticks,
-                                         schema_version=schema_version)
-        require(failure["qpc_frequency"] == frequency and
-                samples[-1]["probe_end_ticks"] <= failure["sample_begin_ticks"],
-                "Picker failure is not ordered after retained samples.")
+        if failure is not None:
+            require(post_stop is None and not retained_complete and
+                    (not custom or "samples" not in scenario) and raw.get("status") == "failed",
+                    "Picker sampler failure was mixed with a completed sample record.")
+            detail = validate_picker_failure(failure, main_handle=main_handle,
+                                             process_id=scenario["process_id"],
+                                             process_start_utc_ticks=start_ticks,
+                                             schema_version=schema_version)
+            require(failure["qpc_frequency"] == frequency and
+                    samples[-1]["probe_end_ticks"] <= failure["sample_begin_ticks"],
+                    "Picker failure is not ordered after retained samples.")
+        else:
+            require(custom and retained_complete and "partial_samples" not in scenario and
+                    len(events) == len(expected_boundaries) and
+                    samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
+                    events[-1]["ticks"] < samples[-1]["probe_end_ticks"],
+                    "Custom input failed receipt lacks completed bounded samples.")
+            if post_stop is not None:
+                marker = exact_keys(post_stop, {"schema_version", "stage", "sample_count",
+                                                "last_probe_end_ticks"}, "custom post-stop failure")
+                require(marker["schema_version"] == 1 and
+                        marker["stage"] in {"capture", "fixture-readback", "journal-readback",
+                                            "normal-close", "native-exit", "owned-dispose"} and
+                        int_equals(marker["sample_count"], len(samples)) and
+                        int_equals(marker["last_probe_end_ticks"], samples[-1]["probe_end_ticks"]) and
+                        raw.get("status") == "failed" and
+                        raw.get("failure_reason") == "gui_regression_observer_failed" and
+                        nested(raw, "assertions", "overall") == "failed" and
+                        not has_failed_postlaunch,
+                        "Custom post-stop observer failure differs from its bounded stage.")
+                detail = {"status": "failed", "kind": "post-stop-observer",
+                          "stage": marker["stage"]}
+            else:
+                observer_cleanup = (raw.get("status") == "failed" and
+                    raw.get("failure_reason") in {
+                        "runtime_cleanup_failed", "text_scale_restore_failed",
+                        "execution_state_restore_failed", "desktop_lock_release_failed",
+                        "owned_process_cleanup_observation_failed", "raw_cleanup_failed"} and
+                    nested(raw, "assertions", "overall") == "passed" and
+                    not has_failed_postlaunch)
+                controller_cleanup = (raw.get("status") == "review_required" and
+                    raw.get("failure_reason") is None and has_failed_postlaunch and
+                    nested(raw, "assertions", "overall") == "passed")
+                require(observer_cleanup or controller_cleanup,
+                        "Custom completed receipt has no bounded cleanup failure class.")
+                detail = {"status": "failed", "kind": "observer-cleanup" if observer_cleanup
+                          else "controller-cleanup", "reason": raw.get("failure_reason")}
         transport, _ = read_json(run_root / "output", Path("transport.json"), "picker transport")
         cleanup, _ = read_json(run_root / "output", Path("cleanup.json"), "picker cleanup")
         require(transport.get("status") == "failed" and
@@ -4801,7 +4881,10 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             "picker failed native lifetime")
         require(int_equals(lifetime["pid"], scenario["process_id"]) and
                 int_equals(lifetime["creation_filetime"], start_ticks - 504911232000000000) and
-                lifetime["terminal_exit_filetime"] is None and
+                (lifetime["terminal_exit_filetime"] is None if not retained_complete or
+                 post_stop is not None and post_stop["stage"] != "owned-dispose" else
+                 type(lifetime["terminal_exit_filetime"]) is int and
+                 lifetime["terminal_exit_filetime"] > lifetime["creation_filetime"]) and
                 isinstance(lifetime["checkpoints"], list) and
                 1 <= len(lifetime["checkpoints"]) <= 3 and
                 all(isinstance(row, dict) and
@@ -4823,7 +4906,8 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 "Picker failed execution cannot qualify as accepted cleanup.")
         return {"run_id": run_id, "status": "failure-observed", "failure": detail,
                 "retained_samples": len(samples), "resource_cleanup": "owned-clean",
-                "postlaunch": "unavailable", "acceptance": "rejected",
+                "postlaunch": "verified-but-nonqualifying" if has_failed_postlaunch else "unavailable",
+                "acceptance": "rejected",
                 "full_performance_sample": "not-run"}
     require(failure is None and len(events) == len(expected_boundaries) and
             samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
@@ -4927,6 +5011,7 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
             "application_sha256": artifacts["application"]["sha256"],
             "sample_count": len(samples),
             ("custom_prompt_intervals_sampled" if custom else "picker_interval_sampled"): True,
+            **({"controlled_hidden_input_sampled": True} if custom else {}),
             "full_performance_sample": "not-run", **owned_verdict}
 
 
