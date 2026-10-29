@@ -155,9 +155,9 @@ class VmRunnerTests(unittest.TestCase):
                            if index == 2 else [])
             model = {'rows': int(bool(model_cells)), 'cells': model_cells}
             stages = []
-            for phase in (['alt-v', 'end', 'right', 'home'] +
+            for phase in (['alt-v', 'language-open'] +
                           ['down-' + str(step) for step in range(1, after + 1)] + ['pre-enter']):
-                highlighted = (0 if phase == 'home' else
+                highlighted = (0 if phase == 'language-open' else
                                int(phase[5:]) if phase.startswith('down-') else
                                after if phase == 'pre-enter' else None)
                 states = [0x80 if position == highlighted else 0 for position in range(4)]
@@ -166,15 +166,15 @@ class VmRunnerTests(unittest.TestCase):
                      'process_id': pid, 'class': '#32768', 'visible': True,
                      'bounds': {'left': 10 + popup * 200, 'top': 10,
                                 'right': 200 + popup * 200, 'bottom': 200}}
-                    for popup in range(1 if phase in ('alt-v', 'end') else 2)
+                    for popup in range(1 if phase == 'alt-v' else 2)
                 ]
                 stages.append({'phase': phase, 'pid': pid, 'session_id': 2, 'hwnd': hwnd,
                                'thread_id': 500 + index, 'language_handle': 800 + index,
                                'menu_owner': hwnd,
                                'gui_flags': 0x4 if phase == 'alt-v' else 0x14,
-                               'view_language_state': 0x80 if phase == 'end' else 0,
+                               'view_language_state': 0x80 if phase == 'language-open' else 0,
                                'top_states': [0, 0, 0x80, 0, 0, 0],
-                               'view_states': [0] * 9 + [0x80 if phase == 'end' else 0],
+                               'view_states': [0] * 9 + [0x80 if phase == 'language-open' else 0],
                                'popup_count': len(popups),
                                'popups': popups,
                                'commands': list(range(0x9020, 0x9024)), 'states': states,
@@ -425,6 +425,28 @@ class VmRunnerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.verify_picker_checks(checks, gui)
 
+    def test_language_menu_trace_accepts_first_down_and_bounded_wrap(self):
+        choice = copy.deepcopy(self.result['gui']['language_checks']['selections'][0]['choice'])
+        trace = choice['input_trace']
+        first = copy.deepcopy(trace[1])
+        trace[1]['states'] = [0] * 4
+        trace[1]['highlighted_indices'] = []
+        first.update(phase='down-1', view_language_state=0,
+                     view_states=[0] * 10)
+        trace.insert(2, first)
+        for step, stage in enumerate(trace[3:-1], start=2):
+            stage['phase'] = f'down-{step}'
+        vm.verify_language_menu_input_trace(choice, 0x9022)
+
+        wrap = copy.deepcopy(self.result['gui']['language_checks']['selections'][3]['choice'])
+        trace = wrap['input_trace']
+        trace[1]['states'] = [0, 0, 0, 0x80]
+        trace[1]['highlighted_indices'] = [3]
+        moved = copy.deepcopy(trace[-1])
+        moved['phase'] = 'down-1'
+        trace.insert(-1, moved)
+        vm.verify_language_menu_input_trace(wrap, 0x9020)
+
     def test_language_acceptance_requires_bound_menu_persistence_and_file_outcomes(self):
         checks = self.result['gui']['language_checks']
         self.assertTrue(vm.verify_language_checks(self.root, self.manifest, checks,
@@ -437,6 +459,12 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['selections'][0]['choice']['input_trace'][-1].update(gui_flags=0),
             lambda row: row['selections'][0]['choice']['input_trace'][0].update(popups=[]),
             lambda row: row['selections'][0]['choice']['input_trace'][0].update(popup_count=2),
+            lambda row: row['selections'][0]['choice']['input_trace'][1].update(
+                view_language_state=0, view_states=[0] * 10),
+            lambda row: row['selections'][0]['choice']['input_trace'][1].update(
+                states=[0x80, 0x80, 0, 0], highlighted_indices=[0, 1]),
+            lambda row: row['selections'][0]['choice']['input_trace'][1].update(
+                states=[0] * 4, highlighted_indices=[]),
             lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0].update(
                 process_id=999),
             lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0].update(
@@ -445,6 +473,7 @@ class VmRunnerTests(unittest.TestCase):
             lambda row: row['selections'][0]['choice']['input_trace'][1]['view_states'].__setitem__(9, 0),
             lambda row: row['selections'][0]['choice']['input_trace'][-1]['popups'][1].update(
                 hwnd=row['selections'][0]['choice']['input_trace'][-1]['popups'][0]['hwnd']),
+            lambda row: row['selections'][0]['choice']['input_trace'][-1]['popups'][1].update(hwnd=999),
             lambda row: row['selections'][0]['choice']['input_trace'][0]['popups'][0]['bounds'].update(
                 right=5000),
             lambda row: row['selections'][0]['choice']['post_enter'][-1].update(preference=None),

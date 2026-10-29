@@ -1541,10 +1541,15 @@ def verify_valid_active_recovery(root, manifest, record):
 def verify_language_menu_input_trace(choice, target):
     trace = choice.get('input_trace')
     target_index = target - 0x9020
-    phases = ['alt-v', 'end', 'right', 'home'] + [
-        'down-' + str(index) for index in range(1, target_index + 1)] + ['pre-enter']
-    if not isinstance(trace, list) or len(trace) != len(phases):
+    if not isinstance(trace, list) or not 3 <= len(trace) <= 7:
         raise ValueError('Real language menu keyboard stage trace is incomplete.')
+    down_count = len(trace) - 3
+    phases = ['alt-v', 'language-open'] + [
+        'down-' + str(index) for index in range(1, down_count + 1)] + ['pre-enter']
+    current_highlight = None
+    view_popup = None
+    language_popups = None
+    language_handle = None
     for index, (stage, phase) in enumerate(zip(trace, phases)):
         if (not isinstance(stage, dict) or stage.get('phase') != phase or
                 any(type(stage.get(key)) is not int or stage[key] <= 0 for key in
@@ -1563,7 +1568,7 @@ def verify_language_menu_input_trace(choice, target):
                 not isinstance(stage.get('popups'), list) or
                 type(stage.get('popup_count')) is not int or
                 stage['popup_count'] != len(stage['popups']) or
-                len(stage['popups']) != (1 if phase in ('alt-v', 'end') else 2) or
+                len(stage['popups']) != (1 if phase == 'alt-v' else 2) or
                 stage.get('commands') != list(range(0x9020, 0x9024)) or
                 not isinstance(stage.get('states'), list) or len(stage['states']) != 4 or
                 any(type(state) is not int or state < 0 for state in stage['states'])):
@@ -1584,16 +1589,36 @@ def verify_language_menu_input_trace(choice, target):
             popup_handles.append(popup['hwnd'])
         if len(set(popup_handles)) != len(popup_handles):
             raise ValueError('Real language menu popups reuse a native window handle.')
+        if language_handle is None:
+            language_handle = stage['language_handle']
+            view_popup = popup_handles[0]
+        elif stage['language_handle'] != language_handle:
+            raise ValueError('Real language menu handle changed during keyboard navigation.')
+        if index == 1:
+            if view_popup not in popup_handles:
+                raise ValueError('Language mnemonic replaced the bound View popup.')
+            language_popups = set(popup_handles)
+        elif index > 1 and set(popup_handles) != language_popups:
+            raise ValueError('Language submenu popups changed during keyboard navigation.')
         highlighted = [position for position, state in enumerate(stage['states'])
                        if state & 0x80]
         if stage.get('highlighted_indices') != highlighted:
             raise ValueError('Real language menu highlighted indices contradict native states.')
-        expected = 0 if phase == 'home' else (
-            int(phase[5:]) if phase.startswith('down-') else
-            target_index if phase == 'pre-enter' else None)
-        if (phase == 'end' and stage['view_language_state'] & 0x80 == 0 or
-                expected is not None and
-                (highlighted != [expected] or stage['states'][expected] & 0x3)):
+        if phase == 'language-open':
+            if (stage['view_language_state'] & 0x80 == 0 or len(highlighted) > 1 or
+                    highlighted and stage['states'][highlighted[0]] & 0x3):
+                raise ValueError('Language mnemonic did not open the selected native submenu.')
+            current_highlight = highlighted[0] if highlighted else None
+        elif phase.startswith('down-'):
+            if current_highlight == target_index:
+                raise ValueError('Language navigation continued after reaching its target.')
+            expected = 0 if current_highlight is None else (current_highlight + 1) % 4
+            if highlighted != [expected] or stage['states'][expected] & 0x3:
+                raise ValueError('Real language menu Down did not move to its enabled next item.')
+            current_highlight = expected
+        elif phase == 'pre-enter' and (current_highlight != target_index or
+                                       highlighted != [target_index] or
+                                       stage['states'][target_index] & 0x3):
             raise ValueError('Real language menu was not visibly on the enabled target.')
     if (not isinstance(choice.get('status_before'), str) or
             len(choice['status_before']) > 512):

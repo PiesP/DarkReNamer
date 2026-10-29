@@ -2632,16 +2632,21 @@ function Test-ProductionLanguageNativeInputAudit {
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Send-ProductionLanguageNativeInput'
     }, $true))
+    $keyPacket = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-ProductionLanguageKeyPacket'
+    }, $true))
     $initializer = @($SourceAst.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Initialize-ProductionLanguageMenuReader'
     }, $true))
-    if ($choice.Count -ne 1 -or $sender.Count -ne 1 -or $initializer.Count -ne 1) { return $false }
+    if ($choice.Count -ne 1 -or $sender.Count -ne 1 -or
+        $keyPacket.Count -ne 1 -or $initializer.Count -ne 1) { return $false }
     $calls = @($choice[0].FindAll({ param($node)
         $node -is [Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -ceq 'Send-ProductionLanguageNativeInput'
     }, $true))
-    $actions = @('alt-v', 'end', 'right', 'home', 'down', 'enter')
+    $actions = @('alt-v', 'language-mnemonic', 'down', 'down', 'enter')
     if ($calls.Count -ne $actions.Count) { return $false }
     for ($index = 0; $index -lt $actions.Count; $index++) {
         $call = $calls[$index].Extent.Text
@@ -2655,7 +2660,7 @@ function Test-ProductionLanguageNativeInputAudit {
     $senderText = $sender[0].Extent.Text
     $choiceText = $choice[0].Extent.Text
     $nativeText = $initializer[0].Extent.Text
-    if ($senderText.IndexOf("[ValidateSet('alt-v', 'end', 'right', 'home', 'down', 'enter')]", [StringComparison]::Ordinal) -lt 0 -or
+    if ($senderText.IndexOf("[ValidateSet('alt-v', 'language-mnemonic', 'down', 'enter')]", [StringComparison]::Ordinal) -lt 0 -or
         [regex]::Matches($SourceAst.Extent.Text,
             '\[DarkReNamerLanguageMenuReader\]::(?:KeyDown|KeyUp|Tap|TapExtended)\(').Count -ne 5) {
         return $false
@@ -2665,16 +2670,18 @@ function Test-ProductionLanguageNativeInputAudit {
         "[DarkReNamerLanguageMenuReader]::KeyDown([uint16]0x12)",
         "[DarkReNamerLanguageMenuReader]::Tap([uint16]0x56)",
         "[DarkReNamerLanguageMenuReader]::KeyUp([uint16]0x12)",
-        '[DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)',
-        '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)',
-        "if (`$Action -ceq 'enter')",
-        "'end'   { 0x23 }", "'right' { 0x27 }", "'home'  { 0x24 }",
-        "'down'  { 0x28 }", "'enter' { 0x0D }"
+        'Get-ProductionLanguageKeyPacket -Action $Action',
+        '[DarkReNamerLanguageMenuReader]::Tap([uint16]$packet.virtual_key)',
+        '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)',
+        'if ($packet.extended)'
     )) {
         if ($senderText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
     }
     if ($senderText.IndexOf('finally {', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('Wait-ProductionLanguageMenuStage', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf("-Phase 'language-open' -RequireViewLanguageHighlight", [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Get-ProductionLanguageHighlightedIndex -Stage $languageOpen -AllowNone', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $preEnter', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('Get-ProductionLanguageChoiceObservation -Process $Process', [StringComparison]::Ordinal) -lt 0 -or
         $choiceText.IndexOf('SendWait', [StringComparison]::Ordinal) -ge 0) { return $false }
     foreach ($fragment in @(
@@ -2697,14 +2704,24 @@ function Test-ProductionLanguageNativeInputAudit {
     )) {
         if ($nativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
     }
+    foreach ($fragment in @(
+        "[ValidateSet('language-mnemonic', 'down', 'enter')]",
+        "'language-mnemonic' { return [ordered]@{ virtual_key = 0x4C; extended = `$false } }",
+        "'down'              { return [ordered]@{ virtual_key = 0x28; extended = `$true } }",
+        "'enter'             { return [ordered]@{ virtual_key = 0x0D; extended = `$false } }"
+    )) {
+        if ($keyPacket[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+            return $false
+        }
+    }
     $true
 }
 if (-not (Test-ProductionLanguageNativeInputAudit -SourceAst $fromFile)) {
     throw 'Language menu native input lost its reviewed keys, foreground guard, or SendInput ABI.'
 }
 $nonExtendedLanguageSource = $recoveryModuleSource.Replace(
-    '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$virtualKey)',
-    '[DarkReNamerLanguageMenuReader]::Tap([uint16]$virtualKey)')
+    '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)',
+    '[DarkReNamerLanguageMenuReader]::Tap([uint16]$packet.virtual_key)')
 if ($nonExtendedLanguageSource -ceq $recoveryModuleSource) {
     throw 'Extended language navigation negative fixture no longer matches the source.'
 }
