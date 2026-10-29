@@ -792,8 +792,8 @@ CodeView identities; the VM bundle does not contain PDBs. A passing
 `validation-result.json` binds the source, test binary, complete stdout and
 stderr bytes, exact libtest outcome, process Job, transport, and owned cleanup.
 
-The test emits 183 schema-1 `runtime-model-baseline` records: three independent
-repetitions each at 100, 1,000, and 10,000 model rows. Each repetition includes
+The test emits 183 schema-1 `runtime-model-baseline` records, with three
+repetitions at 100, 1,000, and 10,000 model rows in each process. Each repetition includes
 full preview uniqueness/collision groups, five single-row edit cases, four
 model sort distributions, and native command sorting with none/sparse selection;
 10,000 shuffled rows also include broad selection. The fixed verifier rejects
