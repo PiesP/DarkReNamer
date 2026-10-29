@@ -477,7 +477,7 @@ try {
     } else {
         $verified.manifest.application
     }
-    if (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution) {
+    if (-not $refreshProfile -and -not $runtimeModel -and -not $focusedTests -and -not $virtualExecution) {
         $result.gui = Invoke-GuiSmoke `
             -Application $applicationArtifact `
             -Root $verified.root `
@@ -491,10 +491,10 @@ try {
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
     if ($testFailures.Count -eq 0 -and
-        ((($refreshProfile -or $focusedTests -or $virtualExecution) -and
+        ((($refreshProfile -or $runtimeModel -or $focusedTests -or $virtualExecution) -and
           $result.tests.Count -eq $testInvocations.Count -and $null -eq $result.gui -and
           $null -eq $result.failure_reason) -or
-         (-not $refreshProfile -and -not $focusedTests -and -not $virtualExecution -and
+         (-not $refreshProfile -and -not $runtimeModel -and -not $focusedTests -and -not $virtualExecution -and
           $result.gui.status -ceq 'passed' -and
           ($candidateLane -or $result.tests.Count -gt 0)))) {
         $result.status = 'passed'

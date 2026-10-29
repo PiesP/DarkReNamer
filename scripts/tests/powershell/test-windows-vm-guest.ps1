@@ -4293,6 +4293,58 @@ Invoke-DrTestPowerShellModuleScope `
         Set-Item Function:\Invoke-RustTestBinary $savedNativeHelper
     }
     $guestEntryText = [IO.File]::ReadAllText($guestEntryPath, [Text.Encoding]::UTF8)
+    $completionText = $guestEntryText.Replace("`r`n", "`n")
+    $completionStart = $completionText.IndexOf(
+        '    $applicationArtifact = if ($candidateLane)', [StringComparison]::Ordinal)
+    $completionEnd = $completionText.IndexOf("`n}`ncatch {", $completionStart,
+        [StringComparison]::Ordinal)
+    if ($completionStart -lt 0 -or $completionEnd -le $completionStart) {
+        throw 'The actual guest completion path could not be isolated.'
+    }
+    $guestCompletion = [scriptblock]::Create(
+        $completionText.Substring($completionStart, $completionEnd - $completionStart))
+    $savedGuiSmoke = (Get-Command Invoke-GuiSmoke).ScriptBlock
+    try {
+        function Invoke-GuiSmoke {
+            param($Application, $Root, $OutputRoot, $RuntimeRoot, $FixtureParentRoot,
+                $ExpectedSession, $TimeoutSeconds, [switch]$RawEvidence)
+            $script:completionGuiCalls++
+            [pscustomobject]@{ status = 'passed' }
+        }
+        & {
+            foreach ($selection in @('ordinary', 'refresh', 'runtime-model', 'focused', 'virtual')) {
+                foreach ($outcome in @('passed', 'failed', 'missing')) {
+                    $refreshProfile = $selection -ceq 'refresh'
+                    $runtimeModel = $selection -ceq 'runtime-model'
+                    $focusedTests = $selection -ceq 'focused'
+                    $virtualExecution = $selection -ceq 'virtual'
+                    $candidateLane = $false
+                    $verified = [pscustomobject]@{
+                        root = $focusedBindingRoot
+                        manifest = [pscustomobject]@{ application = [pscustomobject]@{ file = 'not-launched.exe' } }
+                    }
+                    $testInvocations = @(1)
+                    $result = [ordered]@{
+                        tests = @(if ($outcome -cne 'missing') { [pscustomobject]@{ status = $outcome } })
+                        gui = $null; status = 'running'; failure_reason = $null
+                    }
+                    $fixtureParentRoot = $focusedBindingRoot
+                    $ExpectedSessionId = 1
+                    $script:completionGuiCalls = 0
+                    & $guestCompletion
+                    $expectedGuiCalls = if ($selection -ceq 'ordinary') { 1 } else { 0 }
+                    if ($script:completionGuiCalls -ne $expectedGuiCalls -or
+                        ($selection -cne 'ordinary' -and $null -ne $result.gui) -or
+                        (($result.status -ceq 'passed') -ne ($outcome -ceq 'passed'))) {
+                        throw "Guest completion mixed diagnostic/GUI success: $selection/$outcome."
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        Set-Item Function:\Invoke-GuiSmoke $savedGuiSmoke
+    }
     $loopStart = $guestEntryText.IndexOf(
         '    $testInvocations = [Collections.Generic.List[object]]::new()',
         [StringComparison]::Ordinal)

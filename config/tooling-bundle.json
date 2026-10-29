@@ -536,7 +536,7 @@
       "bundle": "guest-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "05b0ed867f6650a8a86a227249ab87c9e150d59c5b5da55deee476d71b233d78",
+      "sha256": "fc5ce5f13189139710bf84887c1dbb4856193ef3dbe255d020bcb1e1c9779e86",
       "dependencies": [
         "powershell-loader",
         "powershell-guest-contracts",
