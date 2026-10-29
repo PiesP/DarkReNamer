@@ -17,7 +17,8 @@ use crate::DIRECTORY_DIRECT_BUTTON_ID;
 use crate::DIRECTORY_RECURSE_BUTTON_ID;
 use crate::DestructivePromptChoice;
 use crate::DirectoryPromptChoice;
-use crate::PREVIEW_SYNC_BLOCK_MESSAGE;
+use crate::i18n::runtime::{self as rt, Text as RT};
+
 use crate::active_worker_kind;
 use crate::admission::AdmissionAdapter;
 use crate::admission::AdmissionMode;
@@ -164,7 +165,7 @@ pub(super) fn start_import_worker_from(
     if state.import_worker.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "import already active",
+            crate::i18n::runtime::Text::ImportAlreadyActive.get(),
         ));
     }
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -202,7 +203,7 @@ pub(super) fn start_import_worker_from(
         handle,
     });
     state.mutation_locked = true;
-    state.set_progress_status("가져오기 파일을 읽는 중입니다. 취소를 요청할 수 있습니다...");
+    state.set_progress_status(RT::ImportReading.get());
     update_controls(state);
     Ok(())
 }
@@ -232,12 +233,15 @@ pub(super) fn handle_import_completion(window: HWND, state: &mut AppState) {
         || state.apply_worker.is_some();
     let cancelled = worker.cancellation.load(Ordering::Acquire);
     let result = if joined.is_err() {
-        Err(io::Error::other("import worker terminated unexpectedly"))
+        Err(io::Error::other(
+            crate::i18n::runtime::Text::ImportWorkerTerminated.get(),
+        ))
     } else {
-        worker
-            .receiver
-            .try_recv()
-            .unwrap_or_else(|_| Err(io::Error::other("import worker did not return a result")))
+        worker.receiver.try_recv().unwrap_or_else(|_| {
+            Err(io::Error::other(
+                crate::i18n::runtime::Text::ImportWorkerNoResult.get(),
+            ))
+        })
     };
     finish_import_worker_result(
         window,
@@ -389,9 +393,7 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
         }) {
             Ok(writer) => Some(writer),
             Err(error) => {
-                state.set_transient_status(format!(
-                    "열 표시 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-                ));
+                state.set_transient_status(rt::column_writer_start_failed(&error));
                 None
             }
         }
@@ -409,9 +411,7 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
         ) {
             Ok(writer) => Some(writer),
             Err(error) => {
-                state.set_transient_status(format!(
-                    "모양 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-                ));
+                state.set_transient_status(rt::appearance_writer_start_failed(&error));
                 None
             }
         }
@@ -425,10 +425,7 @@ pub(super) fn start_preferences_writers(window: HWND, state: &mut AppState) {
     // SAFETY: the timer belongs to the live top-level window and supplies a
     // loss-safe completion poll if a coalesced PostMessageW wake is missed.
     if unsafe { SetTimer(window, PREFERENCES_POLL_TIMER_ID, 250, None) } == 0 {
-        state.set_transient_status(format!(
-            "열 표시 설정 완료 감시 timer를 시작하지 못했습니다: {}",
-            io::Error::last_os_error()
-        ));
+        state.set_transient_status(rt::column_writer_timer_failed(&io::Error::last_os_error()));
     }
 }
 
@@ -580,8 +577,8 @@ fn preview_is_ready_for_apply(window: HWND, state: &AppState) -> bool {
     if !state.preview_synchronization.is_synchronized() {
         message(
             window,
-            PREVIEW_SYNC_BLOCK_MESSAGE,
-            "DarkReNamer - 적용 차단",
+            crate::i18n::common::Text::PreviewSyncBlocked.get(),
+            RT::ApplyBlockedTitle.get(),
         );
         false
     } else {
@@ -597,19 +594,15 @@ pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
         let blocker_explanation = state
             .preview_issue_cache
             .blocker_explanation()
-            .unwrap_or("표시된 행의 대상 이름 문제를 수정해 주세요.");
+            .unwrap_or(RT::FixDisplayedDestination.get());
         clear_selection(state.list_window);
         select_rows(state.list_window, &state.preview_issue_cache.blocker_rows());
         update_controls(state);
-        message(window, blocker_explanation, "DarkReNamer - 적용 차단");
+        message(window, blocker_explanation, RT::ApplyBlockedTitle.get());
         return;
     }
     if state.apply_locked() {
-        message(
-            window,
-            "복구 또는 다른 변경이 진행 중이어서 적용할 수 없습니다.",
-            "DarkReNamer",
-        );
+        message(window, RT::ApplyBusy.get(), "DarkReNamer");
         return;
     }
     let revision = state.revision();
@@ -631,7 +624,7 @@ pub(super) fn handle_ready_plan(
                 clear_selection(state.list_window);
                 select_rows(state.list_window, &rows);
                 update_controls(state);
-                message(window, &message_text, "DarkReNamer - 적용 차단");
+                message(window, &message_text, RT::ApplyBlockedTitle.get());
             }
             return None;
         }
@@ -639,15 +632,15 @@ pub(super) fn handle_ready_plan(
             message(
                 window,
                 &execute_error_korean(&error),
-                "DarkReNamer - 적용 차단",
+                RT::ApplyBlockedTitle.get(),
             );
             return None;
         }
         Err(ReadyPlanError::Summary) => {
             message(
                 window,
-                "실행 계획 요약이 내부 실행 단계와 일치하지 않습니다. 파일 변경은 시작되지 않았습니다.",
-                "DarkReNamer - 적용 차단",
+                RT::PlanSummaryMismatch.get(),
+                RT::ApplyBlockedTitle.get(),
             );
             return None;
         }
@@ -657,23 +650,22 @@ pub(super) fn handle_ready_plan(
     }
     let plan = ready.plan;
     if plan.is_empty() {
-        message(window, "변경할 항목이 없습니다.", "DarkReNamer");
+        message(window, RT::NothingToChange.get(), "DarkReNamer");
         return None;
     }
-    let primary = format!(
-        "{}\n\n{}\n\n{}\n\n아직 파일을 변경하지 않았습니다. 취소하면 미리보기로 돌아갑니다.",
-        apply_confirmation_scope(
+    let primary = rt::apply_confirmation_content(
+        &apply_confirmation_scope(
             state.model.items().len(),
             selected_indices(state.list_window).len(),
-            ready.summary.logical_changed()
+            ready.summary.logical_changed(),
         ),
-        apply_confirmation_primary(&ready.summary),
-        apply_confirmation_examples(&plan, false),
+        &apply_confirmation_primary(&ready.summary),
+        &apply_confirmation_examples(&plan, false),
     );
     let detail =
         apply_confirmation_detail(&ready.summary, plan.fingerprint(), state.model_revision);
     let text_details = PreparedTextDetails {
-        caption: "DarkReNamer - 변경 예시 전체 정보".to_owned(),
+        caption: RT::ApplyFullDetailsTitle.get().to_owned(),
         text: apply_confirmation_examples(&plan, true),
         appearance: state.prompt_appearance(),
     };
@@ -683,19 +675,19 @@ pub(super) fn handle_ready_plan(
     Some(PreparedWorkerTaskDialog::Apply(PreparedApplyTaskDialog {
         session,
         spec: PreparedTaskDialogSpec {
-            title: "DarkReNamer - 안전한 적용 확인".to_owned(),
-            main_instruction: "계획된 파일 변경을 적용하시겠습니까?".to_owned(),
+            title: RT::ApplyConfirmTitle.get().to_owned(),
+            main_instruction: RT::ApplyConfirmQuestion.get().to_owned(),
             content: primary,
             expanded_information: Some(detail),
             text_details: Some(text_details),
             buttons: vec![
                 PreparedTaskDialogButton {
                     id: APPLY_CONFIRM_BUTTON_ID,
-                    text: "변경 적용".to_owned(),
+                    text: RT::ApplyButton.get().to_owned(),
                 },
                 PreparedTaskDialogButton {
                     id: TEXT_DETAILS_BUTTON_ID,
-                    text: "예시 전체 정보 · 복사".to_owned(),
+                    text: RT::ApplyFullDetailsButton.get().to_owned(),
                 },
             ],
             warning: true,
@@ -725,9 +717,7 @@ fn run_prepared_apply_task_dialog(
     }
     if disposition != PreparedTaskDialogDisposition::Accepted {
         if disposition == PreparedTaskDialogDisposition::Rejected {
-            state.set_transient_status(
-                "확인 중 목록 또는 작업 상태가 바뀌어 실행 계획을 적용하지 않았습니다.",
-            );
+            state.set_transient_status(RT::ApplyStateChanged.get());
         }
         return;
     }
@@ -736,8 +726,8 @@ fn run_prepared_apply_task_dialog(
         Err(error) => {
             message(
                 window,
-                &format!("안전 확인 대화상자를 열지 못해 적용을 취소했습니다: {error}"),
-                "DarkReNamer - 적용 취소",
+                &rt::apply_dialog_failed(&error),
+                RT::ApplyCancelledTitle.get(),
             );
             return;
         }
@@ -745,16 +735,14 @@ fn run_prepared_apply_task_dialog(
     if destructive_prompt_choice(answer, APPLY_CONFIRM_BUTTON_ID)
         != DestructivePromptChoice::Confirm
     {
-        state.set_result_status("적용하지 않았습니다. 미리보기를 계속 편집할 수 있습니다.");
+        state.set_result_status(RT::ApplyNotStarted.get());
         return;
     }
     if !preview_is_ready_for_apply(window, state) {
         return;
     }
     if state.apply_locked() {
-        state.set_transient_status(
-            "확인 중 복구 또는 다른 작업 상태가 바뀌어 실행 계획을 적용하지 않았습니다.",
-        );
+        state.set_transient_status(RT::ApplyRecoveryChanged.get());
         return;
     }
     if state.revision() != prepared.revision
@@ -762,11 +750,7 @@ fn run_prepared_apply_task_dialog(
         || prepared.plan.fingerprint() != prepared.fingerprint
     {
         {
-            message(
-                window,
-                "확인 후 목록이 변경되었습니다. 다시 계획하고 확인해 주세요.",
-                "DarkReNamer",
-            )
+            message(window, RT::ApplyListChanged.get(), "DarkReNamer")
         }
         return;
     }
@@ -815,7 +799,7 @@ pub(super) fn handle_completed_execution(
                 message(
                     window,
                     &cleanup_error.to_string(),
-                    "DarkReNamer - 저널 정리 실패",
+                    RT::JournalCleanupFailedTitle.get(),
                 );
             }
             if matches!(error.kind, crate::rename::ExecuteErrorKind::Cancelled)
@@ -824,21 +808,16 @@ pub(super) fn handle_completed_execution(
                 state.set_result_status(text);
             } else {
                 if !state.recovery_locked {
-                    state.set_result_status(
-                        "적용 전 검사에서 중단 · 파일 변경 없음. 오류를 해결한 뒤 다시 적용하세요.",
-                    );
+                    state.set_result_status(RT::PreApplyRefused.get());
                 }
-                message(window, &text, "DarkReNamer - 실행 거부");
+                message(window, &text, RT::ExecutionRefusedTitle.get());
             }
             update_controls(state);
             return;
         }
     };
     let text = if matches!(report.outcome(), ExecutionOutcome::Completed) {
-        format!(
-            "{}개 변경 완료 · 목록에 실제 결과를 반영했습니다.",
-            report.entries().len()
-        )
+        rt::apply_completed_rows(report.entries().len())
     } else {
         execution_outcome_korean(report.outcome())
     };
@@ -850,8 +829,8 @@ pub(super) fn handle_completed_execution(
                 state.active_journal = Some(journal);
                 message(
                     window,
-                    "완료 결과를 목록과 일치시키지 못했습니다. 저널을 보존하고 적용을 잠급니다.",
-                    "DarkReNamer - 확인 필요",
+                    RT::OutcomeMismatch.get(),
+                    RT::ReviewNeededTitle.get(),
                 );
                 update_controls(state);
                 return;
@@ -862,7 +841,11 @@ pub(super) fn handle_completed_execution(
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
+                message(
+                    window,
+                    &error.to_string(),
+                    RT::JournalCleanupFailedTitle.get(),
+                );
             } else {
                 state.set_result_status(text);
             }
@@ -872,13 +855,17 @@ pub(super) fn handle_completed_execution(
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
+                message(
+                    window,
+                    &error.to_string(),
+                    RT::JournalCleanupFailedTitle.get(),
+                );
             } else {
                 match execution_outcome_presentation(report.outcome()) {
                     ExecutionOutcomePresentation::NonModal => state.set_result_status(text),
                     ExecutionOutcomePresentation::Modal => {
                         state.set_result_status(text.clone());
-                        message(window, &text, "DarkReNamer - 실행 실패");
+                        message(window, &text, RT::ExecutionFailedTitle.get());
                     }
                 }
             }
@@ -886,7 +873,7 @@ pub(super) fn handle_completed_execution(
         ExecutionOutcome::RecoveryRequired { .. } => {
             state.recovery_locked = true;
             state.active_journal = Some(journal);
-            message(window, &text, "DarkReNamer - 복구 필요");
+            message(window, &text, RT::RecoveryNeededTitle.get());
         }
     }
     update_controls(state);
@@ -905,11 +892,8 @@ pub(super) fn start_plan_worker(
     if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
         message(
             window,
-            &format!(
-                "planning worker 완료 감시 timer를 시작하지 못했습니다: {}",
-                io::Error::last_os_error()
-            ),
-            "DarkReNamer - 실행 실패",
+            &rt::planner_timer_failed(&io::Error::last_os_error()),
+            RT::ExecutionFailedTitle.get(),
         );
         return;
     }
@@ -975,8 +959,8 @@ pub(super) fn start_plan_worker(
             unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
             message(
                 window,
-                &format!("planning worker를 시작하지 못했습니다: {error}"),
-                "DarkReNamer - 실행 실패",
+                &rt::planner_start_failed(&error),
+                RT::ExecutionFailedTitle.get(),
             );
             return;
         }
@@ -987,7 +971,7 @@ pub(super) fn start_plan_worker(
         receiver,
         handle,
     });
-    state.set_progress_status("파일 시스템을 확인하고 실행 계획을 만들고 있습니다...");
+    state.set_progress_status(RT::PlanningProgress.get());
     update_controls(state);
 }
 
@@ -1014,8 +998,8 @@ pub(super) fn handle_plan_completion(
     if joined.is_err() {
         message(
             window,
-            "planning worker가 비정상 종료되었습니다. 파일 변경은 시작되지 않았습니다.",
-            "DarkReNamer - 계획 오류",
+            RT::PlannerCrashed.get(),
+            RT::PlanningErrorTitle.get(),
         );
         update_controls(state);
         return None;
@@ -1030,22 +1014,22 @@ pub(super) fn handle_plan_completion(
             prepared
         }
         Ok(PlanWorkerResult::Cancelled) => {
-            state.set_transient_status("파일 변경 계획을 취소했습니다.");
+            state.set_transient_status(RT::PlanningCancelled.get());
             None
         }
         Ok(PlanWorkerResult::Panicked) => {
             message(
                 window,
-                "planning worker 내부 오류가 발생했습니다. 파일 변경은 시작되지 않았습니다.",
-                "DarkReNamer - 계획 오류",
+                RT::PlannerInternalError.get(),
+                RT::PlanningErrorTitle.get(),
             );
             None
         }
         Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
             message(
                 window,
-                "planning worker가 결과를 전달하지 못했습니다. 파일 변경은 시작되지 않았습니다.",
-                "DarkReNamer - 계획 결과 없음",
+                RT::PlannerNoResult.get(),
+                RT::PlanningNoResultTitle.get(),
             );
             None
         }
@@ -1065,8 +1049,8 @@ pub(super) fn start_apply_worker(
             state.recovery_locked = true;
             message(
                 window,
-                &format!("저널 루트 권한을 worker로 전달하지 못했습니다. {error}"),
-                "DarkReNamer - 적용 잠김",
+                &rt::journal_root_transfer_failed(&error),
+                RT::ApplyLockedTitle.get(),
             );
             update_controls(state);
             return;
@@ -1085,11 +1069,8 @@ pub(super) fn start_apply_worker(
     if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
         message(
             window,
-            &format!(
-                "worker 완료 감시 timer를 시작하지 못했습니다: {}",
-                io::Error::last_os_error()
-            ),
-            "DarkReNamer - 실행 실패",
+            &rt::apply_worker_timer_failed(&io::Error::last_os_error()),
+            RT::ExecutionFailedTitle.get(),
         );
         return;
     }
@@ -1126,8 +1107,8 @@ pub(super) fn start_apply_worker(
             unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
             message(
                 window,
-                &format!("적용 worker를 시작하지 못했습니다: {error}"),
-                "DarkReNamer - 실행 실패",
+                &rt::apply_worker_start_failed(&error),
+                RT::ExecutionFailedTitle.get(),
             );
             return;
         }
@@ -1139,7 +1120,7 @@ pub(super) fn start_apply_worker(
         receiver,
         handle,
     });
-    state.set_progress_status("실행 순서를 준비하고 있습니다...");
+    state.set_progress_status(RT::ExecutionOrderProgress.get());
     update_controls(state);
 }
 
@@ -1155,17 +1136,13 @@ pub(super) fn handle_apply_progress(state: &mut AppState) {
     let cancellation_requested = worker.cancellation.is_requested();
     let text = match (phase, cancellation_requested) {
         (ExecutionPhase::Ready | ExecutionPhase::Forward, true) => {
-            format!("취소 요청됨 · 처리 결과를 기다려 주세요 ({completed}/{total} 단계)")
+            rt::apply_cancel_requested(completed, total)
         }
-        (ExecutionPhase::Ready, _) => format!("실행 준비 완료: {total} 단계"),
-        (ExecutionPhase::Forward, _) => format!("파일 변경 중: {completed}/{total} 단계"),
-        (ExecutionPhase::Rollback, _) => {
-            format!("원래 상태로 복원 중: {completed}/{total} 단계 · 복원은 중단할 수 없습니다")
-        }
-        (ExecutionPhase::Terminal, _) => "파일 처리 결과를 목록에 반영하고 있습니다...".to_owned(),
-        (ExecutionPhase::Finalizing, _) => {
-            "변경 결과 확정 중 · 이 단계는 취소할 수 없습니다".to_owned()
-        }
+        (ExecutionPhase::Ready, _) => rt::apply_ready(total),
+        (ExecutionPhase::Forward, _) => rt::apply_forward(completed, total),
+        (ExecutionPhase::Rollback, _) => rt::apply_rollback(completed, total),
+        (ExecutionPhase::Terminal, _) => RT::ReflectingResult.get().to_owned(),
+        (ExecutionPhase::Finalizing, _) => RT::FinalizingResult.get().to_owned(),
     };
     state.set_progress_status(text);
     if matches!(
@@ -1204,8 +1181,8 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
         state.recovery_locked = true;
         message(
             window,
-            "적용 worker가 비정상 종료되었습니다. 남은 저널을 다음 시작에서 복구하도록 적용을 잠급니다.",
-            "DarkReNamer - worker 오류",
+            RT::ApplyWorkerCrashed.get(),
+            RT::WorkerErrorTitle.get(),
         );
     } else {
         match worker.receiver.try_recv() {
@@ -1213,8 +1190,8 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
                 state.recovery_locked = true;
                 message(
                     window,
-                    &format!("활성 저널을 만들지 못했습니다. {error}"),
-                    "DarkReNamer - 적용 잠김",
+                    &rt::active_journal_create_failed(&error),
+                    RT::ApplyLockedTitle.get(),
                 );
             }
             Ok(ApplyWorkerResult::Executed { journal, execution }) => {
@@ -1224,24 +1201,22 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
                 state.recovery_locked = true;
                 message(
                     window,
-                    "적용 worker 내부 오류가 발생했습니다. 남은 저널을 다음 시작에서 복구하도록 적용을 잠급니다.",
-                    "DarkReNamer - worker panic",
+                    RT::ApplyWorkerInternalError.get(),
+                    RT::WorkerPanicTitle.get(),
                 );
             }
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
                 state.recovery_locked = true;
                 message(
                     window,
-                    "적용 worker가 terminal 결과를 전달하지 못했습니다. 다음 시작 복구를 위해 적용을 잠급니다.",
-                    "DarkReNamer - worker 결과 없음",
+                    RT::ApplyWorkerNoTerminal.get(),
+                    RT::WorkerNoResultTitle.get(),
                 );
             }
         }
     }
     if state.recovery_locked {
-        state.set_recovery_status(
-            "복구 확인이 필요해 적용을 잠갔습니다. 복구 상태 메뉴에서 저널을 확인하세요.",
-        );
+        state.set_recovery_status(RT::RecoveryLockedForReview.get());
     }
     update_controls(state);
 }
@@ -1351,10 +1326,7 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
     // SAFETY: the message carries no pointer. The later callback rechecks the
     // close decision and releases its AppState lease before DestroyWindow.
     if unsafe { PostMessageW(window, WM_APP_FINISH_CLOSE, 0, 0) } == 0 {
-        state.set_transient_status(format!(
-            "종료 준비 메시지를 예약하지 못했습니다: {}",
-            io::Error::last_os_error()
-        ));
+        state.set_transient_status(rt::close_message_failed(&io::Error::last_os_error()));
     }
 }
 
@@ -1387,9 +1359,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         if let Some(shared) = &state.icon_shared {
             shared.request_retire();
             if !shared.is_joined() {
-                state.set_progress_status(
-                    "아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다.",
-                );
+                state.set_progress_status(RT::IconShutdownProgress.get());
             }
         }
         schedule_icon_poll(state);
@@ -1402,9 +1372,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     if let Some(worker) = state.admission_worker.as_ref() {
         if !worker.cancellation_requested() {
             worker.cancellation.store(true, Ordering::Release);
-            state.set_progress_status(
-                "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
-            );
+            state.set_progress_status(RT::CloseAfterPathCheck.get());
             update_controls(state);
         }
         return;
@@ -1412,9 +1380,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     if let Some(worker) = state.import_worker.as_ref() {
         if !worker.cancellation_requested() {
             worker.request_cancel();
-            state.set_progress_status(
-                "종료와 가져오기 취소를 요청했습니다. 파일 I/O가 끝나면 종료합니다...",
-            );
+            state.set_progress_status(RT::CloseAfterImport.get());
             update_controls(state);
         }
         return;
@@ -1422,21 +1388,17 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     if let Some(worker) = state.plan_worker.as_ref() {
         if !worker.cancellation_requested() {
             worker.cancellation.request();
-            state.set_progress_status(
-                "종료 요청을 받았습니다. 파일 시스템 확인이 끝나는 즉시 종료합니다...",
-            );
+            state.set_progress_status(RT::CloseAfterPlanning.get());
             update_controls(state);
         }
         return;
     }
     if let Some(worker) = state.apply_worker.as_ref() {
         if worker.is_finishing() {
-            state.set_progress_status("종료 요청됨 · 복원 또는 결과 처리가 끝나면 종료합니다.");
+            state.set_progress_status(RT::CloseAfterResult.get());
         } else if !worker.cancellation_requested() {
             worker.cancellation.request();
-            state.set_progress_status(
-                "종료와 취소를 요청했습니다. 파일 처리 결과가 확인되면 종료합니다...",
-            );
+            state.set_progress_status(RT::CloseAndCancel.get());
             update_controls(state);
         }
         return;
@@ -1456,16 +1418,15 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
         }),
         Some(ActiveWorkerKind::Import) => state.import_worker.as_ref().map(|worker| {
             worker.request_cancel();
-            "가져오기 취소를 요청했습니다. 현재 파일 I/O가 끝나면 결과를 버립니다...".to_owned()
+            RT::ImportCancellationProgress.get().to_owned()
         }),
         Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            "파일 변경 계획 취소를 요청했습니다. 현재 파일 시스템 확인 경계가 끝나면 중단합니다..."
-                .to_owned()
+            RT::PlanCancellationProgress.get().to_owned()
         }),
         Some(ActiveWorkerKind::Apply) => state.apply_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            "적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.".to_owned()
+            RT::ApplyCancellationProgress.get().to_owned()
         }),
         None => None,
     };
@@ -1512,9 +1473,8 @@ pub(super) fn start_admission_worker(
     let (sender, receiver) = sync_channel(1);
     // SAFETY: window is the live top-level HWND and the timer has no callback.
     if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
-        return Err(io::Error::other(format!(
-            "admission worker 완료 감시 timer를 시작하지 못했습니다: {}",
-            io::Error::last_os_error()
+        return Err(io::Error::other(rt::admission_timer_failed(
+            &io::Error::last_os_error(),
         )));
     }
     let window_value = window as usize;
@@ -1585,9 +1545,7 @@ pub(super) fn start_admission_worker(
         Err(error) => {
             // SAFETY: this exact timer was installed above for the live window.
             unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-            return Err(io::Error::other(format!(
-                "admission worker를 시작하지 못했습니다: {error}"
-            )));
+            return Err(io::Error::other(rt::admission_worker_start_failed(&error)));
         }
     };
     state.mutation_locked = true;
@@ -1636,28 +1594,25 @@ pub(super) fn handle_admission_progress(state: &mut AppState) {
 
 fn admission_progress_status(snapshot: AdmissionProgressSnapshot) -> String {
     let phase = match snapshot.phase {
-        AdmissionProgressPhase::SelectingMode => "선택한 경로의 유형을 확인하고 있습니다",
-        AdmissionProgressPhase::Collecting => "경로를 확인하고 있습니다",
+        AdmissionProgressPhase::SelectingMode => RT::SelectingModeProgress.get(),
+        AdmissionProgressPhase::Collecting => RT::CollectingProgress.get(),
     };
     if snapshot.inspected == 0 {
-        format!("{phase}... (취소 가능)")
+        rt::admission_progress_cancellable(phase)
     } else {
-        format!("{phase}: {}개 검사 시작됨 (취소 가능)", snapshot.inspected)
+        rt::admission_progress_inspected(phase, snapshot.inspected)
     }
 }
 
 fn admission_cancellation_status(snapshot: AdmissionProgressSnapshot) -> String {
     let phase = match snapshot.phase {
-        AdmissionProgressPhase::SelectingMode => "선택 유형 확인",
-        AdmissionProgressPhase::Collecting => "경로 확인",
+        AdmissionProgressPhase::SelectingMode => RT::SelectingModeShort.get(),
+        AdmissionProgressPhase::Collecting => RT::CollectingShort.get(),
     };
     if snapshot.inspected == 0 {
-        "경로 추가 취소를 요청했습니다. 현재 확인 경계가 끝나면 중단합니다...".to_owned()
+        RT::AdmissionCancellationProgress.get().to_owned()
     } else {
-        format!(
-            "경로 추가 취소를 요청했습니다. {phase} {}개 검사 시작 후 현재 확인 경계가 끝나면 중단합니다...",
-            snapshot.inspected
-        )
+        rt::admission_cancellation_inspected(phase, snapshot.inspected)
     }
 }
 
@@ -1706,7 +1661,7 @@ pub(super) fn finalize_admission_start_failure(state: &mut AppState) {
 }
 
 pub(super) fn report_admission_start_error(owner: HWND, error: &io::Error) {
-    message(owner, &error.to_string(), "DarkReNamer - 추가 실패");
+    message(owner, &error.to_string(), RT::AdmissionFailedTitle.get());
 }
 
 fn run_prepared_directory_task_dialog(
@@ -1730,9 +1685,7 @@ fn run_prepared_directory_task_dialog(
         || state.revision() != prepared.revision
     {
         if disposition == PreparedTaskDialogDisposition::Rejected {
-            state.set_transient_status(
-                "확인 중 목록 또는 작업 상태가 바뀌어 폴더 추가를 시작하지 않았습니다.",
-            );
+            state.set_transient_status(RT::AddFolderStateChanged.get());
         }
         return;
     }
@@ -1741,8 +1694,8 @@ fn run_prepared_directory_task_dialog(
         Err(error) => {
             message(
                 window,
-                &format!("폴더 추가 방식 대화상자를 열지 못해 추가를 취소했습니다: {error}"),
-                "DarkReNamer - 폴더 추가 취소",
+                &rt::folder_mode_dialog_failed(&error),
+                RT::FolderAddCancelledTitle.get(),
             );
             return;
         }
@@ -1751,8 +1704,7 @@ fn run_prepared_directory_task_dialog(
         DirectoryPromptChoice::Direct => AdmissionMode::Direct,
         DirectoryPromptChoice::Recurse => AdmissionMode::Recurse,
         DirectoryPromptChoice::Cancel => {
-            state
-                .set_transient_status("폴더 추가 방식을 취소했습니다. 목록은 변경되지 않았습니다.");
+            state.set_transient_status(RT::FolderModeCancelled.get());
             update_controls(state);
             return;
         }
@@ -1789,8 +1741,8 @@ pub(super) fn handle_admission_completion(
     if joined.is_err() {
         message(
             window,
-            "경로 확인 worker가 비정상 종료되었습니다. 목록은 변경되지 않았습니다.",
-            "DarkReNamer - 추가 오류",
+            RT::AdmissionWorkerCrashed.get(),
+            RT::AdmissionErrorTitle.get(),
         );
         update_controls(state);
         return None;
@@ -1805,8 +1757,8 @@ pub(super) fn handle_admission_completion(
             if state.revision() != revision {
                 message(
                     window,
-                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
-                    "DarkReNamer - 오래된 결과",
+                    RT::AdmissionStaleResult.get(),
+                    RT::StaleResultTitle.get(),
                 );
                 update_controls(state);
                 return None;
@@ -1817,26 +1769,26 @@ pub(super) fn handle_admission_completion(
                     .strip_suffix(&[0])
                     .unwrap_or(&directory_units),
             );
-            let directory_detail = format!("선택한 폴더: {directory_text}");
+            let directory_detail = rt::selected_directory(&directory_text);
             let session = begin_prepared_task_dialog(state)?;
             update_controls(state);
             return Some(PreparedWorkerTaskDialog::Directory(
                 PreparedDirectoryTaskDialog {
                     session,
                     spec: PreparedTaskDialogSpec {
-                        title: "DarkReNamer - 폴더 추가 방식".to_owned(),
-                        main_instruction: "선택한 폴더를 어떻게 추가할까요?".to_owned(),
-                        content: "목록에 추가할 범위를 선택하세요.".to_owned(),
+                        title: RT::FolderModeTitle.get().to_owned(),
+                        main_instruction: RT::FolderModeQuestion.get().to_owned(),
+                        content: RT::FolderModeDetail.get().to_owned(),
                         expanded_information: Some(directory_detail),
                         text_details: None,
                         buttons: vec![
                             PreparedTaskDialogButton {
                                 id: DIRECTORY_DIRECT_BUTTON_ID,
-                                text: "선택한 폴더만 추가".to_owned(),
+                                text: RT::AddSelectedFolderButton.get().to_owned(),
                             },
                             PreparedTaskDialogButton {
                                 id: DIRECTORY_RECURSE_BUTTON_ID,
-                                text: "하위 파일을 모두 추가".to_owned(),
+                                text: RT::AddSubfilesButton.get().to_owned(),
                             },
                         ],
                         warning: false,
@@ -1854,8 +1806,8 @@ pub(super) fn handle_admission_completion(
             if state.revision() != revision {
                 message(
                     window,
-                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
-                    "DarkReNamer - 오래된 결과",
+                    RT::AdmissionStaleResult.get(),
+                    RT::StaleResultTitle.get(),
                 );
             } else {
                 let items = std::mem::take(&mut report.items);
@@ -1871,7 +1823,7 @@ pub(super) fn handle_admission_completion(
                             message(
                                 window,
                                 &report.summary_korean(appended),
-                                "DarkReNamer - 일부 경로 제외",
+                                RT::SomePathsSkippedTitle.get(),
                             );
                         }
                         refresh(state);
@@ -1881,35 +1833,31 @@ pub(super) fn handle_admission_completion(
                     }
                     Err(error) => {
                         let error_message = proposal_mutation_error_korean(error);
-                        state.set_transient_status(format!(
-                            "{error_message} 기존 목록은 그대로 유지됩니다."
-                        ));
+                        state.set_transient_status(rt::admission_result_unchanged(error_message));
                         message(
                             window,
-                            &format!(
-                                "{error_message}\n\n경로 확인 결과를 반영하지 않았으며 기존 목록은 그대로 유지됩니다."
-                            ),
-                            "DarkReNamer - 추가 오류",
+                            &rt::admission_result_not_applied(error_message),
+                            RT::AdmissionErrorTitle.get(),
                         );
                     }
                 }
             }
         }
         Ok(AdmissionWorkerResult::Cancelled) => {
-            state.set_transient_status("경로 추가를 취소했습니다. 목록은 변경되지 않았습니다.");
+            state.set_transient_status(RT::PathAddCancelled.get());
         }
         Ok(AdmissionWorkerResult::Panicked) => {
             message(
                 window,
-                "경로 확인 worker 내부 오류가 발생했습니다. 목록은 변경되지 않았습니다.",
-                "DarkReNamer - 추가 오류",
+                RT::AdmissionWorkerInternalError.get(),
+                RT::AdmissionErrorTitle.get(),
             );
         }
         Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
             message(
                 window,
-                "경로 확인 worker가 결과를 전달하지 못했습니다. 목록은 변경되지 않았습니다.",
-                "DarkReNamer - 추가 결과 없음",
+                RT::AdmissionWorkerNoResult.get(),
+                RT::AdmissionNoResultTitle.get(),
             );
         }
     }
