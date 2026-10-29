@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
+import zlib
 
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
@@ -946,6 +947,35 @@ def checked_artifact(root, record):
     return path
 
 
+def checked_language_capture(root, record, expected_file):
+    """Check a bounded, source-bound native PNG capture and its recorded shape."""
+    if not isinstance(record, dict) or record.get('file') != expected_file:
+        raise ValueError('Language PNG capture inventory is incomplete.')
+    path = checked_artifact(root, record)
+    size = path.stat().st_size
+    if (type(record.get('bytes')) is not int or record['bytes'] != size or
+            not 45 <= size <= 8 * 1024 * 1024):
+        raise ValueError('Language PNG capture byte count is invalid.')
+    with path.open('rb') as stream:
+        header = stream.read(33)
+        stream.seek(-12, 2)
+        trailer = stream.read(12)
+    if (len(header) != 33 or header[:8] != b'\x89PNG\r\n\x1a\n' or
+            header[8:16] != b'\x00\x00\x00\rIHDR' or header[24] != 8 or
+            header[25] not in (2, 6) or header[26:29] != b'\x00\x00\x00' or
+            int.from_bytes(header[29:33], 'big') != zlib.crc32(header[12:29]) or
+            trailer != b'\x00\x00\x00\x00IEND\xaeB`\x82'):
+        raise ValueError('Language capture has an invalid PNG structure.')
+    width = int.from_bytes(header[16:20], 'big')
+    height = int.from_bytes(header[20:24], 'big')
+    if (type(record.get('width')) is not int or type(record.get('height')) is not int or
+            record['width'] != width or record['height'] != height or
+            not 1 <= width <= 16384 or not 1 <= height <= 16384 or
+            width * height > 100_000_000):
+        raise ValueError('Language capture PNG dimensions differ from the recorded window.')
+    return path
+
+
 def application_record(manifest):
     if manifest.get('schema_version') == 2:
         return manifest['product']['application']
@@ -1133,8 +1163,8 @@ def verify_picker_checks(checks, gui):
             filters = row.get('filters')
             valid_filters = filters == [] if acceptance == 'folder' else (
                 isinstance(filters, list) and len(filters) == 2 and
-                filters[0] in ('Text Files', 'Text Files (*.txt)') and
-                filters[1] in ('All Files', 'All Files (*.*)'))
+                filters[0] in ('텍스트 파일', '텍스트 파일 (*.txt)') and
+                filters[1] in ('모든 파일', '모든 파일 (*.*)'))
             if not valid_filters:
                 raise ValueError('VM production picker filters differ from the maintained policy.')
             if action == 'cancel':
@@ -1158,7 +1188,23 @@ def verify_picker_checks(checks, gui):
                     raise ValueError('VM production picker observed model differs from its expected result.')
 
 
-def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None):
+def verify_native_messagebox_ok(record):
+    if (not isinstance(record, dict) or
+            record.get('selection_contract') != 'sole-native-messagebox-button' or
+            type(record.get('native_button_count')) is not int or
+            record['native_button_count'] != 1 or
+            type(record.get('native_control_id')) is not int or
+            record['native_control_id'] <= 0 or
+            record.get('native_parent_bound') is not True or
+            record.get('native_class') != 'Button' or
+            record.get('enabled') is not True or
+            not isinstance(record.get('automation_id'), str) or
+            len(record['automation_id']) > 128):
+        raise ValueError('Native MessageBox OK control binding is incomplete.')
+
+
+def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None,
+                    screenshot_prefix='', language='ko', require_occupied=False):
     if not isinstance(flow, dict):
         raise ValueError('VM production GUI flow is missing or invalid.')
     if 'status' not in flow:
@@ -1205,10 +1251,49 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
         raise ValueError('VM production GUI flow left journal residue.')
     if flow.get('diagnostic') is not None:
         raise ValueError('Passing VM production GUI flow unexpectedly has a diagnostic artifact.')
+    copy = {
+        'ko': ('DarkReNamer - 안전한 적용 확인', '계획된 파일 변경을 적용하시겠습니까?',
+               '기존 파일을 덮어쓰지 않습니다.'),
+        'en': ('DarkReNamer - Confirm safe Apply', 'Apply the planned file changes?',
+               'Existing files will not be overwritten.'),
+        'ja': ('DarkReNamer - 安全な適用の確認', '計画されたファイル変更を適用しますか？',
+               '既存のファイルは上書きしません。'),
+    }
+    confirmation = flow.get('localized_confirmation')
+    if (not isinstance(confirmation, dict) or language not in copy or
+            tuple(confirmation.get(key) for key in ('title', 'question', 'no_overwrite')) != copy[language] or
+            not isinstance(confirmation.get('bounds'), dict) or
+            any(type(confirmation['bounds'].get(key)) not in (int, float) or
+                confirmation['bounds'][key] <= 0 for key in ('width', 'height'))):
+        raise ValueError('VM production GUI flow lost localized Apply and no-overwrite copy.')
+    if require_occupied:
+        titles = {'ko': ('DarkReNamer - 적용 차단', '대상 이름이 이미 사용 중입니다.'),
+                  'en': ('DarkReNamer - Apply blocked', 'The destination name is already in use.'),
+                  'ja': ('DarkReNamer - 適用をブロック', '変更先の名前はすでに使用されています。')}
+        occupied = flow.get('occupied_destination')
+        if (not isinstance(occupied, dict) or
+                tuple(occupied.get(key) for key in ('title', 'reason')) != titles[language] or
+                occupied.get('source_unchanged') is not True or
+                occupied.get('destination_unchanged') is not True or
+                occupied.get('journal_residue_count') != 0 or
+                not isinstance(occupied.get('ok_control'), dict) or
+                not isinstance(occupied.get('bounds'), dict) or
+                any(type(occupied['bounds'].get(key)) not in (int, float) or
+                    occupied['bounds'][key] <= 0 for key in ('width', 'height'))):
+            raise ValueError('VM production GUI flow did not prove localized no-overwrite refusal.')
+        verify_native_messagebox_ok(occupied['ok_control'])
+        for subject in ('source', 'destination'):
+            for suffix in ('sha256', 'file_identity_sha256'):
+                before = occupied.get(subject + '_before_' + suffix)
+                after = occupied.get(subject + '_after_' + suffix)
+                if (not isinstance(before, str) or
+                        not re.fullmatch(r'[0-9a-f]{64}', before) or before != after):
+                    raise ValueError('VM occupied destination raw content or identity changed.')
     screenshots = flow.get('screenshots')
     if not isinstance(screenshots, list) or len(screenshots) != 2:
         raise ValueError('VM production GUI flow screenshots are incomplete.')
-    expected_screenshots = {'rename-preview.png', 'apply-confirmation.png'}
+    expected_screenshots = {screenshot_prefix + 'rename-preview.png',
+                            screenshot_prefix + 'apply-confirmation.png'}
     if {row.get('file') for row in screenshots if isinstance(row, dict)} != expected_screenshots:
         raise ValueError('VM production GUI flow screenshots are missing or unexpected.')
     for row in screenshots:
@@ -1219,6 +1304,34 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('VM production GUI flow screenshot is not a PNG.')
+    if require_occupied:
+        checked_language_capture(root, flow.get('prefix_prompt_capture'),
+                                 language + '-prefix-prompt.png')
+        binding = {key: flow.get(key) for key in ('process_id', 'session_id', 'window_handle')}
+        if (any(type(binding[key]) is not int or binding[key] <= 0 for key in binding) or
+                not isinstance(flow.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', flow['process_start_time_utc_ticks'])):
+            raise ValueError('Language flow lacks process, window, session, or start identity.')
+        if gui_binding is not None and (
+                any(flow.get(key) != gui_binding.get(other) for key, other in
+                    (('process_id', 'process_id'), ('session_id', 'session_id'),
+                     ('window_handle', 'window_handle'))) or
+                (isinstance(gui_binding.get('process_lifecycle'), dict) and
+                 flow['process_start_time_utc_ticks'] !=
+                 gui_binding['process_lifecycle'].get('start_time_utc_ticks'))):
+            raise ValueError('Language flow differs from the source-bound GUI process.')
+        observations = flow.get('foreground_observations')
+        if not isinstance(observations, list) or len(observations) != 3:
+            raise ValueError('Language flow screenshot foreground evidence is incomplete.')
+        for observation, label, window_class in zip(observations,
+                ('prefix prompt', 'production rename preview', 'apply confirmation task dialog'),
+                ('DarkReNamerInputWindow', 'DarkReNamerWindow', '#32770')):
+            verify_flow_foreground_observation(observation, binding, label, window_class)
+        if (type(flow.get('prefix_prompt_hwnd')) is not int or
+                flow['prefix_prompt_hwnd'] <= 0 or
+                observations[0]['target_hwnd'] != flow['prefix_prompt_hwnd'] or
+                observations[1]['target_hwnd'] != flow['window_handle']):
+            raise ValueError('Language flow captures differ from exact prompt or main HWND.')
     if require_checkpoints:
         observations = flow.get('foreground_observations')
         expected_observations = (
@@ -1242,6 +1355,565 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
                 type(flow.get('journal_residue_count')) is not int or
                 flow['journal_residue_count'] != 0):
             raise ValueError('VM candidate GUI summary contradicts raw checkpoints.')
+    return True
+
+
+def verify_journal_read_boundary(before, live, after, minimum_bytes):
+    if (not isinstance(before, dict) or set(before) !=
+            {'bytes', 'sha256', 'file_identity_sha256'} or
+            type(before['bytes']) is not int or
+            not minimum_bytes <= before['bytes'] <= 64 * 1024 * 1024 or
+            any(not isinstance(before.get(key), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', before[key])
+                for key in ('sha256', 'file_identity_sha256')) or
+            after != before):
+        raise ValueError('Retained journal full before/after-close checkpoint is invalid.')
+    if (not isinstance(live, dict) or set(live) !=
+            {'bytes', 'file_identity_sha256', 'content_read_status', 'native_error',
+             'probe_access', 'probe_share_mode'} or
+            type(live.get('bytes')) is not int or live['bytes'] != before['bytes'] or
+            live.get('file_identity_sha256') != before['file_identity_sha256'] or
+            live.get('content_read_status') != 'sharing-denied' or
+            live.get('probe_access') != 'read' or
+            live.get('probe_share_mode') != 'read-write-delete' or
+            type(live.get('native_error')) is not int or live['native_error'] != 32):
+        raise ValueError('Live retained journal did not prove exclusive content lock and identity.')
+
+
+def verify_valid_active_recovery(root, manifest, record):
+    if (not isinstance(record, dict) or record.get('schema_version') != 1 or
+            record.get('status') != 'passed' or
+            record.get('scope') != 'authentic-crash-child-three-language-default-cancel' or
+            record.get('fixture_cleanup') != 'verified-owned-root'):
+        raise ValueError('Valid-active multilingual recovery evidence is incomplete.')
+    tests = [row for row in manifest['test_binaries'] if row.get('name') == 'darknamer_app']
+    if len(tests) != 1 or not re.fullmatch(r'darknamer_app-[0-9a-f]{16}\.exe', tests[0]['file']):
+        raise ValueError('Valid-active crash child lacks a unique source-built app test binary.')
+    checked_artifact(root, tests[0])
+    child = record.get('child')
+    if (not isinstance(child, dict) or
+            child.get('test_file') != tests[0]['file'] or
+            child.get('test_sha256') != tests[0]['sha256'] or
+            child.get('test_name') != 'windows::tests::crash_recovery_child' or
+            child.get('arguments') != '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1' or
+            child.get('graph') != 'swap' or child.get('crash_point') != 'forward-completed-0' or
+            child.get('exit_code') != 86 or child.get('job_clean') is not True or
+            child.get('exit_semantics') != 'expected-abrupt-crash-point' or
+            child.get('single_process_job') is not True or
+            child.get('job_had_survivors') is not False or
+            child.get('job_forced_termination') is not False or
+            type(child.get('pid')) is not int or child['pid'] <= 0 or
+            not isinstance(child.get('process_start_time_utc_ticks'), str) or
+            not re.fullmatch(r'[1-9][0-9]{14,19}', child['process_start_time_utc_ticks'])):
+        raise ValueError('Valid-active crash child is not bound to its exact source and exit.')
+    partial = record.get('partial')
+    if not isinstance(partial, dict) or set(partial) != {'files', 'journal'}:
+        raise ValueError('Valid-active partial checkpoint is missing.')
+    files = partial['files']
+    if not isinstance(files, list) or len(files) != 3:
+        raise ValueError('Valid-active partial data inventory is invalid.')
+    expected_hashes = sorted(hashlib.sha256(value).hexdigest() for value in
+                             (b'entry-a', b'entry-b', b'sentinel-work'))
+    names = []
+    identities = []
+    for item in files:
+        if (not isinstance(item, dict) or set(item) !=
+                {'name', 'bytes', 'content_sha256', 'file_identity_sha256'} or
+                not isinstance(item['name'], str) or not 1 <= len(item['name']) <= 160 or
+                '\\' in item['name'] or '/' in item['name'] or item['name'] in ('.', '..') or
+                type(item['bytes']) is not int or not 1 <= item['bytes'] <= 64 or
+                any(not isinstance(item.get(key), str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', item[key])
+                    for key in ('content_sha256', 'file_identity_sha256'))):
+            raise ValueError('Valid-active partial file shape is invalid.')
+        names.append(item['name'])
+        identities.append(item['file_identity_sha256'])
+    temporary_names = [name for name in names if re.fullmatch(
+        r'\.__darknamer_[0-9a-f]{16}_[0-9a-f]{32}_[0-9a-f]{8}_[0-9a-f]{2}\.tmp', name)]
+    if (len(set(names)) != 3 or len(set(identities)) != 3 or
+            sorted(item['content_sha256'] for item in files) != expected_hashes or
+            'sentinel.txt' not in names or len(temporary_names) != 1 or
+            sum(name in ('a.txt', 'b.txt') for name in names) != 1):
+        raise ValueError('Valid-active child did not leave a unique partial swap.')
+    journal = partial['journal']
+    if (not isinstance(journal, dict) or set(journal) !=
+            {'bytes', 'sha256', 'file_identity_sha256'} or
+            type(journal['bytes']) is not int or not 24 <= journal['bytes'] <= 64 * 1024 * 1024 or
+            any(not isinstance(journal.get(key), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', journal[key])
+                for key in ('sha256', 'file_identity_sha256'))):
+        raise ValueError('Valid-active retained journal shape is invalid.')
+    if record.get('final') != partial:
+        raise ValueError('Valid-active final file or journal state changed.')
+    expected_copy = (
+        ('ko', 0, 2, 'DarkReNamer - 이전 변경 복구 확인',
+         '이전 실행에서 중단된 이름 변경을 복구하시겠습니까?',
+         '복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.'),
+        ('en', 2, 3, 'DarkReNamer - Confirm recovery',
+         'Recover name changes interrupted in the previous run?',
+         'Recover checks the retained journal and current file identities again before reversing changes as needed. Cancel changes no files and keeps recovery locked.'),
+        ('ja', 3, None, 'DarkReNamer - 復旧の確認',
+         '前回の実行で中断された名前変更を復旧しますか？',
+         '復旧を選ぶと、保持されたジャーナルと現在のファイル識別情報を再検証して必要な逆方向の名前変更を行います。キャンセルするとファイルは変更されず、復旧ロックが維持されます。'),
+    )
+    observations = record.get('observations')
+    if not isinstance(observations, list) or len(observations) != 3:
+        raise ValueError('Valid-active multilingual startup inventory is incomplete.')
+    capture_bytes = 0
+    for index, (row, (language, before, after, title, question, detail)) in enumerate(
+            zip(observations, expected_copy)):
+        if (not isinstance(row, dict) or row.get('language') != language or
+                tuple(row.get(key) for key in ('title', 'question', 'cancel_guidance')) !=
+                (title, question, detail) or
+                row.get('cancel_default_focused') is not True or
+                row.get('apply_locked_after_cancel') is not True or
+                row.get('apply_locked_after_choice') is not True or
+                row.get('normal_close') is not True or
+                row.get('process_job_clean') is not True or
+                any(type(row.get(key)) is not int or row[key] <= 0 for key in
+                    ('pid', 'session_id', 'main_hwnd', 'notice_hwnd')) or
+                row['pid'] == child['pid'] or row['main_hwnd'] == row['notice_hwnd'] or
+                not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', row['process_start_time_utc_ticks']) or
+                not isinstance(row.get('startup_preference'), dict) or
+                row['startup_preference'].get('value') != before or
+                not isinstance(row['startup_preference'].get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', row['startup_preference']['sha256'])):
+            raise ValueError('Valid-active recovery process, language, or Cancel binding is invalid.')
+        if row.get('before') != partial or row.get('after_close') != partial:
+            raise ValueError('Valid-active full before/after-close checkpoints changed.')
+        for key in ('at_startup', 'after_cancel', 'after_choice'):
+            live_checkpoint = row.get(key)
+            if (not isinstance(live_checkpoint, dict) or
+                    set(live_checkpoint) != {'files', 'journal'} or
+                    live_checkpoint['files'] != files):
+                raise ValueError('Valid-active live partial file inventory changed.')
+            verify_journal_read_boundary(journal, live_checkpoint['journal'], journal, 24)
+        notice_bounds, cancel_bounds = row.get('notice_bounds'), row.get('cancel_bounds')
+        if (not isinstance(notice_bounds, dict) or not isinstance(cancel_bounds, dict) or
+                any(type(bounds.get(key)) not in (int, float) for bounds in
+                    (notice_bounds, cancel_bounds) for key in ('x', 'y', 'width', 'height')) or
+                any(bounds[key] <= 0 for bounds in (notice_bounds, cancel_bounds)
+                    for key in ('width', 'height')) or
+                notice_bounds['width'] > 16384 or notice_bounds['height'] > 16384 or
+                cancel_bounds['x'] < notice_bounds['x'] or
+                cancel_bounds['y'] < notice_bounds['y'] or
+                cancel_bounds['x'] + cancel_bounds['width'] >
+                notice_bounds['x'] + notice_bounds['width'] or
+                cancel_bounds['y'] + cancel_bounds['height'] >
+                notice_bounds['y'] + notice_bounds['height']):
+            raise ValueError('Valid-active default Cancel bounds are clipped or invalid.')
+        capture = row.get('notice_capture')
+        checked_language_capture(root, capture, language + '-valid-active-recovery.png')
+        capture_bytes += capture['bytes']
+        verify_flow_foreground_observation(
+            row.get('notice_capture_foreground'),
+            {'process_id': row['pid'], 'session_id': row['session_id']},
+            language + ' valid-active recovery confirmation', '#32770')
+        if row['notice_capture_foreground']['target_hwnd'] != row['notice_hwnd']:
+            raise ValueError('Valid-active recovery capture targeted another dialog.')
+        choice = row.get('choice')
+        if after is None:
+            if choice is not None:
+                raise ValueError('Final valid-active language unexpectedly changed preference.')
+        elif (not isinstance(choice, dict) or choice.get('input') != 'native-menu-keyboard' or
+              any(choice.get(key) != row[binding] for key, binding in
+                  (('pid', 'pid'), ('session_id', 'session_id'), ('hwnd', 'main_hwnd'))) or
+              choice.get('model_rows_before') != 0 or choice.get('model_rows_after') != 0 or
+              choice.get('model_before') != {'rows': 0, 'cells': []} or
+              choice.get('model_after') != {'rows': 0, 'cells': []} or
+              not isinstance(choice.get('preference'), dict) or
+              choice['preference'].get('value') != after or
+              not isinstance(choice.get('before'), dict) or
+              choice['before'].get('checked_command') != 0x9020 + before or
+              not isinstance(choice.get('after'), dict) or
+              choice['after'].get('checked_command') != 0x9020 + after):
+            raise ValueError('Valid-active language choice did not preserve the recovery lock.')
+        if after is not None:
+            verify_language_menu_input_trace(choice, 0x9020 + after)
+        if index > 0 and row['startup_preference'] != observations[index - 1]['choice']['preference']:
+            raise ValueError('Valid-active next startup did not reload its selected language.')
+    if len({row['pid'] for row in observations} | {child['pid']}) != 4:
+        raise ValueError('Valid-active recovery reused a supposedly closed process.')
+    return capture_bytes
+
+
+def verify_language_menu_input_trace(choice, target):
+    trace = choice.get('input_trace')
+    target_index = target - 0x9020
+    if not isinstance(trace, list) or len(trace) != target_index + 3:
+        raise ValueError('Real language menu keyboard stage trace is incomplete.')
+    down_count = target_index
+    phases = ['alt-v', 'language-open'] + [
+        'down-' + str(index) for index in range(1, down_count + 1)] + ['pre-enter']
+    current_highlight = None
+    view_popup = None
+    language_popups = None
+    language_handle = None
+    for index, (stage, phase) in enumerate(zip(trace, phases)):
+        if (not isinstance(stage, dict) or stage.get('phase') != phase or
+                any(type(stage.get(key)) is not int or stage[key] <= 0 for key in
+                    ('pid', 'session_id', 'hwnd', 'thread_id', 'language_handle')) or
+                stage['pid'] != choice['pid'] or stage['session_id'] != choice['session_id'] or
+                stage['hwnd'] != choice['hwnd'] or stage.get('menu_owner') != choice['hwnd'] or
+                type(stage.get('gui_flags')) is not int or
+                stage['gui_flags'] & 0x4 != 0x4 or
+                type(stage.get('view_language_state')) is not int or
+                not isinstance(stage.get('top_states'), list) or len(stage['top_states']) != 6 or
+                not isinstance(stage.get('view_states'), list) or len(stage['view_states']) != 10 or
+                any(type(state) is not int or state < 0 for state in
+                    stage['top_states'] + stage['view_states']) or
+                stage['top_states'][2] & 0x80 == 0 or
+                stage['view_states'][9] != stage['view_language_state'] or
+                not isinstance(stage.get('popups'), list) or
+                type(stage.get('popup_count')) is not int or
+                stage['popup_count'] != len(stage['popups']) or
+                len(stage['popups']) != (1 if phase == 'alt-v' else 2) or
+                stage.get('commands') != list(range(0x9020, 0x9024)) or
+                not isinstance(stage.get('states'), list) or len(stage['states']) != 4 or
+                any(type(state) is not int or state < 0 for state in stage['states'])):
+            raise ValueError('Real language menu stage lost process, owner, mode, or command binding.')
+        popup_handles = []
+        for popup in stage['popups']:
+            if not isinstance(popup, dict) or type(popup.get('hwnd')) is not int or popup['hwnd'] <= 0 or \
+                    type(popup.get('owner')) is not int or \
+                    type(popup.get('process_id')) is not int or popup['process_id'] != choice['pid'] or \
+                    popup.get('class') != '#32768' or popup.get('visible') is not True or \
+                    not isinstance(popup.get('bounds'), dict):
+                raise ValueError('Real language menu popup identity is invalid.')
+            bounds = popup['bounds']
+            if (any(type(bounds.get(key)) is not int for key in ('left', 'top', 'right', 'bottom')) or
+                    not 0 < bounds['right'] - bounds['left'] <= 4096 or
+                    not 0 < bounds['bottom'] - bounds['top'] <= 4096):
+                raise ValueError('Real language menu popup bounds are invalid.')
+            popup_handles.append(popup['hwnd'])
+        if len(set(popup_handles)) != len(popup_handles):
+            raise ValueError('Real language menu popups reuse a native window handle.')
+        if language_handle is None:
+            language_handle = stage['language_handle']
+            view_popup = popup_handles[0]
+        elif stage['language_handle'] != language_handle:
+            raise ValueError('Real language menu handle changed during keyboard navigation.')
+        if index == 1:
+            if view_popup not in popup_handles:
+                raise ValueError('Language mnemonic replaced the bound View popup.')
+            language_popups = set(popup_handles)
+        elif index > 1 and set(popup_handles) != language_popups:
+            raise ValueError('Language submenu popups changed during keyboard navigation.')
+        highlighted = [position for position, state in enumerate(stage['states'])
+                       if state & 0x80]
+        if stage.get('highlighted_indices') != highlighted:
+            raise ValueError('Real language menu highlighted indices contradict native states.')
+        if phase == 'language-open':
+            if (stage['view_language_state'] & 0x80 == 0 or highlighted != [0] or
+                    stage['states'][0] & 0x3):
+                raise ValueError('Language mnemonic did not settle on enabled System item.')
+            current_highlight = 0
+        elif phase.startswith('down-'):
+            if current_highlight == target_index:
+                raise ValueError('Language navigation continued after reaching its target.')
+            expected = (current_highlight + 1) % 4
+            if highlighted != [expected] or stage['states'][expected] & 0x3:
+                raise ValueError('Real language menu Down did not move to its enabled next item.')
+            current_highlight = expected
+        elif phase == 'pre-enter' and (current_highlight != target_index or
+                                       highlighted != [target_index] or
+                                       stage['states'][target_index] & 0x3):
+            raise ValueError('Real language menu was not visibly on the enabled target.')
+    if (not isinstance(choice.get('status_before'), str) or
+            len(choice['status_before']) > 512):
+        raise ValueError('Language menu initial status observation is invalid.')
+    samples = choice.get('post_enter')
+    if not isinstance(samples, list) or not 1 <= len(samples) <= 16:
+        raise ValueError('Language menu has no bounded post-Enter observations.')
+    for sample in samples:
+        if (not isinstance(sample, dict) or
+                not isinstance(sample.get('status'), str) or len(sample['status']) > 512 or
+                sample.get('checked_command') not in (None, *range(0x9020, 0x9024)) or
+                sample.get('menu_read_error') is not None and
+                (not isinstance(sample['menu_read_error'], str) or
+                 len(sample['menu_read_error']) > 128) or
+                not isinstance(sample.get('owned_modals'), list) or
+                len(sample['owned_modals']) > 4):
+            raise ValueError('Language menu post-Enter status or menu observation is invalid.')
+        for modal in sample['owned_modals']:
+            if (not isinstance(modal, dict) or type(modal.get('hwnd')) is not int or
+                    modal['hwnd'] <= 0 or modal.get('class') != '#32770' or
+                    not isinstance(modal.get('title'), str) or len(modal['title']) > 128):
+                raise ValueError('Language menu owned modal observation is invalid.')
+        preference = sample.get('preference')
+        if preference is not None and (not isinstance(preference, dict) or
+                type(preference.get('value')) is not int or
+                preference['value'] not in range(4) or
+                not isinstance(preference.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', preference['sha256'])):
+            raise ValueError('Language menu observed malformed preference metadata.')
+        read_error = sample.get('preference_read_error')
+        if read_error is not None and (not isinstance(read_error, dict) or
+                not isinstance(read_error.get('kind'), str) or
+                len(read_error['kind']) > 128 or
+                type(read_error.get('native_error')) is not int or
+                read_error['native_error'] < 0):
+            raise ValueError('Language menu observed malformed preference read failure.')
+    if samples[-1].get('preference') != choice['preference']:
+        raise ValueError('Language menu saved preference lacks matching post-Enter readback.')
+
+
+def verify_language_process_jobs(checks, process_jobs):
+    selections = checks['selections']
+    active = checks['valid_active_recovery']
+    records = (selections +
+               [row['blocked_recovery'] for row in selections[:3]] +
+               [active['child']] + active['observations'])
+    if len(records) != 12 or not isinstance(process_jobs, list) or not 12 <= len(process_jobs) <= 64:
+        raise ValueError('Language process lifecycle or Job inventory is incomplete.')
+    identities = set()
+    for record in records:
+        lifecycle = record.get('process_lifecycle') if isinstance(record, dict) else None
+        if (not isinstance(lifecycle, dict) or
+                set(lifecycle) != {'pid', 'start_time_utc_ticks'} or
+                type(lifecycle['pid']) is not int or lifecycle['pid'] <= 0 or
+                not isinstance(lifecycle['start_time_utc_ticks'], str) or
+                not re.fullmatch(r'[1-9][0-9]{14,18}', lifecycle['start_time_utc_ticks']) or
+                lifecycle['pid'] != record.get('pid') or
+                lifecycle['start_time_utc_ticks'] != record.get('process_start_time_utc_ticks')):
+            raise ValueError('Language process lifecycle differs from its recorded owner.')
+        identity = (lifecycle['pid'], lifecycle['start_time_utc_ticks'])
+        if identity in identities:
+            raise ValueError('Language process lifecycle is duplicated across roles.')
+        identities.add(identity)
+    jobs = {}
+    for row in process_jobs:
+        if (not isinstance(row, dict) or type(row.get('pid')) is not int or row['pid'] <= 0 or
+                not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,18}', row['process_start_time_utc_ticks'])):
+            raise ValueError('Language Job ledger has an invalid process identity.')
+        identity = (row['pid'], row['process_start_time_utc_ticks'])
+        if identity in jobs:
+            raise ValueError('Language Job ledger repeats a process identity.')
+        jobs[identity] = row
+    for identity in identities:
+        job = jobs.get(identity)
+        if (not isinstance(job, dict) or job.get('status') != 'clean' or
+                job.get('job_empty') is not True or job.get('job_closed') is not True or
+                job.get('capture_complete') is not True or
+                job.get('had_survivors') is not False or
+                job.get('forced_termination') is not False or
+                type(job.get('active_processes_at_close')) is not int or
+                job['active_processes_at_close'] != 0):
+            raise ValueError('Language process is not bound to a clean, closed Job.')
+
+
+def verify_language_checks(root, manifest, checks, baseline_flow, process_jobs):
+    if (not isinstance(checks, dict) or checks.get('schema_version') != 1 or
+            checks.get('status') != 'passed' or
+            checks.get('scope') != 'source-built-three-language-native-menu' or
+            checks.get('application_sha256') != application_record(manifest)['sha256']):
+        raise ValueError('Source-built language acceptance is missing or unbound.')
+    system = checks.get('system_resolution')
+    if not isinstance(system, dict) or not isinstance(system.get('preferred_tags'), list) or len(system['preferred_tags']) > 4096 or any(
+            not isinstance(tag, str) or not 1 <= len(tag) <= 256 for tag in system['preferred_tags']):
+        raise ValueError('Windows preferred UI-language inventory is invalid.')
+    selected = next((tag for tag in system['preferred_tags'] if re.match(r'^(ko|en|ja)(-|$)', tag, re.I)), None)
+    resolved = selected[:2].lower() if selected else 'en'
+    if system.get('selected_tag') != selected or system.get('language') != resolved:
+        raise ValueError('System language restart does not match the Windows preferred UI-language order.')
+    labels = {
+        'ko': ('언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        'en': ('&Language · next startup', 'System language', 'Add a name prefix...'),
+        'ja': ('言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
+    }
+    recovery_labels = {
+        'ko': ('DarkReNamer - 복구 상태', '새 적용은 잠겼습니다.'),
+        'en': ('DarkReNamer - Recovery status', 'Apply is locked.'),
+        'ja': ('DarkReNamer - 復旧状態', '適用をロックしました。'),
+    }
+    locales = (
+        ('ko', 0, 2, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        ('en', 2, 3, '&Language · next startup', 'System language', 'Add a name prefix...'),
+        ('ja', 3, 1, '言語(&L) · 次回起動から', 'システム言語', '名前の先頭に文字列を追加...'),
+        ('ko', 1, 0, '언어(&L) · 다음 실행부터', '시스템 언어', '이름 앞에 문자열 붙이기...'),
+        (resolved, 0, None, *labels[resolved]),
+    )
+    selections = checks.get('selections')
+    if not isinstance(selections, list) or len(selections) != len(locales):
+        raise ValueError('Language startup and menu selection inventory is incomplete.')
+    checked_language_capture(root, baseline_flow.get('prefix_prompt_capture'),
+                             'ko-prefix-prompt.png')
+    capture_bytes = baseline_flow['prefix_prompt_capture']['bytes']
+    for index, (row, (language, before, after, menu_label, system_label, rail_name)) in enumerate(zip(selections, locales)):
+        if not isinstance(row, dict) or row.get('language') != language:
+            raise ValueError('Language startup order is invalid.')
+        for key in ('pid', 'hwnd', 'session_id'):
+            if type(row.get(key)) is not int or row[key] <= 0:
+                raise ValueError('Language process, window, or session binding is invalid.')
+        if (not isinstance(row.get('process_start_time_utc_ticks'), str) or
+                not re.fullmatch(r'[1-9][0-9]{14,19}', row['process_start_time_utc_ticks'])):
+            raise ValueError('Language startup process start identity is invalid.')
+        if index < 3:
+            capture = row.get('startup_capture')
+            checked_language_capture(root, capture, language + '-language-main.png')
+            capture_bytes += capture['bytes']
+            verify_flow_foreground_observation(
+                row.get('startup_capture_foreground'),
+                {'process_id': row['pid'], 'session_id': row['session_id']},
+                language + ' language main workbench', 'DarkReNamerWindow')
+            if row['startup_capture_foreground']['target_hwnd'] != row['hwnd']:
+                raise ValueError('Language main capture differs from startup HWND.')
+        elif row.get('startup_capture') is not None or row.get('startup_capture_foreground') is not None:
+            raise ValueError('Language startup has an unexpected additional main capture.')
+        preference, menu, rail, choice = (row.get(key) for key in
+                                           ('startup_preference', 'startup_menu', 'startup_rail', 'choice'))
+        if (not isinstance(preference, dict) or preference.get('value') != before or
+                not isinstance(preference.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', preference['sha256']) or
+                not isinstance(menu, dict) or menu.get('parent') != menu_label or
+                menu.get('options') != [system_label, '한국어', 'English', '日本語'] or
+                menu.get('checked_command') != 0x9020 + before):
+            raise ValueError('Language preference or translated menu did not survive startup.')
+        if (not isinstance(rail, dict) or rail.get('automation_id') != '32773' or
+                rail.get('name') != rail_name or not isinstance(rail.get('bounds'), dict) or
+                any(type(rail['bounds'].get(key)) not in (int, float) or rail['bounds'][key] <= 0
+                    for key in ('width', 'height'))):
+            raise ValueError('Language accessible rail name or bounds are invalid.')
+        blocked = row.get('blocked_recovery')
+        if before in (0, 2, 3) and after is not None:
+            if (not isinstance(blocked, dict) or blocked.get('language') != language or
+                    tuple(blocked.get(key) for key in ('title', 'lock_guidance')) != recovery_labels[language] or
+                    any(type(blocked.get(key)) is not int or blocked[key] <= 0
+                        for key in ('pid', 'hwnd', 'session_id')) or
+                    blocked['session_id'] != row['session_id'] or
+                    not isinstance(blocked.get('journal_sha256'), str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', blocked['journal_sha256']) or
+                    blocked.get('journal_unchanged') is not True or
+                    blocked.get('normal_close') is not True or
+                    blocked.get('process_job_clean') is not True or
+                    blocked.get('apply_enabled') is not False or
+                    blocked.get('model_rows') != 0 or
+                    not isinstance(blocked.get('ok_control'), dict) or
+                    not isinstance(blocked.get('notice_bounds'), dict) or
+                    any(type(blocked['notice_bounds'].get(key)) not in (int, float) or
+                        blocked['notice_bounds'][key] <= 0 for key in ('width', 'height'))):
+                raise ValueError('Localized blocked recovery or retained-journal evidence is incomplete.')
+            verify_native_messagebox_ok(blocked['ok_control'])
+            journal_before = blocked.get('journal_before')
+            verify_journal_read_boundary(journal_before, blocked.get('journal_live'),
+                                         blocked.get('journal_after_close'), 1)
+            marker = b'DarkReNamer bounded invalid active journal fixture'
+            if (journal_before['bytes'] != len(marker) or
+                    journal_before['sha256'] != hashlib.sha256(marker).hexdigest() or
+                    blocked['journal_sha256'] != journal_before['sha256']):
+                raise ValueError('Blocked recovery journal differs from its owned corrupt fixture.')
+            capture = blocked.get('notice_capture')
+            checked_language_capture(root, capture, language + '-blocked-recovery.png')
+            capture_bytes += capture['bytes']
+            verify_flow_foreground_observation(
+                blocked.get('notice_capture_foreground'),
+                {'process_id': blocked['pid'], 'session_id': blocked['session_id']},
+                language + ' blocked recovery notice', '#32770')
+            if (type(blocked.get('notice_hwnd')) is not int or
+                    blocked['notice_hwnd'] <= 0 or blocked['notice_hwnd'] == blocked['hwnd'] or
+                    blocked['notice_capture_foreground']['target_hwnd'] != blocked['notice_hwnd']):
+                raise ValueError('Blocked recovery capture targeted the wrong dialog HWND.')
+        elif blocked is not None:
+            raise ValueError('Language startup has an unexpected blocked-recovery probe.')
+        if after is None:
+            if choice is not None:
+                raise ValueError('System language readback unexpectedly changed the preference.')
+        elif (not isinstance(choice, dict) or choice.get('input') != 'native-menu-keyboard' or
+              any(choice.get(key) != row[binding] for key, binding in
+                  (('pid', 'pid'), ('hwnd', 'hwnd'), ('session_id', 'session_id'))) or
+              choice.get('before') != menu or
+              not isinstance(choice.get('after'), dict) or
+              choice['after'].get('checked_command') != 0x9020 + after or
+              choice['after'].get('parent') != menu_label or
+              choice['after'].get('options') != menu['options'] or
+              type(choice.get('model_rows_before')) is not int or
+              not 0 <= choice['model_rows_before'] <= 1 or
+              choice.get('model_rows_after') != choice['model_rows_before'] or
+              not isinstance(choice.get('model_before'), dict) or
+              choice.get('model_after') != choice['model_before'] or
+              choice['model_before'].get('rows') != choice['model_rows_before'] or
+              not isinstance(choice['model_before'].get('cells'), list) or
+              len(choice['model_before']['cells']) != 4 * choice['model_rows_before'] or
+              any(not isinstance(cell, str) or len(cell) > 32768
+                  for cell in choice['model_before']['cells']) or
+              choice.get('rail_before') != rail or choice.get('rail_after') != rail or
+              not isinstance(choice.get('preference'), dict) or
+              choice['preference'].get('value') != after):
+            raise ValueError('Language menu selection changed the current UI or model.')
+        if after is not None:
+            verify_language_menu_input_trace(choice, 0x9020 + after)
+            pending_before = choice.get('pending_file_before')
+            pending_after = choice.get('pending_file_after')
+            if index == 1:
+                cells = choice['model_before']['cells']
+                if (choice['model_rows_before'] != 1 or
+                        not all(isinstance(cell, str) and 0 < len(cell) <= 32768 for cell in cells) or
+                        cells[1] == cells[0] or not cells[1].startswith('pending-') or
+                        not cells[2] or not cells[3] or
+                        not isinstance(pending_before, dict) or pending_after != pending_before or
+                        any(not isinstance(pending_before.get(key), str) or
+                            not re.fullmatch(r'[0-9a-f]{64}', pending_before[key])
+                            for key in ('content_sha256', 'file_identity_sha256'))):
+                    raise ValueError('Language choice did not preserve an unapplied model proposal and file.')
+            elif pending_before is not None or pending_after is not None:
+                raise ValueError('Language choice has an unexpected pending-file probe.')
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
+    restored = checks.get('restored_preference')
+    if (not isinstance(restored, dict) or restored != selections[-2]['choice']['preference'] or
+            restored != selections[-1]['startup_preference']):
+        raise ValueError('Language acceptance did not restore the original System preference.')
+    flows = checks.get('flows')
+    if not isinstance(flows, list) or len(flows) != 2:
+        raise ValueError('English and Japanese actual file-flow evidence is incomplete.')
+    for row, language in zip(flows, ('en', 'ja')):
+        if not isinstance(row, dict) or row.get('language') != language:
+            raise ValueError('Language file-flow order is invalid.')
+        flow = row.get('flow')
+        selection = selections[1 if language == 'en' else 2]
+        if (not isinstance(flow, dict) or
+                any(flow.get(key) != selection[binding] for key, binding in
+                    (('process_id', 'pid'), ('session_id', 'session_id'),
+                     ('window_handle', 'hwnd'),
+                     ('process_start_time_utc_ticks', 'process_start_time_utc_ticks')))):
+            raise ValueError('Language file flow is not bound to its startup process and window.')
+        verify_gui_flow(root, manifest, flow, screenshot_prefix=language + '-',
+                        language=language, require_occupied=True)
+        capture_bytes += flow['prefix_prompt_capture']['bytes']
+        checkpoints = verify_flow_checkpoints(flow)
+        prelaunch = flow.get('prelaunch_checkpoints')
+        if (not isinstance(prelaunch, list) or len(prelaunch) != 1 or
+                not isinstance(prelaunch[0], dict) or
+                set(prelaunch[0]) != {'phase', 'fixture_entries', 'journal_entries'} or
+                prelaunch[0]['phase'] != 'initial' or
+                prelaunch[0]['fixture_entries'] != flow['checkpoints'][0]['fixture_entries']):
+            raise ValueError('Language flow prelaunch fixture checkpoint is invalid.')
+        runtime_lock = [{'name': 'runtime.lock', 'kind': 'file', 'bytes': 0}]
+        for journal in (prelaunch[0]['journal_entries'], flow['checkpoints'][0]['journal_entries']):
+            if (not isinstance(journal, list) or len(journal) != 1 or
+                    not isinstance(journal[0], dict) or
+                    set(journal[0]) != {'name', 'kind', 'bytes'} or
+                    type(journal[0]['bytes']) is not int or journal != runtime_lock):
+                raise ValueError('Language flow requires the same exact prelaunch and startup runtime lock.')
+        if (flow.get('before_content_sha256') != baseline_flow.get('before_content_sha256') or
+                flow.get('after_content_sha256') != checkpoints['after_apply']['content_sha256'] or
+                flow.get('after_file_identity_sha256') != checkpoints['after_apply']['file_identity_sha256']):
+            raise ValueError('Language file outcomes differ from the source-bound baseline.')
+        if language == 'en' and (
+                selections[1]['choice']['pending_file_before']['content_sha256'] !=
+                flow['after_content_sha256'] or
+                selections[1]['choice']['pending_file_before']['file_identity_sha256'] !=
+                flow['after_file_identity_sha256']):
+            raise ValueError('Pending selection file does not match the applied flow outcome.')
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
+    capture_bytes += verify_valid_active_recovery(root, manifest,
+                                                  checks.get('valid_active_recovery'))
+    if capture_bytes > 48 * 1024 * 1024:
+        raise ValueError('Language capture inventory exceeds its total byte bound.')
+    verify_language_process_jobs(checks, process_jobs)
     return True
 
 
@@ -1359,10 +2031,13 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
-        if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui):
+        if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui,
+                               require_occupied=not candidate):
             passed = False
         if not candidate:
             verify_picker_checks(gui.get('dialog_picker_checks'), gui)
+            verify_language_checks(root, manifest, gui.get('language_checks'), gui['flow'],
+                                   result.get('process_job_cleanup'))
         if candidate:
             if type(gui.get('exit_code')) is not int or gui['exit_code'] != 0:
                 raise ValueError('VM candidate GUI process exit code is invalid.')

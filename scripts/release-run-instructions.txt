@@ -10,3 +10,7 @@ procedure and supported filesystem scope, see the release notes and
 https://github.com/PiesP/DarkReNamer/blob/master/DISTRIBUTION.md.
 
 Preferences are stored separately in %LOCALAPPDATA%\DarkReNamer.
+
+The single executable embeds Korean, English and Japanese UI. Choose View >
+Language (next startup), wait for the saved status, and close/reopen when ready.
+Changing language does not automatically restart the app or clear current work.

@@ -104,6 +104,8 @@ const ALLOWED_BOUNDARIES: &[(&str, bool, bool)] = &[
     // The sole Shell-icon worker owns its STA and pumps that thread's queue;
     // only validated system-list scalar identities cross to the UI thread.
     ("src/windows/icon_worker.rs", false, false),
+    // Read-only, bounded Windows UI-language query; no locale mutation.
+    ("src/windows/language.rs", false, false),
     ("src/windows/list_view.rs", true, true),
     ("src/windows/menu.rs", false, false),
     ("src/windows/popup_menu.rs", false, true),

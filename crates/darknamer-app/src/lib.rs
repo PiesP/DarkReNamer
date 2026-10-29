@@ -6,6 +6,8 @@
 pub mod admission;
 #[cfg(any(windows, test))]
 mod apply_progress;
+/// Embedded application UI languages and next-startup preference selection.
+pub mod i18n;
 // Pure UI responsibilities remain portable and keep their public crate-root paths.
 #[cfg(any(windows, test))]
 mod appearance_model;
@@ -138,35 +140,39 @@ pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 pub(crate) const LIST_COLUMN_FIT_GUTTER_DIP: i32 = 1;
 #[cfg(any(windows, test))]
 pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
-#[cfg(any(windows, test))]
-pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
-#[cfg(any(windows, test))]
+#[cfg(test)]
+pub(crate) const EMPTY_LIST_STATUS: &str =
+    crate::i18n::common::Text::EmptyList.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
 pub(crate) const PREVIEW_SYNC_FAILURE_STATUS: &str =
-    "미리보기를 표시하지 못해 적용을 잠갔습니다. 목록 작업을 다시 시도하거나 앱을 다시 시작하세요.";
-#[cfg(windows)]
-pub(crate) const PREVIEW_SYNC_BLOCK_MESSAGE: &str = "미리보기 표시가 동기화되지 않아 적용할 수 없습니다. 목록 작업을 다시 시도하거나 앱을 다시 시작하세요.";
-#[cfg(windows)]
-pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
-#[cfg(any(windows, test))]
+    crate::i18n::common::Text::PreviewRenderBlocked.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const EMPTY_STATE_INSTRUCTION: &str =
+    crate::i18n::common::Text::EmptyInstruction.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
 pub(crate) const EMPTY_STATE_SAFETY: &str =
-    "‘변경 적용’을 누르기 전에는 실제 파일을 수정하지 않습니다.";
-#[cfg(any(windows, test))]
+    crate::i18n::common::Text::EmptySafety.in_language(crate::i18n::Language::Korean);
+#[cfg(test)]
 pub(crate) const EMPTY_STATE_SAFETY_RAILS: &str =
-    "‘변경 적용’을 누르기 전에는\r\n실제 파일을 수정하지 않습니다.";
-#[cfg(windows)]
-pub(crate) const EMPTY_STATE_ADD_LABEL: &str = "파일 추가...";
-#[cfg(windows)]
-pub(crate) const DROP_ACCEPTING_TEXT: &str = "여기에 놓아 목록에 추가";
-#[cfg(windows)]
-pub(crate) const DROP_LOCKED_TEXT: &str = "현재 작업 중에는 추가할 수 없습니다.";
-#[cfg(windows)]
-pub(crate) const DROP_UNSUPPORTED_TEXT: &str = "파일 또는 폴더만 추가할 수 있습니다.";
-#[cfg(windows)]
-pub(crate) const DROP_FULL_TEXT: &str = "목록에 더 추가할 수 없습니다.";
-#[cfg(windows)]
-pub(crate) const STATUS_COUNT_SAMPLE: &str = "전체 10000 · 변경 10000 · 선택 10000";
-#[cfg(windows)]
-pub(crate) const STATUS_CANCEL_LABEL: &str = "취소";
+    crate::i18n::common::Text::EmptySafetyWrapped.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const EMPTY_STATE_ADD_LABEL: &str =
+    crate::i18n::common::Text::AddFiles.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const DROP_ACCEPTING_TEXT: &str =
+    crate::i18n::common::Text::DropAccepting.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const DROP_LOCKED_TEXT: &str =
+    crate::i18n::common::Text::DropLocked.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const DROP_UNSUPPORTED_TEXT: &str =
+    crate::i18n::common::Text::DropUnsupported.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const DROP_FULL_TEXT: &str =
+    crate::i18n::common::Text::DropFull.in_language(crate::i18n::Language::Korean);
+#[cfg(all(windows, test))]
+pub(crate) const STATUS_CANCEL_LABEL: &str =
+    crate::i18n::common::Text::Cancel.in_language(crate::i18n::Language::Korean);
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,33 +413,28 @@ impl ApplyConfirmationSummary {
 #[must_use]
 pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> String {
     let mut text = if summary.rename_only == summary.logical_changed() {
-        format!("파일 {}개의 이름을 변경합니다.", summary.logical_changed())
+        crate::i18n::common::rename_count(&(summary.logical_changed()))
     } else if summary.move_only == summary.logical_changed() {
-        format!("파일 {}개를 이동합니다.", summary.logical_changed())
+        crate::i18n::common::move_count(&(summary.logical_changed()))
     } else if summary.move_and_rename == summary.logical_changed() {
-        format!(
-            "파일 {}개를 이동하고 이름도 변경합니다.",
-            summary.logical_changed()
-        )
+        crate::i18n::common::move_rename_count(&(summary.logical_changed()))
     } else {
-        format!(
-            "파일 {}개의 이름 또는 대상 폴더를 변경합니다.",
-            summary.logical_changed()
-        )
+        crate::i18n::common::change_count(&(summary.logical_changed()))
     };
     let kind_count = usize::from(summary.rename_only != 0)
         .saturating_add(usize::from(summary.move_only != 0))
         .saturating_add(usize::from(summary.move_and_rename != 0));
     if kind_count > 1 && summary.rename_only != 0 {
-        text.push_str(&format!("\n이름 변경: {}개", summary.rename_only));
+        text.push_str(&crate::i18n::common::rename_breakdown(
+            &(summary.rename_only),
+        ));
     }
     if kind_count > 1 && summary.move_only != 0 {
-        text.push_str(&format!("\n대상 폴더 이동: {}개", summary.move_only));
+        text.push_str(&crate::i18n::common::move_breakdown(&(summary.move_only)));
     }
     if kind_count > 1 && summary.move_and_rename != 0 {
-        text.push_str(&format!(
-            "\n이름 변경 및 대상 폴더 이동: {}개",
-            summary.move_and_rename
+        text.push_str(&crate::i18n::common::move_rename_breakdown(
+            &(summary.move_and_rename),
         ));
     }
     if summary.move_only != 0 || summary.move_and_rename != 0 {
@@ -445,25 +446,23 @@ pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> 
                 confirmation_display::DETAIL_FIELD_UNITS,
             );
             let label = if snippet == complete {
-                "대상 폴더"
+                crate::i18n::common::Text::DestinationFolder.get()
             } else {
-                "대상 폴더 (축약)"
+                crate::i18n::common::Text::DestinationFolderShort.get()
             };
             text.push_str(&format!("\n{label}: {snippet}"));
         } else {
-            text.push_str("\n대상 폴더는 항목별로 확인하세요.");
+            text.push_str(crate::i18n::common::Text::CheckEachFolder.get());
         }
     }
-    text.push_str("\n기존 파일을 덮어쓰지 않습니다.");
+    text.push_str(crate::i18n::common::Text::NoOverwrite.get());
     text
 }
 
 /// Selection is context for the user, never an input to the frozen Apply plan.
 #[cfg(any(windows, test))]
 pub(crate) fn apply_confirmation_scope(total: usize, selected: usize, changed: usize) -> String {
-    format!(
-        "목록 전체 {total}개 · 선택 {selected}개 · 실제 변경 {changed}개\n선택 여부와 관계없이 목록의 변경 예정 항목을 모두 적용합니다."
-    )
+    crate::i18n::common::apply_scope(&(total), &(selected), &(changed))
 }
 
 /// Samples at most two immutable plan rows; never traverses the whole list.
@@ -473,9 +472,9 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
     let mut elided = false;
     let mut comparison_hidden = false;
     let mut text = if full {
-        format!("변경 예시 전체 경로 ({shown}/{}개)", plan.rows().len())
+        crate::i18n::common::full_examples(&(shown), &(plan.rows().len()))
     } else {
-        format!("변경 예시 ({shown}/{}개)", plan.rows().len())
+        crate::i18n::common::examples(&(shown), &(plan.rows().len()))
     };
     for row in plan.rows().iter().take(shown) {
         let (source_parent, source_leaf) = split_windows_path(row.source());
@@ -492,12 +491,14 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
                 confirmation_display::DETAIL_FIELD_UNITS,
             );
             elided |= names.elided || paths.elided;
-            text.push_str(&format!(
-                "\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n변경 후 전체 경로: {}",
-                names.before, names.after, paths.before, paths.after
+            text.push_str(&crate::i18n::common::example_details(
+                &(names.before),
+                &(names.after),
+                &(paths.before),
+                &(paths.after),
             ));
             if names.hidden || paths.hidden {
-                text.push_str("\n축약문에 차이가 드러나지 않습니다.\n");
+                text.push_str(crate::i18n::common::Text::HiddenDifference.get());
                 text.push_str(&confirmation_display::difference_evidence(
                     row.source().units(),
                     row.destination().units(),
@@ -514,9 +515,9 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
                 confirmation_display::pair(source, destination, APPLY_CONFIRMATION_SNIPPET_CHARS);
             elided |= display.elided;
             comparison_hidden |= display.hidden;
-            text.push_str(&format!(
-                "\n\n현재: {}\n변경 후: {}",
-                display.before, display.after
+            text.push_str(&crate::i18n::common::example_pair(
+                &(display.before),
+                &(display.after),
             ));
             if display.hidden {
                 text.push('\n');
@@ -528,20 +529,18 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
         }
     }
     if full && elided {
-        text.push_str(
-            "\n\n표시 길이를 넘는 부분은 …으로 생략합니다. 복사한 정보에도 같은 축약이 적용됩니다.",
-        );
+        text.push_str(crate::i18n::common::Text::CopyElided.get());
     }
     if !full {
         if comparison_hidden {
-            text.push_str("\n\n축약문에 차이가 드러나지 않습니다. 전체 정보에서 비교하세요.");
+            text.push_str(crate::i18n::common::Text::CompareFull.get());
         } else if elided {
-            text.push_str("\n\n긴 부분은 …으로 생략합니다.");
+            text.push_str(crate::i18n::common::Text::LongElided.get());
         }
-        text.push_str("\n전체 이름과 경로: '예시 전체 정보 · 복사'");
+        text.push_str(crate::i18n::common::Text::FullInfoHint.get());
     }
     text.push_str("\n\n");
-    text.push_str(confirmation_display::DISPLAY_NOTE);
+    text.push_str(confirmation_display::display_note());
     text
 }
 
@@ -583,19 +582,18 @@ pub(crate) fn apply_confirmation_detail(
 ) -> String {
     let mut lines = Vec::new();
     if summary.case_only() != 0 {
-        lines.push(format!("대소문자만 변경: {}개", summary.case_only()));
+        lines.push(crate::i18n::common::case_only(&(summary.case_only())));
     }
     if summary.cycle_groups() != 0 {
-        lines.push(format!("순환 변경 그룹: {}개", summary.cycle_groups()));
+        lines.push(crate::i18n::common::cycle_groups(&(summary.cycle_groups())));
     }
     if summary.primitive_steps() != summary.logical_changed() {
-        lines.push(format!(
-            "파일 시스템 변경 단계: {}개",
-            summary.primitive_steps()
+        lines.push(crate::i18n::common::filesystem_steps(
+            &(summary.primitive_steps()),
         ));
     }
-    lines.push(format!("계획 지문: {fingerprint:016X}"));
-    lines.push(format!("목록 버전: {revision}"));
+    lines.push(crate::i18n::common::plan_fingerprint(&(fingerprint)));
+    lines.push(crate::i18n::common::list_revision(&(revision)));
     lines.join("\n")
 }
 
@@ -844,18 +842,19 @@ impl UiStatus {
             .or(self.progress.as_deref())
             .or(self
                 .preview_sync_failed
-                .then_some(PREVIEW_SYNC_FAILURE_STATUS))
+                .then_some(crate::i18n::common::Text::PreviewRenderBlocked.get()))
             .or(self.result.as_deref())
             .or(self.preview_notice.as_deref())
             .or(self.transient.as_deref())
-            .unwrap_or(EMPTY_LIST_STATUS)
+            .unwrap_or(crate::i18n::common::Text::EmptyList.get())
     }
 
     #[must_use]
     pub(crate) fn count_text(&self) -> String {
-        format!(
-            "전체 {} · 변경 {} · 선택 {}",
-            self.counts.total, self.counts.changed, self.counts.selected
+        crate::i18n::common::status_count(
+            &(self.counts.total),
+            &(self.counts.changed),
+            &(self.counts.selected),
         )
     }
 }
@@ -979,7 +978,7 @@ pub(crate) fn format_exact_bytes(bytes: u64) -> String {
         }
         grouped.push(digit);
     }
-    format!("{grouped} bytes")
+    crate::i18n::common::byte_count(&grouped)
 }
 
 #[cfg(any(windows, test))]
@@ -995,15 +994,17 @@ pub(crate) fn format_timestamp_fallback(date: [u16; 3], time: [u16; 3]) -> Strin
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
 pub const COMPATIBILITY_TARGET: &str = "DarkNamer 08.02.10";
-#[cfg(any(windows, test))]
-pub(crate) const ACTIVE_RECOVERY_STATUS_GUIDANCE: &str = "복구 확인을 다시 보려면 앱을 종료한 뒤 다시 실행하세요. 취소해도 파일은 변경되지 않고 복구 잠금을 유지합니다.";
+#[cfg(test)]
+pub(crate) const ACTIVE_RECOVERY_STATUS_GUIDANCE: &str =
+    crate::i18n::common::Text::RecoveryGuidance.in_language(crate::i18n::Language::Korean);
 
 /// Returns the product identity shown by the native About command.
 #[must_use]
 pub fn about_text() -> String {
-    format!(
-        "{PRODUCT_NAME} {}\n호환 대상: {COMPATIBILITY_TARGET}\n비공식 커뮤니티 관리 Rust 포트",
-        env!("CARGO_PKG_VERSION")
+    crate::i18n::common::about(
+        &(PRODUCT_NAME),
+        &(env!("CARGO_PKG_VERSION")),
+        &(COMPATIBILITY_TARGET),
     )
 }
 
@@ -1132,6 +1133,11 @@ mod windows;
 #[cfg(windows)]
 pub fn show_startup_error(message: &str) {
     windows::show_startup_error(message);
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn active_recovery_status_guidance() -> &'static str {
+    crate::i18n::common::Text::RecoveryGuidance.get()
 }
 
 /// Runs the native application.
@@ -5328,7 +5334,15 @@ mod tests {
         ] {
             assert_eq!(format_iec_file_size(bytes), expected);
         }
-        assert_eq!(format_exact_bytes(134_637_824), "134,637,824 bytes");
+        for (language, expected) in [
+            (crate::i18n::Language::Korean, "134,637,824바이트"),
+            (crate::i18n::Language::English, "134,637,824 bytes"),
+            (crate::i18n::Language::Japanese, "134,637,824 バイト"),
+        ] {
+            crate::i18n::with_language(language, || {
+                assert_eq!(format_exact_bytes(134_637_824), expected)
+            });
+        }
     }
 
     #[test]
@@ -5676,5 +5690,85 @@ mod tests {
             LISTVIEW_SELECTED,
             LISTVIEW_SELECTED | 0x0001
         ));
+    }
+}
+
+#[cfg(test)]
+mod localized_presentation_tests {
+    use super::*;
+    use crate::i18n::{Language, with_language};
+
+    #[test]
+    fn every_command_and_column_has_complete_language_specific_presentation() {
+        for language in [Language::Korean, Language::English, Language::Japanese] {
+            with_language(language, || {
+                for spec in COMMAND_UI_SPECS.iter().chain([&DELETE_SELECTED_UI_SPEC]) {
+                    let menu = command_menu_label(spec);
+                    assert!(menu.starts_with(spec.localized_menu_label()));
+                    assert!(!spec.localized_rail_label().is_empty());
+                    assert!(!spec.localized_tooltip_label().contains('\n'));
+                    if let Some(rail) = rail_tool_spec(spec.id) {
+                        assert_eq!(rail.label, spec.localized_rail_label());
+                    }
+                }
+                for column in COLUMNS.iter().chain([&NATIVE_STATUS_COLUMN]) {
+                    assert!(!column.localized_label().is_empty());
+                }
+                assert_eq!(preview::preview_status_labels().len(), 6);
+                assert!(!active_recovery_status_guidance().is_empty());
+                let reset = command_ui_spec(RESET)
+                    .map(|spec| spec.localized_tooltip_label())
+                    .unwrap_or_default();
+                match language {
+                    Language::Korean => {
+                        assert!(reset.contains("완료된 파일 작업은 취소하지 않습니다"))
+                    }
+                    Language::English => {
+                        assert!(reset.contains("completed file operations are not undone"))
+                    }
+                    Language::Japanese => {
+                        assert!(reset.contains("完了済みのファイル操作は元に戻りません"))
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn translated_confirmation_keeps_selection_scope_no_overwrite_and_exact_paths() {
+        let summary = ApplyConfirmationSummary {
+            logical_changed: 1,
+            rename_only: 1,
+            move_only: 0,
+            move_and_rename: 0,
+            common_destination_parent: None,
+            case_only: 0,
+            temporary_groups: 0,
+            primitive_steps: 1,
+        };
+        for language in [Language::Korean, Language::English, Language::Japanese] {
+            with_language(language, || {
+                let primary = apply_confirmation_primary(&summary);
+                let scope = apply_confirmation_scope(2, 0, 1);
+                assert!(primary.contains('1'));
+                assert!(scope.contains('2') && scope.contains('0') && scope.contains('1'));
+                let expected = match language {
+                    Language::Korean => "덮어쓰지 않습니다",
+                    Language::English => "will not be overwritten",
+                    Language::Japanese => "上書きしません",
+                };
+                assert!(primary.contains(expected));
+                let note = confirmation_display::display_note();
+                assert!(note.contains("[U+XXXX]"));
+                let path: Vec<u16> = "C:\\資料\\한글 [name].txt"
+                    .encode_utf16()
+                    .chain([0xD800])
+                    .collect();
+                let snapshot = path.clone();
+                let shown = confirmation_display::tail(&path, 1024);
+                assert!(shown.contains("[U+D800]"));
+                assert_eq!(path, snapshot);
+            });
+        }
     }
 }

@@ -6136,6 +6136,10 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     if ($result.gui -and $result.gui.flow -and $result.gui.flow.diagnostic) {
         $outputs += $result.gui.flow.diagnostic
     }
+    $languageCaptures = @(Get-CoreLanguageCaptureOutputs -Gui $result.gui)
+    $languageCaptureNames = @{}
+    foreach ($capture in $languageCaptures) { $languageCaptureNames[$capture.file] = $true }
+    $outputs += $languageCaptures
     $failureDiagnostics = @(Get-CoreGuiFailureDiagnosticOutputs -Gui $result.gui)
     if (($outputs.Count + $failureDiagnostics.Count) -gt 256) {
         throw 'Guest output reference count exceeds its bound.'
@@ -6164,7 +6168,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
             if ([long]$output.bytes -ne $remoteBytes) {
                 throw 'Guest output differs from its recorded byte count.'
             }
-            $coreTestChannelMaximumBytes
+            if ($languageCaptureNames.ContainsKey($output.file)) { 8MB }
+            else { $coreTestChannelMaximumBytes }
         } else { $coreOutputFileMaximumBytes }
         if ($remoteBytes -lt 0 -or $remoteBytes -gt $fileMaximum -or
             $collectionBytes -gt ($coreOutputAggregateMaximumBytes - $remoteBytes)) {

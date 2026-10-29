@@ -4,7 +4,7 @@ use super::{
     try_app_state, update_controls,
 };
 use crate::icon_cache::{IconCacheKey, cache_icon_index, icon_cache_key};
-use crate::preview::{PREVIEW_STATUS_LABELS, PreviewRowInput};
+use crate::preview::{PreviewRowInput, preview_status_labels};
 use crate::rename::{RenameBackend, WindowsRenameBackend};
 use crate::{
     LayoutRect, NATIVE_LIST_COLUMN_COUNT, NATIVE_STATUS_COLUMN, NATIVE_STATUS_COLUMN_INDEX,
@@ -496,9 +496,9 @@ pub(super) fn native_status_column_minimum_px(state: &AppState) -> i32 {
 }
 
 fn native_status_column_minimum_px_for(list_window: HWND, font: HFONT, dpi: u32) -> i32 {
-    let measured = PREVIEW_STATUS_LABELS
+    let measured = preview_status_labels()
         .into_iter()
-        .chain(core::iter::once(NATIVE_STATUS_COLUMN.label))
+        .chain(core::iter::once(NATIVE_STATUS_COLUMN.localized_label()))
         .filter_map(|text| measure_text(list_window, font, text, true))
         .map(|(width, _height)| width)
         .max()
@@ -1175,11 +1175,9 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let Some(item) = state.model.items().get(row) else {
         return true;
     };
-    let text = format!(
-        "{}\n정확한 크기: {}",
-        preview_item_details(item, state.preview_issue_cache.issue(row)),
-        format_exact_bytes(item.actual_size())
-    );
+    let details = preview_item_details(item, state.preview_issue_cache.issue(row));
+    let size = format_exact_bytes(item.actual_size());
+    let text = crate::i18n::native_ui::list_view_exact_size(&details, &size);
     // SAFETY: notification is live writable storage and its buffer/count pair
     // belongs to the ListView for this synchronous callback.
     let destination = unsafe { (*notification).pszText };
@@ -4026,7 +4024,7 @@ mod native_tests {
                 assert!(state.close_pending && state.mutation_locked);
                 assert_eq!(
                     state.ui_status.message_text(),
-                    "아이콘 정보 조회를 마치는 중입니다. 완료되면 창이 닫힙니다."
+                    crate::i18n::runtime::Text::IconShutdownProgress.get()
                 );
                 assert!(!guardian.shared.is_joined());
             }

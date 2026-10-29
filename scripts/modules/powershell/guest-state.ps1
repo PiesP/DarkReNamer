@@ -64,7 +64,8 @@ function Get-FlowCheckpoint {
 function Assert-ProductionRenameFlowStartupCheckpoint {
     param(
         [Parameter(Mandatory)][object] $Prelaunch,
-        [Parameter(Mandatory)][object] $Startup
+        [Parameter(Mandatory)][object] $Startup,
+        [switch] $ExpectExistingRuntimeLock
     )
 
     if ($Prelaunch.phase -cne 'initial' -or $Startup.phase -cne 'initial') {
@@ -76,11 +77,23 @@ function Assert-ProductionRenameFlowStartupCheckpoint {
     if ($before -cne $after) {
         throw 'Startup changed the production flow fixture inventory.'
     }
-    if (@($Prelaunch.journal_entries).Count -ne 0) {
+    $prelaunchJournal = @($Prelaunch.journal_entries)
+    if ($ExpectExistingRuntimeLock) {
+        if ($prelaunchJournal.Count -ne 1 -or
+            $prelaunchJournal[0].name -cne 'runtime.lock' -or
+            $prelaunchJournal[0].kind -cne 'file' -or
+            ($prelaunchJournal[0].bytes -isnot [long] -and
+                $prelaunchJournal[0].bytes -isnot [int]) -or
+            $prelaunchJournal[0].bytes -ne 0) {
+            throw 'The reused production flow requires exactly one prelaunch runtime lock.'
+        }
+    }
+    elseif ($prelaunchJournal.Count -ne 0) {
         throw 'The prelaunch production flow journal inventory is not empty.'
     }
     $journal = @($Startup.journal_entries)
-    if ($journal.Count -gt 1 -or ($journal.Count -eq 1 -and (
+    if (($ExpectExistingRuntimeLock -and $journal.Count -ne 1) -or
+        $journal.Count -gt 1 -or ($journal.Count -eq 1 -and (
         $journal[0].name -cne 'runtime.lock' -or $journal[0].kind -cne 'file' -or
         ($journal[0].bytes -isnot [long] -and $journal[0].bytes -isnot [int]) -or
         $journal[0].bytes -ne 0))) {

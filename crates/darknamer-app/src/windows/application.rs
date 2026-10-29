@@ -575,10 +575,11 @@ fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
 }
 
 fn run_unsafe() -> io::Result<()> {
+    let startup_language = super::language::initialize_startup_language()?;
     if process_is_elevated()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
+            crate::i18n::common::Text::ElevationBlocked.get(),
         ));
     }
     // SAFETY: OleInitialize requires a null reserved pointer, initializes the
@@ -637,7 +638,8 @@ fn run_unsafe() -> io::Result<()> {
     let startup_notice = (!startup_recovery_pending)
         .then(|| runtime.status.clone())
         .flatten();
-    let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
+    let state: *mut AppStateSlot =
+        CallbackState::into_raw(AppState::new_with_language(runtime, Some(startup_language)));
     let mut adopted = false;
     let mut init = WindowInit {
         state,
@@ -744,7 +746,11 @@ fn run_unsafe() -> io::Result<()> {
     if startup_recovery_pending {
         confirm_startup_recovery(window);
     } else if let Some(notice) = startup_notice {
-        message(window, &notice, "DarkReNamer - 복구 상태");
+        message(
+            window,
+            &notice,
+            crate::i18n::common::Text::RecoveryCaption.get(),
+        );
     }
     let mut message = MSG::default();
     loop {
@@ -1286,6 +1292,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: child creation succeeded and this callback retains the
             // allocation's sole AppState lease.
             start_preferences_writers(window, state_lease.state_mut());
+            state_lease.state_mut().start_language_writer(window);
             // SetWindowPos can synchronously reenter the callback graph. The
             // copied ListView HWND is sufficient for the z-order repair, so end
             // the AppState lease before placing it behind every direct sibling.
@@ -1390,8 +1397,8 @@ unsafe extern "system" fn window_proc(
                         if attached.is_null() {
                             super::message(
                                 window,
-                                &format!("메뉴를 화면에 표시하지 못했습니다: {error}"),
-                                "DarkReNamer - 시작 실패",
+                                &crate::i18n::common::menu_display_failed(&(error)),
+                                crate::i18n::common::Text::StartupCaption.get(),
                             );
                             drop(attached_owner_data);
                             // SAFETY: no state lease remains. Normal destruction
@@ -1403,8 +1410,8 @@ unsafe extern "system" fn window_proc(
                             let state = lease.state_mut();
                             state.menu = attached;
                             state.menu_owner_data = attached_owner_data;
-                            state.set_transient_status(format!(
-                                "메뉴 배색을 적용하지 못해 이전 표시를 유지합니다: {error}"
+                            state.set_transient_status(crate::i18n::common::menu_theme_failed(
+                                &(error),
                             ));
                         }
                         attached
@@ -1473,8 +1480,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 DPI의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 표시 설정",
+                    &crate::i18n::common::dpi_minimum_failed(&(error)),
+                    crate::i18n::common::Text::DisplayCaption.get(),
                 );
             }
             arrange(window, state);
@@ -1491,8 +1498,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 표시 설정의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 표시 설정",
+                    &crate::i18n::common::display_minimum_failed(&(error)),
+                    crate::i18n::common::Text::DisplayCaption.get(),
                 );
             }
             update_controls(state);
@@ -1516,8 +1523,8 @@ unsafe extern "system" fn window_proc(
                 let released = finish_appearance_dialog(window, state, wparam, lparam);
                 if released.is_some() {
                     if let Err(error) = ensure_minimum_track_size(window, state) {
-                        state.set_transient_status(format!(
-                            "모양 설정의 최소 창 크기를 적용하지 못했습니다: {error}"
+                        state.set_transient_status(crate::i18n::common::appearance_minimum_failed(
+                            &(error),
                         ));
                     }
                     arrange(window, state);
@@ -1537,8 +1544,8 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 글꼴의 최소 창 크기를 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 글꼴 설정",
+                    &crate::i18n::common::font_minimum_failed(&(error)),
+                    crate::i18n::common::Text::FontCaption.get(),
                 );
             }
             arrange(window, state);
@@ -2044,17 +2051,26 @@ mod tests {
     fn preference_read_failure_preserves_original_on_production_close()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::preferences::{
-            appearance_path_for_journal_root, path_for_journal_root, save, save_appearance,
+            appearance_path_for_journal_root, language_path_for_journal_root,
+            path_for_journal_root, save, save_appearance, save_language,
         };
         use std::os::windows::fs::OpenOptionsExt;
         use std::time::{Duration, Instant};
         use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
 
-        for (fail_columns, edit) in [(true, false), (false, false), (true, true), (false, true)] {
+        for (failed_preference, edit) in [
+            (0, false),
+            (1, false),
+            (2, false),
+            (0, true),
+            (1, true),
+            (2, true),
+        ] {
             let dir = tempfile::tempdir()?;
             let runtime = initialize_safe_runtime_at(dir.path())?;
             let columns_path = path_for_journal_root(runtime.root.path());
             let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+            let language_path = language_path_for_journal_root(runtime.root.path());
             drop(runtime);
             let mut columns = crate::default_column_states();
             columns[0].record_user_resize(320, BASE_DPI);
@@ -2064,20 +2080,21 @@ mod tests {
             };
             save(&columns_path, &columns)?;
             save_appearance(&appearance_path, appearance)?;
-            let path = if fail_columns {
-                &columns_path
-            } else {
-                &appearance_path
+            save_language(&language_path, crate::i18n::LanguagePreference::Japanese)?;
+            let path = match failed_preference {
+                0 => &columns_path,
+                1 => &appearance_path,
+                _ => &language_path,
             };
             let original = fs::read(path)?;
             let obstruction = fs::OpenOptions::new().read(true).share_mode(0).open(path)?;
             with_production_test_window(dir.path(), false, false, |window| {
                 let state =
                     try_app_state(window).ok_or_else(|| io::Error::other("missing state"))?;
-                if fail_columns {
-                    assert_eq!(state.state().column_states, crate::default_column_states());
-                } else {
-                    assert_eq!(state.state().appearance, UiAppearance::default());
+                match failed_preference {
+                    0 => assert_eq!(state.state().column_states, crate::default_column_states()),
+                    1 => assert_eq!(state.state().appearance, UiAppearance::default()),
+                    _ => assert!(!state.state().language_preferences_authorized),
                 }
                 drop(state);
                 drop(obstruction);
@@ -2089,13 +2106,23 @@ mod tests {
                     state.appearance.theme = AppThemeMode::Dark;
                     state.persist_column_preferences();
                     state.persist_appearance_preferences();
+                    let revision = state.model_revision;
+                    let locks = (state.mutation_locked, state.recovery_locked);
+                    state.select_language_preference(crate::i18n::LanguagePreference::English);
+                    assert_eq!(state.model_revision, revision);
+                    assert_eq!((state.mutation_locked, state.recovery_locked), locks);
                     // Resetting the failed preference is an in-memory edit, not write authority.
-                    if fail_columns {
-                        state.column_states = crate::default_column_states();
-                        state.persist_column_preferences();
-                    } else {
-                        state.appearance = UiAppearance::default();
-                        state.persist_appearance_preferences();
+                    match failed_preference {
+                        0 => {
+                            state.column_states = crate::default_column_states();
+                            state.persist_column_preferences();
+                        }
+                        1 => {
+                            state.appearance = UiAppearance::default();
+                            state.persist_appearance_preferences();
+                        }
+                        _ => state
+                            .select_language_preference(crate::i18n::LanguagePreference::System),
                     }
                 }
                 // SAFETY: the live test window receives the ordinary production close message.
@@ -2126,10 +2153,10 @@ mod tests {
             let after = fs::read(path)?;
             println!(
                 "failed file: {}; before: {:02x?}; after: {:02x?}",
-                if fail_columns {
-                    "columns"
-                } else {
-                    "appearance"
+                match failed_preference {
+                    0 => "columns",
+                    1 => "appearance",
+                    _ => "language",
                 },
                 original,
                 after
@@ -2137,12 +2164,23 @@ mod tests {
             assert_eq!(after, original, "unread preferences must survive close");
             if edit {
                 let reopened = AppState::new(initialize_safe_runtime_at(dir.path())?);
-                if fail_columns {
+                if failed_preference == 0 {
                     assert_eq!(reopened.appearance.theme, AppThemeMode::Dark);
                 } else {
                     let mut expected = crate::default_column_states();
                     expected[0].record_user_resize(210, BASE_DPI);
                     assert_eq!(reopened.column_states, expected);
+                }
+                assert_eq!(
+                    reopened.language_preference,
+                    if failed_preference == 2 {
+                        crate::i18n::LanguagePreference::Japanese
+                    } else {
+                        crate::i18n::LanguagePreference::English
+                    }
+                );
+                if failed_preference == 2 {
+                    assert_eq!(reopened.appearance.theme, AppThemeMode::Dark);
                 }
             }
         }

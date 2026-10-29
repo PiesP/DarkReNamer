@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use super::{ACTIVE_JOURNAL_LEAF, CANDIDATE_JOURNAL_LEAF};
+use crate::i18n::runtime::{self as text, Text as RuntimeText};
 
 pub(super) struct SafeRuntime {
     pub(super) root: JournalRoot,
@@ -80,14 +81,13 @@ impl StartupJournalBlock {
         match self {
             Self::Evidence { role, evidence } => {
                 let failure = evidence.failure();
-                format!(
-                    "{:?} 저널을 복구용으로 해석하지 못해 원본 핸들을 보존했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}, frame {:?}, {} bytes). 자동 삭제하지 않았으며 새 적용은 잠겼습니다.",
+                text::blocked_journal_evidence(
                     role,
-                    evidence.path().display(),
-                    failure.stage,
-                    failure.kind,
-                    failure.os_code,
-                    failure.codec_frame,
+                    &evidence.path().display(),
+                    &failure.stage,
+                    &failure.kind,
+                    &failure.os_code,
+                    &failure.codec_frame,
                     evidence.byte_len(),
                 )
             }
@@ -95,12 +95,12 @@ impl StartupJournalBlock {
                 role,
                 path,
                 failure,
-            } => format!(
-                "{role:?} 저널을 열 수 없어 원본 핸들을 보존하지 못했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}). 경로를 다시 열어 복사하지 않으며 새 적용은 잠겼습니다.",
-                path.display(),
-                failure.stage,
-                failure.kind,
-                failure.os_code,
+            } => text::blocked_journal_unavailable(
+                role,
+                &path.display(),
+                &failure.stage,
+                &failure.kind,
+                &failure.os_code,
             ),
         }
     }
@@ -122,20 +122,18 @@ impl StartupJournalBlock {
 
 pub(super) fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
     let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| io::Error::other("LOCALAPPDATA 환경 변수를 찾을 수 없습니다"))?;
+        .ok_or_else(|| io::Error::other(RuntimeText::MissingLocalAppData.get()))?;
     initialize_safe_runtime_at(&PathBuf::from(local_app_data))
 }
 
 pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<SafeRuntime> {
     if !local_app_data.is_absolute() {
-        return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
+        return Err(io::Error::other(RuntimeText::JournalRootNotAbsolute.get()));
     }
     let root = JournalRoot::open_private(local_app_data).map_err(io::Error::other)?;
-    let runtime_lock = root.acquire_runtime_lock("runtime.lock").map_err(|error| {
-        io::Error::other(format!(
-            "다른 DarkReNamer 인스턴스가 실행 중이거나 runtime lock을 확보할 수 없습니다: {error}"
-        ))
-    })?;
+    let runtime_lock = root
+        .acquire_runtime_lock("runtime.lock")
+        .map_err(|error| io::Error::other(text::runtime_lock_failed(&error)))?;
     let mut blocked_journals = Vec::new();
     let active_journal = match FileJournal::open_existing_retained(&root, ACTIVE_JOURNAL_LEAF) {
         Ok(journal) => Some(journal),
@@ -171,12 +169,11 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
             .iter()
             .any(|blocked| blocked.role() == JournalRole::Candidate);
     if active_observed && candidate_observed {
-        let mut status = "active 저널과 candidate 저널을 동시에 발견했습니다. 자동 복구와 폐기를 중단하고 두 상태를 보존합니다.".to_owned();
+        let mut status = RuntimeText::ConflictingJournals.get().to_owned();
         if let Some(journal) = active_journal.as_ref() {
-            status.push_str(&format!(
-                " Active 저널: {} ({} bytes).",
-                journal.path().display(),
-                journal.byte_len()
+            status.push_str(&text::active_journal_detail(
+                &journal.path().display(),
+                journal.byte_len(),
             ));
         }
         append_blocked_status(&mut status, &blocked_journals);
@@ -197,13 +194,13 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
         .is_some_and(FileJournal::is_physically_empty_candidate)
     {
         let Some(mut empty) = staged_journal.take() else {
-            return Err(io::Error::other("empty candidate state was lost"));
+            return Err(io::Error::other(
+                crate::i18n::runtime::Text::CandidateEmptyStateLost.get(),
+            ));
         };
         if let Err(error) = empty.mark_delete_if_safe() {
             staged_journal = Some(empty);
-            let status = format!(
-                "빈 candidate 저널을 정리하지 못해 보존했습니다: {error}. 새 적용은 잠겼습니다."
-            );
+            let status = text::empty_candidate_retained(&error);
             return Ok(SafeRuntime {
                 root,
                 runtime_lock,
@@ -234,13 +231,11 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
     }
 
     let Some(journal) = active_journal else {
-        return Err(io::Error::other("active journal state was lost"));
+        return Err(io::Error::other(
+            crate::i18n::runtime::Text::ActiveStateLost.get(),
+        ));
     };
-    let mut status = format!(
-        "이전 실행의 active 저널을 발견했습니다: {} ({} bytes). 파일 변경 전 명시적인 복구 확인이 필요하며 새 적용은 잠겼습니다.",
-        journal.path().display(),
-        journal.byte_len()
-    );
+    let mut status = text::active_journal_found(&journal.path().display(), journal.byte_len());
     append_staged_status(&mut status, staged_journal.as_ref());
     append_blocked_status(&mut status, &blocked_journals);
     Ok(SafeRuntime {
@@ -264,19 +259,15 @@ fn startup_locked_status(
         .map(StartupJournalBlock::status_korean)
         .collect::<Vec<_>>();
     if let Some(journal) = staged_journal {
-        parts.push(format!(
-            "활성화 전 저널을 보존했습니다: {}. 파일 변경은 시작되지 않았으며 새 적용은 잠겼습니다.",
-            journal.path().display()
-        ));
+        parts.push(text::staged_journal_found(&journal.path().display()));
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal>) {
     if let Some(journal) = staged_journal {
-        status.push_str(&format!(
-            " 활성화 전 저널도 보존했습니다: {}. 새 적용은 잠겼습니다.",
-            journal.path().display()
+        status.push_str(&text::staged_journal_also_retained(
+            &journal.path().display(),
         ));
     }
 }

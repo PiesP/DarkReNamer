@@ -101,9 +101,9 @@ impl NativeParentChain {
         });
         for component in components {
             let leaf = component.encode_wide().collect::<Vec<_>>();
-            let previous = directories
-                .last()
-                .ok_or_else(|| io::Error::other("mutation directory chain is empty"))?;
+            let previous = directories.last().ok_or_else(|| {
+                io::Error::other(crate::i18n::runtime::Text::MutationChainEmpty.get())
+            })?;
             let file = open_relative(
                 previous.file(),
                 &leaf,
@@ -118,9 +118,9 @@ impl NativeParentChain {
             let identity = file_identity(&file)?;
             directories.push(NativeParent { file, identity });
         }
-        let parent = directories
-            .pop()
-            .ok_or_else(|| io::Error::other("mutation directory chain is empty"))?;
+        let parent = directories.pop().ok_or_else(|| {
+            io::Error::other(crate::i18n::runtime::Text::MutationChainEmpty.get())
+        })?;
         reject_unsupported_filesystem(parent.file())?;
         Ok(Self {
             _ancestors: directories,
@@ -399,7 +399,7 @@ pub(super) fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi:
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "parent path must start at a local drive root",
+            crate::i18n::runtime::Text::ParentMustStartLocalDrive.get(),
         ));
     };
     match prefix.kind() {
@@ -412,7 +412,7 @@ pub(super) fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi:
     let Some(Component::RootDir) = components.next() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "parent path is not rooted",
+            crate::i18n::runtime::Text::ParentNotRooted.get(),
         ));
     };
     let mut root = PathBuf::new();
@@ -425,7 +425,7 @@ pub(super) fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi:
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "parent path contains unsupported components",
+                    crate::i18n::runtime::Text::ParentUnsupportedComponents.get(),
                 ));
             }
         }
@@ -457,7 +457,7 @@ pub(super) fn validate_directory_handle(file: &File) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "parent component must be a non-reparse directory",
+            crate::i18n::runtime::Text::ParentNotOrdinaryDirectory.get(),
         ))
     }
 }
@@ -497,7 +497,7 @@ pub(crate) fn prepare_text_export_target(path: &Path) -> io::Result<TextExportTa
     let leaf = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "text export destination must have a file name",
+            crate::i18n::runtime::Text::ExportMissingName.get(),
         )
     })?;
     prepare_text_export_parent_from_path(parent_path)?.target_for_test_leaf(leaf)
@@ -542,7 +542,7 @@ fn prepare_text_export_parent_impl(
             if ntfs_volume_id(&root_file)? != volume_id {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "the save folder volume no longer matches the selected shell volume",
+                    crate::i18n::runtime::Text::ExportVolumeChanged.get(),
                 ));
             }
             open_directory_by_file_reference(&root_file, file_reference)
@@ -556,9 +556,9 @@ fn prepare_text_export_parent_impl(
 
     for component in components {
         let leaf = component.encode_wide().collect::<Vec<_>>();
-        let parent = directories
-            .last()
-            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let parent = directories.last().ok_or_else(|| {
+            io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+        })?;
         let file = open_relative(
             parent.file(),
             &leaf,
@@ -573,16 +573,16 @@ fn prepare_text_export_parent_impl(
         let identity = file_identity(&file)?;
         directories.push(NativeParent { file, identity });
     }
-    let final_directory = directories
-        .last()
-        .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+    let final_directory = directories.last().ok_or_else(|| {
+        io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+    })?;
     reject_unsupported_filesystem(final_directory.file())?;
     if let Some(shell_identity) = shell_identity
         && final_directory.identity != shell_identity
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "the save folder path no longer identifies the selected shell folder",
+            crate::i18n::runtime::Text::ExportFolderChanged.get(),
         ));
     }
     Ok(TextExportParent {
@@ -592,10 +592,9 @@ fn prepare_text_export_parent_impl(
 
 impl TextExportParent {
     pub(crate) fn ntfs_file_reference_number(&self) -> io::Result<u64> {
-        let final_directory = self
-            .directories
-            .last()
-            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let final_directory = self.directories.last().ok_or_else(|| {
+            io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+        })?;
         ntfs_file_reference_number(final_directory.file())
     }
 
@@ -606,10 +605,9 @@ impl TextExportParent {
     /// replaced through its former path while the file is created or written.
     pub(crate) fn create_new_file(&self, leaf: &OsStr) -> io::Result<File> {
         let leaf = validated_text_export_leaf(leaf)?;
-        let parent = self
-            .directories
-            .last()
-            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let parent = self.directories.last().ok_or_else(|| {
+            io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+        })?;
         let file = open_relative(
             parent.file(),
             &leaf,
@@ -645,10 +643,9 @@ impl TextExportParent {
         require_shell_identity: bool,
     ) -> io::Result<TextExportTarget> {
         let leaf = validated_text_export_leaf(leaf)?;
-        let parent = self
-            .directories
-            .last()
-            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let parent = self.directories.last().ok_or_else(|| {
+            io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+        })?;
         // This check improves the dialog error; only the final handle-relative
         // no-replace rename authorizes creation, even after a namespace change.
         if require_shell_identity && shell_identity.is_some() {
@@ -683,7 +680,7 @@ fn validated_text_export_leaf(leaf: &OsStr) -> io::Result<Vec<u16>> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "text export destination has an invalid file name",
+            crate::i18n::runtime::Text::ExportInvalidName.get(),
         ));
     }
     Ok(leaf)
@@ -692,7 +689,7 @@ fn validated_text_export_leaf(leaf: &OsStr) -> io::Result<Vec<u16>> {
 fn text_export_existing_target_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "기존 파일은 덮어쓰지 않습니다. 사용하지 않는 새 파일 이름을 선택해 주세요.",
+        crate::i18n::runtime::Text::ExportTargetExists.get(),
     )
 }
 
@@ -749,7 +746,8 @@ fn ntfs_file_reference_number(file: &File) -> io::Result<u64> {
         (status, error_code)
     };
     if status < 0 {
-        let code = error_code.ok_or_else(|| io::Error::other("missing native error code"))?;
+        let code = error_code
+            .ok_or_else(|| io::Error::other(crate::i18n::runtime::Text::MissingNativeCode.get()))?;
         return Err(io::Error::from_raw_os_error(
             i32::try_from(code).unwrap_or(i32::MAX),
         ));
@@ -830,10 +828,9 @@ fn write_text_export_target_inner<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let parent = target
-        .parents
-        .last()
-        .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+    let parent = target.parents.last().ok_or_else(|| {
+        io::Error::other(crate::i18n::runtime::Text::ExportDirectoryChainEmpty.get())
+    })?;
     let (_stage_leaf, mut stage) = create_text_export_stage(parent.file())?;
     let result = (|| {
         validate_text_export_file(&stage)?;
@@ -853,7 +850,7 @@ where
         mark_file_delete(&stage).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("내보내기를 완료하지 못했고 임시 파일도 정리하지 못했습니다: {error}"),
+                crate::i18n::runtime::export_stage_cleanup_failed(&error),
             )
         })?;
     }
@@ -878,7 +875,7 @@ fn create_text_export_stage(parent: &File) -> io::Result<(Vec<u16>, File)> {
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "could not reserve a unique text export staging file",
+        crate::i18n::runtime::Text::ExportStageUnavailable.get(),
     ))
 }
 
@@ -889,7 +886,7 @@ fn text_export_temporary_leaf(kind: &str) -> io::Result<Vec<u16>> {
     if leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "text export temporary name exceeds the Windows leaf limit",
+            crate::i18n::runtime::Text::ExportTemporaryNameTooLong.get(),
         ));
     }
     Ok(leaf)
@@ -932,13 +929,13 @@ fn validate_text_export_file(file: &File) -> io::Result<()> {
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "text export destination must be a regular, unlinked file",
+            crate::i18n::runtime::Text::ExportTargetNotRegular.get(),
         ));
     }
     if !file_is_single_linked(file)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "text export destination must be a regular, unlinked file",
+            crate::i18n::runtime::Text::ExportTargetNotRegular.get(),
         ));
     }
     Ok(())
@@ -1376,15 +1373,21 @@ pub(super) fn open_relative_with_security(
     if leaf.is_empty() || leaf.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "relative leaf is invalid",
+            crate::i18n::runtime::Text::RelativeLeafInvalid.get(),
         ));
     }
-    let name_bytes = leaf
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "leaf is too large"))?;
-    let name_length = u16::try_from(name_bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "leaf is too large"))?;
+    let name_bytes = leaf.len().checked_mul(size_of::<u16>()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::runtime::Text::LeafTooLarge.get(),
+        )
+    })?;
+    let name_length = u16::try_from(name_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::runtime::Text::LeafTooLarge.get(),
+        )
+    })?;
     let mut encoded = leaf.to_vec();
     let object_name = UNICODE_STRING {
         Length: name_length,
@@ -1432,7 +1435,9 @@ pub(super) fn open_relative_with_security(
         ));
     }
     if handle.is_null() {
-        return Err(io::Error::other("relative open returned no handle"));
+        return Err(io::Error::other(
+            crate::i18n::runtime::Text::RelativeOpenNoHandle.get(),
+        ));
     }
     // SAFETY: successful NtCreateFile returned one new owned handle, checked
     // non-null above, and this is its only ownership transfer.
@@ -1476,7 +1481,7 @@ impl RenameBuffer {
         if leaf.is_empty() || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS || leaf.contains(&0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "relative leaf is invalid",
+                crate::i18n::runtime::Text::RelativeLeafInvalid.get(),
             ));
         }
         let name_bytes = leaf

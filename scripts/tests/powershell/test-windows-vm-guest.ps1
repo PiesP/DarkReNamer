@@ -204,6 +204,243 @@ $script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
 $testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    if ($IsWindows) {
+        Initialize-NativeCapture
+        $lockedJournal = Join-Path $temporaryRoot 'held-active.drj'
+        [IO.File]::WriteAllBytes($lockedJournal, [Text.Encoding]::ASCII.GetBytes('held-journal-fixture'))
+        $fullBefore = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1
+        $held = [IO.FileStream]::new($lockedJournal, [IO.FileMode]::Open,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            $live = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1 -LiveJournal
+            Assert-ProductionLiveJournalCheckpoint -Expected $fullBefore -Actual $live
+            if ($live.Contains('sha256') -or $live.native_error -ne 32) {
+                throw 'Live held journal incorrectly reported readable content.'
+            }
+        }
+        finally { $held.Dispose() }
+        $fullAfter = Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1
+        if (($fullBefore | ConvertTo-Json -Compress) -cne
+            ($fullAfter | ConvertTo-Json -Compress)) {
+            throw 'Held journal full checkpoint changed after releasing its content lock.'
+        }
+        Assert-Fails {
+            Get-ProductionJournalCheckpoint -Path $lockedJournal -MinimumBytes 1 -LiveJournal
+        } 'unexpectedly allowed a content read handle'
+    }
+    $languageRoot = Join-Path $temporaryRoot 'language-record'
+    $languageDirectory = Join-Path $languageRoot 'DarkReNamer'
+    [void](New-Item -ItemType Directory -Path $languageDirectory -Force)
+    $languagePath = Join-Path $languageDirectory 'ui-language-v1'
+    $record = [Convert]::FromHexString('44524c414e470000010000000200000030e5e75c')
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    $decoded = Read-ProductionLanguagePreference -LocalAppData $languageRoot
+    if ($decoded.value -ne 2 -or $decoded.sha256 -cne (Get-Sha256 $languagePath)) {
+        throw 'Language preference fixture did not decode the fixed English record.'
+    }
+    $record[12] = 3
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } 'checksum'
+    $record[12] = 2
+    $record[0] = 0
+    [IO.File]::WriteAllBytes($languagePath, $record)
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } 'header'
+    [IO.File]::WriteAllBytes($languagePath, ([byte[]]$record + [byte]0))
+    Assert-Fails { Read-ProductionLanguagePreference -LocalAppData $languageRoot } '20-byte record'
+    $menuStage = [ordered]@{
+        phase = 'pre-enter'; pid = 10; session_id = 2; hwnd = [long]100
+        thread_id = [long]20; language_handle = [long]200; menu_owner = [long]100
+        gui_flags = [long]0x14; view_language_state = [long]0
+        top_states = @(0, 0, 0x80, 0, 0, 0)
+        view_states = @(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        popup_count = 2
+        popups = @(
+            [ordered]@{ hwnd = [long]301; owner = [long]100; process_id = 10
+                class = '#32768'; visible = $true
+                bounds = [ordered]@{ left = 10; top = 10; right = 200; bottom = 200 } },
+            [ordered]@{ hwnd = [long]302; owner = [long]100; process_id = 10
+                class = '#32768'; visible = $true
+                bounds = [ordered]@{ left = 200; top = 10; right = 400; bottom = 200 } }
+        )
+        commands = @(0x9020, 0x9021, 0x9022, 0x9023)
+        states = @(0, 0, 0x80, 0); highlighted_indices = @(2)
+    }
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
+        throw 'Bound native language target stage was rejected.'
+    }
+    $menuStage.phase = 'language-open'
+    $menuStage.view_language_state = [long]0x80
+    $menuStage.view_states[9] = 0x80
+    $menuStage.states = @(0, 0, 0, 0)
+    $menuStage.highlighted_indices = @()
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 0 -RequireViewLanguageHighlight) {
+        throw 'Transient unhighlighted System item was accepted as ready for Down.'
+    }
+    $menuStage.states[0] = 0x80
+    $menuStage.highlighted_indices = @(0)
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 0 -RequireViewLanguageHighlight)) {
+        throw 'Selected System item was not accepted as ready for Down.'
+    }
+    $menuStage.phase = 'down-1'
+    $menuStage.states[0] = 0
+    $menuStage.states[1] = 0x80
+    $menuStage.highlighted_indices = @(1)
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 1)) {
+        throw 'First Down did not accept the selected Korean item.'
+    }
+    $menuStage.phase = 'pre-enter'
+    $menuStage.view_language_state = [long]0
+    $menuStage.view_states[9] = 0
+    $menuStage.states = @(0, 0, 0x80, 0)
+    $menuStage.highlighted_indices = @(2)
+    Assert-ProductionLanguagePopupContinuity -Open $menuStage -Stage $menuStage
+    $changedPopup = [ordered]@{
+        language_handle = [long]200
+        popups = @(
+            [ordered]@{ hwnd = [long]301 },
+            [ordered]@{ hwnd = [long]999 }
+        )
+    }
+    Assert-Fails {
+        Assert-ProductionLanguagePopupContinuity -Open $menuStage -Stage $changedPopup
+    } 'popup handles changed'
+    $menuStage.states[1] = 0x80
+    $menuStage.highlighted_indices = @(1, 2)
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Ambiguous native language highlight was accepted.'
+    }
+    $menuStage.states[1] = 0
+    $menuStage.highlighted_indices = @(2)
+    $menuStage.states[2] = 0x83
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Disabled native language target was accepted.'
+    }
+    $menuStage.states[2] = 0x80
+    $menuStage.popups = @($menuStage.popups[0])
+    $menuStage.popup_count = 1
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Language target without its visible submenu popup was accepted.'
+    }
+    $menuStage.popups = @(
+        [ordered]@{ hwnd = [long]301; owner = [long]100; process_id = 10
+            class = '#32768'; visible = $true
+            bounds = [ordered]@{ left = 10; top = 10; right = 200; bottom = 200 } },
+        [ordered]@{ hwnd = [long]302; owner = [long]100; process_id = 10
+            class = '#32768'; visible = $true
+            bounds = [ordered]@{ left = 200; top = 10; right = 400; bottom = 200 } }
+    )
+    $menuStage.popup_count = 2
+    $menuStage.menu_owner = [long]999
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'Foreign language menu owner was accepted.'
+    }
+    $menuStage.menu_owner = [long]100
+    $menuStage.gui_flags = [long]0x4
+    if (-not (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2)) {
+        throw 'Bound menu mode without optional popup-mode flag was rejected.'
+    }
+    $menuStage.gui_flags = [long]0
+    if (Test-ProductionLanguageMenuStage -Stage $menuStage -ExpectedProcessId 10 `
+        -ExpectedSession 2 -ExpectedWindow 100 -ExpectedHighlight 2) {
+        throw 'A non-menu GUI thread was accepted as the language menu.'
+    }
+    foreach ($language in @('ko', 'en', 'ja')) {
+        $labels = Get-ProductionLanguageSpec -Language $language
+        if ([string]::IsNullOrEmpty($labels.picker) -or
+            [string]::IsNullOrEmpty($labels.prefix) -or
+            [string]::IsNullOrEmpty($labels.apply) -or
+            [string]::IsNullOrEmpty($labels.menu) -or
+            [string]::IsNullOrEmpty($labels.rail)) {
+            throw "$language language acceptance catalog is incomplete."
+        }
+    }
+    $nativeOk = [ordered]@{
+        native_handle = 42; native_live = $true; native_parent_bound = $true
+        native_control_id = 2; native_class = 'Button'; enabled = $true
+        automation_id = 'provider-specific'
+    }
+    $wrongId = [ordered]@{
+        native_handle = 43; native_live = $false; native_parent_bound = $true
+        native_control_id = 1; native_class = 'Button'; enabled = $true; automation_id = '1'
+    }
+    $wrongParent = [ordered]@{
+        native_handle = 44; native_live = $true; native_parent_bound = $false
+        native_control_id = 1; native_class = 'Button'; enabled = $true; automation_id = '1'
+    }
+    $wrongClass = [ordered]@{
+        native_handle = 47; native_live = $true; native_parent_bound = $true
+        native_control_id = 1; native_class = 'Static'; enabled = $true; automation_id = '1'
+    }
+    $selectedOk = Select-ProductionMessageBoxOkCandidate -Candidates @(
+        $wrongId, $nativeOk, $wrongParent, $wrongClass)
+    if ($selectedOk.native_handle -ne 42 -or
+        $null -ne (Select-ProductionMessageBoxOkCandidate -Candidates @(
+            $wrongId, $wrongParent, $wrongClass))) {
+        throw 'Sole native MessageBox Button selection accepted a foreign or stale child.'
+    }
+    $disabled = [ordered]@{
+        native_handle = 45; native_live = $true; native_parent_bound = $true
+        native_control_id = 3; native_class = 'Button'; enabled = $false; automation_id = '3'
+    }
+    $invalidId = [ordered]@{
+        native_handle = 46; native_live = $true; native_parent_bound = $true
+        native_control_id = 0; native_class = 'Button'; enabled = $true; automation_id = '4'
+    }
+    Assert-Fails {
+        Select-ProductionMessageBoxOkCandidate -Candidates @($nativeOk, $disabled)
+    } 'more than one live native Button child'
+    Assert-Fails { Select-ProductionMessageBoxOkCandidate -Candidates @($disabled) } 'disabled'
+    Assert-Fails { Select-ProductionMessageBoxOkCandidate -Candidates @($invalidId) } 'invalid control ID'
+    $preferred = Resolve-ProductionSystemLanguage -Tags @('fr-FR', 'ja-JP', 'ko-KR')
+    if ($preferred.language -cne 'ja' -or $preferred.selected_tag -cne 'ja-JP') {
+        throw 'System language resolution did not select the first supported UI tag.'
+    }
+    $fallback = Resolve-ProductionSystemLanguage -Tags @('fr-FR')
+    if ($fallback.language -cne 'en' -or $null -ne $fallback.selected_tag) {
+        throw 'System language resolution did not use English after unsupported tags.'
+    }
+    Initialize-ProductionLanguageMenuReader
+    $expectedInputLayout = switch ([IntPtr]::Size) {
+        8 { @(24, 32, 32, 40, 8) }
+        4 { @(16, 24, 24, 28, 4) }
+        default { throw 'The guest test runs on an unsupported native INPUT pointer size.' }
+    }
+    $actualInputLayout = @([DarkReNamerLanguageMenuReader]::InputLayout())
+    if (($actualInputLayout -join ',') -cne ($expectedInputLayout -join ',')) {
+        throw "Native SendInput layout is wrong: $($actualInputLayout -join ',')."
+    }
+    foreach ($key in @(
+        @{ action = 'language-mnemonic'; virtual_key = 0x4C; extended = $false },
+        @{ action = 'down'; virtual_key = 0x28; extended = $true },
+        @{ action = 'enter'; virtual_key = 0x0D; extended = $false }
+    )) {
+        $dispatch = Get-ProductionLanguageKeyPacket -Action $key.action
+        if ($dispatch.virtual_key -ne $key.virtual_key -or
+            $dispatch.extended -ne $key.extended) {
+            throw "Native language action dispatch differs for $($key.action)."
+        }
+        $actualPackets = @([DarkReNamerLanguageMenuReader]::InspectTapPackets(
+            [uint16]$dispatch.virtual_key, [bool]$dispatch.extended))
+        $expectedPackets = @(1, $key.virtual_key, [int]$key.extended, 1,
+            $key.virtual_key, $(if ($key.extended) { 3 } else { 2 }))
+        if (($actualPackets -join ',') -cne ($expectedPackets -join ',')) {
+            throw "Native language key packet flags differ for virtual key $($key.virtual_key)."
+        }
+    }
+    $altVPackets = @([DarkReNamerLanguageMenuReader]::InspectTapPackets([uint16]0x56, $false))
+    if (($altVPackets -join ',') -cne '1,86,0,1,86,2') {
+        throw 'Native Alt+V mnemonic lost its ordinary V key packet.'
+    }
+    Initialize-ProductionLanguageMenuReader
     $valid = New-Fixture -Name 'valid'
     Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
     $focused = New-Fixture -Name 'focused-selection'
@@ -858,6 +1095,35 @@ foreach ($rawEvidence in @($true, $false)) {
         Assert-Fails {
             Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch -Startup $startup
         } 'The prelaunch production flow journal inventory is not empty'
+        Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+            -Startup $startup -ExpectExistingRuntimeLock
+        foreach ($mutation in @('missing', 'active', 'extra', 'bytes', 'boolean-bytes', 'kind')) {
+            $changedPrelaunch = $observedBefore | ConvertFrom-Json -Depth 8
+            switch ($mutation) {
+                missing { $changedPrelaunch.journal_entries = @() }
+                active { $changedPrelaunch.journal_entries[0].name = 'active.drj' }
+                extra { $changedPrelaunch.journal_entries += $changedPrelaunch.journal_entries[0] }
+                bytes { $changedPrelaunch.journal_entries[0].bytes = 1 }
+                boolean-bytes { $changedPrelaunch.journal_entries[0].bytes = $false }
+                kind { $changedPrelaunch.journal_entries[0].kind = 'reparse' }
+            }
+            Assert-Fails {
+                Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $changedPrelaunch `
+                    -Startup $startup -ExpectExistingRuntimeLock
+            } 'The reused production flow requires exactly one prelaunch runtime lock'
+        }
+        $startupWithoutLock = $observedBefore | ConvertFrom-Json -Depth 8
+        $startupWithoutLock.journal_entries = @()
+        Assert-Fails {
+            Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+                -Startup $startupWithoutLock -ExpectExistingRuntimeLock
+        } 'Startup left an unexpected production flow journal inventory'
+        $changedFixture = $observedBefore | ConvertFrom-Json -Depth 8
+        $changedFixture.fixture_entries[0].content_sha256 = 'f' * 64
+        Assert-Fails {
+            Assert-ProductionRenameFlowStartupCheckpoint -Prelaunch $dirtyPrelaunch `
+                -Startup $changedFixture -ExpectExistingRuntimeLock
+        } 'Startup changed the production flow fixture inventory'
     }
     $injectedOwnedPath = [IO.Path]::GetFullPath($valid.root).TrimEnd('\\') +
         '\\injected-owned.exe'
@@ -2315,6 +2581,48 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         Assert-Fails {
             Get-FullFileIdentity -Path $valid.root
         } 'requires Windows'
+    }
+    $originalCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+    try {
+        $names = @($originalCrashEnvironment.Keys)
+        if ($names.Count -ne 8) { throw 'The crash child environment snapshot omitted a controlled variable.' }
+        for ($index = 0; $index -lt $names.Count; $index++) {
+            $name = $names[$index]
+            switch ($index % 3) {
+                0 { [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process') }
+                1 { [Environment]::SetEnvironmentVariable($name, '', 'Process') }
+                2 { [Environment]::SetEnvironmentVariable($name, "fixture-$index", 'Process') }
+            }
+        }
+        $fixtureCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+        Clear-ProductionCrashChildOptionalFlags
+        $cleared = [Environment]::GetEnvironmentVariables('Process')
+        foreach ($name in @(
+            'DARKRENAMER_TEST_FORCE_ROLLBACK', 'DARKRENAMER_TEST_FAILURE_ROLLBACK',
+            'DARKRENAMER_TEST_RECOVERY_MODE'
+        )) {
+            if ($cleared.Contains($name)) {
+                throw "The actual crash child helper left optional flag $name present."
+            }
+        }
+        foreach ($name in $names[0..4]) {
+            if ($cleared.Contains($name) -ne $fixtureCrashEnvironment[$name].present -or
+                ($fixtureCrashEnvironment[$name].present -and
+                    [string]$cleared[$name] -cne $fixtureCrashEnvironment[$name].value)) {
+                throw "Clearing crash child optional flags changed required variable $name."
+            }
+        }
+        Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $fixtureCrashEnvironment
+        $restoredCrashEnvironment = Get-ProductionCrashChildEnvironmentSnapshot
+        foreach ($name in $names) {
+            if ($restoredCrashEnvironment[$name].present -ne $fixtureCrashEnvironment[$name].present -or
+                $restoredCrashEnvironment[$name].value -cne $fixtureCrashEnvironment[$name].value) {
+                throw "Crash child environment restoration lost the original state of $name."
+            }
+        }
+    }
+    finally {
+        Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalCrashEnvironment
     }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
@@ -4469,5 +4777,160 @@ function Test-DrControllerSpotlightPreflightTransport {
 }
 
 Test-DrControllerSpotlightPreflightTransport
+
+function Test-DrValidActiveLanguageCrashContract {
+    $source = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-scenario.ps1') -Raw
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'Valid-active language scenario must parse.' }
+    $crash = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionValidActiveRecoveryCheck'
+    }, $true))
+    if ($crash.Count -ne 1) { throw 'Valid-active language crash scenario is missing.' }
+    foreach ($fragment in @(
+        "`$TestBinary.name -cne 'darknamer_app'",
+        'Get-LowerSha256 -Path $binaryPath',
+        'DARKRENAMER_TEST_CHILD_ROOT',
+        'DARKRENAMER_TEST_FIXTURE_NONCE',
+        'forward-completed-0',
+        '--exact windows::tests::crash_recovery_child --nocapture --test-threads=1',
+        'Clear-ProductionCrashChildOptionalFlags',
+        '-SingleProcessOnly -AggregateOutputLimitBytes 65536',
+        '$child.process.ExitCode -ne 86',
+        'expected-abrupt-crash-point',
+        'Restore-ProductionCrashChildEnvironmentSnapshot -Snapshot $originalChildVariables',
+        '$env:LOCALAPPDATA = $originalLocalAppData',
+        'Complete-AcceptanceOwnedProcessJob -Owned $child',
+        'cancel.Current.HasKeyboardFocus',
+        'Invoke-AutomationControl -Element $cancel',
+        'Assert-ProductionValidActiveLiveCheckpoint -Expected $partial -Actual $afterCancel',
+        'Assert-ProductionValidActiveCheckpoint -Expected $partial -Actual $afterClose',
+        'if ($fullyVerified -and (Test-Path -LiteralPath $fixtureRoot))'
+    )) {
+        if ($crash[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+            throw "Valid-active language crash contract lost $fragment"
+        }
+    }
+    $gui = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-GuiSmoke'
+    }, $true))
+    if ($gui.Count -ne 1 -or
+        $gui[0].Extent.Text.IndexOf('Resolve-VerifiedBundle -Root $Root', [StringComparison]::Ordinal) -lt 0 -or
+        $gui[0].Extent.Text.IndexOf('-TestBinary $appTests[0]', [StringComparison]::Ordinal) -lt 0) {
+        throw 'GUI language cycle lost the manifest-verified source test binary.'
+    }
+    foreach ($expected in @(
+        @{ name='Invoke-ProductionBlockedRecoveryCheck'; calls=1 },
+        @{ name='Invoke-ProductionLanguageCycle'; calls=1 },
+        @{ name='Invoke-ProductionValidActiveRecoveryCheck'; calls=2 }
+    )) {
+        $functions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $expected.name
+        }, $true))
+        if ($functions.Count -ne 1 -or
+            [regex]::Matches($functions[0].Extent.Text,
+                'process_lifecycle = Get-ProductionOwnedProcessLifecycle -Owned \$(?:owned|child)').Count -ne
+                $expected.calls) {
+            throw "Language process lifecycle binding is missing from $($expected.name)."
+        }
+    }
+}
+
+Test-DrValidActiveLanguageCrashContract
+
+function Test-DrProductionLanguageJobLedgerBinding {
+    $lifecycles = @(
+        for ($index = 1; $index -le 33; $index++) {
+            $owned = [pscustomobject]@{
+                process = [pscustomobject]@{ Id = [int](5000 + $index) }
+                process_start_time_utc_ticks = [string](638975000000000000L + $index)
+            }
+            $lifecycle = Get-ProductionOwnedProcessLifecycle -Owned $owned
+            if ($lifecycle.pid -ne $owned.process.Id -or
+                $lifecycle.start_time_utc_ticks -cne $owned.process_start_time_utc_ticks) {
+                throw 'The actual production lifecycle factory detached from its owned process.'
+            }
+            $lifecycle
+        }
+    )
+    Assert-Fails {
+        Get-ProductionOwnedProcessLifecycle -Owned ([pscustomobject]@{
+            process = [pscustomobject]@{ Id = 5000 }
+            process_start_time_utc_ticks = 'invalid'
+        })
+    } 'lacks its owned PID or start time'
+    $jobs = @($lifecycles | ForEach-Object {
+        [ordered]@{
+            pid = $_.pid; process_start_time_utc_ticks = $_.start_time_utc_ticks
+            status = 'clean'; job_empty = $true; job_closed = $true
+            capture_complete = $true; had_survivors = $false
+            forced_termination = $false; error = $null
+            active_processes_at_primary_exit = 0; active_processes_at_close = 0
+            active_processes_at_stop = 0; active_process_ids_at_stop = @()
+            total_processes_at_stop = 1; primary_process_active_at_stop = $false
+            termination_exit_code = $null
+        }
+    })
+    $selections = @(
+        for ($index = 0; $index -lt 5; $index++) {
+            $row = [ordered]@{ process_lifecycle = $lifecycles[21 + $index] }
+            if ($index -lt 3) {
+                $row['blocked_recovery'] = [ordered]@{
+                    process_lifecycle = $lifecycles[26 + $index]
+                }
+            }
+            $row
+        }
+    )
+    $shape = [ordered]@{
+        tests = @(0..19 | ForEach-Object { [ordered]@{ process_lifecycle = $lifecycles[$_] } })
+        gui = [ordered]@{
+            process_lifecycle = $lifecycles[20]
+            language_checks = [ordered]@{
+                selections = $selections
+                valid_active_recovery = [ordered]@{
+                    child = [ordered]@{ process_lifecycle = $lifecycles[29] }
+                    observations = @(0..2 | ForEach-Object {
+                        [ordered]@{ process_lifecycle = $lifecycles[30 + $_] }
+                    })
+                }
+            }
+        }
+        process_job_cleanup = $jobs
+    }
+    $json = $shape | ConvertTo-Json -Depth 12 -Compress
+    $result = $json | ConvertFrom-Json -Depth 12
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result)) {
+        throw 'The actual controller rejected 33 clean source-bound language Jobs.'
+    }
+    foreach ($mutation in @('missing-reference', 'wrong-ticks', 'extra-row', 'forced')) {
+        $changed = $json | ConvertFrom-Json -Depth 12
+        switch ($mutation) {
+            missing-reference {
+                $changed.gui.language_checks.selections[0].PSObject.Properties.Remove('process_lifecycle')
+            }
+            wrong-ticks {
+                $changed.gui.language_checks.valid_active_recovery.child.process_lifecycle.start_time_utc_ticks =
+                    '638975000000000099'
+            }
+            extra-row {
+                $newRow = $changed.process_job_cleanup[0] | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+                $newRow.pid = 5999
+                $newRow.process_start_time_utc_ticks = '638975000000000099'
+                $changed.process_job_cleanup = @($changed.process_job_cleanup) + @($newRow)
+            }
+            forced { $changed.process_job_cleanup[0].forced_termination = $true }
+        }
+        if (Test-DrControllerProcessJobCleanupLedger -Result $changed) {
+            throw "The actual controller accepted $mutation in the language Job ledger."
+        }
+    }
+}
+
+Test-DrProductionLanguageJobLedgerBinding
 
 Write-Host 'Windows VM guest runner tests passed.'

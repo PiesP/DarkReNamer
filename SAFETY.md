@@ -381,6 +381,16 @@ does not require a synchronized count table. Every modified exception, including
 additions within an allowed location, still requires native-boundary review and
 a local `SAFETY` justification. The Windows Clippy gate keeps
 `undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` denied.
+`windows/language.rs` is the read-only UI-language boundary. It queries
+`GetUserPreferredUILanguages` using the documented size-query contract, bounds
+the UTF-16 allocation before the second call, checks success and returned extent,
+and consumes only a complete double-NUL list. It does not change thread, process
+or user locales. Language selection changes presentation only; exact UTF-16
+names, sorting, legacy decoding, model revisions and rename/recovery authority
+remain at their existing owners. The independent language preference file uses
+the existing durable temporary-file replacement mechanism and retains its own
+read-failure write prohibition.
+
 `rename/private_state.rs` is the reviewed exception for querying token SIDs,
 handle security descriptors and ACEs and passing a protected descriptor to
 the parent-relative `NtCreateFile` creation boundary. The descriptor and SID

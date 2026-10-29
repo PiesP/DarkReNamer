@@ -297,11 +297,11 @@ foreach ($contract in @(
     @{ Text = $windowsSource; Value = 'const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;' },
     @{ Text = $windowsSource; Value = 'const DISCARD_STAGED_JOURNAL: u16 = 0x9001;' },
     @{ Text = $windowsSource; Value = 'const SHOW_RECOVERY_STATUS: u16 = 0x9002;' },
-    @{ Text = $menuSource; Value = 'recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 및 문제 확인...")?' },
-    @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?' },
+    @{ Text = $menuSource; Value = 'recovery.item(SHOW_RECOVERY_STATUS, Text::MenuRecoveryStatus.get())?' },
+    @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, Text::MenuExportRecovery.get())?' },
     @{ Text = $menuSource; Value = 'recovery.separator()?' },
-    @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?' },
-    @{ Text = $dialogSource; Value = 'let title = wide("복구 저널 원본을 저장할 폴더 선택");' },
+    @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, Text::MenuDiscardStaged.get())?' },
+    @{ Text = $dialogSource; Value = 'let title = wide(Text::DialogExportFolderTitle.get());' },
     @{ Text = $librarySource; Value = 'pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;' },
     @{ Text = $librarySource; Value = 'pub(crate) const RECOVER_CONFIRM_BUTTON_ID: i32 = 1_202;' },
     @{ Text = $recoveryUiSource; Value = '.create_new_file(std::ffi::OsStr::new(leaf))' },
@@ -311,9 +311,9 @@ foreach ($contract in @(
     @{ Text = $recoveryUiSource; Value = '"active.drj.evidence"' },
     @{ Text = $recoveryUiSource; Value = '"candidate.drj.evidence"' },
     @{ Text = $recoveryUiSource; Value = 'if !state.can_discard_staged_intent() || !journal_matches {' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 진단 내보내기 완료"' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 활성화 전 계획 폐기".to_owned()' },
-    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 폐기 완료"' }
+    @{ Text = $recoveryUiSource; Value = 'RT::RecoveryExportCompleteTitle.get()' },
+    @{ Text = $recoveryUiSource; Value = 'RT::DiscardConfirmTitle.get().to_owned()' },
+    @{ Text = $recoveryUiSource; Value = 'RT::DiscardCompleteTitle.get()' }
 )) {
     if ($contract.Text.IndexOf($contract.Value, [StringComparison]::Ordinal) -lt 0) {
         throw "The recovery observer UI contract drifted from production source: $($contract.Value)"
@@ -2539,6 +2539,62 @@ $auditedInputSites = @{
 }
 $observedInputSites = @{}
 if ($sendKeys.Count -ne 4) { throw 'Recovery input sites changed without an ownership audit.' }
+function Test-ProductionLanguageReadbackCallChain {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast] $SourceAst)
+    $choice = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionLanguageMenuChoice'
+    }, $true))
+    $observer = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-ProductionLanguageChoiceObservation'
+    }, $true))
+    $reader = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Read-ProductionLanguagePreference'
+    }, $true))
+    if ($choice.Count -ne 1 -or $observer.Count -ne 1 -or $reader.Count -ne 1) { return $false }
+    $choiceCalls = @($choice[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Get-ProductionLanguageChoiceObservation'
+    }, $true))
+    $observerCalls = @($observer[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Read-ProductionLanguagePreference'
+    }, $true))
+    if ($choiceCalls.Count -ne 1 -or $observerCalls.Count -ne 1 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-MainWindow $MainWindow', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Status $status', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-Session $Session', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceCalls[0].Extent.Text.IndexOf('-CurrentLanguage $CurrentLanguage', [StringComparison]::Ordinal) -lt 0 -or
+        $observerCalls[0].Extent.Text.IndexOf('-LocalAppData $env:LOCALAPPDATA', [StringComparison]::Ordinal) -lt 0 -or
+        $choice[0].Extent.Text.IndexOf('$saved = $observation.preference', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('[IO.FileStream]::new', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('[IO.FileShare]::Delete', [StringComparison]::Ordinal) -lt 0 -or
+        $reader[0].Extent.Text.IndexOf('SHA256]::HashData($bytes)', [StringComparison]::Ordinal) -lt 0) {
+        return $false
+    }
+    $true
+}
+if (-not (Test-ProductionLanguageReadbackCallChain -SourceAst $fromFile)) {
+    throw 'Language menu keyboard selection lost its bound observer and durable readback chain.'
+}
+$detachedSource = $recoveryModuleSource.Replace(
+    'Get-ProductionLanguageChoiceObservation -Process $Process `',
+    'Get-ProductionLanguageChoiceObservationDetached -Process $Process `'
+)
+if ($detachedSource -ceq $recoveryModuleSource) {
+    throw 'Language readback negative fixture no longer matches the observed command call.'
+}
+$detachedTokens = $null
+$detachedErrors = $null
+$detachedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $detachedSource, [ref]$detachedTokens, [ref]$detachedErrors)
+if ($detachedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageReadbackCallChain -SourceAst $detachedAst)) {
+    throw 'Detached language save observation unexpectedly passed the readback-chain audit.'
+}
 foreach ($inputCall in $sendKeys) {
     $owner = $inputCall.Parent
     while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
@@ -2565,6 +2621,164 @@ foreach ($inputCall in $sendKeys) {
             "[Windows.Forms.SendKeys]::SendWait('{ENTER}')"
         )) { throw 'Picker keyboard input exceeds the reviewed address navigation.' }
     }
+}
+function Test-ProductionLanguageNativeInputAudit {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast] $SourceAst)
+    $choice = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionLanguageMenuChoice'
+    }, $true))
+    $sender = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Send-ProductionLanguageNativeInput'
+    }, $true))
+    $keyPacket = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-ProductionLanguageKeyPacket'
+    }, $true))
+    $initializer = @($SourceAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Initialize-ProductionLanguageMenuReader'
+    }, $true))
+    if ($choice.Count -ne 1 -or $sender.Count -ne 1 -or
+        $keyPacket.Count -ne 1 -or $initializer.Count -ne 1) { return $false }
+    $calls = @($choice[0].FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Send-ProductionLanguageNativeInput'
+    }, $true))
+    $actions = @('alt-v', 'language-mnemonic', 'down', 'enter')
+    if ($calls.Count -ne $actions.Count) { return $false }
+    for ($index = 0; $index -lt $actions.Count; $index++) {
+        $call = $calls[$index].Extent.Text
+        if ($call.IndexOf('-Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf('-MainWindow $MainWindow', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf('-Session $Session', [StringComparison]::Ordinal) -lt 0 -or
+            $call.IndexOf("-Action '$($actions[$index])'", [StringComparison]::Ordinal) -lt 0) {
+            return $false
+        }
+    }
+    $senderText = $sender[0].Extent.Text
+    $choiceText = $choice[0].Extent.Text
+    $nativeText = $initializer[0].Extent.Text
+    if ($senderText.IndexOf("[ValidateSet('alt-v', 'language-mnemonic', 'down', 'enter')]", [StringComparison]::Ordinal) -lt 0 -or
+        [regex]::Matches($SourceAst.Extent.Text,
+            '\[DarkReNamerLanguageMenuReader\]::(?:KeyDown|KeyUp|Tap|TapExtended)\(').Count -ne 5) {
+        return $false
+    }
+    foreach ($fragment in @(
+        'Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session',
+        "[DarkReNamerLanguageMenuReader]::KeyDown([uint16]0x12)",
+        "[DarkReNamerLanguageMenuReader]::Tap([uint16]0x56)",
+        "[DarkReNamerLanguageMenuReader]::KeyUp([uint16]0x12)",
+        'Get-ProductionLanguageKeyPacket -Action $Action',
+        '[DarkReNamerLanguageMenuReader]::Tap([uint16]$packet.virtual_key)',
+        '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)',
+        'if ($packet.extended)'
+    )) {
+        if ($senderText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
+    }
+    if ($senderText.IndexOf('finally {', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Wait-ProductionLanguageMenuStage', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf("-Phase 'language-open' -RequireViewLanguageHighlight -ExpectedHighlight 0", [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('$current = 0', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $preEnter', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('Get-ProductionLanguageChoiceObservation -Process $Process', [StringComparison]::Ordinal) -lt 0 -or
+        $choiceText.IndexOf('SendWait', [StringComparison]::Ordinal) -ge 0) { return $false }
+    foreach ($fragment in @(
+        '[StructLayout(LayoutKind.Sequential)] private struct KeyInput',
+        '[StructLayout(LayoutKind.Explicit)] private struct InputUnion',
+        '[StructLayout(LayoutKind.Sequential)] private struct Input',
+        '[FieldOffset(0)] public KeyInput Keyboard',
+        'private static extern uint SendInput(uint count, Input[] inputs, int size)',
+        'SendInput(1, new [] { input }, Marshal.SizeOf(typeof(Input))) != 1',
+        'throw new Win32Exception(Marshal.GetLastWin32Error())',
+        'public static void Tap(ushort virtualKey)',
+        'finally { KeyUp(virtualKey); }',
+        'public static void TapExtended(ushort virtualKey)',
+        'try { SendKey(virtualKey, 1); }',
+        'finally { SendKey(virtualKey, 3); }',
+        'Input down = KeyboardPacket(virtualKey, extended ? 1u : 0u)',
+        'Input up = KeyboardPacket(virtualKey, extended ? 3u : 2u)',
+        'Input input = KeyboardPacket(virtualKey, flags)',
+        'TopStates = new uint[6], ViewStates = new uint[10]'
+    )) {
+        if ($nativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) { return $false }
+    }
+    foreach ($fragment in @(
+        "[ValidateSet('language-mnemonic', 'down', 'enter')]",
+        "'language-mnemonic' { return [ordered]@{ virtual_key = 0x4C; extended = `$false } }",
+        "'down'              { return [ordered]@{ virtual_key = 0x28; extended = `$true } }",
+        "'enter'             { return [ordered]@{ virtual_key = 0x0D; extended = `$false } }"
+    )) {
+        if ($keyPacket[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+            return $false
+        }
+    }
+    $true
+}
+if (-not (Test-ProductionLanguageNativeInputAudit -SourceAst $fromFile)) {
+    throw 'Language menu native input lost its reviewed keys, foreground guard, or SendInput ABI.'
+}
+$unreadyLanguageSource = $recoveryModuleSource.Replace(
+    "-Phase 'language-open' -RequireViewLanguageHighlight -ExpectedHighlight 0",
+    "-Phase 'language-open' -RequireViewLanguageHighlight")
+if ($unreadyLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Language first-highlight negative fixture no longer matches the source.'
+}
+$unreadyTokens = $null
+$unreadyErrors = $null
+$unreadyAst = [Management.Automation.Language.Parser]::ParseInput(
+    $unreadyLanguageSource, [ref]$unreadyTokens, [ref]$unreadyErrors)
+if ($unreadyErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $unreadyAst)) {
+    throw 'Unready language submenu unexpectedly passed the source audit.'
+}
+$nonExtendedLanguageSource = $recoveryModuleSource.Replace(
+    '[DarkReNamerLanguageMenuReader]::TapExtended([uint16]$packet.virtual_key)',
+    '[DarkReNamerLanguageMenuReader]::Tap([uint16]$packet.virtual_key)')
+if ($nonExtendedLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Extended language navigation negative fixture no longer matches the source.'
+}
+$nonExtendedTokens = $null
+$nonExtendedErrors = $null
+$nonExtendedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $nonExtendedLanguageSource, [ref]$nonExtendedTokens, [ref]$nonExtendedErrors)
+if ($nonExtendedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $nonExtendedAst)) {
+    throw 'Ordinary language navigation unexpectedly passed the extended-key source audit.'
+}
+$unguardedLanguageSource = $recoveryModuleSource.Replace(
+    'Assert-ProductionLanguageMenuForeground -Process $Process -MainWindow $MainWindow -Session $Session' + "`n" +
+    "    if (`$Action -ceq 'alt-v')", "if (`$Action -ceq 'alt-v')")
+if ($unguardedLanguageSource -ceq $recoveryModuleSource) {
+    throw 'Language input guard negative fixture no longer matches the source.'
+}
+$unguardedTokens = $null
+$unguardedErrors = $null
+$unguardedAst = [Management.Automation.Language.Parser]::ParseInput(
+    $unguardedLanguageSource, [ref]$unguardedTokens, [ref]$unguardedErrors)
+if ($unguardedErrors.Count -ne 0 -or
+    (Test-ProductionLanguageNativeInputAudit -SourceAst $unguardedAst)) {
+    throw 'Unguarded native language input unexpectedly passed the source audit.'
+}
+$languageForegroundGuards = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-ProductionLanguageMenuForeground'
+}, $true))
+if ($languageForegroundGuards.Count -ne 1 -or
+    $languageForegroundGuards[0].Extent.Text.IndexOf('Get-ForegroundObservation', [StringComparison]::Ordinal) -lt 0 -or
+    $languageForegroundGuards[0].Extent.Text.IndexOf('$foreground.session_id -ne $Session', [StringComparison]::Ordinal) -lt 0) {
+    throw 'Language keyboard foreground guard lost its exact process and session observation.'
+}
+$languageCycle = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ProductionLanguageCycle'
+}, $true))
+if ($languageCycle.Count -ne 1 -or
+    $languageCycle[0].Extent.Text.IndexOf('if ($ownedCleanupClean -and $null -ne $fixture', [StringComparison]::Ordinal) -lt 0) {
+    throw 'Language fixture cleanup must require a verified clean owned process job.'
 }
 foreach ($name in $auditedInputSites.Keys) {
     if ($observedInputSites[$name] -ne $auditedInputSites[$name]) {

@@ -57,6 +57,7 @@ mod command_rail;
 mod dialog;
 mod drag_drop;
 mod icon_worker;
+mod language;
 mod list_view;
 mod menu;
 mod popup_menu;
@@ -72,20 +73,16 @@ mod worker;
 fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str {
     match error {
         ProposalMutationError::InvalidInput(LegacyInputError::NonPositiveWidth) => {
-            "자리수 입력이 잘못되었습니다."
+            crate::i18n::common::Text::InvalidWidth.get()
         }
-        ProposalMutationError::InvalidInput(_) => {
-            "입력값이 올바르지 않아 목록을 변경하지 않았습니다."
-        }
+        ProposalMutationError::InvalidInput(_) => crate::i18n::common::Text::InvalidInput.get(),
         ProposalMutationError::NameBudgetExceeded { .. }
         | ProposalMutationError::AggregateBudgetExceeded { .. }
         | ProposalMutationError::PlannedPathAggregateBudgetExceeded { .. }
         | ProposalMutationError::ArithmeticOverflow => {
-            "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
+            crate::i18n::common::Text::ProposalLimit.get()
         }
-        ProposalMutationError::AllocationFailed => {
-            "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
-        }
+        ProposalMutationError::AllocationFailed => crate::i18n::common::Text::ProposalMemory.get(),
     }
 }
 
@@ -95,10 +92,10 @@ fn destination_parent_mutation_error_korean(error: DestinationParentMutationErro
         | DestinationParentMutationError::AggregateBudgetExceeded { .. }
         | DestinationParentMutationError::PlannedPathAggregateBudgetExceeded { .. }
         | DestinationParentMutationError::ArithmeticOverflow => {
-            "대상 폴더 경로가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 더 짧은 경로를 선택해 주세요."
+            crate::i18n::common::Text::FolderLimit.get()
         }
         DestinationParentMutationError::AllocationFailed => {
-            "대상 폴더 변경을 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
+            crate::i18n::common::Text::FolderMemory.get()
         }
     }
 }
@@ -757,6 +754,9 @@ struct AppState {
     appearance_preferences_path: PathBuf,
     column_preferences_authorized: bool,
     appearance_preferences_authorized: bool,
+    language_preferences_path: PathBuf,
+    language_preferences_authorized: bool,
+    language_preference: crate::i18n::LanguagePreference,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
@@ -821,12 +821,25 @@ impl Drop for AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     fn new(runtime: SafeRuntime) -> Self {
+        Self::new_with_language(runtime, None)
+    }
+
+    fn new_with_language(runtime: SafeRuntime, startup: Option<language::StartupLanguage>) -> Self {
         let column_preferences_path = path_for_journal_root(runtime.root.path());
         let appearance_preferences_path = appearance_path_for_journal_root(runtime.root.path());
         let loaded_columns =
             load_column_preferences(&column_preferences_path, default_column_states());
         let loaded_appearance = load_appearance_or_default(&appearance_preferences_path);
+        let startup = startup.unwrap_or_else(|| language::StartupLanguage {
+            loaded: crate::preferences::load_language_or_default(runtime.root.path()),
+            system_failure: None,
+        });
+        let language_preferences_path =
+            crate::preferences::language_path_for_journal_root(runtime.root.path());
+        let language_preferences_authorized = startup.loaded.failure.is_none();
+        let language_preference = startup.loaded.preference;
         let mut ui_status = runtime
             .status
             .clone()
@@ -840,14 +853,29 @@ impl AppState {
         let column_preferences_authorized = loaded_columns.failure.is_none();
         let appearance_preferences_authorized = loaded_appearance.failure.is_none();
         if let Some(error) = loaded_columns.failure {
-            ui_status.set_transient(format!(
-                "열 표시 설정을 불러오지 못해 안전한 기본값을 사용하며 이번 실행에서는 저장하지 않습니다: {error}"
-            ));
+            ui_status.set_transient(crate::i18n::common::column_read_failed(&(error)));
         }
         if let Some(error) = loaded_appearance.failure {
-            ui_status.set_transient(format!(
-                "모양 설정을 불러오지 못해 안전한 기본값을 사용하며 이번 실행에서는 저장하지 않습니다: {error}"
-            ));
+            ui_status.set_transient(crate::i18n::common::appearance_read_failed(&(error)));
+        }
+        if let Some(error) = startup.loaded.failure {
+            ui_status.set_transient(crate::i18n::common::language_read_failed(&(error)));
+        }
+        if let Some(error) = startup.system_failure {
+            ui_status.set_transient(crate::i18n::common::system_languages_read_failed(&(error)));
+        }
+        // Commit a missing System/legacy default before other settings can turn
+        // a new installation into an apparent Korean legacy installation.
+        if startup.loaded.missing
+            && startup.loaded.migration_failure.is_none()
+            && language_preferences_authorized
+            && let Err(error) =
+                crate::preferences::save_language(&language_preferences_path, language_preference)
+        {
+            ui_status.set_transient(crate::i18n::common::default_language_save_failed(&(error)));
+        }
+        if let Some(error) = startup.loaded.migration_failure {
+            ui_status.set_transient(crate::i18n::common::language_migration_pending(&error));
         }
         let column_states = loaded_columns.columns;
         let appearance = loaded_appearance.appearance;
@@ -886,6 +914,9 @@ impl AppState {
             appearance_preferences_path,
             column_preferences_authorized,
             appearance_preferences_authorized,
+            language_preferences_path,
+            language_preferences_authorized,
+            language_preference,
             journal_root: runtime.root,
             _runtime_lock: runtime.runtime_lock,
             active_journal: runtime.active_journal,
@@ -1166,7 +1197,8 @@ impl AppState {
     fn persist_column_preferences(&mut self) {
         if !self.column_preferences_authorized {
             self.set_transient_status(
-                "열 표시 설정을 읽지 못해 이번 실행에서는 저장하지 않습니다. 다시 시작해 주세요."
+                crate::i18n::common::Text::ColumnWriteBlocked
+                    .get()
                     .to_owned(),
             );
             return;
@@ -1175,16 +1207,15 @@ impl AppState {
             .preference_persistence
             .submit_columns(self.column_states);
         if let Err(error) = result {
-            self.set_transient_status(format!(
-                "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-            ));
+            self.set_transient_status(crate::i18n::common::column_save_failed(&(error)));
         }
     }
 
     fn persist_appearance_preferences(&mut self) {
         if !self.appearance_preferences_authorized {
             self.set_transient_status(
-                "모양 설정을 읽지 못해 이번 실행에서는 저장하지 않습니다. 다시 시작해 주세요."
+                crate::i18n::common::Text::AppearanceWriteBlocked
+                    .get()
                     .to_owned(),
             );
             return;
@@ -1193,9 +1224,50 @@ impl AppState {
             .preference_persistence
             .submit_appearance(self.appearance);
         if let Err(error) = result {
-            self.set_transient_status(format!(
-                "모양 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            self.set_transient_status(crate::i18n::common::appearance_save_failed(&(error)));
+        }
+    }
+
+    fn start_language_writer(&mut self, window: HWND) {
+        if !self.language_preferences_authorized {
+            return;
+        }
+        let window_value = window as usize;
+        match crate::preferences::LanguagePreferencesWriter::spawn(
+            self.language_preferences_path.clone(),
+            move || {
+                // SAFETY: the scalar HWND carries no borrowed memory; normal close
+                // joins this writer before destroying the owning application.
+                unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
+            },
+        ) {
+            Ok(writer) => self.preference_persistence.install_language_writer(writer),
+            Err(error) => {
+                self.set_transient_status(crate::i18n::common::language_writer_failed(&(error)));
+                return;
+            }
+        }
+        // SAFETY: this idempotent timer belongs to the live main window and
+        // polls missed terminal notifications, including language-only writers.
+        if unsafe { SetTimer(window, PREFERENCES_POLL_TIMER_ID, 250, None) } == 0 {
+            self.set_transient_status(crate::i18n::common::language_monitor_failed(
+                &(io::Error::last_os_error()),
             ));
+        }
+    }
+
+    fn select_language_preference(&mut self, preference: crate::i18n::LanguagePreference) {
+        if !self.language_preferences_authorized {
+            self.set_transient_status(crate::i18n::common::Text::LanguageWriteBlocked.get());
+            return;
+        }
+        match self.preference_persistence.submit_language(preference) {
+            Ok(()) => {
+                self.set_transient_status(crate::i18n::common::Text::LanguageSaving.get());
+            }
+            Err(error) => {
+                self.set_transient_status(crate::i18n::common::language_queue_failed(&(error)))
+            }
         }
     }
 
@@ -1328,7 +1400,7 @@ fn show_message_now(owner: HWND, text: &str, caption: &str) {
 
 pub(super) fn show_startup_error(message: &str) {
     let text = wide(message);
-    let caption = wide("DarkReNamer - 시작 실패");
+    let caption = wide(crate::i18n::common::Text::StartupCaption.get());
     // SAFETY: startup has no owner window or UI apartment. MessageBoxW accepts
     // a null owner and borrows both terminated buffers only for this call.
     unsafe {
@@ -1455,11 +1527,15 @@ mod tests {
         let runtime = initialize_safe_runtime_at(directory.path())?;
         let columns_path = path_for_journal_root(runtime.root.path());
         let appearance_path = appearance_path_for_journal_root(runtime.root.path());
+        let language_path = crate::preferences::language_path_for_journal_root(runtime.root.path());
         drop(runtime);
         std::fs::write(&columns_path, b"invalid columns")?;
         std::fs::write(&appearance_path, b"invalid appearance")?;
+        std::fs::write(&language_path, b"invalid language")?;
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         start_preferences_writers(null_mut(), &mut state);
+        state.start_language_writer(null_mut());
+        state.select_language_preference(crate::i18n::LanguagePreference::English);
         state.persist_column_preferences();
         state.persist_appearance_preferences();
         state
@@ -1468,6 +1544,7 @@ mod tests {
         assert!(state.preference_persistence.is_joined());
         assert_eq!(std::fs::read(columns_path)?, b"invalid columns");
         assert_eq!(std::fs::read(appearance_path)?, b"invalid appearance");
+        assert_eq!(std::fs::read(language_path)?, b"invalid language");
         Ok(())
     }
 

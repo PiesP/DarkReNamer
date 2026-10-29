@@ -9,16 +9,7 @@ use crate::CommandId;
 use crate::CommandRailSpec;
 use crate::DELETE_SELECTED_COMMAND;
 use crate::DELETE_SELECTED_UI_SPEC;
-use crate::DROP_ACCEPTING_TEXT;
-use crate::DROP_FULL_TEXT;
-use crate::DROP_LOCKED_TEXT;
-use crate::DROP_UNSUPPORTED_TEXT;
 use crate::DropPresentation;
-use crate::EMPTY_LIST_STATUS;
-use crate::EMPTY_STATE_ADD_LABEL;
-use crate::EMPTY_STATE_INSTRUCTION;
-use crate::EMPTY_STATE_SAFETY;
-use crate::EMPTY_STATE_SAFETY_RAILS;
 use crate::EXIT_COMMAND;
 use crate::EmptyStatePresentation;
 use crate::FocusAction;
@@ -48,8 +39,6 @@ use crate::SHOW_FULL_PATH;
 use crate::SHOW_MODIFIED;
 use crate::SHOW_SIZE;
 use crate::SORT;
-use crate::STATUS_CANCEL_LABEL;
-use crate::STATUS_COUNT_SAMPLE;
 use crate::StatusLayoutInput;
 use crate::THEME_DARK;
 use crate::THEME_LIGHT;
@@ -64,6 +53,9 @@ use crate::command_enabled;
 use crate::command_menu_label;
 use crate::command_ui_spec;
 use crate::empty_state_safety_copy;
+use crate::i18n::common::Text as CommonText;
+use crate::i18n::native_ui::Text;
+use crate::i18n::{LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_KOREAN, LANGUAGE_SYSTEM};
 use crate::main_layout_window_count;
 use crate::owner_draw_menu_for_theme;
 
@@ -347,26 +339,32 @@ pub(super) fn measure_font_metrics(
             button_text_height = button_text_height.max(height);
         }
     }
-    let status_text_height =
-        measure_text(window, status_font, EMPTY_LIST_STATUS, true).map_or(0, |(_, height)| height);
+    let status_text_height = measure_text(window, status_font, CommonText::EmptyList.get(), true)
+        .map_or(0, |(_, height)| height);
     let status_count_text_width =
-        measure_text(window, status_font, STATUS_COUNT_SAMPLE, true).map_or(0, |(width, _)| width);
+        measure_text(window, status_font, CommonText::StatusSample.get(), true)
+            .map_or(0, |(width, _)| width);
     let (cancel_text_width, cancel_text_height) =
-        measure_text(window, message_font, STATUS_CANCEL_LABEL, true).unwrap_or_default();
-    let (empty_instruction_text_width, empty_instruction_text_height) =
-        measure_text(window, message_font, EMPTY_STATE_INSTRUCTION, true).unwrap_or_default();
+        measure_text(window, message_font, CommonText::Cancel.get(), true).unwrap_or_default();
+    let (empty_instruction_text_width, empty_instruction_text_height) = measure_text(
+        window,
+        message_font,
+        CommonText::EmptyInstruction.get(),
+        true,
+    )
+    .unwrap_or_default();
     let (empty_safety_text_width, empty_safety_text_height) =
-        measure_text(window, status_font, EMPTY_STATE_SAFETY, true).unwrap_or_default();
+        measure_text(window, status_font, CommonText::EmptySafety.get(), true).unwrap_or_default();
     let (empty_add_text_width, empty_add_text_height) =
-        measure_text(window, message_font, EMPTY_STATE_ADD_LABEL, true).unwrap_or_default();
+        measure_text(window, message_font, CommonText::AddFiles.get(), true).unwrap_or_default();
     let header_fallback_height = empty_instruction_text_height
         .max(scale_dip(16, dpi.max(BASE_DPI)))
         .saturating_add(scale_dip(4, dpi.max(BASE_DPI)));
     let (drop_overlay_text_width, drop_overlay_text_height) = [
-        DROP_ACCEPTING_TEXT,
-        DROP_LOCKED_TEXT,
-        DROP_UNSUPPORTED_TEXT,
-        DROP_FULL_TEXT,
+        CommonText::DropAccepting.get(),
+        CommonText::DropLocked.get(),
+        CommonText::DropUnsupported.get(),
+        CommonText::DropFull.get(),
     ]
     .into_iter()
     .filter_map(|text| measure_text(window, message_font, text, true))
@@ -519,7 +517,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             LIST_VIEW_EXTENDED_STYLES as isize,
         );
         for (index, column) in COLUMNS.iter().enumerate() {
-            let mut text = wide(column.label);
+            let mut text = wide(column.localized_label());
             let mut native = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
                 fmt: if index == 4 {
@@ -538,7 +536,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
                 (&mut native as *mut LVCOLUMNW) as isize,
             );
         }
-        let mut status_text = wide(NATIVE_STATUS_COLUMN.label);
+        let mut status_text = wide(NATIVE_STATUS_COLUMN.localized_label());
         let mut status_column = LVCOLUMNW {
             mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
             fmt: LVCFMT_LEFT,
@@ -617,7 +615,7 @@ pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HW
     let cancel = child(
         parent,
         "BUTTON",
-        STATUS_CANCEL_LABEL,
+        CommonText::Cancel.get(),
         CANCEL_WORKER_ID,
         WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
@@ -634,21 +632,21 @@ pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWN
     let instruction = child(
         parent,
         "STATIC",
-        EMPTY_STATE_INSTRUCTION,
+        CommonText::EmptyInstruction.get(),
         EMPTY_INSTRUCTION_ID,
         SS_CENTER | SS_NOPREFIX,
     )?;
     let safety = child(
         parent,
         "STATIC",
-        EMPTY_STATE_SAFETY_RAILS,
+        CommonText::EmptySafetyWrapped.get(),
         EMPTY_SAFETY_ID,
         SS_CENTER | SS_NOPREFIX,
     )?;
     let add = child(
         parent,
         "BUTTON",
-        EMPTY_STATE_ADD_LABEL,
+        CommonText::AddFiles.get(),
         EMPTY_ADD_ID,
         WS_TABSTOP | BS_PUSHBUTTON as u32 | BS_OWNERDRAW as u32,
     )?;
@@ -686,10 +684,10 @@ pub(super) fn create_drop_overlay(parent: HWND) -> io::Result<HWND> {
 pub(super) fn set_drop_overlay_control(overlay: HWND, presentation: DropPresentation) {
     let text = match presentation {
         DropPresentation::Inactive => "",
-        DropPresentation::Accepting => DROP_ACCEPTING_TEXT,
-        DropPresentation::Locked => DROP_LOCKED_TEXT,
-        DropPresentation::Unsupported => DROP_UNSUPPORTED_TEXT,
-        DropPresentation::Full => DROP_FULL_TEXT,
+        DropPresentation::Accepting => CommonText::DropAccepting.get(),
+        DropPresentation::Locked => CommonText::DropLocked.get(),
+        DropPresentation::Unsupported => CommonText::DropUnsupported.get(),
+        DropPresentation::Full => CommonText::DropFull.get(),
     };
     set_status(overlay, text);
     // SAFETY: drop_overlay is the live noninteractive STATIC owned by AppState.
@@ -769,7 +767,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     measured.empty_instruction_wrapped_height = measure_wrapped_text(
         state.empty_instruction,
         state.font.as_raw(),
-        EMPTY_STATE_INSTRUCTION,
+        CommonText::EmptyInstruction.get(),
         wrap_width,
     )
     .unwrap_or_default();
@@ -1366,6 +1364,18 @@ pub(super) fn apply_command_states(state: &AppState) {
             MF_BYCOMMAND,
         )
     };
+    // SAFETY: the four contiguous language IDs belong to this live menu. The
+    // check follows the acknowledged saved preference, without changing this
+    // window's language or work session.
+    unsafe {
+        CheckMenuRadioItem(
+            state.menu,
+            u32::from(LANGUAGE_SYSTEM),
+            u32::from(LANGUAGE_JAPANESE),
+            u32::from(state.language_preference.command()),
+            MF_BYCOMMAND,
+        )
+    };
     let activity = state.worker_activity();
     let advanced_enabled = advanced_appearance_available(
         activity.admission || activity.import || activity.plan || activity.apply,
@@ -1547,6 +1557,7 @@ const MENU_POPUP_EXTENSION: usize = 0x1_000B;
 const MENU_POPUP_FOLDER_NAME: usize = 0x1_000C;
 const MENU_POPUP_RECOVERY: usize = 0x1_000D;
 const MENU_SEPARATOR: usize = 0x1_000E;
+const MENU_POPUP_LANGUAGE: usize = 0x1_000F;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnerMenuKind {
@@ -1613,6 +1624,7 @@ pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
         MENU_POPUP_EXPORT
             | MENU_POPUP_TARGET_FOLDER
             | MENU_POPUP_THEME
+            | MENU_POPUP_LANGUAGE
             | MENU_POPUP_TEXT
             | MENU_POPUP_REMOVAL
             | MENU_POPUP_NUMBER
@@ -1629,9 +1641,18 @@ pub(super) fn owner_menu_uses_radio(data: usize) -> bool {
     let Some(data) = owner_menu_tag(data) else {
         return false;
     };
-    u16::try_from(data)
-        .ok()
-        .is_some_and(|id| matches!(id, THEME_SYSTEM | THEME_LIGHT | THEME_DARK))
+    u16::try_from(data).ok().is_some_and(|id| {
+        matches!(
+            id,
+            THEME_SYSTEM
+                | THEME_LIGHT
+                | THEME_DARK
+                | LANGUAGE_SYSTEM
+                | LANGUAGE_KOREAN
+                | LANGUAGE_ENGLISH
+                | LANGUAGE_JAPANESE
+        )
+    })
 }
 
 pub(super) fn owner_menu_label(data: usize) -> Option<String> {
@@ -1640,20 +1661,21 @@ pub(super) fn owner_menu_label(data: usize) -> Option<String> {
 
 fn owner_menu_label_for_tag(data: usize) -> Option<String> {
     let popup = match data {
-        MENU_POPUP_FILE => Some("파일(&F)"),
-        MENU_POPUP_EDIT => Some("편집(&E)"),
-        MENU_POPUP_VIEW => Some("보기(&V)"),
-        MENU_POPUP_TRANSFORM => Some("변환(&T)"),
-        MENU_POPUP_HELP => Some("도움말(&H)"),
-        MENU_POPUP_EXPORT => Some("내보내기(&X)"),
-        MENU_POPUP_TARGET_FOLDER => Some("대상 폴더(&D)"),
-        MENU_POPUP_THEME => Some("테마(&T)"),
-        MENU_POPUP_TEXT => Some("텍스트(&T)"),
-        MENU_POPUP_REMOVAL => Some("삭제·추출(&R)"),
-        MENU_POPUP_NUMBER => Some("번호(&N)"),
-        MENU_POPUP_EXTENSION => Some("확장자(&E)"),
-        MENU_POPUP_FOLDER_NAME => Some("폴더명 사용(&F)"),
-        MENU_POPUP_RECOVERY => Some("복구(&R)"),
+        MENU_POPUP_FILE => Some(Text::MenuFile.get()),
+        MENU_POPUP_EDIT => Some(Text::MenuEdit.get()),
+        MENU_POPUP_VIEW => Some(Text::MenuView.get()),
+        MENU_POPUP_TRANSFORM => Some(Text::MenuTransform.get()),
+        MENU_POPUP_HELP => Some(Text::MenuHelp.get()),
+        MENU_POPUP_EXPORT => Some(Text::MenuExport.get()),
+        MENU_POPUP_TARGET_FOLDER => Some(Text::MenuTargetFolder.get()),
+        MENU_POPUP_THEME => Some(Text::MenuTheme.get()),
+        MENU_POPUP_LANGUAGE => Some(Text::MenuLanguage.get()),
+        MENU_POPUP_TEXT => Some(Text::MenuTextTransforms.get()),
+        MENU_POPUP_REMOVAL => Some(Text::MenuRemoval.get()),
+        MENU_POPUP_NUMBER => Some(Text::MenuNumber.get()),
+        MENU_POPUP_EXTENSION => Some(Text::MenuExtension.get()),
+        MENU_POPUP_FOLDER_NAME => Some(Text::MenuFolderName.get()),
+        MENU_POPUP_RECOVERY => Some(Text::MenuRecovery.get()),
         MENU_SEPARATOR => Some(""),
         _ => None,
     };
@@ -1665,16 +1687,20 @@ fn owner_menu_label_for_tag(data: usize) -> Option<String> {
         return Some(command_menu_label(spec));
     }
     match id {
-        EXIT_COMMAND => Some("종료(&Q)\tAlt+F4".to_owned()),
-        DELETE_SELECTED_COMMAND => Some("선택 항목을 목록에서 제거\tDelete".to_owned()),
-        THEME_SYSTEM => Some("시스템 설정(&S)".to_owned()),
-        THEME_LIGHT => Some("밝게(&L)".to_owned()),
-        THEME_DARK => Some("어둡게(&D)".to_owned()),
-        APPEARANCE_ADVANCED => Some("모양 설정(&A)...".to_owned()),
-        PREVIEW_DETAILS => Some("선택 항목 진단(&I)...".to_owned()),
-        EXPORT_RECOVERY_JOURNAL => Some("복구 데이터 내보내기...".to_owned()),
-        DISCARD_STAGED_JOURNAL => Some("시작되지 않은 작업 기록 삭제...".to_owned()),
-        SHOW_RECOVERY_STATUS => Some("복구 상태 및 문제 확인...".to_owned()),
+        EXIT_COMMAND => Some(Text::MenuExit.get().to_owned()),
+        DELETE_SELECTED_COMMAND => Some(Text::MenuRemoveSelected.get().to_owned()),
+        THEME_SYSTEM => Some(Text::MenuThemeSystem.get().to_owned()),
+        THEME_LIGHT => Some(Text::MenuThemeLight.get().to_owned()),
+        THEME_DARK => Some(Text::MenuThemeDark.get().to_owned()),
+        LANGUAGE_SYSTEM => Some(Text::MenuLanguageSystem.get().to_owned()),
+        LANGUAGE_KOREAN => Some(Text::MenuLanguageKorean.get().to_owned()),
+        LANGUAGE_ENGLISH => Some(Text::MenuLanguageEnglish.get().to_owned()),
+        LANGUAGE_JAPANESE => Some(Text::MenuLanguageJapanese.get().to_owned()),
+        APPEARANCE_ADVANCED => Some(Text::MenuAppearance.get().to_owned()),
+        PREVIEW_DETAILS => Some(Text::MenuPreviewDetails.get().to_owned()),
+        EXPORT_RECOVERY_JOURNAL => Some(Text::MenuExportRecovery.get().to_owned()),
+        DISCARD_STAGED_JOURNAL => Some(Text::MenuDiscardStaged.get().to_owned()),
+        SHOW_RECOVERY_STATUS => Some(Text::MenuRecoveryStatus.get().to_owned()),
         _ => None,
     }
 }
@@ -1923,10 +1949,10 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     append_catalog_section(&mut export, MenuGroup::File, 2)?;
     export.separator()?;
     append_catalog_section(&mut export, MenuGroup::File, 3)?;
-    file.popup_child(export, MENU_POPUP_EXPORT, "내보내기(&X)")?;
+    file.popup_child(export, MENU_POPUP_EXPORT, Text::MenuExport.get())?;
     file.separator()?;
-    file.item(EXIT_COMMAND, "종료(&Q)\tAlt+F4")?;
-    menu.popup_child(file, MENU_POPUP_FILE, "파일(&F)")
+    file.item(EXIT_COMMAND, Text::MenuExit.get())?;
+    menu.popup_child(file, MENU_POPUP_FILE, Text::MenuFile.get())
 }
 
 fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
@@ -1945,34 +1971,45 @@ fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut target = MenuBuilder::popup(menu.owner_draw)?;
     target.item(UNIFY_PATH, &catalog_menu_label(UNIFY_PATH)?)?;
     target.item(RESET_PATH, &catalog_menu_label(RESET_PATH)?)?;
-    edit.popup_child(target, MENU_POPUP_TARGET_FOLDER, "대상 폴더(&D)")?;
+    edit.popup_child(
+        target,
+        MENU_POPUP_TARGET_FOLDER,
+        Text::MenuTargetFolder.get(),
+    )?;
     edit.separator()?;
     edit.item(CLEAR_LIST, &catalog_menu_label(CLEAR_LIST)?)?;
-    menu.popup_child(edit, MENU_POPUP_EDIT, "편집(&E)")
+    menu.popup_child(edit, MENU_POPUP_EDIT, Text::MenuEdit.get())
 }
 
 fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut view = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_items(&mut view, MenuGroup::View)?;
-    view.item(PREVIEW_DETAILS, "선택 항목 진단(&I)...")?;
+    view.item(PREVIEW_DETAILS, Text::MenuPreviewDetails.get())?;
     view.separator()?;
     let mut theme = MenuBuilder::popup(menu.owner_draw)?;
-    theme.item(THEME_SYSTEM, "시스템 설정(&S)")?;
-    theme.item(THEME_LIGHT, "밝게(&L)")?;
-    theme.item(THEME_DARK, "어둡게(&D)")?;
-    view.popup_child(theme, MENU_POPUP_THEME, "테마(&T)")?;
-    view.item(APPEARANCE_ADVANCED, "모양 설정(&A)...")?;
-    menu.popup_child(view, MENU_POPUP_VIEW, "보기(&V)")
+    theme.item(THEME_SYSTEM, Text::MenuThemeSystem.get())?;
+    theme.item(THEME_LIGHT, Text::MenuThemeLight.get())?;
+    theme.item(THEME_DARK, Text::MenuThemeDark.get())?;
+    view.popup_child(theme, MENU_POPUP_THEME, Text::MenuTheme.get())?;
+    view.item(APPEARANCE_ADVANCED, Text::MenuAppearance.get())?;
+    view.separator()?;
+    let mut language = MenuBuilder::popup(menu.owner_draw)?;
+    language.item(LANGUAGE_SYSTEM, Text::MenuLanguageSystem.get())?;
+    language.item(LANGUAGE_KOREAN, Text::MenuLanguageKorean.get())?;
+    language.item(LANGUAGE_ENGLISH, Text::MenuLanguageEnglish.get())?;
+    language.item(LANGUAGE_JAPANESE, Text::MenuLanguageJapanese.get())?;
+    view.popup_child(language, MENU_POPUP_LANGUAGE, Text::MenuLanguage.get())?;
+    menu.popup_child(view, MENU_POPUP_VIEW, Text::MenuView.get())
 }
 
 fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut transform = MenuBuilder::popup(menu.owner_draw)?;
     for (section, data, label) in [
-        (0, MENU_POPUP_TEXT, "텍스트(&T)"),
-        (1, MENU_POPUP_REMOVAL, "삭제·추출(&R)"),
-        (2, MENU_POPUP_NUMBER, "번호(&N)"),
-        (3, MENU_POPUP_EXTENSION, "확장자(&E)"),
-        (4, MENU_POPUP_FOLDER_NAME, "폴더명 사용(&F)"),
+        (0, MENU_POPUP_TEXT, Text::MenuTextTransforms.get()),
+        (1, MENU_POPUP_REMOVAL, Text::MenuRemoval.get()),
+        (2, MENU_POPUP_NUMBER, Text::MenuNumber.get()),
+        (3, MENU_POPUP_EXTENSION, Text::MenuExtension.get()),
+        (4, MENU_POPUP_FOLDER_NAME, Text::MenuFolderName.get()),
     ] {
         let mut popup = MenuBuilder::popup(menu.owner_draw)?;
         if section == 4 {
@@ -1984,22 +2021,22 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
         }
         transform.popup_child(popup, data, label)?;
     }
-    menu.popup_child(transform, MENU_POPUP_TRANSFORM, "변환(&T)")
+    menu.popup_child(transform, MENU_POPUP_TRANSFORM, Text::MenuTransform.get())
 }
 
 fn append_help_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut help = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_items(&mut help, MenuGroup::Help)?;
-    menu.popup_child(help, MENU_POPUP_HELP, "도움말(&H)")
+    menu.popup_child(help, MENU_POPUP_HELP, Text::MenuHelp.get())
 }
 
 fn append_recovery_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut recovery = MenuBuilder::popup(menu.owner_draw)?;
-    recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 및 문제 확인...")?;
-    recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?;
+    recovery.item(SHOW_RECOVERY_STATUS, Text::MenuRecoveryStatus.get())?;
+    recovery.item(EXPORT_RECOVERY_JOURNAL, Text::MenuExportRecovery.get())?;
     recovery.separator()?;
-    recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?;
-    menu.popup_child(recovery, MENU_POPUP_RECOVERY, "복구(&R)")
+    recovery.item(DISCARD_STAGED_JOURNAL, Text::MenuDiscardStaged.get())?;
+    menu.popup_child(recovery, MENU_POPUP_RECOVERY, Text::MenuRecovery.get())
 }
 
 fn append_catalog_section(menu: &mut MenuBuilder, group: MenuGroup, section: u8) -> io::Result<()> {

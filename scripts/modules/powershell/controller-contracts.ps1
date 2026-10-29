@@ -153,6 +153,77 @@ function Get-CoreGuiFailureDiagnosticOutputs {
     }
     $outputs.ToArray()
 }
+function Get-CoreLanguageCaptureOutputs {
+    param([AllowNull()][object] $Gui)
+
+    # Select only the capture paths owned by the core language scenario. A guest
+    # cannot turn test stdout into a larger image by adding a kind field.
+    $property = {
+        param([AllowNull()][object] $Value, [string] $Name)
+        if ($null -ne $Value) {
+            $member = $Value.PSObject.Properties[$Name]
+            if ($null -ne $member) { $member.Value }
+        }
+    }
+    $candidates = [Collections.Generic.List[object]]::new()
+    $flow = & $property $Gui 'flow'
+    $capture = & $property $flow 'prefix_prompt_capture'
+    if ($null -ne $capture) { $candidates.Add($capture) }
+    $languages = & $property $Gui 'language_checks'
+    foreach ($selection in @(& $property $languages 'selections')) {
+        $capture = & $property $selection 'startup_capture'
+        if ($null -ne $capture) { $candidates.Add($capture) }
+        $blocked = & $property $selection 'blocked_recovery'
+        $capture = & $property $blocked 'notice_capture'
+        if ($null -ne $capture) { $candidates.Add($capture) }
+    }
+    foreach ($languageFlow in @(& $property $languages 'flows')) {
+        $flow = & $property $languageFlow 'flow'
+        $capture = & $property $flow 'prefix_prompt_capture'
+        if ($null -ne $capture) { $candidates.Add($capture) }
+        foreach ($capture in @(& $property $flow 'screenshots')) {
+            if ($null -ne $capture) { $candidates.Add($capture) }
+        }
+    }
+    $recovery = & $property $languages 'valid_active_recovery'
+    foreach ($observation in @(& $property $recovery 'observations')) {
+        $capture = & $property $observation 'notice_capture'
+        if ($null -ne $capture) { $candidates.Add($capture) }
+    }
+    if ($candidates.Count -gt 32) {
+        throw 'Core language capture reference count exceeds its bound.'
+    }
+    $seen = @{}
+    $bytes = [long]0
+    foreach ($capture in $candidates) {
+        $required = @('file', 'sha256', 'bytes')
+        if (@($required | Where-Object {
+                $capture.PSObject.Properties.Name -cnotcontains $_
+            }).Count -ne 0 -or
+            $capture.file -isnot [string] -or
+            $capture.file -cnotmatch '\.png\z' -or
+            $capture.sha256 -isnot [string] -or
+            $capture.sha256 -cnotmatch '^[0-9a-f]{64}\z' -or
+            ($capture.bytes -isnot [int] -and $capture.bytes -isnot [long]) -or
+            $capture.bytes -le 0 -or $capture.bytes -gt 8MB) {
+            throw 'Core language capture has a malformed reference.'
+        }
+        Assert-PlainFile $capture.file
+        if ($seen.ContainsKey($capture.file)) {
+            throw 'Core language capture has a duplicate file reference.'
+        }
+        if ($bytes -gt (48MB - $capture.bytes)) {
+            throw 'Core language captures exceed their aggregate collection bound.'
+        }
+        $seen[$capture.file] = $true
+        $bytes += $capture.bytes
+        [pscustomobject]@{
+            file = [string]$capture.file
+            sha256 = [string]$capture.sha256
+            bytes = [long]$capture.bytes
+        }
+    }
+}
 function Join-GuestWindowsPath {
     param(
         [Parameter(Mandatory = $true)][string] $Root,

@@ -1,5 +1,6 @@
 //! Pure UI activation policy for the safe rename engine.
 
+use crate::i18n::runtime::{self as text, Text as RuntimeText};
 use darknamer_core::LegacyList;
 
 use super::{
@@ -100,7 +101,7 @@ pub fn cleanup_decision(records: &[JournalRecord]) -> JournalCleanupDecision {
     }
 }
 
-/// Formats structured plan blockers for the Korean native shell.
+/// Formats structured plan blockers for the selected application language.
 #[must_use]
 pub fn plan_error_korean(error: &PlanError) -> (String, Vec<usize>) {
     let mut rows = error
@@ -121,33 +122,37 @@ pub fn plan_error_korean(error: &PlanError) -> (String, Vec<usize>) {
 fn plan_issue_korean(kind: &PlanIssueKind) -> String {
     match kind {
         PlanIssueKind::RelativeSource | PlanIssueKind::RelativeDestinationParent => {
-            "상대 경로는 사용할 수 없습니다.".to_owned()
+            RuntimeText::RelativePath.get().to_owned()
         }
         PlanIssueKind::InvalidDestinationName(_) => {
-            "Windows에서 사용할 수 없는 이름입니다.".to_owned()
+            RuntimeText::InvalidWindowsName.get().to_owned()
         }
-        PlanIssueKind::MissingSource => "원본 항목을 찾을 수 없습니다.".to_owned(),
-        PlanIssueKind::SourceKindChanged => "원본 항목 종류가 변경되었습니다.".to_owned(),
-        PlanIssueKind::ReparseSource => "재분석 지점은 변경할 수 없습니다.".to_owned(),
-        PlanIssueKind::DuplicateDestination => "중복되는 대상 이름이 있습니다.".to_owned(),
+        PlanIssueKind::MissingSource => RuntimeText::MissingSource.get().to_owned(),
+        PlanIssueKind::SourceKindChanged => RuntimeText::SourceKindChanged.get().to_owned(),
+        PlanIssueKind::ReparseSource => RuntimeText::ReparseSource.get().to_owned(),
+        PlanIssueKind::DuplicateDestination => RuntimeText::DuplicateDestination.get().to_owned(),
         PlanIssueKind::DuplicateEntryId | PlanIssueKind::DuplicateSource => {
-            "중복되는 원본 항목이 있습니다.".to_owned()
+            RuntimeText::DuplicateSource.get().to_owned()
         }
-        PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.".to_owned(),
-        PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.".to_owned(),
-        PlanIssueKind::CrossVolume => "다른 볼륨으로 이동할 수 없습니다.".to_owned(),
-        PlanIssueKind::DirectoryMoveUnsupported => "폴더 이동은 아직 지원하지 않습니다.".to_owned(),
-        PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.".to_owned(),
-        PlanIssueKind::PathTooDeep => "경로의 폴더 깊이가 안전 한도를 초과했습니다.".to_owned(),
+        PlanIssueKind::DestinationOccupied => RuntimeText::DestinationOccupied.get().to_owned(),
+        PlanIssueKind::CrossParent => RuntimeText::CrossParent.get().to_owned(),
+        PlanIssueKind::CrossVolume => RuntimeText::CrossVolume.get().to_owned(),
+        PlanIssueKind::DirectoryMoveUnsupported => {
+            RuntimeText::DirectoryMoveUnsupported.get().to_owned()
+        }
+        PlanIssueKind::SourceOverlap => RuntimeText::SourceOverlap.get().to_owned(),
+        PlanIssueKind::PathTooDeep => RuntimeText::PathTooDeep.get().to_owned(),
         PlanIssueKind::UnsupportedCaseSensitiveParent => {
-            "대소문자 구분 폴더는 아직 지원하지 않습니다.".to_owned()
+            RuntimeText::CaseSensitiveParent.get().to_owned()
         }
         PlanIssueKind::UnsupportedWindowsPath => {
-            "네트워크 또는 지원하지 않는 경로입니다.".to_owned()
+            RuntimeText::UnsupportedWindowsPath.get().to_owned()
         }
-        PlanIssueKind::UnsupportedFilesystem => "NTFS 파일 시스템만 지원합니다.".to_owned(),
-        PlanIssueKind::Backend => "파일 시스템을 안전하게 확인하지 못했습니다.".to_owned(),
-        PlanIssueKind::BackendFailure(error) => backend_error_korean("계획 검사", *error),
+        PlanIssueKind::UnsupportedFilesystem => RuntimeText::UnsupportedFilesystem.get().to_owned(),
+        PlanIssueKind::Backend => RuntimeText::BackendPlan.get().to_owned(),
+        PlanIssueKind::BackendFailure(error) => {
+            backend_error_korean(RuntimeText::PlanInspection.get(), *error)
+        }
     }
 }
 
@@ -155,24 +160,20 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
 #[must_use]
 pub fn execute_error_korean(error: &ExecuteError) -> String {
     match error.kind {
-        ExecuteErrorKind::Cancelled => "파일 변경을 시작하기 전에 취소했습니다.".to_owned(),
-        ExecuteErrorKind::Backend(backend) => backend_error_korean("실행 준비", backend),
-        ExecuteErrorKind::Journal(journal) => {
-            format!("저널을 준비하지 못했습니다. 코드 {}", journal.code)
+        ExecuteErrorKind::Cancelled => RuntimeText::CancelledBeforeMutation.get().to_owned(),
+        ExecuteErrorKind::Backend(backend) => {
+            backend_error_korean(RuntimeText::ExecutionPreparation.get(), backend)
         }
+        ExecuteErrorKind::Journal(journal) => text::journal_prepare_failed(journal.code),
         ExecuteErrorKind::JournalCapacity(capacity) => journal_capacity_error_korean(capacity),
-        ExecuteErrorKind::StaleSource => "원본 항목이 계획 이후 변경되었습니다.".to_owned(),
-        ExecuteErrorKind::StaleParent => "부모 폴더가 계획 이후 변경되었습니다.".to_owned(),
+        ExecuteErrorKind::StaleSource => RuntimeText::StaleSource.get().to_owned(),
+        ExecuteErrorKind::StaleParent => RuntimeText::StaleParent.get().to_owned(),
         ExecuteErrorKind::DestinationChanged | ExecuteErrorKind::TemporaryOccupied => {
-            "대상 이름이 계획 이후 변경되었습니다.".to_owned()
+            RuntimeText::DestinationChanged.get().to_owned()
         }
-        ExecuteErrorKind::TemporaryExhausted => {
-            "안전한 임시 이름을 확보하지 못했습니다.".to_owned()
-        }
-        ExecuteErrorKind::InvalidSchedule => "안전한 실행 순서를 만들지 못했습니다.".to_owned(),
-        ExecuteErrorKind::UnauthorizedMove => {
-            "계획된 이동이 허용된 안전 범위를 벗어났습니다.".to_owned()
-        }
+        ExecuteErrorKind::TemporaryExhausted => RuntimeText::TemporaryExhausted.get().to_owned(),
+        ExecuteErrorKind::InvalidSchedule => RuntimeText::InvalidSchedule.get().to_owned(),
+        ExecuteErrorKind::UnauthorizedMove => RuntimeText::UnauthorizedMove.get().to_owned(),
     }
 }
 
@@ -180,14 +181,12 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
 #[must_use]
 pub fn journal_capacity_error_korean(error: JournalCapacityError) -> String {
     match error.kind {
-        JournalCapacityKind::PrimitiveSteps => format!(
-            "저널의 파일 이동 단계 용량을 초과했습니다. 필요 {}개, 최대 {}개입니다.",
-            error.required, error.maximum
-        ),
-        JournalCapacityKind::IntentFrameBytes => format!(
-            "저널 실행 계획 용량을 초과했습니다. 필요 {}바이트, 최대 {}바이트입니다.",
-            error.required, error.maximum
-        ),
+        JournalCapacityKind::PrimitiveSteps => {
+            text::journal_step_capacity(error.required, error.maximum)
+        }
+        JournalCapacityKind::IntentFrameBytes => {
+            text::journal_frame_capacity(error.required, error.maximum)
+        }
     }
 }
 
@@ -195,22 +194,22 @@ pub fn journal_capacity_error_korean(error: JournalCapacityError) -> String {
 #[must_use]
 pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
     match outcome {
-        ExecutionOutcome::Completed => "파일 변경을 완료했습니다.".to_owned(),
+        ExecutionOutcome::Completed => RuntimeText::MutationCompleted.get().to_owned(),
         ExecutionOutcome::RolledBack {
             failure: ExecutionFailure::Cancelled { .. },
-        } => "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.".to_owned(),
-        ExecutionOutcome::RolledBack { failure } => format!(
-            "변경에 실패하여 원래 상태로 복원했습니다. {}",
-            failure_korean(*failure)
-        ),
+        } => RuntimeText::CancelledAndRestored.get().to_owned(),
+        ExecutionOutcome::RolledBack { failure } => {
+            text::restored_after_failure(&failure_korean(*failure))
+        }
         ExecutionOutcome::RecoveryRequired {
             failure: ExecutionFailure::Cancelled { .. },
             ..
-        } => "취소 요청 후 상태 확인과 복구가 필요합니다. 적용이 잠겼습니다.".to_owned(),
-        ExecutionOutcome::RecoveryRequired { failure, .. } => format!(
-            "상태 확인과 복구가 필요합니다. 적용이 잠겼습니다. {}",
-            failure_korean(*failure)
-        ),
+        } => RuntimeText::RecoveryRequiredAfterCancellation
+            .get()
+            .to_owned(),
+        ExecutionOutcome::RecoveryRequired { failure, .. } => {
+            text::recovery_required_after_failure(&failure_korean(*failure))
+        }
     }
 }
 
@@ -241,17 +240,16 @@ pub const fn execution_outcome_presentation(
 
 fn failure_korean(failure: ExecutionFailure) -> String {
     match failure {
-        ExecutionFailure::Cancelled { .. } => "요청에 따라 변경을 취소했습니다.".to_owned(),
-        ExecutionFailure::Backend { error, .. } => backend_error_korean("파일 변경", error),
-        ExecutionFailure::Journal { error, .. } => format!("저널 코드 {}", error.code),
+        ExecutionFailure::Cancelled { .. } => RuntimeText::MutationCancelled.get().to_owned(),
+        ExecutionFailure::Backend { error, .. } => {
+            backend_error_korean(RuntimeText::FileMutation.get(), error)
+        }
+        ExecutionFailure::Journal { error, .. } => text::journal_code(error.code),
     }
 }
 
 fn backend_error_korean(context: &str, error: BackendError) -> String {
-    format!(
-        "{context} 실패: {:?}, Windows 코드 {}",
-        error.operation, error.code
-    )
+    text::backend_failure(context, &error.operation, error.code)
 }
 
 #[cfg(test)]
@@ -274,6 +272,36 @@ mod presentation_tests {
             execute_error_korean(&error),
             "실행 준비 실패: Observe, Windows 코드 32"
         );
+    }
+
+    #[test]
+    fn safety_guidance_keeps_native_diagnostics_and_recovery_lock_in_each_language() {
+        use crate::i18n::{Language, with_language};
+
+        let error = ExecuteError {
+            entry: Some(EntryId::new(0)),
+            kind: ExecuteErrorKind::Backend(BackendError {
+                operation: BackendOperation::Observe,
+                code: 32,
+                certainty: MutationCertainty::NotApplied,
+            }),
+        };
+        let outcome = ExecutionOutcome::RecoveryRequired {
+            failure: ExecutionFailure::Cancelled { step: 1 },
+            rollback_failures: Vec::new().into_boxed_slice(),
+        };
+        for (language, expected_code, expected_lock) in [
+            (Language::Korean, "Windows 코드 32", "적용이 잠겼습니다"),
+            (Language::English, "Windows code 32", "Apply is locked"),
+            (Language::Japanese, "Windows コード 32", "適用はロック"),
+        ] {
+            with_language(language, || {
+                let diagnostic = execute_error_korean(&error);
+                assert!(diagnostic.contains("Observe"));
+                assert!(diagnostic.contains(expected_code));
+                assert!(execution_outcome_korean(&outcome).contains(expected_lock));
+            });
+        }
     }
 
     #[test]

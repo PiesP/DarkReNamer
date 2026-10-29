@@ -55,17 +55,58 @@ These are authoring defaults; the [safety model](SAFETY.md),
 
 ### Preference read authority
 
-Column and appearance files have independent write authority. A successful read
+Column, appearance and language files have independent write authority. A successful read
 or a genuinely absent file permits that file's writer; an initial read error
 uses safe display defaults but starts no writer for that file for the session.
-Edits and resets still affect the current UI, but are not persisted, and the UI
-reports that limitation. There is no in-session retry or reset that restores
-write authority: restart retries the read, and edits from the blocked session
-are discarded. The other file remains independently writable. Both normal close
+Column and appearance edits and resets still affect the current UI, but are not
+persisted, and the UI reports that limitation. An initial language-file read
+failure blocks new language choices for that session. There is no in-session
+retry or reset that restores write authority: restart retries the read, and
+unpersisted column/appearance edits are discarded. The other files remain
+independently writable. Both normal close
 and message-loop failure retire all writers that were started. This preserves
 unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
 writers.
+
+### Embedded UI language maintenance
+
+`crates/darknamer-app/src/i18n.rs` owns the supported languages, immutable startup
+selection and typed `catalog!` representation. The four catalog owners under
+`src/i18n/` cover command metadata, shared presentation, native controls and
+runtime/recovery messages. Translations are compiled into the single EXE; there
+are no language downloads or runtime text parsers. Typed Rust catalogs keep the
+small fixed language set and format arguments checked without a serialization
+library or external language-pack lifecycle.
+
+Add complete Korean/English/Japanese messages in that order. Use typed static
+keys for labels and a named function for complete formatted messages. Each
+format is compiled with the same named arguments, so missing/extra parameters
+are build errors. Keep counts grammatically valid for zero, one and multiple
+items; use a count label or an explicit grammatical branch where needed.
+Translate safety intent, including all-list Apply scope, no replacement,
+proposal-only reset and retained recovery locks. Never translate path inputs,
+rewrite UTF-16 values or substitute rendered diagnostics into filesystem calls.
+Keep diagnostic kinds, native codes and technical/OS-owned exceptions defined
+in the [user guide](docs/USER-GUIDE.md#language).
+
+Native rendering uses `CommandUiSpec.localized_*` and
+`ColumnSpec.localized_label()`; the immutable Korean compatibility label fields
+are not active UI text. Startup resolves the language before app-owned fatal or
+recovery guidance. `windows/language.rs` uses the Windows UI-language API without
+changing regional locales. The independent versioned preference record reuses
+safe persistence; a successful initial read, uncertain legacy migration, pending
+write and acknowledged durable choice are distinct states. Menu selection tracks
+acknowledged writes, while running text stays in the startup language.
+
+Run focused i18n, confirmation, preview and preference tests before the full
+gate. Test overrides are thread-local and restore the caller, so concurrent
+language tests cannot change one another. Native/VM validation must exercise
+actual translated prompts, full accessible names, settings/restart and file
+outcomes; catalog or geometry tests alone do not establish visible layout or
+Windows execution. Keep tested/landed source, EXE identity, footprint comparison
+conditions, inspected captures and remaining release-only scope in the external
+completion record.
 
 ### Foreground worker ownership
 
@@ -514,6 +555,18 @@ Hyper-V guest. The controller reads the guest parameters from its own PSSession
 and rejects a different identity before guest staging or task execution.
 Without this option, ordinary source-built runs retain their existing behavior;
 candidate and observer runs still require the expected identity.
+
+Ordinary source-built runs also exercise the Korean, English and Japanese UI
+through normal restarts. The maintained VM must resolve System to Korean for
+the initial baseline; the observer reads Windows UI-language preferences and
+rejects a different baseline instead of changing them. It checks saved language
+selection, intact pending proposals, localized Apply/cancel and occupied-target
+refusal, corrupt-journal locking, and default Cancel for a valid active recovery
+journal made by the source-bound crash-test child. Original PNGs and independent
+file-content/identity checkpoints stay in the private result bundle. Candidate
+GUI-only and performance lanes retain their separate scopes. Repeat relevant
+display configurations and inspect the original captures; a focused language
+cycle does not establish the full GUI or release acceptance matrix.
 
 The default `--desktop-mode rdp` starts a managed RDP desktop before the SSH
 controller runs and disconnects its client after the controller finishes,

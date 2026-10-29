@@ -18,6 +18,8 @@ use crate::admission::PathBudget;
 use crate::admission::PathBudgetReservation;
 use crate::admission::bounded_selection;
 use crate::calculate_prompt_layout;
+use crate::i18n::native_ui;
+use crate::i18n::native_ui::Text;
 use crate::prompt_custom_theme_enabled;
 use crate::rename::MAX_PATH_UNITS;
 use crate::scale_dip;
@@ -426,10 +428,10 @@ impl OwnedTaskDialog {
         let expanded_information = spec.expanded_information.map(wide);
         let expanded_control_text = expanded_information
             .as_ref()
-            .map(|_| wide("상세 정보 숨기기"));
+            .map(|_| wide(Text::DialogHideDetails.get()));
         let collapsed_control_text = expanded_information
             .as_ref()
-            .map(|_| wide("상세 정보 표시"));
+            .map(|_| wide(Text::DialogShowDetails.get()));
         let button_texts = spec
             .buttons
             .iter()
@@ -874,7 +876,7 @@ fn text_details_value(text: &str) -> io::Result<LegacyText> {
             if unit == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "전체 정보에 NUL 문자가 포함되어 있습니다.",
+                    Text::DialogFullInfoNul.get(),
                 ));
             }
             1
@@ -882,20 +884,20 @@ fn text_details_value(text: &str) -> io::Result<LegacyText> {
         normalized_len = normalized_len.checked_add(required).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+                Text::DialogFullInfoTooLong.get(),
             )
         })?;
         if normalized_len > MAX_TEXT_DETAILS_UTF16_UNITS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+                Text::DialogFullInfoTooLong.get(),
             ));
         }
     }
     let mut units = Vec::new();
     units
         .try_reserve_exact(normalized_len)
-        .map_err(|_| io::Error::other("전체 정보를 표시할 메모리가 부족합니다."))?;
+        .map_err(|_| io::Error::other(Text::DialogFullInfoOutOfMemory.get()))?;
     let mut source = text.encode_utf16().peekable();
     while let Some(unit) = source.next() {
         let newline = unit == u16::from(b'\r') || unit == u16::from(b'\n');
@@ -924,7 +926,7 @@ pub(super) fn text_details(
         appearance,
         PromptSpec {
             caption: caption.to_owned(),
-            title: "전체 이름과 경로".to_owned(),
+            title: Text::DialogFullInfoTitle.get().to_owned(),
             label_one: String::new(),
             label_two: String::new(),
             value_one: value,
@@ -949,7 +951,7 @@ pub(super) fn prompt_input_or_report(
                 .map_or_else(|| error.to_string(), |code| format!("OS {code}"));
             message(
                 owner,
-                &format!("입력창을 처리하지 못했습니다. {detail}"),
+                &native_ui::dialog_prompt_failure(&detail),
                 "DarkReNamer",
             );
             None
@@ -1384,11 +1386,17 @@ pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> i
     state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
     if state.read_only {
         state.edit_one = create_prompt_details_edit(window, &state.spec.value_one, 1004)?;
-        state.ok = child(window, "BUTTON", "전체 복사(&C)", IDOK as u16, WS_TABSTOP)?;
+        state.ok = child(
+            window,
+            "BUTTON",
+            Text::DialogCopyAll.get(),
+            IDOK as u16,
+            WS_TABSTOP,
+        )?;
         state.cancel = child(
             window,
             "BUTTON",
-            "닫기",
+            Text::DialogClose.get(),
             IDCANCEL as u16,
             WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
         )?;
@@ -1436,11 +1444,17 @@ pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> i
     state.ok = child(
         window,
         "BUTTON",
-        "확인",
+        Text::DialogConfirm.get(),
         IDOK as u16,
         WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
     )?;
-    state.cancel = child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP)?;
+    state.cancel = child(
+        window,
+        "BUTTON",
+        Text::DialogCancel.get(),
+        IDCANCEL as u16,
+        WS_TABSTOP,
+    )?;
     state.separator = child(window, "STATIC", "", 1010, SS_OWNERDRAW)?;
     Ok(())
 }
@@ -1648,10 +1662,8 @@ pub(super) unsafe extern "system" fn prompt_proc(
                     if let Err(error) = copy_clipboard(window, &text) {
                         show_message_now(
                             window,
-                            &format!(
-                                "클립보드에 복사하지 못했습니다: {error}\n다시 시도할 수 있습니다."
-                            ),
-                            "DarkReNamer - 복사 실패",
+                            &native_ui::dialog_copy_failure_retry(&error),
+                            Text::DialogCopyFailureTitle.get(),
                         );
                     }
                     return 0;
@@ -1705,7 +1717,7 @@ const MAX_PROMPT_CONTROL_UTF16_UNITS: usize = MAX_PROMPT_TEXT_UTF16_UNITS + 1;
 fn prompt_text_too_long(length: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("입력값이 너무 깁니다(UTF-16 {length}/{MAX_PROMPT_TEXT_UTF16_UNITS}자)."),
+        native_ui::dialog_input_too_long(length, MAX_PROMPT_TEXT_UTF16_UNITS),
     )
 }
 
@@ -1749,7 +1761,7 @@ fn create_prompt_details_edit(parent: HWND, value: &LegacyText, id: u16) -> io::
     if value.len() > MAX_TEXT_DETAILS_UTF16_UNITS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "전체 정보가 안전한 표시 길이를 초과했습니다.",
+            Text::DialogFullInfoTooLong.get(),
         ));
     }
     let edit = child(
@@ -1845,7 +1857,7 @@ fn prompt_window_text_with_limit(window: HWND, maximum: usize) -> io::Result<Leg
         } else {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+                Text::DialogFullInfoTooLong.get(),
             )
         });
     }
@@ -1876,14 +1888,14 @@ fn prompt_window_text_with_limit(window: HWND, maximum: usize) -> io::Result<Leg
         } else {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+                Text::DialogFullInfoTooLong.get(),
             )
         });
     }
     if copied != final_length || final_length > length {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "입력값이 읽는 동안 변경되어 적용하지 않았습니다.",
+            Text::DialogInputChanged.get(),
         ));
     }
     value.truncate(copied);
@@ -1899,8 +1911,8 @@ pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
     if let Err(error) = copy_clipboard(owner, text) {
         message(
             owner,
-            &format!("클립보드에 복사하지 못했습니다: {error}"),
-            "DarkReNamer - 복사 실패",
+            &native_ui::dialog_copy_failure(&error),
+            Text::DialogCopyFailureTitle.get(),
         );
     }
 }
@@ -1964,10 +1976,8 @@ pub(super) fn select_prepared_file_dialog(
             Err(error) => {
                 message(
                     owner,
-                    &format!(
-                        "파일 선택을 완료하지 못했습니다: {error}\n다시 파일을 선택해 주세요."
-                    ),
-                    "DarkReNamer - 파일 선택 실패",
+                    &native_ui::dialog_file_picker_failure(&error),
+                    Text::DialogFilePickerFailureTitle.get(),
                 );
                 PreparedFileDialogSelection::Cancelled
             }
@@ -1975,7 +1985,7 @@ pub(super) fn select_prepared_file_dialog(
         PreparedFileDialogKind::UnifyDestinationParent => match modal_native_dialog(owner, || {
             show_single_path_dialog(
                 owner,
-                "모든 파일을 이동할 대상 폴더 선택",
+                Text::DialogMoveDestinationTitle.get(),
                 SinglePathDialog::DestinationFolder,
             )
         }) {
@@ -1984,17 +1994,17 @@ pub(super) fn select_prepared_file_dialog(
             Err(error) => {
                 message(
                     owner,
-                    &format!("대상 폴더를 선택하지 못했습니다: {error}"),
-                    "DarkReNamer - 대상 폴더 선택 실패",
+                    &native_ui::dialog_target_picker_failure(&error),
+                    Text::DialogTargetPickerFailureTitle.get(),
                 );
                 PreparedFileDialogSelection::Cancelled
             }
         },
         PreparedFileDialogKind::SaveText { text, names } => {
             let title = if names {
-                "파일명 저장"
+                Text::DialogSaveNamesTitle.get()
             } else {
-                "경로명 저장"
+                Text::DialogSavePathsTitle.get()
             };
             let default_name = if names { "names.txt" } else { "paths.txt" };
             match modal_native_dialog(owner, || {
@@ -2005,8 +2015,8 @@ pub(super) fn select_prepared_file_dialog(
                 Err(error) => {
                     message(
                         owner,
-                        &format!("저장 대화상자를 열지 못했습니다: {error}"),
-                        "DarkReNamer - 저장 실패",
+                        &native_ui::dialog_save_picker_failure(&error),
+                        Text::DialogSaveFailureTitle.get(),
                     );
                     PreparedFileDialogSelection::Cancelled
                 }
@@ -2014,12 +2024,12 @@ pub(super) fn select_prepared_file_dialog(
         }
         PreparedFileDialogKind::ImportNames => select_import_path(
             owner,
-            "바꿀 파일 이름 불러오기",
+            Text::DialogImportNamesTitle.get(),
             PreparedFileDialogSelection::ImportNames,
         ),
         PreparedFileDialogKind::ImportPaths => select_import_path(
             owner,
-            "파일에서 경로목록 읽어 추가하기",
+            Text::DialogImportPathsTitle.get(),
             PreparedFileDialogSelection::ImportPaths,
         ),
         PreparedFileDialogKind::ExportRecoveryJournal => {
@@ -2031,8 +2041,8 @@ pub(super) fn select_prepared_file_dialog(
                 Err(error) => {
                     message(
                         owner,
-                        &format!("복구 저널 저장 폴더를 열지 못했습니다: {error}"),
-                        "DarkReNamer - 진단 내보내기 실패",
+                        &native_ui::dialog_export_picker_failure(&error),
+                        Text::DialogExportFailureTitle.get(),
                     );
                     PreparedFileDialogSelection::Cancelled
                 }
@@ -2054,8 +2064,8 @@ fn select_import_path(
         Err(error) => {
             message(
                 owner,
-                &format!("불러올 파일을 선택하지 못했습니다: {error}"),
-                "DarkReNamer - 불러오기 실패",
+                &native_ui::dialog_import_picker_failure(&error),
+                Text::DialogImportFailureTitle.get(),
             );
             PreparedFileDialogSelection::Cancelled
         }
@@ -2140,9 +2150,9 @@ fn configure_single_path_dialog(
             .map_err(shell_dialog_error)?;
         if matches!(policy, SinglePathDialog::ImportFile) {
             let default_extension = wide("txt");
-            let text_label = wide("Text Files");
+            let text_label = wide(Text::DialogFilterTextFiles.get());
             let text_pattern = wide("*.txt");
-            let all_label = wide("All Files");
+            let all_label = wide(Text::DialogFilterAllFiles.get());
             let all_pattern = wide("*.*");
             let filters = [
                 COMDLG_FILTERSPEC {
@@ -2382,14 +2392,14 @@ impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
                 let leaf = path.file_name().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "text export destination must have a file name",
+                        crate::i18n::runtime::Text::ExportMissingName.get(),
                     )
                 })?;
                 let folder = self.folder.borrow();
                 let folder = folder.as_ref().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "the current save folder was not retained; navigate to it again",
+                        crate::i18n::native_ui::Text::SaveFolderNotRetained.get(),
                     )
                 })?;
                 require_matching_folder_identity(folder.identity, selected_parent_identity)?;
@@ -2517,9 +2527,9 @@ fn show_secure_text_save_dialog(
     let title = wide(title);
     let default_name = wide(default_name);
     let default_extension = wide("txt");
-    let text_label = wide("Text Files");
+    let text_label = wide(Text::DialogFilterTextFiles.get());
     let text_pattern = wide("*.txt");
-    let all_label = wide("All Files");
+    let all_label = wide(Text::DialogFilterAllFiles.get());
     let all_pattern = wide("*");
     let filters = [
         COMDLG_FILTERSPEC {
@@ -2599,13 +2609,11 @@ fn secure_text_save_dialog_options(
 
 fn report_text_save_target_error(owner: HWND, error: &io::Error) {
     let text = wide(&if error.kind() == io::ErrorKind::AlreadyExists {
-        "기존 파일은 덮어쓰지 않습니다. 사용하지 않는 새 파일 이름을 선택해 주세요.".to_owned()
+        Text::DialogSaveNoReplace.get().to_owned()
     } else {
-        format!(
-            "선택한 저장 위치를 안전하게 고정하지 못했습니다. 다른 위치를 선택해 주세요.\n{error}"
-        )
+        native_ui::dialog_save_location_failure(error)
     });
-    let title = wide("DarkReNamer - 저장 위치 확인");
+    let title = wide(Text::DialogSaveLocationTitle.get());
     // SAFETY: both strings remain NUL-terminated for the synchronous call and
     // owner is the live parent window for this modal file dialog.
     unsafe {
@@ -2627,7 +2635,7 @@ fn show_secure_recovery_export_folder_dialog(
     let dialog: IFileOpenDialog =
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
             .map_err(shell_dialog_error)?;
-    let title = wide("복구 저널 원본을 저장할 폴더 선택");
+    let title = wide(Text::DialogExportFolderTitle.get());
     // SAFETY: the dialog is live on its initialized UI thread and GetOptions
     // retrieves its default Open policy before applying the required flags.
     let options = unsafe { dialog.GetOptions() }.map_err(shell_dialog_error)?;
@@ -2666,10 +2674,8 @@ fn show_secure_recovery_export_folder_dialog(
 }
 
 fn report_recovery_export_folder_error(owner: HWND, error: &io::Error) {
-    let text = wide(&format!(
-        "선택한 저장 폴더를 안전하게 고정하지 못했습니다. 다른 폴더를 선택해 주세요.\n{error}"
-    ));
-    let title = wide("DarkReNamer - 진단 내보내기 위치 확인");
+    let text = wide(&native_ui::dialog_export_location_failure(error));
+    let title = wide(Text::DialogExportLocationTitle.get());
     // SAFETY: both strings remain NUL-terminated for the synchronous call and
     // owner is the live parent window for this modal folder dialog.
     unsafe {
@@ -2689,7 +2695,7 @@ fn show_bounded_file_open_dialog(owner: HWND) -> io::Result<Option<IShellItemArr
     let dialog: IFileOpenDialog =
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
             .map_err(shell_dialog_error)?;
-    let title = wide("이름 붙일 파일 불러오기");
+    let title = wide(Text::DialogLoadFilesTitle.get());
     // SAFETY: the dialog and owner belong to the initialized UI thread; title
     // remains NUL-terminated and alive through SetTitle, and Show is modal.
     unsafe {

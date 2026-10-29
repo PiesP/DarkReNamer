@@ -2,10 +2,46 @@
 
 [한국어 사용자 안내](USER-GUIDE.ko.md)
 
-This guide covers the native Korean-language DarkReNamer interface. For the
+This guide covers the native DarkReNamer interface. Menu examples below use
+Korean labels with English explanations; choose the interface language under
+[Language](#language). For the
 supported operating-system and filesystem boundary, read the
 [README](../README.md#supported-environment). The
 [safety model](../SAFETY.md) remains authoritative for mutation and recovery.
+
+## Language
+
+Open **View > Language · next startup** (Korean: **보기 > 언어 · 다음 실행부터**)
+and choose **System language**, **한국어**, **English**, or **日本語**. A manual
+choice takes precedence over Windows. System uses the first supported entry in
+Windows UI-language preferences, with English as the fallback. Regional number,
+date, sorting and legacy text-decoding settings are not changed.
+
+The status first says the choice is being saved. After the durable save succeeds,
+it confirms the next-startup change and the menu check follows the saved value.
+A failed save reports that the choice may not survive restart; it keeps the
+previous acknowledged choice checked. The application stays open, and its
+current language, list, proposed names and recovery state remain intact. Close
+normally and reopen when you are ready; no list/session restoration is added.
+
+A separate per-user `ui-language-v1` record under
+`%LOCALAPPDATA%\DarkReNamer` preserves existing column and appearance formats.
+When no language record exists, a valid old column or appearance record keeps
+Korean; a fresh installation uses System. If old records cannot be read and no
+valid record establishes the legacy policy, Korean is temporary and automatic
+migration is deferred. Choose a language explicitly or restart to retry.
+An unreadable or corrupt language record uses System for display and is not
+overwritten during that run. Each settings file retains independent write
+authority; a problem in one does not disable saving healthy files.
+
+App-owned menus, controls, accessible names, confirmations and recovery guidance
+follow the selected language. Windows-owned common-dialog controls and standard
+TaskDialog buttons may use the installed Windows language resources. System I/O
+messages, provider text, structured diagnostic kinds/native codes and low-level
+handle, security or codec reason payloads retain their technical spelling;
+the surrounding app-owned explanation and corrective guidance are translated.
+Names, exact UTF-16 paths, import/export bytes, sorting, journal data and Apply
+or recovery authority are independent of UI language.
 
 ## Add and review entries
 
@@ -163,8 +199,6 @@ read [Startup recovery and corrupt evidence](../SAFETY.md#startup-recovery-and-c
 
 ## Known limitations
 
-- The interface is Korean even when this guide is reached through an English or
-  Japanese README.
 - Native System, Forced Colors, file dialogs, and confirmation TaskDialogs
   follow Windows and may not match the app-owned Light or Dark palette.
   Scrollbars retain native behavior; app-owned Dark repainting is described
