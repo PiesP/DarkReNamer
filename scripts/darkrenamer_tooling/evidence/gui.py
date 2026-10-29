@@ -4740,10 +4740,14 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 "Custom input prompt handles or retirement sequence differ.")
     failure = scenario.get("sampler_failure")
     post_stop = scenario.get("post_stop_failure") if custom else None
+    transfer = scenario.get("sample_transfer_failure") if custom else None
+    unverified_transfer = custom and failed and transfer is not None
     retained_complete = custom and failed and failure is None and isinstance(scenario.get("samples"), list)
-    samples = (scenario.get("samples") if retained_complete or not failed else
+    samples = ([] if unverified_transfer else
+               scenario.get("samples") if retained_complete or not failed else
                scenario.get("partial_samples"))
-    require(isinstance(samples, list) and 1 <= len(samples) <= 650,
+    require(isinstance(samples, list) and
+            (len(samples) == 0 if unverified_transfer else 1 <= len(samples) <= 650),
             "Picker samples are empty, missing, or exceed the bounded observer.")
     last_probe = 0
     for index, sample in enumerate(samples):
@@ -4821,7 +4825,31 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                     for popup in confirm_popups),
                 "Controlled custom input lacks bound hidden and restored popup samples.")
     if failed:
-        if failure is not None:
+        if unverified_transfer:
+            marker = exact_keys(transfer, {"schema_version", "stage",
+                                           "reported_raw_sample_count",
+                                           "reported_last_probe_end_ticks"},
+                                "custom sample transfer failure")
+            require(marker["schema_version"] == 1 and
+                    marker["stage"] == "convert-stopped-samples" and
+                    type(marker["reported_raw_sample_count"]) is int and
+                    1 <= marker["reported_raw_sample_count"] <= 650 and
+                    type(marker["reported_last_probe_end_ticks"]) is int and
+                    marker["reported_last_probe_end_ticks"] > 0 and
+                    failure is None and post_stop is None and not retained_complete and
+                    "samples" not in scenario and "partial_samples" not in scenario and
+                    "sampler_failure" not in scenario and "post_stop_failure" not in scenario and
+                    len(events) == len(expected_boundaries) and
+                    events[-1]["ticks"] < marker["reported_last_probe_end_ticks"] and
+                    raw.get("status") == "failed" and
+                    raw.get("failure_reason") == "gui_regression_observer_failed" and
+                    nested(raw, "assertions", "overall") == "failed" and
+                    not has_failed_postlaunch,
+                    "Custom sample transfer failure is unbounded or mixed with verified samples.")
+            detail = {"status": "failed", "kind": "sample-transfer",
+                      "stage": marker["stage"], "sample_coverage": "unverified",
+                      "reported_raw_sample_count": marker["reported_raw_sample_count"]}
+        elif failure is not None:
             require(post_stop is None and not retained_complete and
                     (not custom or "samples" not in scenario) and raw.get("status") == "failed",
                     "Picker sampler failure was mixed with a completed sample record.")
@@ -4908,8 +4936,10 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
                 "retained_samples": len(samples), "resource_cleanup": "owned-clean",
                 "postlaunch": "verified-but-nonqualifying" if has_failed_postlaunch else "unavailable",
                 "acceptance": "rejected",
+                **({"sample_coverage": "unverified"} if unverified_transfer else {}),
                 "full_performance_sample": "not-run"}
-    require(failure is None and len(events) == len(expected_boundaries) and
+    require(failure is None and post_stop is None and transfer is None and
+            len(events) == len(expected_boundaries) and
             samples[0]["probe_begin_ticks"] < events[0]["ticks"] and
             events[-1]["ticks"] < samples[-1]["probe_end_ticks"] and
             raw.get("status") == "review_required" and

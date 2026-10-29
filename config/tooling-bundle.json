@@ -418,7 +418,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "bd4b3a8407a11d91669dd7ba1dccd91320080d6ea0b131c393dc1abeaa9ab134",
+      "sha256": "7eb43c29a23bf15ba80e73f5ce6e48e9622739ec59a824b97a37523cdd428bfb",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -618,7 +618,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e91df32a8088a98734dc2580a195bbeb8295c86c610715beb2e2f9172c73f40a",
+      "sha256": "8f96a610cbdbcfd5307ae65d8f4a6c59bd14ec0e14700c06605f938691fd2307",
       "dependencies": []
     },
     {

@@ -2502,6 +2502,10 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                 lambda s: s['samples'][4].__setitem__('probe_status', 'failure_unknown'),
                 lambda s: s['samples'][4].update(probe_status='timeout', probe_error_code=0),
                 lambda s: s['samples'][4].__setitem__('ui_response_ms', 50.0),
+                lambda s: s.__setitem__('sample_transfer_failure', {
+                    'schema_version': 1, 'stage': 'convert-stopped-samples',
+                    'reported_raw_sample_count': 7,
+                    'reported_last_probe_end_ticks': 2700010}),
                 lambda s: s['custom_input'].__setitem__('cancellation_retired', False),
                 lambda s: s['samples'].pop(4),
             )):
@@ -2592,6 +2596,57 @@ class PerformanceSampleEvidenceTests(SyntheticFixtureTestCase):
                             evidence.validate_picker_run(self.root, run.name, SOURCE,
                                                          SCRIPT_ROOT.parent)
                     raw_path.write_bytes(original)
+
+    def test_custom_sample_transfer_failure_is_rejected_without_verified_sample_coverage(self):
+        run = self.custom_completed_failed_run('post-stop-observer')
+        raw_path = run / 'output/acceptance-result.json'
+        raw = json.loads(raw_path.read_text())
+        scenario = raw['assertions']['scenario']
+        stopped_samples = scenario.pop('samples')
+        scenario.pop('post_stop_failure')
+        scenario['sample_transfer_failure'] = {
+            'schema_version': 1, 'stage': 'convert-stopped-samples',
+            'reported_raw_sample_count': len(stopped_samples),
+            'reported_last_probe_end_ticks': stopped_samples[-1]['probe_end_ticks']}
+        self.assertNotIn('sampler_failure', scenario)
+        write_json(raw_path, raw)
+        self.fixture.refresh(run)
+        (run / 'output/run-result.json').unlink(missing_ok=True)
+        proof = {'environment': 'strict-failed', 'owned_cleanup': 'owned-clean',
+                 'acceptance': 'rejected'}
+        with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3), \
+             mock.patch.object(evidence, 'verify_preserved_owned_cleanup', return_value=proof):
+            verdict = evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                   SCRIPT_ROOT.parent)
+            self.assertEqual(verdict['failure']['kind'], 'sample-transfer')
+            self.assertEqual(verdict['sample_coverage'], 'unverified')
+            self.assertEqual(verdict['retained_samples'], 0)
+            self.assertEqual(verdict['acceptance'], 'rejected')
+            original = raw_path.read_bytes()
+            for mutation in (
+                lambda s: s['sample_transfer_failure'].__setitem__('reported_raw_sample_count', 0),
+                lambda s: s['sample_transfer_failure'].__setitem__('stage', 'sampler'),
+                lambda s: s.__setitem__('samples', stopped_samples),
+                lambda s: s.__setitem__('sampler_failure', None),
+                lambda s: s.__setitem__('post_stop_failure', {'schema_version': 1}),
+            ):
+                with self.subTest(mutation=mutation):
+                    altered = json.loads(original)
+                    mutation(altered['assertions']['scenario'])
+                    write_json(raw_path, altered)
+                    self.fixture.refresh(run)
+                    (run / 'output/run-result.json').unlink(missing_ok=True)
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_picker_run(self.root, run.name, SOURCE,
+                                                     SCRIPT_ROOT.parent)
+            raw_path.write_bytes(original)
+            self.fixture.refresh(run)
+            (run / 'output/run-result.json').unlink(missing_ok=True)
+        with mock.patch.object(evidence, 'selected_picker_failure_schema', return_value=3), \
+             mock.patch.object(evidence, 'verify_preserved_owned_cleanup',
+                               side_effect=evidence.EvidenceError('missing cleanup proof')):
+            with self.assertRaisesRegex(evidence.EvidenceError, 'missing cleanup proof'):
+                evidence.validate_picker_run(self.root, run.name, SOURCE, SCRIPT_ROOT.parent)
 
     def test_picker_v2_success_requires_visible_bound_picker_and_postlaunch(self):
         run = self.picker_v2_run()

@@ -1338,8 +1338,14 @@ After the sampler stops, screenshot, fixture readback, journal readback, normal
 close, or native exit errors retain completed samples and a bounded
 `post_stop_failure` stage, separate from `sampler_failure`. Observer and
 controller cleanup failures retain the original status and independent owned
-cleanup proof; none become accepted observations. This focused diagnostic
-does not execute the complete performance workload. Run and verify one complete
+cleanup proof; none become accepted observations. If conversion of stopped
+native samples fails, the receipt instead records
+`sample_transfer_failure` with a bounded reported raw count and final probe
+tick. No converted samples or sampler failure are inferred from that report;
+the independent verifier marks sample coverage unverified and still requires
+the original failed status and owned cleanup proof before classifying the
+rejected attempt. This focused diagnostic does not execute the complete
+performance workload. Run and verify one complete
 `performance-sample` after it; a failed or partial record cannot qualify the
 full workload. Schema-2 receipts retain their prior `#32770`-only hidden-popup
 meaning, while schema 3 additionally recognizes the exact custom input class

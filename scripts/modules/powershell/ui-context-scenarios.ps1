@@ -1999,8 +1999,18 @@ function Invoke-ObserverPerformanceSampleScenario {
                 $nativeLifetimeCheckpoints.Add([ordered]@{ phase='post'; creation_filetime=[long]$check[0] })
                 Start-Sleep -Milliseconds 400
                 $samples = @($sampler.Stop())
-                $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline -Picker)
                 $sampler = $null
+                try {
+                    $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows -Samples $samples -Timeline -Picker)
+                }
+                catch {
+                    [void]$ObservationSink.Remove('samples')
+                    $ObservationSink['sample_transfer_failure'] = [ordered]@{
+                        schema_version=1; stage='convert-stopped-samples';
+                        reported_raw_sample_count=$samples.Count;
+                        reported_last_probe_end_ticks=[long]$samples[-1].ProbeEndTicks }
+                    throw
+                }
                 $postStopStage = 'capture'
                 [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
                     -Window $application.main -Process $application.process -ExpectedSession $SessionId `
