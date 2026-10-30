@@ -1,6 +1,7 @@
 """Build the current checkout's Windows tests and execute them in a Hyper-V VM."""
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -315,6 +316,8 @@ def argument_parser():
                         help='Run the fixed two-pass optimized ListView refresh diagnostic.')
     parser.add_argument('--profile-runtime-model', action='store_true',
                         help='Run the fixed Windows preview and sort model baseline diagnostic.')
+    parser.add_argument('--baseline-repetitions', type=int, choices=(6,),
+                        help='Run six independent fixed native baseline invocations with one frozen build.')
     parser.add_argument('--focused-icon-tests', action='store_true',
                         help='Run only the fixed native icon-worker functional tests.')
     parser.add_argument('--focused-refresh-tests', action='store_true',
@@ -356,6 +359,12 @@ def parse_arguments(argv=None):
                                       args.focused_icon_tests, args.focused_refresh_tests,
                                       args.virtual_execution_count is not None)) > 1:
         parser.error('Only one fixed native diagnostic selector may be used.')
+    if args.baseline_repetitions is not None and (
+            not (args.profile_refresh_stages or args.profile_runtime_model) or
+            args.prepare_only or args.candidate_mode or args.task_kind != 'core' or
+            args.acceptance_profile_id != V2_PROFILE_ID or args.expected_vm_id is None or
+            args.private_symbol_output is None):
+        parser.error('Six baseline repetitions require one source-built v2 native diagnostic, exact VM identity, and private symbol output.')
     if args.native_test_profile and not (args.focused_icon_tests or args.focused_refresh_tests):
         parser.error('--native-test-profile requires one focused native test selector.')
     if args.focused_icon_case and not args.focused_icon_tests:
@@ -2803,6 +2812,7 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
             row.get('exit_code') != 0 or
             [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
         raise ValueError('Refresh native test result is incomplete.')
+    verify_virtual_execution_job(row, result.get('process_job_cleanup'))
     checked_artifact(root, binary)
     checked_artifact(root, manifest['application'])
     checked_artifact(root, manifest['runner'])
@@ -3324,6 +3334,176 @@ def verify_focused_native_result(root, manifest, result, transport_kind,
             'test_binary_sha256': binary['sha256']}
 
 
+def frozen_native_files(prepared):
+    if any(path.is_symlink() for path in prepared.rglob('*')):
+        raise ValueError('The prepared diagnostic bundle contains a symbolic link.')
+    return {path.relative_to(prepared): sha256(path) for path in prepared.rglob('*')
+            if path.is_file()}
+
+
+def frozen_private_symbol_files(root, manifest, bundle_manifest_sha256, expected=None):
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError('Private symbol output must be an ordinary directory.')
+    verify_private_symbol_root(root)
+    files = list(root.iterdir())
+    if len(files) > 16:
+        raise RuntimeError('Private symbol inventory exceeds its file bound.')
+    inventory = {}
+    total_bytes = 0
+    for path in files:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_size > 128 * 1024 * 1024 or
+                total_bytes > 256 * 1024 * 1024 - info.st_size):
+            raise RuntimeError('Private symbol inventory contains a non-ordinary or oversized file.')
+        total_bytes += info.st_size
+        inventory[path.name] = sha256(path)
+    receipt_name = 'private-symbols.json'
+    if receipt_name not in inventory:
+        raise RuntimeError('Private symbol receipt is missing.')
+    receipt = read_json_strict(root / receipt_name, maximum_bytes=1024 * 1024)
+    if (not isinstance(receipt, dict) or receipt.get('schema_version') != 1 or
+            receipt.get('source_sha') != manifest['source_sha'] or
+            receipt.get('bundle_manifest_sha256') != bundle_manifest_sha256 or
+            receipt.get('target') != manifest['target'] or
+            receipt.get('source_state') != 'clean' or
+            receipt.get('test_profile') != 'release'):
+        raise RuntimeError('Private symbol receipt differs from the source-built baseline bundle.')
+    rows = receipt.get('binaries')
+    expected_roles = {'application': manifest['application']}
+    expected_roles.update({'test:' + row['file']: row for row in manifest['test_binaries']})
+    if (not isinstance(rows, list) or len(rows) != len(expected_roles) or
+            len({row.get('role') for row in rows if isinstance(row, dict)}) != len(expected_roles)):
+        raise RuntimeError('Private symbol receipt has an invalid binary inventory.')
+    expected_names = {receipt_name}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('role') not in expected_roles:
+            raise RuntimeError('Private symbol receipt has an unknown binary role.')
+        binary = expected_roles[row['role']]
+        exe = binary['file']
+        pdb = Path(exe).with_suffix('.pdb').name
+        measurement = exe + '.measurement.json'
+        if (row.get('exe') != exe or row.get('pdb') != pdb or
+                row.get('measurement') != measurement or
+                row.get('executable_sha256') != binary['sha256'] or
+                not isinstance(row.get('pdb_sha256'), str) or
+                re.fullmatch(r'[0-9a-f]{64}', row['pdb_sha256']) is None or
+                not isinstance(row.get('codeview_guid'), str) or
+                type(row.get('codeview_age')) is not int):
+            raise RuntimeError('Private symbol receipt has an invalid EXE/PDB identity.')
+        expected_names.update((exe, pdb, measurement))
+        if inventory.get(exe) != binary['sha256'] or inventory.get(pdb) != row['pdb_sha256']:
+            raise RuntimeError('Private symbol EXE/PDB bytes differ from the frozen binary identities.')
+        measured = read_json_strict(root / measurement, maximum_bytes=1024 * 1024)
+        if (not isinstance(measured, dict) or measured.get('schema_version') != 1 or
+                measured.get('executable', {}).get('sha256') != binary['sha256'] or
+                measured.get('debug_symbols', {}).get('pdb_sha256') != row['pdb_sha256'] or
+                measured['debug_symbols'].get('guid') != row['codeview_guid'] or
+                measured['debug_symbols'].get('age') != row['codeview_age']):
+            raise RuntimeError('Private symbol measurement differs from the frozen EXE/PDB pair.')
+    if set(inventory) != expected_names:
+        raise RuntimeError('Private symbol inventory has added or missing files.')
+    if expected is not None and inventory != expected:
+        raise RuntimeError('Private symbol inventory changed during the baseline campaign.')
+    return inventory
+
+
+def native_baseline_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def copy_frozen_native_attempt(repo, prepared, attempt, frozen, source_sha, label):
+    if clean_source_identity(repo, label)[1] != source_sha:
+        raise RuntimeError('Checkout changed after the optimized diagnostic build.')
+    if frozen_native_files(prepared) != frozen:
+        raise RuntimeError('The prepared optimized diagnostic bundle changed.')
+    shutil.copytree(prepared, attempt)
+    if frozen_native_files(attempt) != frozen:
+        raise RuntimeError('The copied optimized diagnostic bundle changed.')
+
+
+def run_runtime_model_repetitions(repo, args, tooling):
+    root, defaults, pwsh = prepare_transport(repo, args)
+    root = resolve_prepare_output_root(repo, root)
+    root.mkdir(mode=0o700)
+    prepared = root / 'bundle'
+    manifest = build_bundle(repo, prepared, tooling, runtime_model=True,
+                            private_symbol_output=args.private_symbol_output)
+    frozen = frozen_native_files(prepared)
+    symbol_files = frozen_private_symbol_files(
+        args.private_symbol_output, manifest, frozen[Path('bundle.json')])
+    profile_sha256 = args.acceptance_profile_sha256
+    plan = {'schema_version': 1, 'diagnostic': RUNTIME_MODEL_KIND,
+            'source_sha': manifest['source_sha'],
+            'test_binary': manifest['test_binaries'][0],
+            'application': manifest['application'],
+            'private_symbols': str(args.private_symbol_output),
+            'private_symbol_receipt_sha256': symbol_files['private-symbols.json'],
+            'private_symbol_files_sha256': symbol_files,
+            'bundle_files_sha256': {name.as_posix(): digest for name, digest in frozen.items()},
+            'bundle_manifest_sha256': frozen[Path('bundle.json')],
+            'profile_id': V2_PROFILE_ID, 'profile_sha256': profile_sha256,
+            'test_timeout_seconds': 1200, 'suite_timeout_seconds': 1200,
+            'repetitions': 6, 'independent_processes_per_repetition': 1,
+            'record_scope': RUNTIME_MODEL_SCOPE, 'records_per_repetition': 183,
+            'rust_toolchain_sha256': sha256(repo / 'rust-toolchain.toml'),
+            'desktop': {'mode': args.desktop_mode, 'scale': args.desktop_scale,
+                        'width': args.desktop_width, 'height': args.desktop_height}}
+    (root / 'plan.json').write_text(json.dumps(plan, indent=2) + '\n')
+    attempts = []
+    for repetition in range(1, 7):
+        attempt = root / ('run-%02d' % repetition)
+        record = {'repetition': repetition, 'path': str(attempt), 'status': 'running',
+                  'attempt_started_at_utc': native_baseline_timestamp()}
+        attempts.append(record)
+        (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+        try:
+            copy_frozen_native_attempt(repo, prepared, attempt, frozen,
+                                       manifest['source_sha'], 'Runtime model baseline checkout')
+            frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                        frozen[Path('bundle.json')], symbol_files)
+            args.expected_bundle_manifest_sha256 = frozen[Path('bundle.json')]
+            record['controller_started_at_utc'] = native_baseline_timestamp()
+            (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            try:
+                run_controller(attempt, args, defaults, pwsh)
+            finally:
+                record['controller_finished_at_utc'] = native_baseline_timestamp()
+            frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                        frozen[Path('bundle.json')], symbol_files)
+            if clean_source_identity(repo, 'Runtime model baseline checkout')[1] != manifest['source_sha']:
+                raise RuntimeError('Checkout changed during the optimized diagnostic pass.')
+            result = read_json_strict(attempt / 'result.json', CORE_RESULT_MAXIMUM_BYTES)
+            observed = verify_runtime_model_result(
+                attempt, manifest, result, 'ssh' if args.ssh_host else 'powershell_direct',
+                args.expected_vm_id, profile_sha256)
+            (attempt / 'validation-result.json').write_text(json.dumps(observed, indent=2) + '\n')
+            frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                        frozen[Path('bundle.json')], symbol_files)
+            record.update(status='passed', test_binary_sha256=observed['test_binary_sha256'],
+                          stdout_sha256=observed['stdout_sha256'], records=observed['records'])
+        except Exception as error:
+            record['status'] = 'failed'
+            record['error_type'] = type(error).__name__
+            record['error_message'] = str(error)[:512]
+            try:
+                frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                            frozen[Path('bundle.json')], symbol_files)
+            except Exception as symbol_error:
+                record['private_symbol_error_type'] = type(symbol_error).__name__
+                record['private_symbol_error_message'] = str(symbol_error)[:512]
+            print('FAIL: optimized runtime model baseline repetition ' + str(repetition) +
+                  '; evidence=' + str(attempt) + '; reason=' + str(error),
+                  file=sys.stderr, flush=True)
+            return 1
+        finally:
+            record['attempt_finished_at_utc'] = native_baseline_timestamp()
+            (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+        print('PASS: optimized runtime model baseline repetition ' + str(repetition) +
+              '; evidence=' + str(attempt), flush=True)
+    return 0
+
+
 def run_refresh_profile(repo, args, tooling):
     root, defaults, pwsh = prepare_transport(repo, args)
     root = resolve_prepare_output_root(repo, root)
@@ -3331,10 +3511,10 @@ def run_refresh_profile(repo, args, tooling):
     prepared = root / 'bundle'
     manifest = build_bundle(repo, prepared, tooling, refresh_profile=True,
                             private_symbol_output=args.private_symbol_output)
-    frozen = {path.relative_to(prepared): sha256(path) for path in prepared.rglob('*')
-              if path.is_file() and not path.is_symlink()}
-    if any(path.is_symlink() for path in prepared.rglob('*')):
-        raise ValueError('The prepared diagnostic bundle contains a symbolic link.')
+    frozen = frozen_native_files(prepared)
+    symbol_files = (frozen_private_symbol_files(
+        args.private_symbol_output, manifest, frozen[Path('bundle.json')])
+        if args.baseline_repetitions is not None else None)
     profile_sha256 = args.acceptance_profile_sha256
     plan = {'schema_version': 1, 'diagnostic': 'profile-refresh-stages',
             'source_sha': manifest['source_sha'],
@@ -3353,23 +3533,48 @@ def run_refresh_profile(repo, args, tooling):
             'desktop': {'mode': args.desktop_mode, 'scale': args.desktop_scale,
                         'width': args.desktop_width, 'height': args.desktop_height},
             'initial_preferences': 'fresh-isolated-localappdata'}
+    if args.baseline_repetitions is not None:
+        plan['repetitions'] = args.baseline_repetitions
+        plan['independent_processes_per_order'] = args.baseline_repetitions
+        plan['order_policy'] = 'alternate-first-order-by-repetition'
+        plan['private_symbols'] = str(args.private_symbol_output)
+        plan['private_symbol_receipt_sha256'] = symbol_files['private-symbols.json']
+        plan['private_symbol_files_sha256'] = symbol_files
+        plan['bundle_files_sha256'] = {name.as_posix(): digest for name, digest in frozen.items()}
     (root / 'plan.json').write_text(json.dumps(plan, indent=2) + '\n')
     attempts = []
-    for index, order in enumerate(REFRESH_PROFILE_ORDERS, 1):
-        if clean_source_identity(repo, 'Refresh diagnostic checkout')[1] != manifest['source_sha']:
-            raise RuntimeError('Checkout changed after the optimized diagnostic build.')
-        if any(sha256(prepared / name) != digest for name, digest in frozen.items()):
-            raise RuntimeError('The prepared optimized diagnostic bundle changed.')
-        attempt = root / ('pass-%02d-%s' % (index, order))
-        shutil.copytree(prepared, attempt)
-        if any(sha256(attempt / name) != digest for name, digest in frozen.items()):
-            raise RuntimeError('The copied optimized diagnostic bundle changed.')
+    count = args.baseline_repetitions or 1
+    for repetition, index, order in (
+            (repetition, index, order)
+            for repetition in range(1, count + 1)
+            for index, order in enumerate(
+                REFRESH_PROFILE_ORDERS if repetition % 2 else tuple(reversed(REFRESH_PROFILE_ORDERS)), 1)):
+        attempt = root / (
+            'pass-%02d-%s' % (index, order) if count == 1 else
+            'run-%02d-pass-%02d-%s' % (repetition, index, order))
         args.refresh_profile_order = order
         args.expected_bundle_manifest_sha256 = frozen[Path('bundle.json')]
-        record = {'order': order, 'path': str(attempt), 'status': 'failed'}
+        record = {'order': order, 'path': str(attempt), 'status': 'running',
+                  'attempt_started_at_utc': native_baseline_timestamp()}
+        if count != 1:
+            record['repetition'] = repetition
         attempts.append(record)
+        (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
         try:
-            run_controller(attempt, args, defaults, pwsh)
+            copy_frozen_native_attempt(repo, prepared, attempt, frozen,
+                                       manifest['source_sha'], 'Refresh diagnostic checkout')
+            if symbol_files is not None:
+                frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                            frozen[Path('bundle.json')], symbol_files)
+            record['controller_started_at_utc'] = native_baseline_timestamp()
+            (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            try:
+                run_controller(attempt, args, defaults, pwsh)
+            finally:
+                record['controller_finished_at_utc'] = native_baseline_timestamp()
+            if symbol_files is not None:
+                frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                            frozen[Path('bundle.json')], symbol_files)
             if clean_source_identity(repo, 'Refresh diagnostic checkout')[1] != manifest['source_sha']:
                 raise RuntimeError('Checkout changed during the optimized diagnostic pass.')
             result = read_json_strict(attempt / 'result.json', CORE_RESULT_MAXIMUM_BYTES)
@@ -3377,12 +3582,25 @@ def run_refresh_profile(repo, args, tooling):
                 attempt, manifest, result, order,
                 'ssh' if args.ssh_host else 'powershell_direct', args.expected_vm_id,
                 profile_sha256))
+            if symbol_files is not None:
+                frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                            frozen[Path('bundle.json')], symbol_files)
         except Exception as error:
+            record['status'] = 'failed'
             record['error_type'] = type(error).__name__
+            record['error_message'] = str(error)[:512]
+            if symbol_files is not None:
+                try:
+                    frozen_private_symbol_files(args.private_symbol_output, manifest,
+                                                frozen[Path('bundle.json')], symbol_files)
+                except Exception as symbol_error:
+                    record['private_symbol_error_type'] = type(symbol_error).__name__
+                    record['private_symbol_error_message'] = str(symbol_error)[:512]
             print('FAIL: optimized refresh diagnostic ' + order + '; evidence=' +
                   str(attempt) + '; reason=' + str(error), file=sys.stderr, flush=True)
             return 1
         finally:
+            record['attempt_finished_at_utc'] = native_baseline_timestamp()
             (root / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
         print('PASS: optimized refresh diagnostic ' + order + '; evidence=' + str(attempt),
               flush=True)
@@ -3563,6 +3781,8 @@ def main(repo, argv=None, tooling=None):
     if args.profile_refresh_stages:
         return run_refresh_profile(repo, args, tooling)
     if args.profile_runtime_model:
+        if args.baseline_repetitions == 6:
+            return run_runtime_model_repetitions(repo, args, tooling)
         root, defaults, pwsh = prepare_transport(repo, args)
         manifest = build_bundle(repo, root, tooling, runtime_model=True,
                                 private_symbol_output=args.private_symbol_output)

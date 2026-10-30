@@ -12,6 +12,39 @@ $ErrorActionPreference = 'Stop'
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
+$readinessStart = [datetime]::UtcNow
+$readinessProcess = [pscustomobject]@{ Id=4141; HasExited=$false;
+    StartTime=$readinessStart; TotalProcessorTime=[timespan]::FromMilliseconds(50) }
+$readinessProcess | Add-Member ScriptMethod Refresh { }
+$readinessApplication = [pscustomobject]@{
+    process=$readinessProcess; main_handle=[IntPtr]900;
+    owned=[pscustomobject]@{ process_start_time_utc_ticks=$readinessStart.Ticks.ToString() };
+    readiness_brackets=[Collections.Generic.List[object]]::new() }
+$script:readinessAttempts = 0
+$readiness = Wait-ObserverMeasuredReadiness -Application $readinessApplication `
+    -Operation test -Predicate enabled -WaitSeconds 5 -Probe {
+        $script:readinessAttempts++
+        return ($script:readinessAttempts -eq 2)
+    }
+if ($readiness.probes.Count -ne 2 -or $readiness.probes[0].ready -or
+    -not $readiness.probes[1].ready -or $readinessApplication.readiness_brackets.Count -ne 1) {
+    throw 'Measured readiness producer did not retain false-to-true QPC queries.'
+}
+$cpuSnapshot = Read-ObserverOwnedCpuSnapshot -Application $readinessApplication
+if ($cpuSnapshot.process_id -ne 4141 -or $cpuSnapshot.cpu_total_ticks -ne 500000) {
+    throw 'Owned idle CPU snapshot lost the measured process identity or CPU total.'
+}
+$driftRejected = $false
+try {
+    [void](Wait-ObserverMeasuredReadiness -Application $readinessApplication `
+        -Operation drift -Predicate enabled -WaitSeconds 5 -Probe {
+            $readinessProcess.Id = 4142
+            return $false
+        })
+}
+catch { $driftRejected = $_.Exception.Message -match 'changed its owned product identity' }
+if (-not $driftRejected) { throw 'Measured readiness accepted product process identity drift.' }
+
 $controllerAst = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'),
     [ref]$null, [ref]$null)

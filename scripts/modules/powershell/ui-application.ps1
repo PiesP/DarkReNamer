@@ -192,6 +192,7 @@ function Start-AcceptanceApplication {
             main_handle = [IntPtr]::Zero
             launch_ticks = $launchTicks
             main_bound_ticks = $null
+            readiness_brackets = [Collections.Generic.List[object]]::new()
             process_lifecycle = $null
         }
         $application.process_lifecycle = New-AcceptanceProcessLifecycle `
@@ -207,6 +208,7 @@ function Start-AcceptanceApplication {
                 process_lifecycle = $application.process_lifecycle
             })
         }
+        $discoveryBeginTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         $binding = Wait-ExactApplicationMainWindow `
             -Process $process `
             -ExpectedSession $SessionId `
@@ -230,6 +232,15 @@ function Start-AcceptanceApplication {
             -RequireMainWindow
         $application.main = $window
         $application.main_handle = $mainHandle
+        $application.readiness_brackets.Add([ordered]@{
+            operation='startup-main-window'; predicate='bound-main-window';
+            observation='opaque-observer-envelope';
+            qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
+            process_id=[int]$process.Id;
+            process_start_utc_ticks=[long]$process.StartTime.ToUniversalTime().Ticks;
+            main_window_handle=[long]$mainHandle;
+            begin_ticks=[long]$discoveryBeginTicks;
+            end_ticks=[long]$application.main_bound_ticks })
         $application
     }
     catch {
@@ -244,6 +255,65 @@ function Start-AcceptanceApplication {
         }
         throw $startupError
     }
+}
+function Wait-ObserverMeasuredReadiness {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][scriptblock] $Probe,
+        [Parameter(Mandatory)][string] $Operation,
+        [Parameter(Mandatory)][string] $Predicate,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $probes = [Collections.Generic.List[object]]::new()
+    $expectedProcessId = [int]$Application.process.Id
+    $expectedProcessStart = [long]$Application.process.StartTime.ToUniversalTime().Ticks
+    $expectedMainHandle = [long]$Application.main_handle
+    do {
+        $Application.process.Refresh()
+        if ($Application.process.HasExited) {
+            throw "Readiness query for $Operation lost its owned product process."
+        }
+        if ([int]$Application.process.Id -ne $expectedProcessId -or
+            [long]$Application.process.StartTime.ToUniversalTime().Ticks -ne $expectedProcessStart -or
+            [long]$Application.main_handle -ne $expectedMainHandle) {
+            throw "Readiness query for $Operation changed its owned product identity."
+        }
+        $begin = [Diagnostics.Stopwatch]::GetTimestamp()
+        $ready = & $Probe
+        $end = [Diagnostics.Stopwatch]::GetTimestamp()
+        if ($ready -isnot [bool]) { throw "Readiness query for $Operation returned a non-Boolean value." }
+        $probes.Add([ordered]@{ begin_ticks=[long]$begin; end_ticks=[long]$end;
+            ready=[bool]$ready })
+        if ($ready) { break }
+        if ((Get-Date) -ge $deadline) { throw "Readiness query for $Operation exceeded its deadline." }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+    $observation = [ordered]@{
+        operation=$Operation; predicate=$Predicate; observation='polled-monotonic-predicate';
+        qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
+        process_id=$expectedProcessId;
+        process_start_utc_ticks=$expectedProcessStart;
+        main_window_handle=$expectedMainHandle;
+        probes=@($probes.ToArray()) }
+    $Application.readiness_brackets.Add($observation)
+    return $observation
+}
+function Read-ObserverOwnedCpuSnapshot {
+    param([Parameter(Mandatory)][object] $Application)
+    $begin = [Diagnostics.Stopwatch]::GetTimestamp()
+    $Application.process.Refresh()
+    if ($Application.process.HasExited) { throw 'Owned idle CPU process exited during its snapshot.' }
+    $observedProcessId = [int]$Application.process.Id
+    $started = [long]$Application.process.StartTime.ToUniversalTime().Ticks
+    if ([string]$started -cne [string]$Application.owned.process_start_time_utc_ticks) {
+        throw 'Owned idle CPU process creation time changed.'
+    }
+    $cpu = [long]$Application.process.TotalProcessorTime.Ticks
+    $end = [Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{ begin_ticks=[long]$begin; end_ticks=[long]$end;
+        process_id=$observedProcessId; process_start_utc_ticks=$started;
+        main_window_handle=[long]$Application.main_handle; cpu_total_ticks=$cpu }
 }
 function Get-ObserverGrid {
     param(
@@ -311,6 +381,7 @@ function Import-GuiRegressionPathList {
         [object] $Grid,
         [switch] $MeasureCommandReadiness,
         [switch] $IncludeOpenTicks,
+        [switch] $RecordReadinessBrackets,
         [ValidateRange(0, 500)][int] $PickerSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents,
         [string] $TimelineOperation
@@ -352,30 +423,59 @@ function Import-GuiRegressionPathList {
     Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
     $dialogClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
-    $deadline = (Get-Date).AddSeconds($WaitSeconds)
-    do {
-        if ($Grid.pattern.Current.RowCount -eq $ExpectedRows) { break }
-        if ($Grid.pattern.Current.RowCount -gt $ExpectedRows) { throw 'Path admission produced too many rows.' }
-        Start-Sleep -Milliseconds 100
-    } while ((Get-Date) -lt $deadline)
-    if ($Grid.pattern.Current.RowCount -ne $ExpectedRows) {
-        throw "Path admission did not reach $ExpectedRows rows before the bounded deadline."
+    if ($RecordReadinessBrackets) {
+        $operation = if ($TimelineOperation) { $TimelineOperation }
+            else { 'runtime-import-1000' }
+        $rowProbe = Wait-ObserverMeasuredReadiness -Application $Application -WaitSeconds $WaitSeconds `
+            -Operation $operation -Predicate 'expected-row-count' -Probe {
+                $count = $Grid.pattern.Current.RowCount
+                if ($count -gt $ExpectedRows) { throw 'Path admission produced too many rows.' }
+                return ($count -eq $ExpectedRows)
+            }
+        $rowObservedTicks = [long]$rowProbe.probes[-1].end_ticks
     }
-    $rowObservedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
-    $rowObservedMs = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
+    else {
+        $deadline = (Get-Date).AddSeconds($WaitSeconds)
+        do {
+            if ($Grid.pattern.Current.RowCount -eq $ExpectedRows) { break }
+            if ($Grid.pattern.Current.RowCount -gt $ExpectedRows) { throw 'Path admission produced too many rows.' }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $deadline)
+        if ($Grid.pattern.Current.RowCount -ne $ExpectedRows) {
+            throw "Path admission did not reach $ExpectedRows rows before the bounded deadline."
+        }
+        $rowObservedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+    }
+    $rowObservedMs = if ($RecordReadinessBrackets) {
+        [Math]::Round(($rowObservedTicks - $openTicks) * 1000.0 / [Diagnostics.Stopwatch]::Frequency, 3)
+    } else { [Math]::Round($watch.Elapsed.TotalMilliseconds, 3) }
     $readinessMs = $null
     if ($MeasureCommandReadiness) {
         $readinessWatch = [Diagnostics.Stopwatch]::StartNew()
-        while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-            [IntPtr]$Application.main_handle, [uint32]0x801D)) {
-            if ($readinessWatch.Elapsed.TotalSeconds -ge $WaitSeconds) {
-                throw 'Path-list import command did not become ready after row observation.'
-            }
-            Start-Sleep -Milliseconds 100
+        if ($RecordReadinessBrackets) {
+            $commandProbe = Wait-ObserverMeasuredReadiness -Application $Application -WaitSeconds $WaitSeconds `
+                -Operation $operation -Predicate 'import-command-enabled' -Probe {
+                    return [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                        [IntPtr]$Application.main_handle, [uint32]0x801D)
+                }
+            $commandReadyTicks = [long]$commandProbe.probes[-1].end_ticks
         }
-        $readinessMs = [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3)
+        else {
+            while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                [IntPtr]$Application.main_handle, [uint32]0x801D)) {
+                if ($readinessWatch.Elapsed.TotalSeconds -ge $WaitSeconds) {
+                    throw 'Path-list import command did not become ready after row observation.'
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        }
+        $readinessMs = if ($RecordReadinessBrackets) {
+            [Math]::Round(($commandReadyTicks - $rowObservedTicks) * 1000.0 /
+                [Diagnostics.Stopwatch]::Frequency, 3)
+        } else { [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3) }
     }
-    $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+    else { $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp() }
     if ($null -ne $TimelineEvents) {
         foreach ($boundary in @(
             @('picker_request', $pickerRequestTicks, 0),
