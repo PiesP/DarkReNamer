@@ -366,6 +366,28 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                     {"ssh_host": "fixture-vm", "expected_vm_id": "fixture-id"},
                     {"expectedGuestSid": "S-1-5-21-1-2-3-4"})
 
+    def test_gui_apply_requires_fixed_case_owned_profile_and_prepared_bundle(self):
+        base = ["--output-root", str(self.root / "gui-apply-output"),
+                "--connection-profile", str(self.root / "missing.json"),
+                "--diagnostic", runner.GUI_APPLY_MODE]
+        with self.assertRaisesRegex(ValueError, "explicit owned V2"):
+            runner.main(self.root, base)
+        selected = base + ["--gui-apply-case", "success-1000"]
+        with self.assertRaisesRegex(ValueError, "explicit owned V2"):
+            runner.main(self.root, selected)
+        selected += ["--acceptance-profile-id", runner.V2_PROFILE_ID]
+        with self.assertRaisesRegex(ValueError, "exactly one fixed case"):
+            runner.main(self.root, base + ["--acceptance-profile-id", runner.V2_PROFILE_ID])
+        with self.assertRaisesRegex(ValueError, "requires a prepared bundle"):
+            runner.main(self.root, selected)
+        for case in runner.GUI_APPLY_CASES:
+            run = runner.gui_apply_run(case)
+            self.assertEqual(run["run_id"], runner.GUI_APPLY_RUN_PREFIX + case)
+            self.assertEqual(run["acceptance_profile_id"], runner.V2_PROFILE_ID)
+        with self.assertRaises(ValueError):
+            runner.gui_apply_run("success-500")
+        self.assertFalse((self.root / "gui-apply-output").exists())
+
     def test_runtime_baseline_requires_fixed_prepared_owned_plan_before_vm(self):
         base = ["--output-root", str(self.root / "runtime-output"),
                 "--connection-profile", str(self.root / "missing.json"),

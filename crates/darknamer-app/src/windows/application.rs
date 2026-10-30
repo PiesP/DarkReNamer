@@ -25,15 +25,16 @@ use super::{
     initialize_safe_runtime, int_resource, list_view, measure_owner_menu, menu_belongs_to_root,
     message, native_status_column_minimum_px, notify_appearance_dialog_accessibility,
     paint_menu_bottom_edge, place_list_view_below_siblings, poll_icon_work, prepare_window_close,
-    programmatic_list_update_active, record_child_focus, refresh_forced_colors,
-    refresh_installed_popup_menus, refresh_system_fonts, refresh_system_theme,
-    register_drop_targets, remove_list_view_notification_subclass, request_active_worker_cancel,
-    request_window_close, request_worker_shutdown_after_message_loop_failure, resource_ids,
-    restore_child_focus, run_after_callback_state_release, run_prepared_command_action,
-    run_prepared_worker_task_dialog, schedule_deferred_message_wake, select_prepared_file_dialog,
-    select_prepared_task_dialog, selected_indices, set_drop_overlay_control, set_status,
-    show_message_now, start_preferences_writers, static_control_colors, try_app_state,
-    try_finish_window_close, update_controls, update_dpi_metrics, update_popup_menu, wide,
+    programmatic_list_update_active, record_child_focus, record_import_feedback_after_layout,
+    refresh_forced_colors, refresh_installed_popup_menus, refresh_system_fonts,
+    refresh_system_theme, register_drop_targets, remove_list_view_notification_subclass,
+    request_active_worker_cancel, request_window_close,
+    request_worker_shutdown_after_message_loop_failure, resource_ids, restore_child_focus,
+    run_after_callback_state_release, run_prepared_command_action, run_prepared_worker_task_dialog,
+    schedule_deferred_message_wake, select_prepared_file_dialog, select_prepared_task_dialog,
+    selected_indices, set_drop_overlay_control, set_status, show_message_now,
+    start_preferences_writers, static_control_colors, try_app_state, try_finish_window_close,
+    update_controls, update_dpi_metrics, update_popup_menu, wide,
 };
 use crate::rename::process_is_elevated;
 use crate::{
@@ -1346,6 +1347,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: this posted pointer-free callback begins after the
             // state mutation that requested it has returned.
             arrange(window, state_lease.state_mut());
+            record_import_feedback_after_layout(window, state_lease.state_mut());
             0
         }
         WM_APP_MENU_REDRAW => {

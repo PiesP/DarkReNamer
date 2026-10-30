@@ -1084,6 +1084,25 @@ public static class DarkReNamerVmAcceptanceNative {
         if ((code & 0x2010) != 0x2010 || (code & 0x0020) != 0) return 0;
         return GetDlgCtrlID(button);
     }
+    public static IntPtr FindUniqueDirectChildById(IntPtr main, int controlId, uint expectedPid) {
+        IntPtr match = IntPtr.Zero;
+        HashSet<IntPtr> seen = new HashSet<IntPtr>();
+        IntPtr child = GetWindow(main, 5); // GW_CHILD; follow only direct HWND siblings.
+        for (int inspected = 0; child != IntPtr.Zero; inspected++) {
+            if (inspected >= 1024 || !seen.Add(child))
+                throw new InvalidOperationException("Native main-window child enumeration cycled or exceeded its bound.");
+            if (GetDlgCtrlID(child) == controlId) {
+                uint childPid;
+                if (GetParent(child) != main ||
+                    GetWindowThreadProcessId(child, out childPid) == 0 || childPid != expectedPid ||
+                    match != IntPtr.Zero)
+                    throw new InvalidOperationException("Multiple or unbound native direct children share the control ID.");
+                match = child;
+            }
+            child = GetWindow(child, 2); // GW_HWNDNEXT.
+        }
+        return match;
+    }
     public static int ReadButtonState(IntPtr button) {
         if (button == IntPtr.Zero) throw new ArgumentException("Button handle is missing.");
         return checked((int)SendMessageW(button, 0x00F2, IntPtr.Zero, IntPtr.Zero).ToInt64());
@@ -1948,6 +1967,16 @@ public sealed class DarkReNamerIconStatusSnapshot {
     public uint UnavailableOrRetiring;
 }
 
+public sealed class DarkReNamerGuiApplyClockFrame {
+    public ulong Frequency, Revision, InitialApplyAcceptedTicks;
+    public ulong ConfirmationAcceptedTicks, CancelAcceptedTicks;
+    public uint CancelKind;
+}
+
+public sealed class DarkReNamerGuiImportFeedbackClockFrame {
+    public ulong Frequency, Revision, ImportFeedbackTicks;
+}
+
 public static class DarkReNamerIconStatusObserver {
     private const uint StatusMessage = 0x8056; // WM_APP + 0x56, version 1.
     [DllImport("user32.dll", SetLastError=true)]
@@ -1972,6 +2001,107 @@ public static class DarkReNamerIconStatusObserver {
         uint low = Scalar(window, lowSelector);
         uint high = Scalar(window, lowSelector + 1);
         return ((ulong)high << 32) | low;
+    }
+
+    // Selector 22 is an additive, read-only GUI close precondition. An older
+    // product returns the unpublished sentinel and cannot qualify this run.
+    public static uint ReadCloseReadinessBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Close readiness target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Close readiness HWND does not belong to the owned process.");
+        uint flags = Scalar(window, 22);
+        if ((flags & ~31u) != 0 || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+            GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Close readiness flags or process identity changed.");
+        return flags;
+    }
+
+    // Selector 34 reads the UI owner's native ListView/model synchronization
+    // state. A failed update is never a completed, actionable Apply endpoint.
+    public static uint ReadPreviewSynchronizationBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Preview synchronization target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Preview synchronization HWND does not belong to the owned process.");
+        uint synchronized = Scalar(window, 34);
+        if (synchronized > 1 || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+            GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Preview synchronization or process identity changed.");
+        return synchronized;
+    }
+
+    // Additive selectors 23..33 expose QPC event clocks only for this diagnostic.
+    // A matching revision around all split scalars proves one owner-thread frame.
+    public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("GUI Apply clock target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("GUI Apply clock HWND does not belong to the owned process.");
+        for (int attempt = 0; attempt < 4; attempt++) {
+            ulong before = Pair(window, 31);
+            DarkReNamerGuiApplyClockFrame frame = new DarkReNamerGuiApplyClockFrame {
+                Frequency = Pair(window, 23),
+                InitialApplyAcceptedTicks = Pair(window, 25),
+                ConfirmationAcceptedTicks = Pair(window, 27),
+                CancelAcceptedTicks = Pair(window, 29),
+                CancelKind = Scalar(window, 33),
+            };
+            ulong after = Pair(window, 31);
+            if (before != after) continue;
+            if (frame.Frequency != (ulong)System.Diagnostics.Stopwatch.Frequency ||
+                frame.Frequency == 0 || frame.CancelKind != 0 && frame.CancelKind != 4 ||
+                (frame.CancelAcceptedTicks == 0) != (frame.CancelKind == 0))
+                throw new InvalidOperationException("GUI Apply owner clock frequency or event kind differs.");
+            if (process.HasExited ||
+                process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+                GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+                throw new InvalidOperationException("GUI Apply clock target changed during query.");
+            frame.Revision = after;
+            return frame;
+        }
+        throw new InvalidOperationException("GUI Apply owner clock frame changed during query.");
+    }
+
+    // Selectors 35..36 latch the first Paths import's committed native Cancel
+    // control availability. This is an owner-thread state change, not a pixel
+    // presentation or the possibly coalesced status text.
+    public static DarkReNamerGuiImportFeedbackClockFrame ReadImportFeedbackClockBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Import feedback target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Import feedback HWND does not belong to the owned process.");
+        for (int attempt = 0; attempt < 4; attempt++) {
+            ulong before = Pair(window, 31);
+            DarkReNamerGuiImportFeedbackClockFrame frame = new DarkReNamerGuiImportFeedbackClockFrame {
+                Frequency = Pair(window, 23),
+                ImportFeedbackTicks = Pair(window, 35),
+            };
+            ulong after = Pair(window, 31);
+            if (before != after) continue;
+            if (frame.Frequency != (ulong)System.Diagnostics.Stopwatch.Frequency ||
+                frame.Frequency == 0 || process.HasExited ||
+                process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+                GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+                throw new InvalidOperationException("Import feedback clock or target changed during query.");
+            frame.Revision = after;
+            return frame;
+        }
+        throw new InvalidOperationException("Import feedback clock frame changed during query.");
     }
 
     public static DarkReNamerIconStatusSnapshot ReadBound(

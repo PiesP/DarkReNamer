@@ -121,19 +121,19 @@ pub(super) mod runtime_sort_profile {
 
 use super::{
     AppState, AppearanceDialogPlatform, DISCARD_STAGED_JOURNAL, EXPORT_RECOVERY_JOURNAL,
-    ImportKind, PreparedAppearanceAction, PreparedDiscardTaskDialog, PreparedFileDialogKind,
-    PreparedFileDialogSelection, PreparedRecoveryExport, PreparedTaskDialogSpec,
-    PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec, SHOW_RECOVERY_STATUS,
-    admit_paths, apply_changes, apply_native_appearance_nonblocking, arrange, compare_windows,
-    copy_clipboard_or_report, destination_parent_mutation_error_message, finalize_admission_start,
-    finalize_admission_start_failure, legacy_path, message, prepare_appearance_dialog,
-    prepare_discard_staged_journal, prepare_recovery_export, prompt_input_or_report,
-    proposal_mutation_error_message, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
-    report_admission_start_error, request_window_close, run_prepared_appearance_action,
-    run_prepared_discard_task_dialog, run_prepared_recovery_export, show_recovery_status,
-    start_import_worker, text_details, try_app_state, try_finish_window_close,
-    update_column_visibility, update_controls, update_primary_column_widths,
-    write_legacy_text_to_target,
+    ImportFeedbackPhase, ImportKind, PreparedAppearanceAction, PreparedDiscardTaskDialog,
+    PreparedFileDialogKind, PreparedFileDialogSelection, PreparedRecoveryExport,
+    PreparedTaskDialogSpec, PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec,
+    SHOW_RECOVERY_STATUS, admit_paths, apply_changes, apply_native_appearance_nonblocking, arrange,
+    compare_windows, copy_clipboard_or_report, destination_parent_mutation_error_message,
+    finalize_admission_start, finalize_admission_start_failure, legacy_path, message,
+    prepare_appearance_dialog, prepare_discard_staged_journal, prepare_recovery_export,
+    prompt_input_or_report, proposal_mutation_error_message, refresh_all_rows,
+    refresh_changed_rows, refresh_proposal_rows, report_admission_start_error,
+    request_window_close, run_prepared_appearance_action, run_prepared_discard_task_dialog,
+    run_prepared_recovery_export, show_recovery_status, start_import_worker, text_details,
+    try_app_state, try_finish_window_close, update_column_visibility, update_controls,
+    update_primary_column_widths, write_legacy_text_to_target,
 };
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Controls::LVIS_FOCUSED;
@@ -1605,6 +1605,18 @@ pub(super) fn finish_import_worker_result(
     cancelled: bool,
     result: io::Result<LegacyText>,
 ) {
+    let pending_feedback = matches!(
+        state.import_feedback_phase,
+        Some(ImportFeedbackPhase::Reading {
+            session_id: pending_session,
+            revision: pending_revision,
+        }) if matches!(kind, ImportKind::Paths)
+            && pending_session == session_id
+            && pending_revision == revision
+    );
+    // Reading has retired. Only its accepted Paths result may transfer this
+    // diagnostic context to the admission worker started below.
+    state.import_feedback_phase = None;
     let locks = completion_locks(state);
     let current_revision = state.revision();
     let disposition = take_file_dialog_session(
@@ -1665,7 +1677,18 @@ pub(super) fn finish_import_worker_result(
                 );
             }
             match admit_paths(window, state, paths) {
-                Ok(()) => finalize_admission_start(state),
+                Ok(()) => {
+                    if pending_feedback {
+                        state.import_feedback_phase =
+                            state.admission_worker.as_ref().map(|worker| {
+                                ImportFeedbackPhase::Admitting {
+                                    revision,
+                                    worker_id: worker.handle.thread().id(),
+                                }
+                            });
+                    }
+                    finalize_admission_start(state);
+                }
                 Err(error) => {
                     finalize_admission_start_failure(state);
                     report_admission_start_error(window, &error);

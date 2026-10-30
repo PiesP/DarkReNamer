@@ -234,6 +234,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 #[cfg(test)]
 use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 #[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{
@@ -282,7 +283,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMenuItemCount, GetMenuItemInfoW, GetSubMenu, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, IDCANCEL, IDOK, IsWindow, IsWindowVisible, KillTimer, MENUITEMINFOW,
     MF_BYCOMMAND, MF_CHECKED, MF_GRAYED, MF_OWNERDRAW, MF_SEPARATOR, MIIM_DATA, MIIM_SUBMENU,
-    MNC_EXECUTE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+    MNC_EXECUTE, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
     SetForegroundWindow, SetMenu, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_COMMAND,
     WM_NOTIFY, WM_TIMER, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
     WS_VISIBLE,
@@ -299,10 +300,10 @@ use worker::{
     finish_apply_after_message_loop_failure, handle_admission_completion,
     handle_admission_progress, handle_apply_completion, handle_apply_progress,
     handle_import_completion, handle_plan_completion, handle_preferences_wake,
-    prepare_window_close, report_admission_start_error, request_active_worker_cancel,
-    request_window_close, request_worker_shutdown_after_message_loop_failure,
-    run_prepared_worker_task_dialog, start_import_worker, start_preferences_writers,
-    try_finish_window_close,
+    prepare_window_close, record_import_feedback_after_layout, report_admission_start_error,
+    request_active_worker_cancel, request_window_close,
+    request_worker_shutdown_after_message_loop_failure, run_prepared_worker_task_dialog,
+    start_import_worker, start_preferences_writers, try_finish_window_close,
 };
 #[cfg(test)]
 use worker::{AdmissionWorkerResult, ApplyWorkerResult, PlanWorkerResult};
@@ -723,6 +724,139 @@ fn try_app_state(window: HWND) -> Option<CallbackStateLease<AppState, DropTarget
     unsafe { CallbackState::try_lease(app_state_slot(window)) }
 }
 
+/// UI-thread-only diagnostic latches. A zero tick means no matching event yet.
+struct GuiAcceptanceClock {
+    frequency: u64,
+    import_feedback: u64,
+    apply_command: u64,
+    confirmation: u64,
+    cancellation: u64,
+    cancellation_kind: u8,
+    revision: u64,
+    last_tick: u64,
+    valid: bool,
+}
+
+impl GuiAcceptanceClock {
+    fn new() -> Self {
+        let mut frequency = 0_i64;
+        // SAFETY: the writable scalar remains live for this synchronous API call.
+        let available = unsafe { QueryPerformanceFrequency(&mut frequency) } != 0;
+        Self::with_frequency(if available && frequency > 0 {
+            frequency as u64
+        } else {
+            0
+        })
+    }
+
+    const fn with_frequency(frequency: u64) -> Self {
+        Self {
+            frequency,
+            import_feedback: 0,
+            apply_command: 0,
+            confirmation: 0,
+            cancellation: 0,
+            cancellation_kind: 0,
+            revision: 0,
+            last_tick: 0,
+            valid: frequency > 0,
+        }
+    }
+
+    fn read_tick() -> Option<u64> {
+        let mut tick = 0_i64;
+        // SAFETY: the writable scalar remains live for this synchronous API call.
+        (unsafe { QueryPerformanceCounter(&mut tick) } != 0 && tick > 0).then_some(tick as u64)
+    }
+
+    fn advance(&mut self, tick: Option<u64>) -> Option<u64> {
+        let Some(tick) = tick.filter(|tick| self.valid && *tick > self.last_tick) else {
+            self.valid = false;
+            return None;
+        };
+        let Some(revision) = self.revision.checked_add(1) else {
+            self.valid = false;
+            return None;
+        };
+        self.last_tick = tick;
+        self.revision = revision;
+        Some(tick)
+    }
+
+    fn record_apply_at(&mut self, tick: Option<u64>) {
+        if let Some(tick) = self.advance(tick) {
+            self.apply_command = tick;
+            self.confirmation = 0;
+            self.cancellation = 0;
+            self.cancellation_kind = 0;
+        }
+    }
+
+    fn record_import_feedback_at(&mut self, tick: Option<u64>) {
+        if let Some(tick) = self.advance(tick) {
+            self.import_feedback = tick;
+        }
+    }
+
+    fn record_confirmation_at(&mut self, tick: Option<u64>) {
+        if self.apply_command == 0 {
+            self.valid = false;
+            return;
+        }
+        if let Some(tick) = self.advance(tick) {
+            self.confirmation = tick;
+            self.cancellation = 0;
+            self.cancellation_kind = 0;
+        }
+    }
+
+    fn record_cancellation_at(&mut self, kind: u8, tick: Option<u64>) {
+        if !(1..=4).contains(&kind) || (kind == 4 && self.confirmation == 0) {
+            self.valid = false;
+            return;
+        }
+        if let Some(tick) = self.advance(tick) {
+            self.cancellation = tick;
+            self.cancellation_kind = kind;
+        }
+    }
+
+    fn selector_value(&self, selector: usize) -> Option<LRESULT> {
+        if !self.valid {
+            return None;
+        }
+        let value = match selector {
+            23 => (self.frequency as u32) as LRESULT,
+            24 => ((self.frequency >> 32) as u32) as LRESULT,
+            25 => (self.apply_command as u32) as LRESULT,
+            26 => ((self.apply_command >> 32) as u32) as LRESULT,
+            27 => (self.confirmation as u32) as LRESULT,
+            28 => ((self.confirmation >> 32) as u32) as LRESULT,
+            29 => (self.cancellation as u32) as LRESULT,
+            30 => ((self.cancellation >> 32) as u32) as LRESULT,
+            31 => (self.revision as u32) as LRESULT,
+            32 => ((self.revision >> 32) as u32) as LRESULT,
+            33 => self.cancellation_kind as LRESULT,
+            35 => (self.import_feedback as u32) as LRESULT,
+            36 => ((self.import_feedback >> 32) as u32) as LRESULT,
+            _ => return None,
+        };
+        Some(value)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ImportFeedbackPhase {
+    Reading {
+        session_id: u64,
+        revision: ModelRevision,
+    },
+    Admitting {
+        revision: ModelRevision,
+        worker_id: std::thread::ThreadId,
+    },
+}
+
 struct AppState {
     list_window: HWND,
     status_message: HWND,
@@ -769,6 +903,8 @@ struct AppState {
     admission_worker: Option<AdmissionWorker>,
     import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
+    acceptance_clock: GuiAcceptanceClock,
+    import_feedback_phase: Option<ImportFeedbackPhase>,
     close_pending: bool,
     confirmation_pending: bool,
     active_prompt: Option<u64>,
@@ -930,6 +1066,8 @@ impl AppState {
             admission_worker: None,
             import_worker: None,
             preference_persistence: PreferencePersistence::default(),
+            acceptance_clock: GuiAcceptanceClock::new(),
+            import_feedback_phase: None,
             close_pending: false,
             confirmation_pending: false,
             active_prompt: None,
@@ -1017,6 +1155,29 @@ impl AppState {
             19 => (self.model_revision as u32) as LRESULT,
             20 => ((self.model_revision >> 32) as u32) as LRESULT,
             21 => isize::from(u8::from(shared.is_none_or(IconShared::is_unavailable))),
+            22 => {
+                // Idle-close preconditions: no foreground worker, settled
+                // icons, drained preference acks, no prompt, no close request.
+                let no_foreground_worker = self.admission_worker.is_none()
+                    && self.import_worker.is_none()
+                    && self.plan_worker.is_none()
+                    && self.apply_worker.is_none();
+                let no_prompt = !self.confirmation_pending
+                    && self.active_prompt.is_none()
+                    && self.appearance_dialog.is_none();
+                isize::from(u8::from(no_foreground_worker))
+                    | (isize::from(u8::from(settled)) << 1)
+                    | (isize::from(u8::from(
+                        self.preference_persistence
+                            .required_acknowledgments_complete(),
+                    )) << 2)
+                    | (isize::from(u8::from(no_prompt)) << 3)
+                    | (isize::from(u8::from(!self.close_pending)) << 4)
+            }
+            23..=33 | 35..=36 => self.acceptance_clock.selector_value(selector)?,
+            // The final Apply result is not native-row-ready after a failed
+            // incremental update and failed fallback rebuild.
+            34 => isize::from(u8::from(self.preview_synchronization.is_synchronized())),
             _ => return None,
         };
         (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
@@ -1521,6 +1682,208 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acceptance_clock_latches_ordered_events_and_rejects_unstable_frames() {
+        let high = 1_u64 << 32;
+        let mut clock = GuiAcceptanceClock::with_frequency(high + 10);
+        assert_eq!(clock.selector_value(23), Some(10));
+        assert_eq!(clock.selector_value(24), Some(1));
+        assert_eq!(clock.selector_value(25), Some(0));
+        assert_eq!(clock.selector_value(27), Some(0));
+        assert_eq!(clock.selector_value(29), Some(0));
+        assert_eq!(clock.selector_value(31), Some(0));
+        assert_eq!(clock.selector_value(33), Some(0));
+        assert_eq!(clock.selector_value(35), Some(0));
+        assert_eq!(clock.selector_value(36), Some(0));
+        assert_eq!(clock.selector_value(34), None);
+
+        clock.record_import_feedback_at(Some(high + 50));
+        assert_eq!(clock.selector_value(35), Some(50));
+        assert_eq!(clock.selector_value(36), Some(1));
+        assert_eq!(clock.selector_value(31), Some(1));
+        clock.record_import_feedback_at(Some(high + 75));
+        assert_eq!(clock.selector_value(35), Some(75));
+        assert_eq!(clock.selector_value(31), Some(2));
+
+        clock.record_apply_at(Some(high + 100));
+        assert_eq!(clock.selector_value(25), Some(100));
+        assert_eq!(clock.selector_value(26), Some(1));
+        assert_eq!(clock.selector_value(31), Some(3));
+        clock.record_confirmation_at(Some(high + 200));
+        assert_eq!(clock.selector_value(27), Some(200));
+        assert_eq!(clock.selector_value(28), Some(1));
+        assert_eq!(clock.selector_value(31), Some(4));
+        clock.record_cancellation_at(4, Some(high + 300));
+        assert_eq!(clock.selector_value(29), Some(300));
+        assert_eq!(clock.selector_value(30), Some(1));
+        assert_eq!(clock.selector_value(31), Some(5));
+        assert_eq!(clock.selector_value(33), Some(4));
+
+        clock.record_apply_at(Some(high + 400));
+        assert_eq!(clock.selector_value(25), Some(400));
+        assert_eq!(clock.selector_value(27), Some(0));
+        assert_eq!(clock.selector_value(29), Some(0));
+        assert_eq!(clock.selector_value(33), Some(0));
+        assert_eq!(clock.selector_value(31), Some(6));
+        clock.record_confirmation_at(Some(high + 399));
+        assert_eq!(clock.selector_value(23), None);
+        assert_eq!(clock.selector_value(31), None);
+        assert_eq!(clock.selector_value(35), None);
+
+        let mut missing = GuiAcceptanceClock::with_frequency(10);
+        missing.record_import_feedback_at(None);
+        assert_eq!(missing.selector_value(35), None);
+        let mut nonmonotonic = GuiAcceptanceClock::with_frequency(10);
+        nonmonotonic.record_import_feedback_at(Some(10));
+        nonmonotonic.record_import_feedback_at(Some(10));
+        assert_eq!(nonmonotonic.selector_value(36), None);
+
+        let mut saturated = GuiAcceptanceClock::with_frequency(10);
+        saturated.revision = u64::MAX;
+        saturated.record_apply_at(Some(1));
+        assert_eq!(saturated.selector_value(25), None);
+        let mut unavailable = GuiAcceptanceClock::with_frequency(0);
+        unavailable.record_apply_at(None);
+        assert_eq!(unavailable.selector_value(23), None);
+        let mut orphan = GuiAcceptanceClock::with_frequency(10);
+        orphan.record_confirmation_at(Some(1));
+        assert_eq!(orphan.selector_value(27), None);
+        let mut premature_cancel = GuiAcceptanceClock::with_frequency(10);
+        premature_cancel.record_apply_at(Some(1));
+        premature_cancel.record_cancellation_at(4, Some(2));
+        assert_eq!(premature_cancel.selector_value(29), None);
+    }
+
+    #[test]
+    fn cancel_without_active_worker_does_not_latch_acceptance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.acceptance_clock = GuiAcceptanceClock::with_frequency(10);
+        request_active_worker_cancel(&mut state);
+        assert_eq!(state.icon_status_value(29), Some(0));
+        assert_eq!(state.icon_status_value(31), Some(0));
+        assert_eq!(state.icon_status_value(33), Some(0));
+        state.acceptance_clock = GuiAcceptanceClock::with_frequency(0);
+        assert_eq!(state.icon_status_value(23), None);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        Ok(())
+    }
+
+    #[test]
+    fn preview_synchronization_status_tracks_failure_and_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        assert_eq!(state.icon_status_value(34), Some(0));
+
+        state.mark_preview_synchronized();
+        assert_eq!(state.icon_status_value(34), Some(1));
+        state.mark_preview_sync_failed();
+        assert_eq!(state.icon_status_value(34), Some(0));
+        state.mark_preview_synchronized();
+        assert_eq!(state.icon_status_value(34), Some(1));
+        assert_eq!(state.icon_status_value(35), Some(0));
+        assert_eq!(state.icon_status_value(36), Some(0));
+        assert_eq!(state.icon_status_value(37), None);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_close_selector_preserves_existing_status_and_rejects_unknown_selectors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(11), Some(1));
+        assert_eq!(state.icon_status_value(21), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        assert_eq!(state.icon_status_value(34), Some(0));
+        assert_eq!(state.icon_status_value(35), Some(0));
+        assert_eq!(state.icon_status_value(36), Some(0));
+        assert_eq!(state.icon_status_value(37), None);
+
+        state.preference_persistence = PreferencePersistence::new(
+            Some(PreferencesWriter::spawn(
+                state.column_preferences_path.clone(),
+                || {},
+            )?),
+            Some(AppearancePreferencesWriter::spawn(
+                state.appearance_preferences_path.clone(),
+                || {},
+            )?),
+        );
+        state.preference_persistence.install_language_writer(
+            crate::preferences::LanguagePreferencesWriter::spawn(
+                state.language_preferences_path.clone(),
+                || {},
+            )?,
+        );
+        assert_eq!(state.icon_status_value(22), Some(0b11111));
+        state.icon_unresolved_rows = 1;
+        assert_eq!(state.icon_status_value(22), Some(0b11101));
+        state.icon_unresolved_rows = 0;
+        state.confirmation_pending = true;
+        assert_eq!(state.icon_status_value(22), Some(0b10111));
+        state.confirmation_pending = false;
+        state.active_prompt = Some(1);
+        assert_eq!(state.icon_status_value(22), Some(0b10111));
+        state.active_prompt = None;
+        state.close_pending = true;
+        assert_eq!(state.icon_status_value(22), Some(0b01111));
+        state
+            .preference_persistence
+            .shutdown_and_join(state.column_states, state.appearance);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_close_selector_tracks_owned_appearance_dialog() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(directory.path(), false, |window| {
+            let (prepared, before) = {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("main window state is unavailable"))?;
+                let state = lease.state_mut();
+                let before = state
+                    .icon_status_value(22)
+                    .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+                let prepared = prepare_appearance_dialog(window, state)
+                    .ok_or_else(|| io::Error::other("appearance dialog was not prepared"))?;
+                (prepared, before)
+            };
+            run_prepared_appearance_action(window, prepared, NativeAppearanceDialogPlatform);
+
+            let mut lease = try_app_state(window)
+                .ok_or_else(|| io::Error::other("main window state disappeared"))?;
+            let state = lease.state_mut();
+            let dialog_owned = state.appearance_dialog.is_some();
+            let prompt_active = state.active_prompt.is_some();
+            let during = state
+                .icon_status_value(22)
+                .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+            let session = cancel_appearance_dialog(window, state)
+                .ok_or_else(|| io::Error::other("owned appearance dialog disappeared"))?;
+            let after = state
+                .icon_status_value(22)
+                .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+            drop(lease);
+            destroy_cancelled_appearance_dialog(session);
+
+            assert_ne!(before & 0b01000, 0);
+            assert!(dialog_owned);
+            assert!(!prompt_active);
+            assert_eq!(during & 0b01000, 0);
+            assert_ne!(after & 0b01000, 0);
+            Ok(())
+        })?;
+        Ok(())
+    }
 
     #[test]
     fn unread_preferences_survive_message_loop_failure_shutdown()
@@ -4291,9 +4654,105 @@ mod tests {
             assert_eq!(window_text(cancel)?, STATUS_CANCEL_LABEL);
             // SAFETY: cancel remains live and the enabled query has no pointers.
             assert_eq!(unsafe { IsWindowEnabled(cancel) }, 0);
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: these test-owned HWNDs remain live until the enclosing
+            // scope destroys their parent; a visible parent is needed for the
+            // same effective visibility query used by the production latch.
+            unsafe {
+                ShowWindow(parent, SW_SHOW);
+                EnableWindow(cancel, 1);
+                ShowWindow(cancel, SW_SHOW);
+            }
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: the test-owned child gets its first actionable rectangle,
+            // as the production layout does after its posted callback.
+            assert_ne!(
+                // SAFETY: cancel is a live child HWND and this call only places
+                // its test-owned rectangle inside the visible parent.
+                unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
+            assert!(worker::import_cancel_control_ready(parent, cancel));
+            let directory = tempfile::tempdir()?;
+            let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            state.cancel_worker = cancel;
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Reading {
+                session_id: 1,
+                revision: state.revision(),
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Admitting {
+                revision: state.revision(),
+                worker_id: std::thread::current().id(),
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            let release = install_controlled_admission_worker(
+                &mut state,
+                AdmissionProgressPhase::SelectingMode,
+            );
+            let worker_id = state
+                .admission_worker
+                .as_ref()
+                .ok_or_else(|| io::Error::other("controlled admission worker missing"))?
+                .handle
+                .thread()
+                .id();
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Admitting {
+                revision: state.revision(),
+                worker_id,
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert!(state.icon_status_value(35).is_some_and(|tick| tick > 0));
+            assert!(state.import_feedback_phase.is_none());
+            release
+                .send(())
+                .map_err(|_| io::Error::other("controlled admission worker release failed"))?;
+            state
+                .admission_worker
+                .take()
+                .ok_or_else(|| io::Error::other("controlled admission worker missing"))?
+                .handle
+                .join()
+                .map_err(|_| io::Error::other("controlled admission worker join failed"))?;
+            assert!(!worker::import_cancel_control_ready(parent, status_message));
+            assert!(!worker::import_cancel_control_ready(status_message, cancel));
+            assert!(!worker::import_cancel_control_ready(null_mut(), cancel));
+            // SAFETY: a positive but off-client rectangle cannot be clicked
+            // through the owner and must not qualify as available feedback.
+            assert_ne!(
+                // SAFETY: cancel remains a live child HWND and its new rectangle
+                // is used only for this off-client visibility test.
+                unsafe { SetWindowPos(cancel, null_mut(), 700, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            assert_ne!(
+                // SAFETY: cancel remains a live child HWND and is restored to
+                // its test-owned rectangle inside the visible parent.
+                unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
+            // SAFETY: the live test button remains owned through both state
+            // changes and is restored to hidden/disabled before teardown.
+            unsafe { EnableWindow(cancel, 0) };
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: cancel is still a live test-owned child HWND; the test
+            // checks visibility after hiding it and then disables it again.
+            unsafe {
+                EnableWindow(cancel, 1);
+                ShowWindow(cancel, SW_HIDE);
+            }
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: cancel remains a live test-owned child HWND until the
+            // parent is destroyed after this closure returns.
+            unsafe { EnableWindow(cancel, 0) };
             Ok(())
         })();
-        // SAFETY: parent is the hidden test HWND and destroys all child controls.
+        // SAFETY: parent is the test-owned HWND and destroys all child controls.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }

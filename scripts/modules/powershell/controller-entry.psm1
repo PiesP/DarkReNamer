@@ -202,7 +202,7 @@ function Test-DrControllerOwnedFailureModeSupported {
             'tooltip')) { return $true }
     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
         'first-clear-observation', 'picker-identity-observation',
-        'custom-input-identity-observation', 'runtime-baseline') -and
+        'custom-input-identity-observation', 'runtime-baseline', 'gui-apply-feedback') -and
         $TextScalePercent -eq 100 -and -not $HighContrast
 }
 
@@ -465,7 +465,7 @@ function New-DrControllerOwnedPerformancePredelete {
         $original.status -cne 'failed' -or $original.task_kind -cne 'ui' -or
         $original.owned_cleanup_failure_context.acceptance_mode -cnotin
             @('performance-sample','picker-identity-observation',
-              'custom-input-identity-observation', 'runtime-baseline') -or
+              'custom-input-identity-observation', 'runtime-baseline', 'gui-apply-feedback') -or
         $original.owned_cleanup_failure_context.source_sha -cne $SourceSha -or
         $original.owned_cleanup_failure_context.bundle.sha256 -cne $BundleSha256 -or
         $original.owned_cleanup_failure_context.root_records.guest.file_id -cne
@@ -522,6 +522,8 @@ function New-DrControllerOwnedPerformancePredelete {
     $pickerRun = $runId -ceq 'picker-identity-observation-v1-1366x768-96-text100'
     $customRun = $runId -ceq 'custom-input-identity-observation-v1-1366x768-96-text100'
     $runtimeRun = $runId -ceq 'runtime-baseline-v2-1366x768-96-text100'
+    $guiApplyRun = $runId -cmatch '^gui-apply-feedback-v1-owned-r3-1366x768-96-text100-(success-100|success-1000|success-10000|cancel-10000)$'
+    $guiApplyCase = if ($guiApplyRun) { [string]$Matches[1] } else { $null }
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
     $readinessContract = $input.request.PSObject.Properties['readiness_bracket_contract']
@@ -530,7 +532,7 @@ function New-DrControllerOwnedPerformancePredelete {
     if ($null -ne $readinessContract) {
         $performanceNames = 'appearance,desktop,mode,performance_plan,readiness_bracket_contract,text_scale_percent'
     }
-    if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun) {
+    if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun -and -not $guiApplyRun) {
         throw 'Owned diagnostic frozen run ID differs.'
     }
     if (
@@ -541,10 +543,11 @@ function New-DrControllerOwnedPerformancePredelete {
         $input.request.mode -cne $(if ($pickerRun) { 'picker-identity-observation' }
             elseif ($customRun) { 'custom-input-identity-observation' }
             elseif ($runtimeRun) { 'runtime-baseline' }
+            elseif ($guiApplyRun) { 'gui-apply-feedback' }
             else { 'performance-sample' }) -or
         ($null -ne $readinessContract -and ($readinessContract.Value -isnot [string] -or
             $readinessContract.Value -cne 'qpc-polled-readiness-v1' -or
-            -not ($runtimeRun -or $performanceRun))) -or
+            -not ($runtimeRun -or $performanceRun -or $guiApplyRun))) -or
         ($pickerRun -and ($input.request.picker_identity_plan.PSObject.Properties.Name.Count -ne 8 -or
             (@($input.request.picker_identity_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
                 'command_timeout_ms,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,picker_settle_ms,sample_interval_ms' -or
@@ -579,6 +582,19 @@ function New-DrControllerOwnedPerformancePredelete {
             $null -ne $input.request.PSObject.Properties['performance_plan'])) -or
         ($performanceRun -and ($requestNames -cne $performanceNames -or
             $input.request.performance_plan.long_path_order -cne $columnOrder)) -or
+        ($guiApplyRun -and ($input.request.gui_apply_case -cne $guiApplyCase -or
+            ($input.request.gui_apply_plan | ConvertTo-Json -Depth 5 -Compress) -cne
+                ([ordered]@{ success_counts=@(100,1000,10000); representative_count=1000;
+                    representative_processes=6; first_1000_counts_toward_six=$true;
+                    single_cancel_count=10000; observation_poll_ms=10;
+                    close_readiness_selector=22; close_readiness_mask=31 } | ConvertTo-Json -Depth 5 -Compress) -or
+            $requestNames -cne 'appearance,desktop,gui_apply_case,gui_apply_plan,mode,readiness_bracket_contract,text_scale_percent' -or
+            $input.request.readiness_bracket_contract -cne 'qpc-polled-readiness-v1' -or
+            $input.request.appearance -cne 'light' -or
+            $input.request.text_scale_percent -ne 100 -or
+            $input.request.desktop.width -ne 1366 -or
+            $input.request.desktop.height -ne 768 -or
+            $input.request.desktop.dpi -ne 96)) -or
         $original.owned_cleanup_failure_context.acceptance_mode -cne $input.request.mode -or
         $profile.schema -cne 'darkrenamer-vm-automated-profile-v3' -or
         $profile.profile_id -cne 'vm-automated-v2-owned-resources' -or
@@ -782,7 +798,8 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     ($predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -and
                      $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100' -and
                      $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100' -and
-                     $predelete.run_id -cne 'runtime-baseline-v2-1366x768-96-text100') -or
+                     $predelete.run_id -cne 'runtime-baseline-v2-1366x768-96-text100' -and
+                     $predelete.run_id -cnotmatch '^gui-apply-feedback-v1-owned-r3-1366x768-96-text100-(success-100|success-1000|success-10000|cancel-10000)$') -or
                     $predelete.vm_id -cne $actualVmId -or
                     $predelete.nonce -cne $expectedNonce -or
                     $predelete.desktop_lease_id -cne $expectedLeaseId -or
@@ -1599,7 +1616,7 @@ function Invoke-DrWindowsVmController {
     [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline', 'gui-apply-feedback')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -1705,8 +1722,8 @@ if ($refreshProfile -or $runtimeModel -or $FocusedRefreshTests) { $coreTestOutpu
 $ownedV2 = $AcceptanceProfileId -ceq 'vm-automated-v2-owned-resources'
 $ownedPerformance = $ownedV2 -and $taskSelection.kind -ceq 'ui' -and
     $AcceptanceMode -cin @('performance-sample','picker-identity-observation',
-        'custom-input-identity-observation', 'runtime-baseline')
-if ($ownedPerformance -and ((($AcceptanceMode -cin @('performance-sample','runtime-baseline')) -and
+        'custom-input-identity-observation', 'runtime-baseline', 'gui-apply-feedback')
+if ($ownedPerformance -and ((($AcceptanceMode -cin @('performance-sample','runtime-baseline','gui-apply-feedback')) -and
     ($TestTimeoutSeconds -ne 600 -or $SuiteTimeoutSeconds -ne 1200)) -or
     (($AcceptanceMode -cin @('picker-identity-observation','custom-input-identity-observation')) -and
     ($TestTimeoutSeconds -ne 120 -or $SuiteTimeoutSeconds -ne 240)) -or
@@ -7482,7 +7499,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 if ($taskSelection.kind -ceq 'ui' -and
                     $AcceptanceMode -cin @('appearance-pair', 'performance-sample',
                         'first-clear-observation', 'picker-identity-observation',
-                        'custom-input-identity-observation', 'runtime-baseline')) {
+                        'custom-input-identity-observation', 'runtime-baseline', 'gui-apply-feedback')) {
                     $transport['owned_cleanup_failure_context']['acceptance_text_scale_percent'] =
                         [int]$AcceptanceTextScalePercent
                 }

@@ -1092,6 +1092,98 @@ explicit v1 remains available. Preserved v1 failures cannot be reclassified as
 v2 success. Fixed GUI diagnostics do not replace the complete source-bound
 release campaign or human visual acceptance.
 
+### GUI Apply, feedback and idle close diagnostic
+
+The `gui-apply-feedback` diagnostic uses a clean source-built bundle and the
+revision-3 owned-resource profile on the fixed 1366×768, 96-DPI, text-100,
+System/Korean, Light desktop. Run one process per declared case:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic gui-apply-feedback --gui-apply-case success-1000 \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --connection-profile /absolute/private/connection-profile.json \
+  --prepared-bundle-root /absolute/private/source-built-bundle \
+  --expected-prepared-application-sha256 "$DARKRENAMER_APPLICATION_SHA256" \
+  --output-root /absolute/private/new-gui-apply-attempt
+```
+
+Keep one EXE/PDB and observer revision for the campaign. The fixed order is
+`success-100`, `success-1000`, `success-10000`, five more `success-1000`, then
+one `cancel-10000`. The first 1,000-file success counts toward the six independent
+representative processes. A 10,000-file import uses the existing 1,000-row start
+and four 2,250-row additions. The Cancel case accepts the confirmation and
+cancels an active Apply worker; dismissing the confirmation does not qualify.
+Preserve failures before diagnosing a new attempt; do not rerun valid samples.
+
+The first representative import records the UI owner's QPC tick after the same
+Paths import and admission lifecycle makes the owned Cancel button visible,
+enabled, and laid out with positive native geometry. A before/after
+revision frame binds this committed control state to the exact process and Open
+invocation, even if the transient import status text is coalesced before it is
+written to the status control. Report the Open-to-control-commit interval for
+the 200 ms proposal and the later clock-discovery upper interval separately.
+Neither value proves UIA discovery, pixel presentation, or uninterrupted click
+response. The initial fresh-process clock must have no earlier import event;
+all subsequent import stages remain ordinary row and command observations.
+
+Raw QPC query brackets retain initial Apply feedback and actionable confirmation,
+post-confirmation execution feedback,
+terminal model/native/command readiness, active Cancel first corresponding
+feedback, and idle
+close-to-held-process-exit. UI-thread acceptance clock frames distinguish input
+invocation from actual Apply admission, affirmative confirmation return and
+active-worker cancellation acceptance. Full file-content/NTFS-identity and
+journal checks follow the timed operation-ready endpoint. Idle close begins
+only after selector 22 reports mask 31; final normal-close persistence remains
+inside the exit interval. UIA and status observations do not establish pixel
+presentation time.
+The Cancel request and before-clock frame are retained before asynchronous input.
+The first positive UIA probe records either a visible, disabled Cancel with the
+request-pending status, or one of the three explicit terminal cancellation
+statuses. The latter is first corresponding feedback, but leaves intermediate
+acknowledgment `not-observed`; it does not prove that the product omitted that
+transient state. The verifier reports request-to-native-owner acceptance,
+request-to-first-feedback and owner-to-first-feedback separately. It reports a
+numeric intermediate acknowledgment bound only when that state was observed.
+Operation readiness and full file, identity and journal verification remain
+separate endpoints. No dwell or repaint delay is inserted to expose a transient
+state. A normal success status cannot qualify as Cancel feedback.
+Before the Cancel request, the observer resolves the owned main window's direct
+native child Cancel button 1009 by HWND and control ID without traversing the
+ListView subtree. It then waits at most five seconds for that same
+process/session-bound button to be enabled, onscreen, and laid out with positive
+bounds. Lookup and availability are outside the measured
+request-to-first-feedback interval. A terminal operation before the request,
+lost binding, or timeout fails the Cancel case.
+The final positive operation-ready query also requires selector 34 to report
+native preview synchronization for the bound process and HWND. Its raw query
+interval must lie inside that readiness probe; a later synchronized state cannot
+repair an earlier incomplete endpoint.
+
+After every canonical run passes, create a private campaign index with
+`schema_version: 1`, `diagnostic: "gui-apply-feedback-campaign-v1"`, the exact
+`source_sha`, and ordered `runs`. Each run declares `case`, absolute
+`result_root`, and the canonical `input_manifest_sha256`, `collection_sha256`,
+`cleanup_sha256` and `observer_result_sha256`. Independently verify the index:
+
+```bash
+python3 -I scripts/validate-gui-regression-evidence.py \
+  --diagnostic gui-apply-feedback \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --expected-source-sha "$DARKRENAMER_SOURCE_SHA" \
+  --gui-apply-campaign-index /absolute/private/gui-apply-campaign.json
+```
+
+The verifier checks all nine raw runs and distinct process lifetimes before
+reporting all six representative values, median, range, the provisional 200 ms
+first-feedback and 500 ms median idle-close dispositions, and individual
+exceedances. The single cancellation reports the observed first-feedback kind
+and its descriptive 200 ms disposition. It separately marks the intermediate
+acknowledgment goal inconclusive when terminal feedback was first. Preserve its
+actual before-mutation, rolled-back or rollback-unproven outcome. No p95, full release
+acceptance, durability shortcut or performance improvement is implied.
+
 ### Paired appearance diagnostic
 
 On a clean, committed source checkout with the prepared VM available, run the

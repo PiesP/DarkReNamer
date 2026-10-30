@@ -262,7 +262,8 @@ function Wait-ObserverMeasuredReadiness {
         [Parameter(Mandatory)][scriptblock] $Probe,
         [Parameter(Mandatory)][string] $Operation,
         [Parameter(Mandatory)][string] $Predicate,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [ValidateRange(5, 100)][int] $PollMilliseconds = 100
     )
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     $probes = [Collections.Generic.List[object]]::new()
@@ -287,7 +288,7 @@ function Wait-ObserverMeasuredReadiness {
             ready=[bool]$ready })
         if ($ready) { break }
         if ((Get-Date) -ge $deadline) { throw "Readiness query for $Operation exceeded its deadline." }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $PollMilliseconds
     } while ($true)
     $observation = [ordered]@{
         operation=$Operation; predicate=$Predicate; observation='polled-monotonic-predicate';
@@ -371,6 +372,23 @@ function Wait-ObserverPathImportDialog {
     } while ((Get-Date) -lt $deadline)
     throw 'Bound native path-list import dialog was not found before the bounded deadline.'
 }
+function Read-ObserverImportFeedbackClockFrame {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks)
+    $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $frame = [DarkReNamerIconStatusObserver]::ReadImportFeedbackClockBound(
+        $Application.process, [IntPtr]$Application.main_handle,
+        $ExpectedStartUtcTicks)
+    $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{
+        query_begin_ticks=$begin; query_end_ticks=$end;
+        qpc_frequency=[long]$frame.Frequency; revision=[long]$frame.Revision;
+        import_feedback_ticks=[long]$frame.ImportFeedbackTicks;
+        process_id=[int]$Application.process.Id;
+        process_start_utc_ticks=$ExpectedStartUtcTicks;
+        main_window_handle=[long]$Application.main_handle }
+}
+
 function Import-GuiRegressionPathList {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -382,6 +400,8 @@ function Import-GuiRegressionPathList {
         [switch] $MeasureCommandReadiness,
         [switch] $IncludeOpenTicks,
         [switch] $RecordReadinessBrackets,
+        [switch] $MeasureFirstFeedback,
+        [long] $ExpectedStartUtcTicks = 0,
         [ValidateRange(0, 500)][int] $PickerSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents,
         [string] $TimelineOperation
@@ -406,6 +426,17 @@ function Import-GuiRegressionPathList {
         if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
         Start-Sleep -Milliseconds 100
     }
+    $importClockBefore = if ($MeasureFirstFeedback) {
+        if ($ExpectedStartUtcTicks -le 0) {
+            throw 'Import feedback requires the captured product start time.'
+        }
+        $before = Read-ObserverImportFeedbackClockFrame -Application $Application `
+            -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+        if ($before.import_feedback_ticks -ne 0 -or $before.revision -ne 0) {
+            throw 'The first import feedback clock is stale before opening the picker.'
+        }
+        $before
+    } else { $null }
     $pickerRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
         -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
@@ -420,8 +451,17 @@ function Import-GuiRegressionPathList {
     }
     $openTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
+    $openInvocation = if ($MeasureFirstFeedback) {
+        Start-AutomationControlInvoke -OwnedProcess $Application.owned `
+            -Element $nativeOpen.Element -Label 'path-list import Open'
+    } else { $null }
+    if (-not $MeasureFirstFeedback) {
+        Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
+    }
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
+    if ($null -ne $openInvocation) {
+        Complete-AutomationControlInvoke -State $openInvocation -TimeoutSeconds $WaitSeconds
+    }
     $dialogClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     if ($RecordReadinessBrackets) {
         $operation = if ($TimelineOperation) { $TimelineOperation }
@@ -476,6 +516,21 @@ function Import-GuiRegressionPathList {
         } else { [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3) }
     }
     else { $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp() }
+    $feedback = if ($MeasureFirstFeedback) {
+        $after = Read-ObserverImportFeedbackClockFrame -Application $Application `
+            -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+        if ($after.revision -ne $importClockBefore.revision + 1 -or
+            $importClockBefore.query_end_ticks -ge $pickerRequestTicks -or
+            $openTicks -le $pickerRequestTicks -or
+            $openTicks -ge $after.import_feedback_ticks -or
+            $after.import_feedback_ticks -ge $rowObservedTicks -or
+            $commandReadyTicks -ge $after.query_begin_ticks) {
+            throw 'Import cancel-control feedback clock is missing, stale, or follows ready rows.'
+        }
+        [ordered]@{
+            definition='owner-thread-import-cancel-control-availability-committed';
+            before=$importClockBefore; after=$after }
+    } else { $null }
     if ($null -ne $TimelineEvents) {
         foreach ($boundary in @(
             @('picker_request', $pickerRequestTicks, 0),
@@ -489,6 +544,7 @@ function Import-GuiRegressionPathList {
         }
     }
     [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
+        first_feedback = $(if ($MeasureFirstFeedback) { $feedback } else { $null });
         command_ready_after_rows_ms = $readinessMs;
         open_ticks = $(if ($IncludeOpenTicks) { $openTicks } else { $null });
         row_observed_ticks = $(if ($IncludeOpenTicks) { $rowObservedTicks } else { $null });
@@ -1428,6 +1484,37 @@ function Wait-ObserverConfirmation {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][int] $WaitSeconds, [Parameter(Mandatory)][string] $Label)
     Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name 'DarkReNamer - 안전한 적용 확인' -TimeoutSeconds $WaitSeconds -Label $Label
 }
+function Wait-ObserverApplyConfirmationReady {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $probe = Wait-ObserverMeasuredReadiness -Application $Application -WaitSeconds $WaitSeconds `
+        -Operation 'apply-confirmation' `
+        -Predicate 'bound-actionable-confirmation' -Probe {
+            $windows = @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows(
+                [uint32]$Application.process.Id))
+            $matches = @($windows | Where-Object {
+                $_.ProcessId -eq $Application.process.Id -and
+                $_.Owner -eq [long]$Application.main_handle -and $_.Visible -and
+                $_.Title -ceq 'DarkReNamer - 안전한 적용 확인'
+            })
+            if ($matches.Count -gt 1) { throw 'Apply confirmation has multiple bound windows.' }
+            if ($matches.Count -eq 0) { return $false }
+            $window = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$matches[0].Handle)
+            Assert-AutomationBinding -Element $window -Process $Application.process `
+                -ExpectedSession $SessionId -Label 'actionable Apply confirmation' -RequireWindowHandle
+            $button = $window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+                [Windows.Automation.PropertyCondition]::new(
+                    [Windows.Automation.AutomationElement]::AutomationIdProperty, 'CommandLink_1101'))
+            if ($null -eq $button) { return $false }
+            Assert-AutomationBinding -Element $button -Process $Application.process `
+                -ExpectedSession $SessionId -Label 'actionable Apply confirmation button' -RequireWindowHandle
+            return [bool]($button.Current.IsEnabled -and -not $button.Current.IsOffscreen)
+        }
+    $confirmation = Wait-ObserverConfirmation -Application $Application -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds -Label 'measured Apply confirmation'
+    return [pscustomobject]@{ bracket=$probe; window=$confirmation }
+}
 function Start-ObserverApplyFromPublicUi {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1444,8 +1531,10 @@ function Start-ObserverApplyFromPublicUi {
         [Windows.Automation.AndCondition]::new($id, $buttonType))
     if ($null -ne $apply -and $apply.Current.IsEnabled -and -not $apply.Current.IsOffscreen) {
         Assert-AutomationBinding -Element $apply -Process $Application.process -ExpectedSession $SessionId -Label $Label
+        $requestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         return [pscustomobject]@{
             input = 'visible-command-rail'
+            request_ticks = [long]$requestTicks
             invocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $apply -Label $Label
             menu_entry = $null
         }
@@ -1480,10 +1569,12 @@ function Start-ObserverApplyFromPublicUi {
     $matches = @($items | Where-Object { $_.Current.Name -like '*변경 사항 적용*' -and $_.Current.IsEnabled -and -not $_.Current.IsOffscreen })
     if ($matches.Count -ne 1) { throw "$Label public File menu Apply matched $($matches.Count) items." }
     $menuItem = Get-ElementObservation -Element $matches[0]
+    $requestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $itemTarget = Get-GuiRegressionPhysicalTarget -Click -Element $matches[0] -Application $Application -SessionId $SessionId -ExpectedRoot $popup -Label "$Label public File menu Apply"
     Wait-AcceptancePopupMenuClosed -Process $Application.process -Label "$Label File popup"
     [pscustomobject]@{
         input = 'physical-mouse-file-menu-public-apply'
+        request_ticks = [long]$requestTicks
         invocation = $null
         menu_entry = [ordered]@{
             file = $menu
@@ -1800,10 +1891,12 @@ function Close-AcceptanceApplication {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][ValidateSet('keyboard', 'ordinary')][string] $CloseInput
+        [Parameter(Mandatory)][ValidateSet('keyboard', 'ordinary')][string] $CloseInput,
+        [switch] $MeasureExit
     )
     $Application.process.Refresh()
     if ($Application.process.HasExited) { throw 'The acceptance application exited before normal close.' }
+    $requestTicks = [long]0
     if ($CloseInput -ceq 'keyboard') {
         Assert-ExactApplicationMainWindowBinding `
             -Process $Application.process `
@@ -1814,7 +1907,20 @@ function Close-AcceptanceApplication {
             -ExpectedTitle 'DarkReNamer' `
             -Label 'acceptance application keyboard close'
         $Application.main.SetFocus()
+        if ($MeasureExit) { $requestTicks = [Diagnostics.Stopwatch]::GetTimestamp() }
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x73 -Label 'application Alt+F4 close'
+    }
+    elseif ($MeasureExit) {
+        Assert-ExactApplicationMainWindowBinding `
+            -Process $Application.process -ExpectedSession $SessionId `
+            -MainWindowHandle ([IntPtr]$Application.main_handle) -MainWindow $Application.main `
+            -ExpectedClassName 'DarkReNamerWindow' -ExpectedTitle 'DarkReNamer' `
+            -Label 'measured acceptance application ordinary close'
+        if (-not [DarkReNamerVmNative]::IsWindowEnabled([IntPtr]$Application.main_handle)) {
+            throw 'Measured ordinary close did not expose an enabled bound main window.'
+        }
+        $requestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        [DarkReNamerVmNative]::RequestWindowClose([IntPtr]$Application.main_handle)
     }
     else {
         Close-ExactApplicationMainWindow `
@@ -1829,6 +1935,7 @@ function Close-AcceptanceApplication {
     if (-not $Application.process.WaitForExit([Math]::Min(30, $WaitSeconds) * 1000)) {
         throw 'The acceptance application did not close before the bounded deadline.'
     }
+    $exitObservedTicks = if ($MeasureExit) { [Diagnostics.Stopwatch]::GetTimestamp() } else { [long]0 }
     if ($Application.process.ExitCode -ne 0) { throw 'The acceptance application returned a nonzero exit code.' }
     Complete-AcceptanceProcessLifecycle `
         -Lifecycle $Application.process_lifecycle `
@@ -1838,6 +1945,17 @@ function Close-AcceptanceApplication {
     $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
     if ($jobCleanup.status -cne 'clean') {
         throw 'The acceptance candidate process job had survivors or did not close cleanly.'
+    }
+    if ($MeasureExit) {
+        return [ordered]@{
+            request_ticks=[long]$requestTicks; exit_observed_ticks=[long]$exitObservedTicks;
+            qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
+            process_id=[int]$Application.process.Id;
+            process_start_utc_ticks=[long]$Application.process.StartTime.ToUniversalTime().Ticks;
+            main_window_handle=[long]$Application.main_handle;
+            exit_code=[int]$Application.process.ExitCode;
+            job_cleanup=$jobCleanup
+        }
     }
     $Application.process.ExitCode
 }

@@ -3940,3 +3940,542 @@ function Invoke-ObserverRuntimeBaselineScenario {
     $ObservationSink['appearance'] = 'light'
     return $ObservationSink
 }
+
+function Get-ObserverGuiApplyFixtureState {
+    param([Parameter(Mandatory)][string] $Ordinary,
+        [Parameter(Mandatory)][ValidateSet(100,1000,10000)][int] $Count,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Prefix)
+    $files = @(Get-ChildItem -LiteralPath $Ordinary -File -Force)
+    if ($files.Count -ne $Count -or
+        @(Get-ChildItem -LiteralPath $Ordinary -Force).Count -ne $Count) {
+        throw 'GUI Apply fixture has extra or missing directory entries.'
+    }
+    $rows = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $Count; $index++) {
+        $name = $Prefix + ('ordinary-{0:D5}.txt' -f $index)
+        $file = Get-Item -LiteralPath (Join-Path $Ordinary $name) -Force -ErrorAction Stop
+        if ($file -isnot [IO.FileInfo] -or
+            ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'GUI Apply fixture has a nonordinary file.'
+        }
+        $rows.Add([ordered]@{
+            name=$name; content_sha256=(Get-ObserverFixtureFileHash -File $file);
+            identity=[DarkReNamerVmNative]::GetFileIdentity($file.FullName) })
+    }
+    $rows.ToArray()
+}
+
+function Read-ObserverGuiApplyClockFrame {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks)
+    $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $frame = [DarkReNamerIconStatusObserver]::ReadGuiApplyClockBound(
+        $Application.process, [IntPtr]$Application.main_handle,
+        $ExpectedStartUtcTicks)
+    $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{
+        query_begin_ticks=$begin; query_end_ticks=$end;
+        qpc_frequency=[long]$frame.Frequency; revision=[long]$frame.Revision;
+        initial_apply_accepted_ticks=[long]$frame.InitialApplyAcceptedTicks;
+        confirmation_accepted_ticks=[long]$frame.ConfirmationAcceptedTicks;
+        cancel_accepted_ticks=[long]$frame.CancelAcceptedTicks;
+        cancel_kind=[int]$frame.CancelKind;
+        process_id=[int]$Application.process.Id;
+        process_start_utc_ticks=$ExpectedStartUtcTicks;
+        main_window_handle=[long]$Application.main_handle }
+}
+
+function Wait-ObserverActiveCancelAvailability {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Cancel,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Status,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks,
+        [Parameter(Mandatory)][long] $ExpectedMainWindowHandle,
+        [Parameter(Mandatory)][int] $ExpectedRows,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $cancelHandle = [long]$Cancel.Current.NativeWindowHandle
+    $deadline = [long][Diagnostics.Stopwatch]::GetTimestamp() +
+        [long]([Math]::Min(5, $WaitSeconds) * [Diagnostics.Stopwatch]::Frequency)
+    do {
+        $Application.process.Refresh()
+        if ($Application.process.HasExited -or
+            [long]$Application.process.StartTime.ToUniversalTime().Ticks -ne $ExpectedStartUtcTicks -or
+            [long]$Application.main_handle -ne $ExpectedMainWindowHandle -or
+            [long]$Application.main.Current.NativeWindowHandle -ne $ExpectedMainWindowHandle) {
+            throw 'Active worker Cancel lost its owned process or main window before request.'
+        }
+        Assert-AutomationBinding -Element $Application.main -Process $Application.process `
+            -ExpectedSession $SessionId -Label 'active worker Cancel main window' -RequireWindowHandle
+        Assert-AutomationBinding -Element $Cancel -Process $Application.process `
+            -ExpectedSession $SessionId -Label 'active worker Cancel' -RequireWindowHandle
+        if ($Cancel.Current.AutomationId -cne '1009' -or
+            $Cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+            [long]$Cancel.Current.NativeWindowHandle -ne $cancelHandle) {
+            throw 'Active worker Cancel changed its bound control before request.'
+        }
+        $statusName = [string]$Status.Current.Name
+        if ($statusName -ceq ('{0}개 변경 완료 · 목록에 실제 결과를 반영했습니다.' -f $ExpectedRows) -or
+            $statusName -ceq '파일 변경을 시작하기 전에 취소했습니다.' -or
+            $statusName -ceq '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.' -or
+            $statusName -ceq '요청에 따라 변경을 취소했습니다.') {
+            throw 'Apply reached a terminal state before active worker Cancel was requested.'
+        }
+        $bounds = $Cancel.Current.BoundingRectangle
+        if ([Diagnostics.Stopwatch]::GetTimestamp() -ge $deadline) {
+            throw 'Active worker Cancel did not become visible, enabled, and laid out before the bounded deadline.'
+        }
+        if ($Cancel.Current.IsEnabled -and -not $Cancel.Current.IsOffscreen -and
+            $bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 10
+    } while ($true)
+}
+
+function Find-ObserverActiveWorkerCancel {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId)
+    Initialize-AcceptanceNative
+    Initialize-AcceptanceNativeOpen
+    $Application.process.Refresh()
+    if ($Application.process.HasExited) {
+        throw 'Active worker Cancel process exited before control lookup.'
+    }
+    Assert-AutomationBinding -Element $Application.main -Process $Application.process `
+        -ExpectedSession $SessionId -Label 'active worker Cancel main window' -RequireWindowHandle
+    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    if ($mainHandle -eq [IntPtr]::Zero -or [IntPtr]$Application.main_handle -ne $mainHandle) {
+        throw 'Active worker Cancel main window changed before control lookup.'
+    }
+    $handle = [DarkReNamerAcceptanceNativeOpen]::GetDlgItem($mainHandle, 1009)
+    $unique = [DarkReNamerVmAcceptanceNative]::FindUniqueDirectChildById(
+        $mainHandle, 1009, [uint32]$Application.process.Id)
+    if ($handle -eq [IntPtr]::Zero -or $unique -ne $handle -or
+        -not [DarkReNamerAcceptanceNativeOpen]::IsWindow($handle) -or
+        [DarkReNamerAcceptanceNativeOpen]::GetParent($handle) -ne $mainHandle -or
+        [DarkReNamerAcceptanceNativeOpen]::GetDlgCtrlID($handle) -ne 1009) {
+        throw 'Active worker Cancel is not the exact native direct child ID 1009.'
+    }
+    $processId = [uint32]0
+    $threadId = [DarkReNamerAcceptanceNativeOpen]::GetWindowThreadProcessId($handle, [ref]$processId)
+    if ($threadId -eq 0 -or $processId -ne $Application.process.Id) {
+        throw 'Active worker Cancel native control is outside the bound process.'
+    }
+    $className = [Text.StringBuilder]::new(32)
+    if ([DarkReNamerAcceptanceNativeOpen]::GetClassName($handle, $className, $className.Capacity) -le 0 -or
+        $className.ToString() -cne 'Button') {
+        throw 'Active worker Cancel native control is not a Button.'
+    }
+    $cancel = [Windows.Automation.AutomationElement]::FromHandle($handle)
+    if ($null -eq $cancel) {
+        throw 'Active worker Cancel native control has no UI Automation element.'
+    }
+    Assert-AutomationBinding -Element $cancel -Process $Application.process `
+        -ExpectedSession $SessionId -Label 'active worker Cancel' -RequireWindowHandle
+    if ($cancel.Current.AutomationId -cne '1009' -or
+        $cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        [IntPtr]$cancel.Current.NativeWindowHandle -ne $handle) {
+        throw 'Active worker Cancel UI Automation identity differs from the native child.'
+    }
+    $cancel
+}
+
+function Resolve-ObserverCancelFeedbackKind {
+    param([Parameter(Mandatory)][string] $Status,
+        [Parameter(Mandatory)][bool] $CancelEnabled,
+        [Parameter(Mandatory)][bool] $CancelOffscreen)
+    if (-not $CancelEnabled -and -not $CancelOffscreen -and
+        ($Status -ceq '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' -or
+         $Status.StartsWith('취소 요청됨 · 처리 결과를 기다려 주세요', [StringComparison]::Ordinal))) {
+        return 'intermediate-request-status'
+    }
+    if ($Status -ceq '파일 변경을 시작하기 전에 취소했습니다.' -or
+        $Status -ceq '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.' -or
+        $Status -ceq '요청에 따라 변경을 취소했습니다.') {
+        return 'terminal-cancel-status'
+    }
+    return ''
+}
+
+function Invoke-ObserverGuiApplyFeedbackScenario {
+    param([Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][ValidateSet('success-100','success-1000','success-10000','cancel-10000')]
+        [string] $Case,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations,
+        [Parameter(Mandatory)][Collections.IDictionary] $ObservationSink)
+
+    $count = [int]($Case.Split('-')[-1])
+    $cancelCase = $Case -ceq 'cancel-10000'
+    $frequency = [long][Diagnostics.Stopwatch]::Frequency
+    $fixture = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui-apply-fixture'
+    $ordinary = New-PrivateDirectory -Parent (Resolve-JobBoundShortPath -Path $fixture) -Leaf 'ordinary'
+    $paths = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $count; $index++) {
+        $path = Join-Path $ordinary ('ordinary-{0:D5}.txt' -f $index)
+        [IO.File]::WriteAllText($path, ('gui-apply-{0:D5}' -f $index), [Text.Encoding]::ASCII)
+        $paths.Add($path)
+    }
+    $initial = @(Get-ObserverGuiApplyFixtureState -Ordinary $ordinary -Count $count -Prefix '')
+    if ($initial.Count -ne $count) { throw 'GUI Apply fixture inventory is incomplete.' }
+    $initialLeaf = 'gui-apply-initial.json'
+    Write-JsonUtf8Bom -Path (Join-Path $EvidenceRoot $initialLeaf) -Value $initial
+    $stages = [Collections.Generic.List[object]]::new()
+    if ($count -le 1000) {
+        $stages.Add([ordered]@{ id='initial'; rows=$count; file=(New-ObserverPathList `
+            -RuntimeRoot $RuntimeRoot -Paths ([string[]]$paths.ToArray()) -Leaf 'gui-apply-paths.txt') })
+    }
+    else {
+        $stages.Add([ordered]@{ id='initial'; rows=1000; file=(New-ObserverPathList `
+            -RuntimeRoot $RuntimeRoot -Paths ([string[]]$paths.GetRange(0, 1000)) `
+            -Leaf 'gui-apply-paths-0.txt') })
+        for ($chunk = 0; $chunk -lt 4; $chunk++) {
+            $stages.Add([ordered]@{ id=('remainder-' + $chunk); rows=(1000 + 2250 * ($chunk + 1));
+                file=(New-ObserverPathList -RuntimeRoot $RuntimeRoot `
+                    -Paths ([string[]]$paths.GetRange(1000 + 2250 * $chunk, 2250)) `
+                    -Leaf ('gui-apply-paths-{0}.txt' -f ($chunk + 1))) })
+        }
+    }
+    $applicationPath = Join-Path $Verified.root $Verified.application.file
+    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
+        throw 'GUI Apply executable differs from the prepared source-built bundle.'
+    }
+    $ObservationSink['mode'] = 'gui-apply-feedback'
+    $ObservationSink['case'] = $Case
+    $ObservationSink['count'] = $count
+    $ObservationSink['qpc_frequency'] = $frequency
+    $ObservationSink['executable_sha256'] = $Verified.application.sha256
+    $ObservationSink['fixture_initial'] = [ordered]@{
+        file=$initialLeaf; sha256=(Get-LowerSha256 -Path (Join-Path $EvidenceRoot $initialLeaf)) }
+    $application = $null
+    $sampler = $null
+    $nativeCreationFileTime = [long]0
+    $lifetimeCheckpoints = [Collections.Generic.List[object]]::new()
+    try {
+        $application = Start-AcceptanceApplication -FilePath $applicationPath `
+            -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -Label 'GUI Apply feedback application' `
+            -ProcessLifecycleObservations $ProcessLifecycleObservations
+        $nativeCreationFileTime = Initialize-ObserverOwnedPerformanceLifetime `
+            -Application $application -ObservationSink $ObservationSink -Checkpoints $lifetimeCheckpoints
+        $ObservationSink['process_id'] = [int]$application.process.Id
+        $ObservationSink['process_start_utc_ticks'] = [long]$application.process.StartTime.ToUniversalTime().Ticks
+        $ObservationSink['main_window_handle'] = [long]$application.main_handle
+        $environment = Get-ObserverEnvironmentMetadata -Application $application
+        $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
+        if ($environment.physical_screen.width -ne 1366 -or
+            $environment.physical_screen.height -ne 768 -or $environment.hwnd_dpi -ne 96 -or
+            $environment.text_scale_factor_percent -ne 100) {
+            throw 'GUI Apply display differs from its fixed prepared-VM request.'
+        }
+        $ObservationSink['environment'] = $environment
+        $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
+        if ($grid.pattern.Current.RowCount -ne 0) { throw 'GUI Apply did not begin with an empty list.' }
+        $sampler = [DarkReNamerPerformanceSampler]::new($application.process,
+            [IntPtr]$application.main_handle)
+        $imports = [Collections.Generic.List[object]]::new()
+        foreach ($stage in $stages) {
+            $sampler.SetPhase('import-' + $stage.id)
+            $import = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
+                -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid `
+                -MeasureCommandReadiness -IncludeOpenTicks -RecordReadinessBrackets `
+                -MeasureFirstFeedback:($stage.id -ceq 'initial' -and $count -ge 1000) `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
+                -TimelineOperation ('gui-apply-' + $stage.id)
+            $imports.Add([ordered]@{ id=$stage.id; expected_rows=$stage.rows;
+                open_ticks=[long]$import.open_ticks; rows_observed_ticks=[long]$import.row_observed_ticks;
+                command_ready_ticks=[long]$import.command_ready_ticks;
+                first_feedback=$import.first_feedback })
+        }
+        $ObservationSink['imports'] = $imports.ToArray()
+        if ($grid.pattern.Current.RowCount -ne $count) { throw 'GUI Apply import row count is incomplete.' }
+        $lastImport = $imports[-1]
+        $ObservationSink['icon_settlement'] = Wait-ObserverIconSettlementPhase `
+            -Application $application -StartUtcTicks $ObservationSink.process_start_utc_ticks `
+            -OpenTicks $lastImport.open_ticks -DataReadyMs (($lastImport.rows_observed_ticks - `
+                $lastImport.open_ticks) * 1000.0 / $frequency) -Rows $count `
+            -OverallDeadline (Get-Date).AddSeconds($WaitSeconds)
+        [void]$Captures.Add((Save-WindowScreenshot `
+            -ForegroundObservations $script:acceptanceForegroundObservations `
+            -Window $application.main -Process $application.process -ExpectedSession $SessionId `
+            -Root $EvidenceRoot -Leaf 'gui-apply-imported.png' -Label 'GUI Apply imported rows'))
+        $sampler.SetPhase('preview')
+        [void](Invoke-ObserverPrefix -Application $application -Grid $grid -Prefix 'sample-' `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectedFirstSourceName 'ordinary-00000.txt')
+        $lastName = 'ordinary-{0:D5}.txt' -f ($count - 1)
+        if ($grid.pattern.GetItem($count - 1, 1).Current.Name -cne ('sample-' + $lastName)) {
+            throw 'GUI Apply last proposal was not ready before confirmation.'
+        }
+        $status = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
+            -ExpectedSession $SessionId -AutomationId '1007' `
+            -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds `
+            -Label 'GUI Apply functional status' -RequireWindowHandle
+        $sampler.SetPhase('planning')
+        $initialClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+        $applyTrigger = Start-ObserverApplyFromPublicUi -Application $application `
+            -SessionId $SessionId -Label 'measured public Apply'
+        if ($applyTrigger.input -cne 'visible-command-rail') {
+            throw 'GUI Apply public invocation clock requires the visible command rail.'
+        }
+        $planningFeedback = if ($count -ge 1000) {
+            Wait-ObserverMeasuredReadiness -Application $application -WaitSeconds ([Math]::Min(5, $WaitSeconds)) `
+                -PollMilliseconds 10 -Operation 'apply-request' -Predicate 'planning-status' -Probe {
+                    return [bool]($status.Current.Name -ceq '파일 시스템을 확인하고 실행 계획을 만들고 있습니다...')
+                }
+        } else { $null }
+        $readyConfirmation = Wait-ObserverApplyConfirmationReady -Application $application `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $initialClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+        $initialFeedbackEnd = if ($null -ne $planningFeedback) {
+            [long]$planningFeedback.probes[-1].end_ticks
+        } else { [long]$readyConfirmation.bracket.probes[-1].end_ticks }
+        if ($initialClockBefore.initial_apply_accepted_ticks -ne 0 -or
+            $initialClockBefore.confirmation_accepted_ticks -ne 0 -or
+            $initialClockBefore.cancel_accepted_ticks -ne 0 -or
+            $initialClockAfter.revision -le $initialClockBefore.revision -or
+            $initialClockAfter.initial_apply_accepted_ticks -lt $applyTrigger.request_ticks -or
+            $initialClockAfter.initial_apply_accepted_ticks -gt $initialFeedbackEnd) {
+            throw 'GUI Apply initial owner acceptance is stale or follows its feedback.'
+        }
+        $confirmation = $readyConfirmation.window
+        $tree = Get-ObserverWindowTree -Window $confirmation -Process $application.process `
+            -SessionId $SessionId -Label 'GUI Apply confirmation scope'
+        $scopeText = [string]::Join("`n", @($tree | ForEach-Object { $_.name } | Where-Object { $_ }))
+        if ($scopeText.IndexOf("목록 전체 ${count}개", [StringComparison]::Ordinal) -lt 0 -or
+            $scopeText.IndexOf("실제 변경 ${count}개", [StringComparison]::Ordinal) -lt 0) {
+            throw 'GUI Apply confirmation is not bound to the exact changed-row scope.'
+        }
+        $ObservationSink['apply_request'] = [ordered]@{
+            input=$applyTrigger.input; request_ticks=[long]$applyTrigger.request_ticks;
+            owner_thread_acceptance=[ordered]@{
+                before=$initialClockBefore; after=$initialClockAfter };
+            planning_feedback=$planningFeedback;
+            confirmation_ready=$readyConfirmation.bracket;
+            confirmation_handle=[long]$confirmation.Current.NativeWindowHandle;
+            expected_changed_rows=$count }
+        $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $application.process `
+            -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' `
+            -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
+            -Label 'measured Apply acceptance' -RequireEnabled -RequireWindowHandle
+        $sampler.SetPhase('execution')
+        $confirmationClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+        $invocationTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        $confirmInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
+            -Element $confirm -Label 'measured Apply acceptance'
+        $executionFeedback = Wait-ObserverMeasuredReadiness -Application $application `
+            -WaitSeconds ([Math]::Min(5, $WaitSeconds)) -PollMilliseconds 10 `
+            -Operation 'apply-accepted' -Predicate 'execution-busy-status' -Probe {
+                $value = $status.Current.Name
+                return [bool]($value -ceq '실행 순서를 준비하고 있습니다...' -or
+                    $value.StartsWith('실행 준비 완료:', [StringComparison]::Ordinal) -or
+                    $value.StartsWith('파일 변경 중:', [StringComparison]::Ordinal))
+            }
+        $confirmationClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+        if ($confirmationClockBefore.confirmation_accepted_ticks -ne 0 -or
+            $confirmationClockAfter.revision -le $confirmationClockBefore.revision -or
+            $confirmationClockAfter.confirmation_accepted_ticks -lt $invocationTicks -or
+            $confirmationClockAfter.confirmation_accepted_ticks -gt
+                $executionFeedback.probes[-1].end_ticks) {
+            throw 'GUI Apply confirmation owner acceptance is stale or follows execution feedback.'
+        }
+        $ObservationSink['apply_execution'] = [ordered]@{
+            invocation_ticks=$invocationTicks;
+            owner_thread_acceptance=[ordered]@{
+                before=$confirmationClockBefore; after=$confirmationClockAfter };
+            first_feedback=$executionFeedback }
+        if ($cancelCase) {
+            $cancel = Find-ObserverActiveWorkerCancel -Application $application `
+                -SessionId $SessionId
+            Wait-ObserverActiveCancelAvailability -Application $application -Cancel $cancel -Status $status `
+                -SessionId $SessionId -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
+                -ExpectedMainWindowHandle $ObservationSink.main_window_handle `
+                -ExpectedRows $count -WaitSeconds $WaitSeconds
+            $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+            $cancelRequestTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
+            $ObservationSink['cancel'] = [ordered]@{
+                request_ticks=$cancelRequestTicks; first_feedback=$null;
+                first_feedback_observation=$null; intermediate_ack='not-observed';
+                owner_thread_acceptance=[ordered]@{ before=$cancelClockBefore; after=$null };
+                control_id=1009;
+                control_handle=[long]$cancel.Current.NativeWindowHandle;
+                requested_from='active-apply-worker' }
+            $cancelInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
+                -Element $cancel -Label 'active worker Cancel request'
+            $cancelHandle = [long]$cancel.Current.NativeWindowHandle
+            $firstFeedback = Wait-ObserverMeasuredReadiness -Application $application `
+                -WaitSeconds ([Math]::Min(5, $WaitSeconds)) -PollMilliseconds 10 `
+                -Operation 'active-apply-cancel' -Predicate 'first-corresponding-cancel-feedback' -Probe {
+                    Assert-AutomationBinding -Element $cancel -Process $application.process `
+                        -ExpectedSession $SessionId -Label 'active worker Cancel feedback' -RequireWindowHandle
+                    if ($cancel.Current.AutomationId -cne '1009' -or
+                        $cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+                        [long]$cancel.Current.NativeWindowHandle -ne $cancelHandle) {
+                        throw 'Active worker Cancel feedback changed its bound control.'
+                    }
+                    $value = [string]$status.Current.Name
+                    $offscreen = [bool]$cancel.Current.IsOffscreen
+                    $enabled = [bool]$cancel.Current.IsEnabled
+                    $kind = Resolve-ObserverCancelFeedbackKind -Status $value `
+                        -CancelEnabled $enabled -CancelOffscreen $offscreen
+                    if ($kind -cne '') {
+                        $ObservationSink['cancel']['first_feedback_observation'] = [ordered]@{
+                            kind=$kind;
+                            status=$value; cancel_enabled=$enabled; cancel_offscreen=$offscreen;
+                            control_id=1009; control_handle=$cancelHandle }
+                        return $true
+                    }
+                    return $false
+                }
+            $ObservationSink['cancel']['first_feedback'] = $firstFeedback
+            $firstPositive = $ObservationSink['cancel']['first_feedback_observation']
+            if ($firstPositive.kind -ceq 'intermediate-request-status') {
+                $ObservationSink['cancel']['intermediate_ack'] = 'observed'
+            }
+            $cancelClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+            $ObservationSink['cancel']['owner_thread_acceptance']['after'] = $cancelClockAfter
+            if ($cancelClockBefore.cancel_accepted_ticks -ne 0 -or
+                $cancelClockAfter.revision -le $cancelClockBefore.revision -or
+                $cancelClockAfter.cancel_kind -ne 4 -or
+                $cancelClockAfter.cancel_accepted_ticks -le $cancelRequestTicks -or
+                $cancelClockAfter.cancel_accepted_ticks -gt $firstFeedback.probes[-1].end_ticks) {
+                throw 'GUI Apply Cancel owner acceptance is stale or follows first feedback.'
+            }
+            Complete-AutomationControlInvoke -State $cancelInvocation -TimeoutSeconds $WaitSeconds
+        }
+        Complete-AutomationControlInvoke -State $confirmInvocation -TimeoutSeconds $WaitSeconds
+        if ($null -ne $applyTrigger.invocation) {
+            Complete-AutomationControlInvoke -State $applyTrigger.invocation -TimeoutSeconds $WaitSeconds
+        }
+        $sampler.SetPhase('result')
+        $expectedStatus = '{0}개 변경 완료 · 목록에 실제 결과를 반영했습니다.' -f $count
+        $nativeSyncReads = [Collections.Generic.List[object]]::new()
+        $ready = Wait-ObserverMeasuredReadiness -Application $application -WaitSeconds $WaitSeconds `
+            -Operation 'apply-result' `
+            -Predicate $(if ($cancelCase) { 'cancelled-result-and-commands' } else {
+                'completed-result-rows-and-commands' }) -Probe {
+                $value = [string]$status.Current.Name
+                $terminal = if ($cancelCase) {
+                    $value -ceq '파일 변경을 시작하기 전에 취소했습니다.' -or
+                    $value -ceq '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.' -or
+                    $value -ceq '요청에 따라 변경을 취소했습니다.'
+                } else { $value -ceq $expectedStatus }
+                if (-not $terminal) { return $false }
+                if ($grid.pattern.Current.RowCount -ne $count) { return $false }
+                if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                    [IntPtr]$application.main_handle, [uint32]0x801D)) { return $false }
+                $applyEnabled = [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                    [IntPtr]$application.main_handle, [uint32]0x8003)
+                if ($applyEnabled -ne $cancelCase) { return $false }
+                $first = [string]$grid.pattern.GetItem(0, 0).Current.Name
+                $last = [string]$grid.pattern.GetItem($count - 1, 0).Current.Name
+                $prefix = if ($cancelCase) { '' } else { 'sample-' }
+                if ($first -cne ($prefix + 'ordinary-00000.txt') -or
+                    $last -cne ($prefix + $lastName)) { return $false }
+                $syncBegin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+                $synchronized = [DarkReNamerIconStatusObserver]::ReadPreviewSynchronizationBound(
+                    $application.process, [IntPtr]$application.main_handle,
+                    [long]$ObservationSink.process_start_utc_ticks)
+                $syncEnd = [long][Diagnostics.Stopwatch]::GetTimestamp()
+                if ($synchronized -ne 1) { return $false }
+                $nativeSyncReads.Add([ordered]@{
+                    selector=34; value=[int]$synchronized;
+                    qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
+                    query_begin_ticks=$syncBegin; query_end_ticks=$syncEnd;
+                    process_id=[int]$application.process.Id;
+                    process_start_utc_ticks=[long]$ObservationSink.process_start_utc_ticks;
+                    main_window_handle=[long]$application.main_handle })
+                return $true
+            }
+        if ($nativeSyncReads.Count -ne 1) {
+            throw 'GUI Apply native preview synchronization was not observed in the ready probe.'
+        }
+        $ObservationSink['apply_execution']['operation_ready'] = $ready
+        $ObservationSink['apply_execution']['native_preview_synchronization'] = $nativeSyncReads[0]
+        $ObservationSink['apply_execution']['result_status'] = [string]$status.Current.Name
+        $ObservationSink['apply_execution']['outcome'] = if (-not $cancelCase) { 'completed' }
+            elseif ($ObservationSink['apply_execution']['result_status'] -ceq
+                '파일 변경을 시작하기 전에 취소했습니다.') { 'cancelled-before-mutation' }
+            elseif ($ObservationSink['apply_execution']['result_status'] -ceq
+                '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.') { 'rolled-back' }
+            else { 'cancelled-rollback-unproven' }
+        $ObservationSink['apply_execution']['rows'] = [int]$grid.pattern.Current.RowCount
+        $ObservationSink['apply_execution']['import_command_enabled'] = [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+            [IntPtr]$application.main_handle, [uint32]0x801D)
+        $ObservationSink['apply_execution']['apply_command_enabled'] = [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+            [IntPtr]$application.main_handle, [uint32]0x8003)
+        # Full content, name, identity, and journal checks follow the user-ready endpoint.
+        $ObservationSink['verification_begin_ticks'] = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        $finalPrefix = if ($cancelCase) { '' } else { 'sample-' }
+        $final = @(Get-ObserverGuiApplyFixtureState -Ordinary $ordinary -Count $count -Prefix $finalPrefix)
+        if ($final.Count -ne $count) { throw 'GUI Apply final fixture count differs.' }
+        for ($index = 0; $index -lt $count; $index++) {
+            $prefix = if ($cancelCase) { '' } else { 'sample-' }
+            $expectedName = $prefix + ('ordinary-{0:D5}.txt' -f $index)
+            if ($final[$index].name -cne $expectedName -or
+                $final[$index].content_sha256 -cne $initial[$index].content_sha256 -or
+                $final[$index].identity -cne $initial[$index].identity) {
+                throw 'GUI Apply file name, content, or NTFS identity differs.'
+            }
+        }
+        $finalLeaf = 'gui-apply-final.json'
+        Write-JsonUtf8Bom -Path (Join-Path $EvidenceRoot $finalLeaf) -Value $final
+        $ObservationSink['fixture_final'] = [ordered]@{
+            file=$finalLeaf; sha256=(Get-LowerSha256 -Path (Join-Path $EvidenceRoot $finalLeaf)) }
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $ObservationSink['journal_residue_count'] = 0
+        $ObservationSink['verification_end_ticks'] = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        $ObservationSink['samples'] = @(Convert-ObserverPerformanceSampleRows `
+            -Samples @($sampler.Stop()) -ClockIdentity)
+        $sampler = $null
+        $ObservationSink['close_readiness_wait'] = Wait-ObserverMeasuredReadiness `
+            -Application $application -WaitSeconds $WaitSeconds -Operation 'idle-close' `
+            -Predicate 'close-readiness-mask31' -Probe {
+                return [bool]([DarkReNamerIconStatusObserver]::ReadCloseReadinessBound(
+                    $application.process, [IntPtr]$application.main_handle,
+                    [long]$ObservationSink.process_start_utc_ticks) -eq 31)
+            }
+        $closeReadyBegin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        $closeFlags = [DarkReNamerIconStatusObserver]::ReadCloseReadinessBound(
+            $application.process, [IntPtr]$application.main_handle,
+            [long]$ObservationSink.process_start_utc_ticks)
+        $closeReadyEnd = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        if ($closeFlags -ne 31) { throw 'GUI Apply idle close prerequisites are not all acknowledged.' }
+        $ObservationSink['close_readiness'] = [ordered]@{
+            selector=22; required_mask=31; flags=[int]$closeFlags;
+            query_begin_ticks=$closeReadyBegin; query_end_ticks=$closeReadyEnd;
+            process_id=[int]$application.process.Id;
+            process_start_utc_ticks=[long]$ObservationSink.process_start_utc_ticks;
+            main_window_handle=[long]$application.main_handle }
+        $ObservationSink['normal_close'] = Close-AcceptanceApplication -Application $application `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary -MeasureExit
+        $terminal = [DarkReNamerVmAcceptanceNative]::ReadPerformanceLifetime(
+            [IntPtr]$application.process.Handle,[uint32]$application.process.Id,
+            $nativeCreationFileTime,$true)
+        $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
+        $ObservationSink['readiness_brackets'] = @($application.readiness_brackets.ToArray())
+        $ObservationSink['appearance'] = 'light'
+        return $ObservationSink
+    }
+    finally {
+        if ($null -ne $sampler) {
+            try { $ObservationSink['partial_samples'] = @(Convert-ObserverPerformanceSampleRows `
+                -Samples @($sampler.Stop()) -ClockIdentity) }
+            catch { $ObservationSink['partial_sampling_error'] = $_.Exception.Message }
+        }
+        if ($null -ne $application) {
+            Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+        }
+    }
+}

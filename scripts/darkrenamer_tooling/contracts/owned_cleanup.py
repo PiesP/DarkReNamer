@@ -30,6 +30,13 @@ PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
 CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
 RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
 READINESS_BRACKET_CONTRACT = "qpc-polled-readiness-v1"
+GUI_APPLY_RUN = re.compile(r"^gui-apply-feedback-v1-owned-r3-1366x768-96-text100-"
+                           r"(success-100|success-1000|success-10000|cancel-10000)$")
+GUI_APPLY_PLAN = {"success_counts": [100, 1000, 10000],
+                  "representative_count": 1000, "representative_processes": 6,
+                  "first_1000_counts_toward_six": True, "single_cancel_count": 10000,
+                  "observation_poll_ms": 10, "close_readiness_selector": 22,
+                  "close_readiness_mask": 31}
 RUNTIME_BASELINE_CELLS = ["fresh-system", "saved-system", "saved-english"]
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": RUNTIME_BASELINE_CELLS, "idle_seconds": 30,
@@ -446,8 +453,9 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
     picker = run_id == PICKER_RUN_ID
     custom = run_id == CUSTOM_RUN_ID
     runtime = run_id == RUNTIME_BASELINE_RUN_ID
+    gui_apply = GUI_APPLY_RUN.fullmatch(run_id) if type(run_id) is str else None
     require(frozen["schema_version"] == 1 and
-            frozen["kind"] == "owned_performance_predelete_restoration" and (match is not None or picker or custom or runtime) and
+            frozen["kind"] == "owned_performance_predelete_restoration" and (match is not None or picker or custom or runtime or gui_apply) and
             frozen["run_name"] == receipt["run_name"] and
             frozen["vm_id"] == receipt["vm_id"] and
             frozen["nonce"] == receipt["nonce"] and
@@ -495,7 +503,8 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
             manifest.get("request", {}).get("mode") ==
                 ("picker-identity-observation" if picker else
                  "custom-input-identity-observation" if custom else
-                 "runtime-baseline" if runtime else "performance-sample") and
+                 "runtime-baseline" if runtime else
+                 "gui-apply-feedback" if gui_apply else "performance-sample") and
             context.get("acceptance_mode") == manifest.get("request", {}).get("mode") and
             ((manifest.get("request", {}).get("picker_identity_plan") == PICKER_PLAN and
               "performance_plan" not in manifest.get("request", {})) if picker else
@@ -503,6 +512,9 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
               "performance_plan" not in manifest.get("request", {})) if custom else
              (manifest.get("request", {}).get("runtime_baseline_plan") == RUNTIME_BASELINE_PLAN and
               "performance_plan" not in manifest.get("request", {})) if runtime else
+             (manifest.get("request", {}).get("gui_apply_plan") == GUI_APPLY_PLAN and
+              manifest.get("request", {}).get("gui_apply_case") == gui_apply.group(1) and
+              "performance_plan" not in manifest.get("request", {})) if gui_apply else
              manifest.get("request", {}).get("performance_plan", {}).get("long_path_order") ==
                 match.group(1)) and
             result.get("application", {}).get("sha256") ==
@@ -511,14 +523,19 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
                 expected["acceptance-observations.json"]["sha256"] and
             result.get("acceptance_observations") == observations,
             "Owned performance frozen input, profile, result, or observations differ.")
-    if runtime:
+    if runtime or gui_apply:
         request_fields = {
-            "mode", "appearance", "desktop", "text_scale_percent", "runtime_baseline_plan",
+            "mode", "appearance", "desktop", "text_scale_percent",
         }
         raw_request = manifest.get("request")
-        if type(raw_request) is dict and "readiness_bracket_contract" in raw_request:
-            request_fields.add("readiness_bracket_contract")
-        request = require_exact_keys(raw_request, request_fields, "Runtime baseline request")
+        if runtime:
+            request_fields.add("runtime_baseline_plan")
+            if type(raw_request) is dict and "readiness_bracket_contract" in raw_request:
+                request_fields.add("readiness_bracket_contract")
+        else:
+            request_fields.update({"readiness_bracket_contract", "gui_apply_plan", "gui_apply_case"})
+        request = require_exact_keys(raw_request, request_fields,
+                                     "Runtime baseline request" if runtime else "GUI Apply request")
         require("readiness_bracket_contract" not in request or
                 (type(request["readiness_bracket_contract"]) is str and
                  request["readiness_bracket_contract"] == READINESS_BRACKET_CONTRACT),
@@ -526,7 +543,7 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
         require(request["appearance"] == "light" and
                 request["desktop"] == {"width": 1366, "height": 768, "dpi": 96} and
                 type(request["text_scale_percent"]) is int and request["text_scale_percent"] == 100,
-                "Runtime baseline fixed desktop request differs.")
+                "Owned diagnostic fixed desktop request differs.")
         prepared = require_exact_keys(manifest.get("prepared_bundle"), {
             "origin", "bundle_manifest_sha256", "application_sha256"}, "Runtime prepared bundle")
         bundle = document("bundle.json")
@@ -535,8 +552,9 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
                     "application_sha256": result["application"]["sha256"]} and
                 bundle.get("source_sha") == frozen["source_sha"] and
                 bundle.get("application", {}).get("sha256") == result["application"]["sha256"],
-                "Runtime baseline prepared source bundle or application differs.")
-        _runtime_baseline_processes(original, result)
+                "Owned diagnostic prepared source bundle or application differs.")
+        if runtime:
+            _runtime_baseline_processes(original, result)
     elif match is not None:
         request_fields = {"mode", "appearance", "desktop", "text_scale_percent",
                           "performance_plan"}
@@ -616,7 +634,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
     bounded_ui = (type(raw_context) is dict and raw_context.get("task_kind") == "ui" and
                   raw_context.get("acceptance_mode") in
                   ("appearance-pair", "performance-sample", "first-clear-observation",
-                   "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline"))
+                   "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline",
+                   "gui-apply-feedback"))
     context = require_exact_keys(raw_context, {
         "failed_snapshot", "root_records", "source_result", "bundle", "source_sha",
         "observer_sha256", "acceptance_mode", "high_contrast_requested",
@@ -671,7 +690,8 @@ def _source_result(root: Path, original: dict, receipt: dict,
              ("current-dpi", "full-context", "standard", "text-scale", "tooltip") or
              (context["acceptance_mode"] in
               ("appearance-pair", "performance-sample", "first-clear-observation",
-               "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline") and
+               "picker-identity-observation", "custom-input-identity-observation", "runtime-baseline",
+               "gui-apply-feedback") and
               type(context["acceptance_text_scale_percent"]) is int and
               context["acceptance_text_scale_percent"] == 100 and
               context["high_contrast_requested"] is False)
@@ -737,7 +757,8 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
     require(v2 or profile_id == V1_PROFILE_ID, "Unknown VM cleanup profile.")
     selected_context = original.get("owned_cleanup_failure_context")
     if type(selected_context) is dict and selected_context.get("acceptance_mode") in \
-            {"picker-identity-observation", "custom-input-identity-observation", "runtime-baseline"}:
+            {"picker-identity-observation", "custom-input-identity-observation", "runtime-baseline",
+             "gui-apply-feedback"}:
         require(possible_owned_performance,
                 "Focused GUI preservation requires reviewed V2 revision-3 cleanup.")
     profile_fields = {"profile_id", "profile_sha256"} if v2 else set()
@@ -854,10 +875,12 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
         embedded = result.get("acceptance_observations")
         run_id = embedded.get("run_id") if type(embedded) is dict else None
         candidate = (context["acceptance_mode"] in {"performance-sample", "picker-identity-observation",
-                                                   "custom-input-identity-observation", "runtime-baseline"} or
+                                                   "custom-input-identity-observation", "runtime-baseline",
+                                                   "gui-apply-feedback"} or
                      type(run_id) is str and
                      run_id.startswith("performance-sample-v2-owned-r3-") or
                      run_id in {PICKER_RUN_ID, CUSTOM_RUN_ID, RUNTIME_BASELINE_RUN_ID} or
+                     type(run_id) is str and GUI_APPLY_RUN.fullmatch(run_id) is not None or
                      any(name.startswith("owned-performance-") for name in listed) or
                      "predelete_sha256" in proof or
                      (root / "owned-performance-predelete.json").exists())
@@ -870,7 +893,9 @@ def verify_preserved_owned_cleanup(root: Path | str, *, profile_id: str = V1_PRO
                      (context["acceptance_mode"] == "custom-input-identity-observation" and
                       run_id == CUSTOM_RUN_ID) or
                      (context["acceptance_mode"] == "runtime-baseline" and
-                      run_id == RUNTIME_BASELINE_RUN_ID)) and
+                      run_id == RUNTIME_BASELINE_RUN_ID) or
+                     (context["acceptance_mode"] == "gui-apply-feedback" and
+                      type(run_id) is str and GUI_APPLY_RUN.fullmatch(run_id) is not None)) and
                     "predelete_sha256" in proof,
                     "Owned performance route lacks its frozen restoration gate.")
             _owned_performance_predelete(root, original, receipt, proof,

@@ -4467,5 +4467,531 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             self.refresh_runtime(run)
 
 
+class GuiApplyEndpointTests(unittest.TestCase):
+    @staticmethod
+    def fixture(count, cancelled):
+        initial, final = [], []
+        for index in range(count):
+            name = f'ordinary-{index:05d}.txt'
+            row = {'name': name,
+                   'content_sha256': digest(f'gui-apply-{index:05d}'.encode('ascii')),
+                   'identity': f'{index + 1:08x}:{index + 1:016x}'}
+            initial.append(row)
+            final.append({**row, 'name': name if cancelled else 'sample-' + name})
+        return initial, final
+
+    @staticmethod
+    def icon(count):
+        return {'version': 1, 'session': '1', 'generation': '1',
+            'status_revision': '2', 'model_revision': '1', 'bootstrap': 1,
+            'queued': 0, 'inflight': 0, 'undrained': 0, 'unresolved_rows': 0,
+            'cursor': count, 'settled': True, 'worker_joined': False,
+            'reconcile_rows': 0, 'batch_ack': 0, 'demand_exhausted': True,
+            'demand_remaining': 0, 'unavailable_or_retiring': False}
+
+    @classmethod
+    def valid(cls, case='success-100'):
+        count = int(case.split('-')[-1])
+        cancelled = case.startswith('cancel-')
+        initial, final = cls.fixture(count, cancelled)
+        pid, start, hwnd, frequency = 41, 638965440000000000, 900, 10000000
+        clock = 200
+        brackets = [{'operation': 'startup-main-window',
+            'predicate': 'bound-main-window', 'observation': 'opaque-observer-envelope',
+            'qpc_frequency': frequency, 'process_id': pid,
+            'process_start_utc_ticks': start, 'main_window_handle': hwnd,
+            'begin_ticks': 100, 'end_ticks': 150}]
+
+        def tick():
+            nonlocal clock
+            clock += 50
+            return clock
+
+        def probe(operation, predicate):
+            begin = tick()
+            row = {'operation': operation, 'predicate': predicate,
+                'observation': 'polled-monotonic-predicate', 'qpc_frequency': frequency,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd,
+                'probes': [{'begin_ticks': begin, 'end_ticks': begin + 1,
+                            'ready': True}]}
+            brackets.append(row)
+            return row
+
+        imports = []
+        stages = [count] if count <= 1000 else [1000, 3250, 5500, 7750, 10000]
+        def import_frame(revision, feedback=0):
+            begin = tick()
+            return {'query_begin_ticks': begin, 'query_end_ticks': begin + 1,
+                'qpc_frequency': frequency, 'revision': revision,
+                'import_feedback_ticks': feedback,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd}
+
+        for index, rows in enumerate(stages):
+            stage = 'initial' if index == 0 else f'remainder-{index - 1}'
+            feedback_before = import_frame(0) if index == 0 and count >= 1000 else None
+            opened = tick()
+            committed = opened + 1
+            observed = probe('gui-apply-' + stage, 'expected-row-count')
+            command = probe('gui-apply-' + stage, 'import-command-enabled')
+            feedback = {'definition':
+                'owner-thread-import-cancel-control-availability-committed',
+                'before': feedback_before, 'after': import_frame(1, committed)} \
+                if feedback_before is not None else None
+            imports.append({'id': stage, 'expected_rows': rows, 'open_ticks': opened,
+                'rows_observed_ticks': observed['probes'][-1]['end_ticks'],
+                'command_ready_ticks': command['probes'][-1]['end_ticks'],
+                'first_feedback': feedback})
+        def frame(revision, initial=0, confirmation=0, cancel_ticks=0):
+            begin = tick()
+            return {'query_begin_ticks': begin, 'query_end_ticks': begin + 1,
+                'qpc_frequency': frequency, 'revision': revision,
+                'initial_apply_accepted_ticks': initial,
+                'confirmation_accepted_ticks': confirmation,
+                'cancel_accepted_ticks': cancel_ticks,
+                'cancel_kind': 4 if cancel_ticks else 0,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd}
+
+        initial_before = frame(len(stages))
+        requested = tick()
+        planning = probe('apply-request', 'planning-status') if count >= 1000 else None
+        confirmation = probe('apply-confirmation', 'bound-actionable-confirmation')
+        initial_after = frame(len(stages) + 1, requested + 1)
+        confirmation_before = frame(len(stages) + 1, requested + 1)
+        invoked = tick()
+        execution_feedback = probe('apply-accepted', 'execution-busy-status')
+        confirmation_after = frame(len(stages) + 2, requested + 1, invoked + 1)
+        cancel = None
+        if cancelled:
+            cancel_before = frame(len(stages) + 2, requested + 1, invoked + 1)
+            cancel_requested = tick()
+            ack = probe('active-apply-cancel', 'first-corresponding-cancel-feedback')
+            cancel_after = frame(len(stages) + 3, requested + 1, invoked + 1, cancel_requested + 1)
+            cancel = {'request_ticks': cancel_requested, 'first_feedback': ack,
+                      'first_feedback_observation': {
+                          'kind': 'intermediate-request-status',
+                          'status': '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.',
+                          'cancel_enabled': False, 'cancel_offscreen': False,
+                          'control_id': 1009, 'control_handle': 9009},
+                      'intermediate_ack': 'observed',
+                      'owner_thread_acceptance': {'before': cancel_before,
+                                                  'after': cancel_after},
+                      'control_id': 1009, 'control_handle': 9009,
+                      'requested_from': 'active-apply-worker'}
+        ready = probe('apply-result', 'cancelled-result-and-commands' if cancelled
+                      else 'completed-result-rows-and-commands')
+        ready_probe = ready['probes'][-1]
+        native_sync = {'selector': 34, 'value': 1, 'qpc_frequency': frequency,
+                       'query_begin_ticks': ready_probe['begin_ticks'],
+                       'query_end_ticks': ready_probe['end_ticks'],
+                       'process_id': pid, 'process_start_utc_ticks': start,
+                       'main_window_handle': hwnd}
+        verified_begin = tick()
+        verified_end = tick()
+        close_wait = probe('idle-close', 'close-readiness-mask31')
+        query_begin, query_end, close_request, exit_observed = (tick() for _ in range(4))
+        job = {'status': 'clean'}
+        icon = cls.icon(count)
+        scenario = {'mode': evidence.GUI_APPLY_MODE, 'case': case, 'count': count,
+            'qpc_frequency': frequency, 'executable_sha256': 'a' * 64,
+            'fixture_initial': {}, 'fixture_final': {}, 'native_process_lifetime': {},
+            'process_id': pid, 'process_start_utc_ticks': start,
+            'main_window_handle': hwnd, 'environment': {}, 'imports': imports,
+            'icon_settlement': {'data_ready_ms': 1, 'icon_settled_observed_ms': 2,
+                'first_status': icon, 'settled_status': icon, 'confirmation_status': icon,
+                'poll_count': 2, 'unstable_query_attempts': 0,
+                'sampled_peak_pending': 0, 'sampled_peak_unresolved_rows': 0},
+            'apply_request': {'input': 'visible-command-rail', 'request_ticks': requested,
+                'owner_thread_acceptance': {'before': initial_before,
+                                            'after': initial_after},
+                'planning_feedback': planning, 'confirmation_ready': confirmation,
+                'confirmation_handle': 999, 'expected_changed_rows': count},
+            'apply_execution': {'invocation_ticks': invoked,
+                'owner_thread_acceptance': {'before': confirmation_before,
+                                            'after': confirmation_after},
+                'first_feedback': execution_feedback,
+                'outcome': 'cancelled-rollback-unproven' if cancelled else 'completed',
+                'operation_ready': ready,
+                'native_preview_synchronization': native_sync,
+                'result_status': '요청에 따라 변경을 취소했습니다.' if cancelled else
+                    f'{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다.',
+                'rows': count, 'import_command_enabled': True,
+                'apply_command_enabled': cancelled},
+            'journal_residue_count': 0, 'verification_begin_ticks': verified_begin,
+            'verification_end_ticks': verified_end,
+            'samples': [{'process_id': pid, 'process_start_utc_ticks': start,
+                         'main_window_handle': hwnd}],
+            'close_readiness_wait': close_wait,
+            'close_readiness': {'selector': 22, 'required_mask': 31, 'flags': 31,
+                'query_begin_ticks': query_begin, 'query_end_ticks': query_end,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd},
+            'normal_close': {'request_ticks': close_request,
+                'exit_observed_ticks': exit_observed, 'qpc_frequency': frequency,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd, 'exit_code': 0, 'job_cleanup': job},
+            'readiness_brackets': brackets, 'appearance': 'light'}
+        if cancelled:
+            scenario['cancel'] = cancel
+        return scenario, initial, final
+
+    def test_success_and_cancel_have_distinct_measured_endpoints(self):
+        for case in ('success-100', 'success-1000', 'success-10000', 'cancel-10000'):
+            with self.subTest(case=case):
+                scenario, initial, final = self.valid(case)
+                metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+                self.assertEqual(metrics['count'], int(case.split('-')[-1]))
+                self.assertTrue(metrics['native_preview_synchronized'])
+                self.assertEqual(metrics['presentation_latency'], 'not-measured')
+                if metrics['count'] >= 1000:
+                    feedback = scenario['imports'][0]['first_feedback']
+                    self.assertEqual(metrics['import_first_feedback_committed_ms'],
+                        (feedback['after']['import_feedback_ticks'] -
+                         scenario['imports'][0]['open_ticks']) * 1000 /
+                        scenario['qpc_frequency'])
+                    self.assertGreater(metrics['import_feedback_clock_discovery_upper_ms'],
+                                       metrics['import_first_feedback_committed_ms'])
+                else:
+                    self.assertEqual(metrics['import_first_feedback_committed_ms'],
+                                     'not-measured')
+
+    def test_rejects_missing_stale_foreign_or_late_import_control_feedback(self):
+        scenario, initial, final = self.valid('success-1000')
+        feedback = scenario['imports'][0]['first_feedback']
+        changes = {
+            'missing': lambda s: s['imports'][0].__setitem__('first_feedback', None),
+            'wrong-definition': lambda s: s['imports'][0]['first_feedback']
+                .__setitem__('definition', 'queued-status-text'),
+            'prior-event': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('import_feedback_ticks', 1),
+            'prior-revision': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('revision', 1),
+            'skipped-revision': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('revision', 2),
+            'event-before-open': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', s['imports'][0]['open_ticks']),
+            'event-after-rows': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', s['imports'][0]['rows_observed_ticks']),
+            'discovery-before-ready': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('query_begin_ticks', s['imports'][0]['command_ready_ticks']),
+            'overlap-open': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('query_end_ticks', s['imports'][0]['open_ticks']),
+            'wrong-frequency': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('qpc_frequency', 1),
+            'foreign-process': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('process_start_utc_ticks', 1),
+            'foreign-hwnd': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('main_window_handle', 1),
+            'bool-tick': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', True),
+        }
+        self.assertEqual(feedback['before']['revision'], 0)
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+        changed = deepcopy(scenario)
+        changed['readiness_brackets'].insert(1, {
+            'operation': 'import-open', 'predicate': 'bound-import-reading-status',
+            'observation': 'polled-monotonic-predicate',
+            'qpc_frequency': scenario['qpc_frequency'],
+            'process_id': scenario['process_id'],
+            'process_start_utc_ticks': scenario['process_start_utc_ticks'],
+            'main_window_handle': scenario['main_window_handle'],
+            'probes': [{'begin_ticks': scenario['imports'][0]['open_ticks'],
+                        'end_ticks': scenario['imports'][0]['open_ticks'] + 1,
+                        'ready': True}],
+        })
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_short_unmeasured_import_may_finish_without_a_laid_out_cancel_button(self):
+        scenario, initial, final = self.valid('success-100')
+        frames = [scenario['apply_request']['owner_thread_acceptance'][side]
+                  for side in ('before', 'after')]
+        frames.extend(scenario['apply_execution']['owner_thread_acceptance'][side]
+                      for side in ('before', 'after'))
+        for frame in frames:
+            frame['revision'] -= 1
+        self.assertEqual(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['import_first_feedback_committed_ms'],
+            'not-measured')
+
+    def test_later_ten_thousand_row_stages_do_not_require_separate_feedback_events(self):
+        scenario, initial, final = self.valid('success-10000')
+        frames = [scenario['apply_request']['owner_thread_acceptance'][side]
+                  for side in ('before', 'after')]
+        frames.extend(scenario['apply_execution']['owner_thread_acceptance'][side]
+                      for side in ('before', 'after'))
+        for frame in frames:
+            frame['revision'] -= 4
+        self.assertGreater(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['import_first_feedback_committed_ms'], 0)
+
+    def test_rejects_native_preview_failure_or_late_or_foreign_query(self):
+        scenario, initial, final = self.valid()
+        for name, mutate in {
+            'failed_fallback': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('value', 0),
+            'missing': lambda x: x['apply_execution'].pop('native_preview_synchronization'),
+            'wrong_selector': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('selector', 22),
+            'foreign_process': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('process_id', 42),
+            'foreign_window': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('main_window_handle', 901),
+            'wrong_clock': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('qpc_frequency', 9),
+            'after_endpoint': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__(
+                'query_begin_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks'] + 1),
+        }.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_rejects_identity_order_completion_command_journal_exit_and_survivors(self):
+        scenario, initial, final = self.valid()
+        changes = {
+            'identity': lambda x: x['close_readiness'].__setitem__('process_id', 42),
+            'frequency': lambda x: x['normal_close'].__setitem__('qpc_frequency', 9),
+            'order': lambda x: x.__setitem__('verification_begin_ticks',
+                x['apply_execution']['invocation_ticks']),
+            'premature_rows': lambda x: x['imports'][0].__setitem__('rows_observed_ticks',
+                x['imports'][0]['open_ticks']),
+            'command': lambda x: x['apply_execution'].__setitem__('import_command_enabled', False),
+            'journal': lambda x: x.__setitem__('journal_residue_count', 1),
+            'exit': lambda x: x['normal_close'].__setitem__('exit_code', 1),
+            'survivors': lambda x: x['normal_close']['job_cleanup'].__setitem__('status', 'failed'),
+            'preference_ack': lambda x: x['close_readiness'].__setitem__('flags', 27),
+        }
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+        missing = deepcopy(final)
+        missing.pop()
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(scenario, initial, missing)
+
+    def test_cancel_first_feedback_cannot_follow_ready_or_precede_request(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        for mutate in (
+            lambda x: x['cancel']['first_feedback']['probes'][-1].__setitem__(
+                'end_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks']),
+            lambda x: x['cancel'].__setitem__('request_ticks',
+                x['apply_execution']['invocation_ticks']),
+            lambda x: x.pop('cancel'),
+        ):
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_terminal_first_is_feedback_without_intermediate_ack(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        observation = scenario['cancel']['first_feedback_observation']
+        observation.update(kind='terminal-cancel-status',
+                           status=scenario['apply_execution']['result_status'],
+                           cancel_enabled=False, cancel_offscreen=True)
+        scenario['cancel']['intermediate_ack'] = 'not-observed'
+        metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+        self.assertEqual(metrics['cancel_first_corresponding_feedback_kind'],
+                         'terminal-cancel-status')
+        self.assertEqual(metrics['cancel_intermediate_ack_upper_ms'], 'not-observed')
+        self.assertGreater(metrics['cancel_first_corresponding_feedback_upper_ms'], 0)
+        for mutate in (
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'status', '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'),
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'status', '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.'),
+            lambda x: x['cancel'].__setitem__('intermediate_ack', 'observed'),
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'kind', 'unknown'),
+            lambda x: x['cancel']['first_feedback_observation'].pop('status'),
+        ):
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_intermediate_first_requires_visible_disabled_cancel(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+        self.assertGreater(metrics['cancel_intermediate_ack_upper_ms'], 0)
+        for key, value in (('cancel_enabled', True), ('cancel_offscreen', True),
+                           ('status', '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'),
+                           ('control_handle', 999)):
+            changed = deepcopy(scenario)
+            changed['cancel']['first_feedback_observation'][key] = value
+            with self.subTest(key=key), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_owner_acceptance_rejects_preinput_stale_or_drifting_clock(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        changes = {
+            'preinput': lambda x: x['apply_execution']['owner_thread_acceptance']
+                ['after'].__setitem__('confirmation_accepted_ticks',
+                    x['apply_execution']['invocation_ticks'] - 1),
+            'stale_revision': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('revision',
+                    x['cancel']['owner_thread_acceptance']['before']['revision']),
+            'skipped_revision': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('revision',
+                    x['cancel']['owner_thread_acceptance']['before']['revision'] + 2),
+            'overlapping_clock_query': lambda x: x['cancel']['owner_thread_acceptance']
+                ['before'].__setitem__('query_begin_ticks',
+                    x['apply_execution']['owner_thread_acceptance']['after']
+                     ['query_end_ticks'] - 1),
+            'stale_event': lambda x: x['cancel']['owner_thread_acceptance']
+                ['before'].__setitem__('cancel_accepted_ticks', 1),
+            'frequency': lambda x: x['apply_request']['owner_thread_acceptance']
+                ['after'].__setitem__('qpc_frequency', 9),
+            'process': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('process_start_utc_ticks', 1),
+            'wrong_cancel_kind': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('cancel_kind', 0),
+            'bool_cancel_kind': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('cancel_kind', True),
+        }
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_cancel_terminal_disposition_is_derived_from_status(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        statuses = {
+            '파일 변경을 시작하기 전에 취소했습니다.': 'cancelled-before-mutation',
+            '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.': 'rolled-back',
+            '요청에 따라 변경을 취소했습니다.': 'cancelled-rollback-unproven',
+        }
+        for status, outcome in statuses.items():
+            changed = deepcopy(scenario)
+            changed['apply_execution'].update(result_status=status, outcome=outcome)
+            with self.subTest(outcome=outcome):
+                self.assertEqual(evidence.validate_gui_apply_metrics(
+                    changed, initial, final)['outcome'], outcome)
+                changed['apply_execution']['outcome'] = 'rolled-back' \
+                    if outcome != 'rolled-back' else 'cancelled-before-mutation'
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_gui_apply_metrics(changed, initial, final)
+
+
+class GuiApplyCampaignTests(unittest.TestCase):
+    @staticmethod
+    def payload(base):
+        order = ['success-100', 'success-1000', 'success-10000',
+                 *(['success-1000'] * 5), 'cancel-10000']
+        source = 'a' * 40
+        receipts = {key: 'b' * 64 for key in (
+            'input_manifest_sha256', 'collection_sha256', 'cleanup_sha256',
+            'observer_result_sha256')}
+        metrics = {key: 100.0 for key in (
+            'import_first_feedback_committed_ms', 'apply_planning_feedback_upper_ms',
+            'apply_execution_feedback_upper_ms', 'idle_close_to_exit_upper_ms',
+            'apply_request_to_confirmation_upper_ms',
+            'confirm_to_operation_ready_upper_ms',
+            'cancel_owner_acceptance_ms',
+            'cancel_first_corresponding_feedback_upper_ms',
+            'cancel_owner_to_first_feedback_upper_ms',
+            'cancel_intermediate_ack_upper_ms',
+            'cancel_to_operation_ready_upper_ms')}
+        rows, measured = [], []
+        for index, case in enumerate(order):
+            root = base / f'run-{index + 1}'
+            root.mkdir()
+            rows.append({'case': case, 'result_root': str(root), **receipts})
+            measured.append({'run_id': evidence.GUI_APPLY_RUN_PREFIX + case,
+                'source_sha': source, 'application_sha256': 'c' * 64,
+                'observer_sha256': 'd' * 64, 'runner_sha256': 'e' * 64,
+                'profile_sha256': evidence.OWNED_PERFORMANCE_PROFILE_SHA256,
+                'bundle_manifest_sha256': 'f' * 64,
+                'process_id': index + 1,
+                'process_start_utc_ticks': index + 1,
+                **receipts, 'metrics': {**metrics,
+                    'cancel_first_corresponding_feedback_kind':
+                        'intermediate-request-status' if index == 8 else 'not-measured',
+                    'outcome': 'cancelled-rollback-unproven' if index == 8 else 'completed'}})
+        return {'schema_version': 1, 'diagnostic': 'gui-apply-feedback-campaign-v1',
+                'source_sha': source, 'runs': rows}, measured
+
+    def test_nine_canonical_runs_and_median_dispositions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            self.assertEqual(report['run_count'], 9)
+            self.assertEqual(report['representative_count'], 6)
+            self.assertEqual(report['representative_summaries']
+                ['idle_close_to_exit_upper_ms']['median_ms'], 100.0)
+            self.assertEqual(report['cancel_case_first_feedback_kind'],
+                             'intermediate-request-status')
+            self.assertEqual(report['cancel_case_intermediate_ack_upper_ms'], 100.0)
+            self.assertEqual(report['p95'], 'not-estimated')
+
+    def test_terminal_first_campaign_does_not_grade_intermediate_ack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            measured[-1]['metrics'].update(
+                cancel_first_corresponding_feedback_kind='terminal-cancel-status',
+                cancel_intermediate_ack_upper_ms='not-observed')
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            self.assertEqual(report['cancel_case_first_feedback_kind'],
+                             'terminal-cancel-status')
+            self.assertTrue(report['cancel_case_first_feedback_within_200_ms'])
+            self.assertEqual(report['cancel_case_intermediate_ack_upper_ms'],
+                             'not-observed')
+            self.assertEqual(report['cancel_case_intermediate_ack_within_200_ms'],
+                             'inconclusive')
+
+    def test_discloses_values_range_and_goal_exceedances_without_sla_claim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            values = (100.0, 210.0, 220.0, 230.0, 240.0, 250.0)
+            for row, value in zip([measured[1], *measured[3:8]], values, strict=True):
+                row['metrics']['apply_execution_feedback_upper_ms'] = value
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            summary = report['representative_summaries']['apply_execution_feedback_upper_ms']
+            self.assertEqual(summary['values_ms'], list(values))
+            self.assertEqual(summary['range_ms'], [100.0, 250.0])
+            self.assertEqual(summary['median_ms'], 225.0)
+            self.assertEqual(summary['exceedance_runs'], [2, 3, 4, 5, 6])
+            self.assertFalse(summary['median_within_goal'])
+
+    def test_rejects_missing_duplicate_or_reordered_representatives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            path = base / 'campaign.json'
+            cases = (
+                (lambda i, m: i['runs'].pop(3)),
+                (lambda i, m: m[3].update(process_id=m[2]['process_id'],
+                    process_start_utc_ticks=m[2]['process_start_utc_ticks'])),
+                (lambda i, m: i['runs'][3].update(case='success-10000')),
+                (lambda i, m: i['runs'][3].update(collection_sha256='0' * 64)),
+                (lambda i, m: m[3].update(application_sha256='0' * 64)),
+            )
+            for change in cases:
+                bad_index, bad_measured = deepcopy(index), deepcopy(measured)
+                change(bad_index, bad_measured)
+                path.write_text(json.dumps(bad_index), encoding='utf-8')
+                with mock.patch.object(evidence, 'validate_gui_apply_run',
+                                       side_effect=bad_measured):
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

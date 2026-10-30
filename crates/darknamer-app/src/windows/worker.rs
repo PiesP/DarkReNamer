@@ -1,14 +1,14 @@
 use super::{
-    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANDIDATE_JOURNAL_LEAF,
-    PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton, PreparedTaskDialogDisposition,
-    PreparedTaskDialogPolicy, PreparedTaskDialogSession, PreparedTaskDialogSpec,
-    PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE, WM_APP_APPLY_COMPLETE,
-    WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE, WM_APP_PLAN_COMPLETE,
-    WM_APP_PREFERENCES_WAKE, apply_cancel_control_state, begin_prepared_task_dialog,
-    cleanup_file_journal, clear_selection, compare_windows, finish_import_worker_result,
-    legacy_path, message, path_wide, proposal_mutation_error_message, read_legacy_text_cancellable,
-    refresh, schedule_focus_target, schedule_icon_poll, select_rows, selected_indices,
-    take_prepared_task_dialog, try_app_state, update_controls,
+    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANCEL_WORKER_ID, CANDIDATE_JOURNAL_LEAF,
+    GuiAcceptanceClock, ImportFeedbackPhase, PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton,
+    PreparedTaskDialogDisposition, PreparedTaskDialogPolicy, PreparedTaskDialogSession,
+    PreparedTaskDialogSpec, PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE,
+    WM_APP_APPLY_COMPLETE, WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE,
+    WM_APP_PLAN_COMPLETE, WM_APP_PREFERENCES_WAKE, apply_cancel_control_state,
+    begin_prepared_task_dialog, cleanup_file_journal, clear_selection, compare_windows,
+    finish_import_worker_result, legacy_path, message, path_wide, proposal_mutation_error_message,
+    read_legacy_text_cancellable, refresh, schedule_focus_target, schedule_icon_poll, select_rows,
+    selected_indices, take_prepared_task_dialog, try_app_state, update_controls,
 };
 use crate::APPLY_CONFIRM_BUTTON_ID;
 use crate::ActiveWorkerKind;
@@ -78,8 +78,15 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::thread::JoinHandle;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
@@ -133,6 +140,82 @@ impl ImportWorker {
         // requests cancellation of pending synchronous I/O; completion remains
         // asynchronous and the result is always discarded after a request.
         unsafe { CancelSynchronousIo(self.handle.as_raw_handle()) };
+    }
+}
+
+pub(super) fn import_cancel_control_ready(owner: HWND, cancel: HWND) -> bool {
+    if owner.is_null() || cancel.is_null() {
+        return false;
+    }
+    let mut control = RECT::default();
+    let mut client = RECT::default();
+    // SAFETY: all HWNDs are copied UI-thread values and all writable RECTs and
+    // POINTs remain live through their synchronous Win32 calls. Parent and ID
+    // checks reject unrelated children; positive, intersecting geometry must
+    // be committed by the existing layout before this can qualify feedback.
+    unsafe {
+        if GetParent(cancel) != owner
+            || GetDlgCtrlID(cancel) != i32::from(CANCEL_WORKER_ID)
+            || IsWindowVisible(cancel) == 0
+            || IsWindowEnabled(cancel) == 0
+            || GetClientRect(cancel, &mut control) == 0
+            || control.right <= control.left
+            || control.bottom <= control.top
+            || GetWindowRect(cancel, &mut control) == 0
+            || GetClientRect(owner, &mut client) == 0
+        {
+            return false;
+        }
+        let mut top_left = POINT {
+            x: control.left,
+            y: control.top,
+        };
+        let mut bottom_right = POINT {
+            x: control.right,
+            y: control.bottom,
+        };
+        ScreenToClient(owner, &mut top_left) != 0
+            && ScreenToClient(owner, &mut bottom_right) != 0
+            && top_left.x < client.right
+            && bottom_right.x > client.left
+            && top_left.y < client.bottom
+            && bottom_right.y > client.top
+    }
+}
+
+pub(super) fn record_import_feedback_after_layout(window: HWND, state: &mut AppState) {
+    let Some(phase) = state.import_feedback_phase else {
+        return;
+    };
+    let current = match phase {
+        ImportFeedbackPhase::Reading {
+            session_id,
+            revision,
+        } => state.import_worker.as_ref().is_some_and(|worker| {
+            state.revision() == revision
+                && worker.session_id == session_id
+                && worker.revision == revision
+                && matches!(worker.kind, ImportKind::Paths)
+                && !worker.cancellation_requested()
+        }),
+        ImportFeedbackPhase::Admitting {
+            revision,
+            worker_id,
+        } => {
+            state.revision() == revision
+                && state.admission_worker.as_ref().is_some_and(|worker| {
+                    worker.handle.thread().id() == worker_id && !worker.cancellation_requested()
+                })
+        }
+    };
+    if state.close_pending || !current {
+        return;
+    }
+    if import_cancel_control_ready(window, state.cancel_worker) {
+        state
+            .acceptance_clock
+            .record_import_feedback_at(GuiAcceptanceClock::read_tick());
+        state.import_feedback_phase = None;
     }
 }
 
@@ -204,6 +287,11 @@ pub(super) fn start_import_worker_from(
     });
     state.mutation_locked = true;
     state.set_progress_status(RT::ImportReading.get());
+    state.import_feedback_phase =
+        matches!(kind, ImportKind::Paths).then_some(ImportFeedbackPhase::Reading {
+            session_id,
+            revision,
+        });
     update_controls(state);
     Ok(())
 }
@@ -591,6 +679,9 @@ fn preview_is_ready_for_apply(window: HWND, state: &AppState) -> bool {
 }
 
 pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
+    // Capture entry before validation, but publish only for a command admitted
+    // to planning; a busy/rejected click must not erase a live operation's clock.
+    let entered_at = GuiAcceptanceClock::read_tick();
     if !preview_is_ready_for_apply(window, state) {
         return;
     }
@@ -609,6 +700,7 @@ pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
         message(window, RT::ApplyBusy.get(), "DarkReNamer");
         return;
     }
+    state.acceptance_clock.record_apply_at(entered_at);
     let revision = state.revision();
     let request = build_plan_request(&state.model, revision);
     start_plan_worker(window, state, revision, request);
@@ -708,12 +800,23 @@ fn run_prepared_apply_task_dialog(
     select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
 ) {
     let answer = select(window, &prepared.spec);
+    // The native choice has returned to the owner thread here. This is not
+    // the button callback time; the exact live session is checked below.
+    let returned_at = GuiAcceptanceClock::read_tick();
     let Some(mut state_lease) = try_app_state(window) else {
         return;
     };
     let state = state_lease.state_mut();
     let disposition =
         take_prepared_task_dialog(state, prepared.session, PreparedTaskDialogPolicy::Mutable);
+    if disposition == PreparedTaskDialogDisposition::Accepted
+        && answer.as_ref().is_ok_and(|answer| {
+            destructive_prompt_choice(*answer, APPLY_CONFIRM_BUTTON_ID)
+                == DestructivePromptChoice::Confirm
+        })
+    {
+        state.acceptance_clock.record_confirmation_at(returned_at);
+    }
     update_controls(state);
     if disposition == PreparedTaskDialogDisposition::Closed {
         try_finish_window_close(window, state);
@@ -1233,6 +1336,7 @@ pub(super) fn request_worker_shutdown_after_message_loop_failure(window: HWND) {
     };
     let state = state_lease.state_mut();
     state.close_pending = true;
+    state.import_feedback_phase = None;
     state.mutation_locked = true;
     if let Some(shared) = &state.icon_shared {
         shared.request_retire();
@@ -1359,6 +1463,7 @@ pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
 pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     if !state.close_pending {
         state.close_pending = true;
+        state.import_feedback_phase = None;
         state.mutation_locked = true;
         if let Some(shared) = &state.icon_shared {
             shared.request_retire();
@@ -1414,27 +1519,50 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
     if !cancel_control_state(state.worker_activity()).is_enabled() {
         return;
     }
+    // Kind values are 1=admission, 2=import, 3=plan, 4=Apply.
     let progress = match active_worker_kind(state.worker_activity()) {
         Some(ActiveWorkerKind::Admission) => state.admission_worker.as_ref().map(|worker| {
             worker.cancellation.store(true, Ordering::Release);
+            let accepted_at = GuiAcceptanceClock::read_tick();
             let (_, snapshot) = worker.progress.load();
-            admission_cancellation_status(snapshot)
+            (1, accepted_at, admission_cancellation_status(snapshot))
         }),
         Some(ActiveWorkerKind::Import) => state.import_worker.as_ref().map(|worker| {
             worker.request_cancel();
-            RT::ImportCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                2,
+                accepted_at,
+                RT::ImportCancellationProgress.get().to_owned(),
+            )
         }),
         Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            RT::PlanCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                3,
+                accepted_at,
+                RT::PlanCancellationProgress.get().to_owned(),
+            )
         }),
         Some(ActiveWorkerKind::Apply) => state.apply_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            RT::ApplyCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                4,
+                accepted_at,
+                RT::ApplyCancellationProgress.get().to_owned(),
+            )
         }),
         None => None,
     };
-    if let Some(progress) = progress {
+    if let Some((kind, accepted_at, progress)) = progress {
+        if kind == 1 || kind == 2 {
+            state.import_feedback_phase = None;
+        }
+        state
+            .acceptance_clock
+            .record_cancellation_at(kind, accepted_at);
         state.set_progress_status(progress);
         update_controls(state);
     }
@@ -1734,6 +1862,10 @@ pub(super) fn handle_admission_completion(
     // has reached its terminal state.
     unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
     let worker = state.admission_worker.take()?;
+    if matches!(state.import_feedback_phase, Some(ImportFeedbackPhase::Admitting { worker_id, .. }) if worker_id == worker.handle.thread().id())
+    {
+        state.import_feedback_phase = None;
+    }
     apply_cancel_control_state(state);
     let joined = worker.handle.join();
     state.mutation_locked = false;

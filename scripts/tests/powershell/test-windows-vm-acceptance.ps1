@@ -4208,6 +4208,7 @@ $expectedApplicationStartSites = @(
     'Invoke-ObserverAppearancePairScenario|appearance pair application'
     'Invoke-ObserverIconSettlementScenario|icon settlement application'
     'Invoke-ObserverRuntimeBaselineScenario|runtime baseline application'
+    'Invoke-ObserverGuiApplyFeedbackScenario|GUI Apply feedback application'
 )
 $actualApplicationStartSites = foreach ($call in $applicationStartCalls) {
     $owner = $call.Parent

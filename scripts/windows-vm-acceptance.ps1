@@ -12,7 +12,7 @@ param(
     [switch] $Clipboard,
     [switch] $HighContrast,
     [switch] $RestoreHighContrastOnly,
-    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline')]
+    [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline', 'gui-apply-feedback')]
     [string] $RegressionMode,
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
@@ -28,7 +28,7 @@ $ErrorActionPreference = 'Stop'
 if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v2-owned-resources')) {
     throw 'Unsupported VM acceptance profile identity.'
 }
-$ToolingManifestSha256 = '796615ff0c40c2d0d9e50f70e86b0aab8a574af68b93215dbe8fc10ee2c9dc8f'
+$ToolingManifestSha256 = 'c74b8f90a0b7788d2609f7dbccbf59b7427eaf38c7ca3309da27f240d15f7412'
 $ToolingLoaderSha256 = '322bfaad0639f443756a4da7680594ebc86e011e139f49d1c22976db6bc058f1'
 
 function Get-DrBootstrapSha256 {

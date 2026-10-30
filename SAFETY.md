@@ -553,6 +553,39 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+The UI-thread diagnostic clock in `windows.rs` calls
+`QueryPerformanceFrequency` and `QueryPerformanceCounter` with live, writable
+stack `i64` values for each synchronous call. It retains only positive copied
+scalars; an unavailable clock, nonmonotonic event or exhausted revision makes
+the diagnostic unavailable. Apply admission, an affirmative confirmation's
+return to the exact live owner session, and active-worker cancellation latch
+their actual owner-thread ticks without changing authorization or persistence.
+Read-only message selectors expose split scalar values with a revision bracket;
+the observer must reject a changed frame. Idle-close selector 22 requires no
+foreground worker or owned prompt, settled icons, successfully drained required
+preference acknowledgments from healthy writers, and no pending close. The
+query performs no joins, event draining or persistence work. Observing this
+state does not promise how long normal close and its final writes will take.
+Selector 34 reads the existing preview synchronization state in O(1); a failed
+incremental row update and failed fallback rebuild report unsynchronized even
+if a terminal result status was posted. The source-bound observer requires this
+native state within its final positive Apply readiness probe.
+Selectors 35 and 36 expose the latest Paths-import feedback tick from the same
+UI-thread clock. The latch occurs after the existing layout callback returns,
+while the matching Paths read worker or its exact accepted admission worker is
+still registered, and only if the owned Cancel button is a direct child with
+the expected ID, effectively visible and enabled, with a positive rectangle
+intersecting the owner client area. `GetParent`, `GetDlgCtrlID`,
+`IsWindowVisible`, `IsWindowEnabled`, `GetClientRect`, `GetWindowRect`, and
+`ScreenToClient` read copied live HWNDs and write only stack-owned geometry;
+they do not cross process ownership. Cancellation, stale or failed reads, and
+worker retirement clear the pending diagnostic context. A missing or foreign
+child prevents the latch; an unavailable QPC tick or nonmonotonic clock
+invalidates the diagnostic without changing product behavior. A fresh process
+has a zero tick before its first Paths Open. This timestamp bounds owner-thread
+laid-out Cancel control availability, not a transient status text write, UIA
+discovery, pixel presentation, or click response.
+
 `windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
 worker initializes and balances COM on that same STA, pumps its own message
 queue between Shell calls, and never receives `AppState`, HWND, model pointers,

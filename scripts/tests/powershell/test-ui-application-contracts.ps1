@@ -84,6 +84,9 @@ namespace Windows.Automation {
         public static readonly object AutomationIdProperty = "AutomationId", ControlTypeProperty = "ControlType";
         public ElementInfo Current = new ElementInfo();
         public List<AutomationElement> Children = new List<AutomationElement>();
+        public bool RejectDescendants;
+        public static AutomationElement FromHandleElement;
+        public static AutomationElement FromHandle(IntPtr handle) { return FromHandleElement; }
         public Dictionary<object, object> Patterns = new Dictionary<object, object>();
         public int FocusCalls;
         public long FirstFocusTicks;
@@ -93,6 +96,8 @@ namespace Windows.Automation {
         }
         public bool TryGetCurrentPattern(object key, out object value) { return Patterns.TryGetValue(key, out value); }
         public AutomationElement[] FindAll(TreeScope scope, Condition condition) {
+            if (scope == TreeScope.Descendants && RejectDescendants)
+                throw new InvalidOperationException("Main-window descendant traversal is forbidden.");
             var result = new List<AutomationElement>();
             foreach (var child in Children) {
                 if (condition.Matches(child)) result.Add(child);
@@ -124,11 +129,43 @@ namespace Windows.Automation {
 public static class DarkReNamerVmNative {
     public static uint HitProcess = 42, HitThread = 1;
     public static IntPtr Foreground = new IntPtr(10);
+    public static bool IsWindow(IntPtr window) { return window != IntPtr.Zero; }
     public static uint GetWindowThreadProcessId(IntPtr window, out uint process) { process = HitProcess; return HitThread; }
     public static IntPtr GetForegroundWindow() { return Foreground; }
     public static bool SetForegroundWindow(IntPtr window) { Foreground = window; return true; }
 }
+public static class DarkReNamerAcceptanceNativeOpen {
+    public static string Mode = "normal";
+    public static uint ProcessId;
+    public static IntPtr GetDlgItem(IntPtr main, int id) {
+        if (main != new IntPtr(10) || id != 1009)
+            throw new InvalidOperationException("Cancel lookup changed its bound main HWND or control ID.");
+        return Mode == "missing" ? IntPtr.Zero : new IntPtr(21);
+    }
+    public static bool IsWindow(IntPtr window) { return Mode != "dead"; }
+    public static IntPtr GetParent(IntPtr window) { return new IntPtr(Mode == "parent" ? 99 : 10); }
+    public static int GetDlgCtrlID(IntPtr window) { return Mode == "id" ? 42 : 1009; }
+    public static uint GetWindowThreadProcessId(IntPtr window, out uint processId) {
+        processId = ProcessId + (uint)(Mode == "pid" ? 1 : 0);
+        return Mode == "thread" ? 0U : 1U;
+    }
+    public static int GetClassName(IntPtr window, System.Text.StringBuilder value, int capacity) {
+        value.Append(Mode == "class" ? "Edit" : "Button");
+        return value.Length;
+    }
+}
 public static class DarkReNamerVmAcceptanceNative {
+    public static string CancelMode = "normal";
+    public static uint CancelProcessId;
+    public static IntPtr FindUniqueDirectChildById(IntPtr main, int id, uint expectedPid) {
+        if (main != new IntPtr(10) || id != 1009 || expectedPid != CancelProcessId)
+            throw new InvalidOperationException("Cancel native child scan changed its bound target.");
+        if (CancelMode == "duplicate")
+            throw new InvalidOperationException("Multiple or unbound native direct children share the control ID.");
+        if (CancelMode == "cycle" || CancelMode == "budget")
+            throw new InvalidOperationException("Native main-window child enumeration cycled or exceeded its bound.");
+        return new IntPtr(CancelMode == "mismatch" ? 22 : 21);
+    }
     public struct Point { public int X, Y; }
     public class ClipboardSnapshot {
         public uint SequenceNumber;
@@ -165,7 +202,145 @@ public static class DarkReNamerVmAcceptanceNative {
     }
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint process) { return Windows; }
 }
+public sealed class DarkReNamerGuiApplyClockFrame {
+    public ulong Frequency, Revision, InitialApplyAcceptedTicks;
+    public ulong ConfirmationAcceptedTicks, CancelAcceptedTicks;
+    public uint CancelKind;
+}
+public sealed class DarkReNamerGuiImportFeedbackClockFrame {
+    public ulong Frequency, Revision, ImportFeedbackTicks;
+}
+public static class DarkReNamerIconStatusObserver {
+    public static long CapturedStartUtcTicks;
+    public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(
+        object process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window != new IntPtr(5151) ||
+            expectedStartUtcTicks != CapturedStartUtcTicks)
+            throw new InvalidOperationException("GUI Apply clock target process identity changed.");
+        return new DarkReNamerGuiApplyClockFrame {
+            Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency, Revision = 7
+        };
+    }
+    public static DarkReNamerGuiImportFeedbackClockFrame ReadImportFeedbackClockBound(
+        object process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window != new IntPtr(5151) ||
+            expectedStartUtcTicks != CapturedStartUtcTicks)
+            throw new InvalidOperationException("Import feedback target process identity changed.");
+        return new DarkReNamerGuiImportFeedbackClockFrame {
+            Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency,
+            Revision = 1, ImportFeedbackTicks = 9876
+        };
+    }
+}
 '@
+
+& {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    $main = [Windows.Automation.AutomationElement]::new()
+    $main.Current.ProcessId = $process.Id
+    $main.Current.NativeWindowHandle = 10
+    $cancel = [Windows.Automation.AutomationElement]::new()
+    $cancel.Current.ProcessId = $process.Id
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1009'
+    $cancel.Current.IsOffscreen = $true
+    $cancel.Current.BoundingRectangle.Width = 0
+    $status = [Windows.Automation.AutomationElement]::new()
+    $status.Current.Name = '파일 변경 중: 0 / 10000'
+    $application = @{ process=$process; main=$main; main_handle=10L }
+    $arguments = @{ Application=$application; Cancel=$cancel; Status=$status;
+        SessionId=$process.SessionId;
+        ExpectedStartUtcTicks=$process.StartTime.ToUniversalTime().Ticks;
+        ExpectedMainWindowHandle=10L; ExpectedRows=10000; WaitSeconds=1 }
+    $script:cancelAvailabilityPolls = 0
+    $script:cancelBecomesAvailable = $true
+    function Start-Sleep {
+        param($Milliseconds)
+        if ($Milliseconds -ne 10) { throw 'Cancel availability changed its polling interval.' }
+        $script:cancelAvailabilityPolls++
+        if ($script:cancelBecomesAvailable) {
+            $cancel.Current.IsOffscreen = $false
+            $cancel.Current.BoundingRectangle.Width = 20
+        }
+        [Threading.Thread]::Sleep($Milliseconds)
+    }
+    Wait-ObserverActiveCancelAvailability @arguments
+    if ($script:cancelAvailabilityPolls -ne 1) {
+        throw 'Initially offscreen Cancel did not wait for the same control to become visible.'
+    }
+    $script:cancelBecomesAvailable = $false
+    $cancel.Current.BoundingRectangle.Width = 0
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'bounded deadline'
+    $cancel.Current.BoundingRectangle.Width = 20
+    $arguments.WaitSeconds = 0
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'bounded deadline'
+    $arguments.WaitSeconds = 1
+    $status.Current.Name = '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'terminal state'
+    $status.Current.Name = '파일 변경 중: 0 / 10000'
+    $cancel.Current.ProcessId = 99
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'not bound to the expected process'
+    $cancel.Current.ProcessId = $process.Id
+    [DarkReNamerVmNative]::HitProcess = 42
+}
+
+& {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    [DarkReNamerAcceptanceNativeOpen]::ProcessId = [uint32]$process.Id
+    [DarkReNamerVmAcceptanceNative]::CancelProcessId = [uint32]$process.Id
+    $main = [Windows.Automation.AutomationElement]::new()
+    $main.Current.ProcessId = $process.Id
+    $main.Current.NativeWindowHandle = 10
+    $main.RejectDescendants = $true
+    $cancel = [Windows.Automation.AutomationElement]::new()
+    $cancel.Current.ProcessId = $process.Id
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1009'
+    [Windows.Automation.AutomationElement]::FromHandleElement = $cancel
+    $application = @{ process=$process; main=$main; main_handle=10L }
+    $arguments = @{ Application=$application; SessionId=$process.SessionId }
+    $cancel.Current.IsEnabled = $false
+    $cancel.Current.IsOffscreen = $true
+    if ((Find-ObserverActiveWorkerCancel @arguments) -ne $cancel) {
+        throw 'Active worker Cancel did not resolve its exact native child HWND.'
+    }
+    $cancel.Current.IsEnabled = $true
+    $cancel.Current.IsOffscreen = $false
+    foreach ($mode in @('missing', 'dead', 'parent', 'id', 'pid', 'thread', 'class')) {
+        [DarkReNamerAcceptanceNativeOpen]::Mode = $mode
+        Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'active worker Cancel'
+    }
+    [DarkReNamerAcceptanceNativeOpen]::Mode = 'normal'
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'duplicate'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'Multiple or unbound native direct children'
+    foreach ($mode in @('cycle', 'budget')) {
+        [DarkReNamerVmAcceptanceNative]::CancelMode = $mode
+        Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'cycled or exceeded its bound'
+    }
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'mismatch'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'exact native direct child ID 1009'
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'normal'
+    $cancel.Current.NativeWindowHandle = 22
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1008'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.AutomationId = '1009'
+    $cancel.Current.ControlType = [Windows.Automation.ControlType]::Edit
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.ControlType = [Windows.Automation.ControlType]::Button
+    [DarkReNamerVmNative]::HitProcess = 99
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'native control belongs to another process'
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    $arguments.SessionId = $process.SessionId + 1
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'not bound to the expected process and desktop session'
+    $arguments.SessionId = $process.SessionId
+    $application.main_handle = 99L
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'main window changed'
+    [DarkReNamerVmNative]::HitProcess = 42
+}
 
 & {
     function Assert-AutomationBinding { param($Element, $Process, $ExpectedSession, $Label) }
@@ -464,6 +639,40 @@ public static class DarkReNamerVmAcceptanceNative {
     $startupSource = ${function:Start-AcceptanceApplication}.ToString()
     if ($startupSource -cnotmatch '(?s)-Label \$Label\s+\$application\.main_bound_ticks = \[Diagnostics.Stopwatch\]::GetTimestamp\(\)\s+\$window = \$binding.element') {
         throw 'The main-bound QPC endpoint is not immediately after the exact window wait.'
+    }
+    if ($null -ne $application.PSObject.Properties['process_start_utc_ticks']) {
+        throw 'Startup fixture unexpectedly added the GUI Apply observer timestamp to Application.'
+    }
+    $capturedStart = [long]$process.StartTime.ToUniversalTime().Ticks
+    [DarkReNamerIconStatusObserver]::CapturedStartUtcTicks = $capturedStart
+    $clock = Read-ObserverGuiApplyClockFrame -Application $application `
+        -ExpectedStartUtcTicks $capturedStart
+    if ($clock.process_id -ne $process.Id -or
+        $clock.process_start_utc_ticks -ne $capturedStart -or
+        $clock.main_window_handle -ne 5151 -or $clock.revision -ne 7 -or
+        $clock.query_begin_ticks -gt $clock.query_end_ticks) {
+        throw 'GUI Apply clock lost its captured process lifetime binding.'
+    }
+    Assert-Fails -Expected 'target process identity changed' -Action {
+        Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks ($capturedStart - 1)
+    }
+    $importClock = Read-ObserverImportFeedbackClockFrame -Application $application `
+        -ExpectedStartUtcTicks $capturedStart
+    if ($importClock.process_id -ne $process.Id -or
+        $importClock.process_start_utc_ticks -ne $capturedStart -or
+        $importClock.main_window_handle -ne 5151 -or
+        $importClock.revision -ne 1 -or $importClock.import_feedback_ticks -ne 9876 -or
+        $importClock.query_begin_ticks -gt $importClock.query_end_ticks) {
+        throw 'Import feedback clock lost its captured process lifetime binding.'
+    }
+    Assert-Fails -Expected 'target process identity changed' -Action {
+        Read-ObserverImportFeedbackClockFrame -Application $application `
+            -ExpectedStartUtcTicks ($capturedStart - 1)
+    }
+    $scenarioSource = ${function:Invoke-ObserverGuiApplyFeedbackScenario}.ToString()
+    if ($scenarioSource -match '(?i)\$application\.process_start_utc_ticks') {
+        throw 'GUI Apply scenario still reads a timestamp absent from Application.'
     }
 }
 
