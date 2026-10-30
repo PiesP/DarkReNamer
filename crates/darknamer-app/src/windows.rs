@@ -300,10 +300,10 @@ use worker::{
     finish_apply_after_message_loop_failure, handle_admission_completion,
     handle_admission_progress, handle_apply_completion, handle_apply_progress,
     handle_import_completion, handle_plan_completion, handle_preferences_wake,
-    prepare_window_close, report_admission_start_error, request_active_worker_cancel,
-    request_window_close, request_worker_shutdown_after_message_loop_failure,
-    run_prepared_worker_task_dialog, start_import_worker, start_preferences_writers,
-    try_finish_window_close,
+    prepare_window_close, record_import_feedback_after_layout, report_admission_start_error,
+    request_active_worker_cancel, request_window_close,
+    request_worker_shutdown_after_message_loop_failure, run_prepared_worker_task_dialog,
+    start_import_worker, start_preferences_writers, try_finish_window_close,
 };
 #[cfg(test)]
 use worker::{AdmissionWorkerResult, ApplyWorkerResult, PlanWorkerResult};
@@ -845,6 +845,18 @@ impl GuiAcceptanceClock {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ImportFeedbackPhase {
+    Reading {
+        session_id: u64,
+        revision: ModelRevision,
+    },
+    Admitting {
+        revision: ModelRevision,
+        worker_id: std::thread::ThreadId,
+    },
+}
+
 struct AppState {
     list_window: HWND,
     status_message: HWND,
@@ -892,6 +904,7 @@ struct AppState {
     import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
     acceptance_clock: GuiAcceptanceClock,
+    import_feedback_phase: Option<ImportFeedbackPhase>,
     close_pending: bool,
     confirmation_pending: bool,
     active_prompt: Option<u64>,
@@ -1054,6 +1067,7 @@ impl AppState {
             import_worker: None,
             preference_persistence: PreferencePersistence::default(),
             acceptance_clock: GuiAcceptanceClock::new(),
+            import_feedback_phase: None,
             close_pending: false,
             confirmation_pending: false,
             active_prompt: None,
@@ -4649,9 +4663,73 @@ mod tests {
                 EnableWindow(cancel, 1);
                 ShowWindow(cancel, SW_SHOW);
             }
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: the test-owned child gets its first actionable rectangle,
+            // as the production layout does after its posted callback.
+            assert_ne!(
+                unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
             assert!(worker::import_cancel_control_ready(parent, cancel));
+            let directory = tempfile::tempdir()?;
+            let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            state.cancel_worker = cancel;
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Reading {
+                session_id: 1,
+                revision: state.revision(),
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Admitting {
+                revision: state.revision(),
+                worker_id: std::thread::current().id(),
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            let release = install_controlled_admission_worker(
+                &mut state,
+                AdmissionProgressPhase::SelectingMode,
+            );
+            let worker_id = state
+                .admission_worker
+                .as_ref()
+                .expect("controlled admission worker")
+                .handle
+                .thread()
+                .id();
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert_eq!(state.icon_status_value(35), Some(0));
+            state.import_feedback_phase = Some(ImportFeedbackPhase::Admitting {
+                revision: state.revision(),
+                worker_id,
+            });
+            worker::record_import_feedback_after_layout(parent, &mut state);
+            assert!(state.icon_status_value(35).is_some_and(|tick| tick > 0));
+            assert!(state.import_feedback_phase.is_none());
+            release
+                .send(())
+                .expect("release controlled admission worker");
+            state
+                .admission_worker
+                .take()
+                .expect("controlled admission worker")
+                .handle
+                .join()
+                .expect("controlled admission worker joins");
             assert!(!worker::import_cancel_control_ready(parent, status_message));
+            assert!(!worker::import_cancel_control_ready(status_message, cancel));
             assert!(!worker::import_cancel_control_ready(null_mut(), cancel));
+            // SAFETY: a positive but off-client rectangle cannot be clicked
+            // through the owner and must not qualify as available feedback.
+            assert_ne!(
+                unsafe { SetWindowPos(cancel, null_mut(), 700, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            assert_ne!(
+                unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
+                0
+            );
             // SAFETY: the live test button remains owned through both state
             // changes and is restored to hidden/disabled before teardown.
             unsafe { EnableWindow(cancel, 0) };
