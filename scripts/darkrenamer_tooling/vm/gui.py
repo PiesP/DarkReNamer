@@ -85,6 +85,7 @@ CUSTOM_MODE = "custom-input-identity-observation"
 CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
 RUNTIME_BASELINE_MODE = "runtime-baseline"
 RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
+READINESS_BRACKET_CONTRACT = "qpc-polled-readiness-v1"
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": ["fresh-system", "saved-system", "saved-english"],
     "idle_seconds": 30, "populated_rows": 1000, "sample_interval_ms": 200,
@@ -891,6 +892,8 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
             "appearance": run["appearance"],
             "desktop": {"width": run["width"], "height": run["height"], "dpi": run["dpi"]},
             "text_scale_percent": run["text_scale_percent"],
+            **({"readiness_bracket_contract": READINESS_BRACKET_CONTRACT}
+               if run["mode"] in {"performance-sample", RUNTIME_BASELINE_MODE} else {}),
             **({"high_contrast": run["high_contrast"]} if run["mode"] == "appearance-pair" else {}),
             **({"performance_plan": {**PERFORMANCE_PLAN, "long_path_order": run["long_path_order"]}}
                if run["mode"] == "performance-sample" else {}),

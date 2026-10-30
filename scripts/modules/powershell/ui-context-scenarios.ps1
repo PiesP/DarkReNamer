@@ -1799,6 +1799,7 @@ function Invoke-ObserverPerformanceSampleScenario {
     $clearRowCounts = [Collections.Generic.List[int]]::new()
     $commandSends = [Collections.Generic.List[object]]::new()
     $timelineEnabled = -not $ObserveFirstClear
+    $measureReadinessBrackets = -not ($ObserveFirstClear -or $ObservePicker -or $ObserveCustomInput)
     $timelineEvents = [Collections.Generic.List[object]]::new()
     $activeTimelineEvents = $null
     if ($timelineEnabled) { $activeTimelineEvents = $timelineEvents }
@@ -1880,13 +1881,23 @@ function Invoke-ObserverPerformanceSampleScenario {
         $ObservationSink['executable_bytes'] = [long](Get-Item -LiteralPath $applicationPath).Length
         $grid = Get-ObserverGrid -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds
         if ($grid.pattern.Current.RowCount -ne 0) { throw 'Performance sample did not begin with an empty list.' }
-        $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
-        while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-            [IntPtr]$application.main_handle, [uint32]0x801D)) {
-            if ((Get-Date) -ge $readyDeadline) { throw 'Performance import command did not become ready.' }
-            Start-Sleep -Milliseconds 100
+        if ($measureReadinessBrackets) {
+            $readyProbe = Wait-ObserverMeasuredReadiness -Application $application `
+                -WaitSeconds $WaitSeconds -Operation startup -Predicate 'import-command-enabled' -Probe {
+                    return [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                        [IntPtr]$application.main_handle, [uint32]0x801D)
+                }
+            $readyTicks = [long]$readyProbe.probes[-1].end_ticks
         }
-        $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        else {
+            $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
+            while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                [IntPtr]$application.main_handle, [uint32]0x801D)) {
+                if ((Get-Date) -ge $readyDeadline) { throw 'Performance import command did not become ready.' }
+                Start-Sleep -Milliseconds 100
+            }
+            $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        }
         $createBegin = [long]$application.owned.ProcessCreateBeginTimestamp
         $createEnd = [long]$application.owned.ProcessCreateEndTimestamp
         if ($createBegin -le 0 -or $createEnd -lt $createBegin -or $readyTicks -lt $createEnd) {
@@ -1928,6 +1939,7 @@ function Invoke-ObserverPerformanceSampleScenario {
             $sampler.SetPhase($stage.id)
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $stage.file `
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -RecordReadinessBrackets:$measureReadinessBrackets `
                 -PickerSettleMilliseconds $(if ($focusedPopup) { 350 } else { 0 }) `
                 -TimelineEvents $activeTimelineEvents -TimelineOperation $stage.id
             $timings.Add([ordered]@{ id=$stage.id; elapsed_ms=$timing.elapsed_ms;
@@ -2113,6 +2125,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         for ($chunk = 0; $chunk -lt 4; $chunk++) {
             $timing = Import-GuiRegressionPathList -Application $application -PathsFile $paths2250[$chunk] `
                 -ExpectedRows (1000 + 2250 * ($chunk + 1)) -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -RecordReadinessBrackets:$measureReadinessBrackets `
                 -TimelineEvents $activeTimelineEvents `
                 -TimelineOperation ('ordinary-10000-{0}' -f ($chunk + 1))
             $largeElapsed += [double]$timing.elapsed_ms
@@ -2311,6 +2324,7 @@ function Invoke-ObserverPerformanceSampleScenario {
             $sampler.SetPhase($mode)
             $longTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsLong `
                 -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -RecordReadinessBrackets `
                 -TimelineEvents $timelineEvents -TimelineOperation $mode
             $timings.Add([ordered]@{ id=$mode; elapsed_ms=$longTiming.elapsed_ms;
                 command_ready_after_rows_ms=$longTiming.command_ready_after_rows_ms;
@@ -2348,6 +2362,7 @@ function Invoke-ObserverPerformanceSampleScenario {
         $sampler.SetPhase('extensions')
         $extensionTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsExtensions `
             -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+            -RecordReadinessBrackets `
             -TimelineEvents $timelineEvents -TimelineOperation 'extensions'
         $timings.Add([ordered]@{ id='extensions'; elapsed_ms=$extensionTiming.elapsed_ms;
             command_ready_after_rows_ms=$extensionTiming.command_ready_after_rows_ms;
@@ -2368,6 +2383,7 @@ function Invoke-ObserverPerformanceSampleScenario {
             $cycleWatch = [Diagnostics.Stopwatch]::StartNew()
             $cycleTiming = Import-GuiRegressionPathList -Application $application -PathsFile $pathsCycle `
                 -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid -MeasureCommandReadiness `
+                -RecordReadinessBrackets `
                 -TimelineEvents $timelineEvents -TimelineOperation $id
             $cycleObservedRows = [int]$grid.pattern.Current.RowCount
             [void](Set-ObserverManualName -Application $application -Grid $grid -Row 0 `
@@ -2429,6 +2445,9 @@ function Invoke-ObserverPerformanceSampleScenario {
             $ObservationSink['native_process_lifetime'].terminal_exit_filetime = [long]$terminal[1]
         }
         $ObservationSink['normal_exit_code'] = $exitCode
+        if ($measureReadinessBrackets) {
+            $ObservationSink['readiness_brackets'] = @($application.readiness_brackets.ToArray())
+        }
         $ObservationSink['appearance'] = 'light'
         $ObservationSink['mode'] = if ($ObserveFirstClear) { 'first-clear-observation' }
             elseif ($ObservePicker) { 'picker-identity-observation' }
@@ -3646,6 +3665,7 @@ function Invoke-ObserverRuntimeBaselineScenario {
             startup=$null; preference_before=$null; preference_after=$null; menu=$null;
             empty_idle=$null; import=$null; icon_settlement=$null;
             populated_idle=$null; transforms=$null; samples=$null; phase_summary=$null;
+            idle_cpu_windows=$null; readiness_brackets=$null;
             normal_exit_code=$null; disk_unchanged=$false; journal_residue_count=$null }
         $cells.Add($cell)
         Invoke-WithIsolatedEnvironment -RuntimeRoot $cellRoot -Action {
@@ -3678,15 +3698,12 @@ function Invoke-ObserverRuntimeBaselineScenario {
                 if ($grid.pattern.Current.RowCount -ne 0) {
                     throw 'Runtime baseline product did not start with an empty list.'
                 }
-                $readyDeadline = (Get-Date).AddSeconds($WaitSeconds)
-                while (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                    [IntPtr]$application.main_handle, [uint32]0x801D)) {
-                    if ((Get-Date) -ge $readyDeadline) {
-                        throw 'Runtime baseline import command was not ready.'
+                $readyProbe = Wait-ObserverMeasuredReadiness -Application $application `
+                    -WaitSeconds $WaitSeconds -Operation startup -Predicate 'import-command-enabled' -Probe {
+                        return [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                            [IntPtr]$application.main_handle, [uint32]0x801D)
                     }
-                    Start-Sleep -Milliseconds 100
-                }
-                $readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+                $readyTicks = [long]$readyProbe.probes[-1].end_ticks
                 $createBegin = [long]$application.owned.ProcessCreateBeginTimestamp
                 $createEnd = [long]$application.owned.ProcessCreateEndTimestamp
                 $mainBound = [long]$application.main_bound_ticks
@@ -3772,27 +3789,37 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     $sampler = [DarkReNamerPerformanceSampler]::new(
                         $application.process, [IntPtr]$application.main_handle)
                     $sampler.SetPhase('empty-idle')
+                    $emptyCpuBefore = Read-ObserverOwnedCpuSnapshot -Application $application
                     $emptyStart = [Diagnostics.Stopwatch]::GetTimestamp()
                     $emptyEnd = Wait-ObserverRuntimeMinimumIdle -StartTicks $emptyStart `
                         -MinimumMilliseconds 30000 -OverallDeadline $deadline
+                    $emptyCpuAfter = Read-ObserverOwnedCpuSnapshot -Application $application
                     $cell.empty_idle = [ordered]@{ elapsed_ms=[Math]::Round(
                         ($emptyEnd - $emptyStart) * 1000.0 /
                         [Diagnostics.Stopwatch]::Frequency, 3); rows=0 }
                     $sampler.SetPhase('import-1000')
                     $import = Import-GuiRegressionPathList -Application $application -PathsFile $pathList `
                         -ExpectedRows 1000 -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid `
-                        -MeasureCommandReadiness -IncludeOpenTicks
+                        -MeasureCommandReadiness -IncludeOpenTicks -RecordReadinessBrackets
                     $cell.import = [ordered]@{ rows=1000; observed_rows=[int]$grid.pattern.Current.RowCount;
                         data_ready_ms=$import.elapsed_ms;
-                        command_ready_after_rows_ms=$import.command_ready_after_rows_ms }
+                        command_ready_after_rows_ms=$import.command_ready_after_rows_ms;
+                        open_ticks=[long]$import.open_ticks;
+                        row_observed_ticks=[long]$import.row_observed_ticks;
+                        command_ready_ticks=[long]$import.command_ready_ticks }
                     $sampler.SetPhase('icon-settlement')
                     $cell.icon_settlement = Wait-ObserverIconSettlementPhase -Application $application `
                         -StartUtcTicks $cell.process_start_utc_ticks -OpenTicks $import.open_ticks `
                         -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
                     $sampler.SetPhase('populated-idle')
+                    $populatedCpuBefore = Read-ObserverOwnedCpuSnapshot -Application $application
                     $populatedStart = [Diagnostics.Stopwatch]::GetTimestamp()
                     [void](Wait-ObserverRuntimeMinimumIdle -StartTicks $populatedStart `
                         -MinimumMilliseconds 30000 -OverallDeadline $deadline)
+                    $populatedCpuAfter = Read-ObserverOwnedCpuSnapshot -Application $application
+                    $cell.idle_cpu_windows = @(
+                        [ordered]@{ phase='empty-idle'; before=$emptyCpuBefore; after=$emptyCpuAfter },
+                        [ordered]@{ phase='populated-idle'; before=$populatedCpuBefore; after=$populatedCpuAfter })
                     $afterIdleReceipt = Wait-ObserverIconSettlementPhase -Application $application `
                         -StartUtcTicks $cell.process_start_utc_ticks -OpenTicks $import.open_ticks `
                         -DataReadyMs $import.elapsed_ms -Rows 1000 -OverallDeadline $deadline
@@ -3873,6 +3900,7 @@ function Invoke-ObserverRuntimeBaselineScenario {
                 Assert-ObserverRuntimeSystemAppearanceMenu -Menu $environment.appearance.pre_close_menu
                 $cell.normal_exit_code = Close-AcceptanceApplication -Application $application `
                     -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
+                $cell.readiness_brackets = @($application.readiness_brackets.ToArray())
                 $finalPreference = if (Test-Path -LiteralPath $preferencePath) {
                     $record = Read-ProductionLanguagePreference -LocalAppData $env:LOCALAPPDATA
                     [ordered]@{ status='valid-saved'; value=$record.value; sha256=$record.sha256 }
