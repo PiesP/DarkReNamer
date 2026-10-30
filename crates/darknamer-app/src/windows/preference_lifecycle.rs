@@ -14,15 +14,17 @@ pub(crate) struct PreferencePersistence {
     column_status: WriterStatus,
     appearance_status: WriterStatus,
     language: Option<LanguagePreferencesWriter>,
-    language_terminal_observed: bool,
+    language_status: WriterStatus,
     language_notify_saved: bool,
-    language_requested: Option<u64>,
     language_saved: Option<LanguagePreference>,
 }
 
 #[derive(Default)]
 struct WriterStatus {
+    requested_generation: Option<u64>,
+    saved_generation: Option<u64>,
     failed_generation: Option<u64>,
+    submission_failed: bool,
     terminal_observed: bool,
 }
 
@@ -42,6 +44,31 @@ impl PreferenceKind {
 }
 
 impl WriterStatus {
+    fn note_submission(&mut self, result: &io::Result<u64>) {
+        match result {
+            Ok(generation) => {
+                self.requested_generation = Some(*generation);
+                self.submission_failed = false;
+            }
+            Err(_) => self.submission_failed = true,
+        }
+    }
+
+    fn acknowledged(&self) -> bool {
+        !self.terminal_observed
+            && !self.submission_failed
+            && self.failed_generation.is_none()
+            && self.requested_generation.is_none_or(|requested| {
+                // Saturated generations cannot distinguish a new request from
+                // an old acknowledgment of the same number.
+                requested > 0
+                    && requested < u64::MAX
+                    && self
+                        .saved_generation
+                        .is_some_and(|saved| saved >= requested && saved < u64::MAX)
+            })
+    }
+
     fn observe(
         &mut self,
         kind: PreferenceKind,
@@ -52,6 +79,10 @@ impl WriterStatus {
         for event in events {
             let message = match event {
                 PreferenceWriteEvent::Saved { generation } => {
+                    self.saved_generation = Some(
+                        self.saved_generation
+                            .map_or(generation, |saved| saved.max(generation)),
+                    );
                     if self
                         .failed_generation
                         .is_some_and(|failed| generation >= failed)
@@ -96,12 +127,13 @@ impl PreferencePersistence {
     }
 
     pub(crate) fn submit_language(&mut self, preference: LanguagePreference) -> io::Result<()> {
-        let generation = self
+        let result = self
             .language
             .as_mut()
             .ok_or_else(|| io::Error::other("language preference writer is unavailable"))?
-            .submit(preference)?;
-        self.language_requested = Some(generation);
+            .submit(preference);
+        self.language_status.note_submission(&result);
+        result?;
         self.language_notify_saved = true;
         Ok(())
     }
@@ -119,19 +151,37 @@ impl PreferencePersistence {
     }
 
     pub(crate) fn submit_columns(&mut self, columns: [ColumnState; 7]) -> io::Result<()> {
-        self.columns
+        let result = self
+            .columns
             .as_mut()
             .ok_or_else(|| io::Error::other("column preference writer is unavailable"))?
-            .submit(columns)
-            .map(|_| ())
+            .submit(columns);
+        self.column_status.note_submission(&result);
+        result.map(|_| ())
     }
 
     pub(crate) fn submit_appearance(&mut self, appearance: UiAppearance) -> io::Result<()> {
-        self.appearance
+        let result = self
+            .appearance
             .as_mut()
             .ok_or_else(|| io::Error::other("appearance preference writer is unavailable"))?
-            .submit(appearance)
-            .map(|_| ())
+            .submit(appearance);
+        self.appearance_status.note_submission(&result);
+        result.map(|_| ())
+    }
+
+    /// UI-thread shadow state only: this does not drain results or request a flush.
+    pub(crate) fn required_acknowledgments_complete(&self) -> bool {
+        self.columns
+            .as_ref()
+            .is_some_and(|writer| !writer.is_finished() && self.column_status.acknowledged())
+            && self.appearance.as_ref().is_some_and(|writer| {
+                !writer.is_finished() && self.appearance_status.acknowledged()
+            })
+            && self
+                .language
+                .as_ref()
+                .is_some_and(|writer| !writer.is_finished() && self.language_status.acknowledged())
     }
 
     /// Interprets each file's generations independently, suppressing notices while closing.
@@ -160,12 +210,35 @@ impl PreferencePersistence {
                 self.language_saved = Some(preference);
             }
             for event in events {
+                match &event {
+                    PreferenceWriteEvent::Saved { generation } => {
+                        self.language_status.saved_generation = Some(
+                            self.language_status
+                                .saved_generation
+                                .map_or(*generation, |saved| saved.max(*generation)),
+                        );
+                        if self
+                            .language_status
+                            .failed_generation
+                            .is_some_and(|failed| *generation >= failed)
+                        {
+                            self.language_status.failed_generation = None;
+                        }
+                    }
+                    PreferenceWriteEvent::Failed { generation, .. } => {
+                        self.language_status.failed_generation = Some(*generation);
+                    }
+                    PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
+                        self.language_status.terminal_observed = true;
+                    }
+                }
                 match event {
                     PreferenceWriteEvent::Saved { generation }
                         if !closing
                             && self.language_notify_saved
                             && self
-                                .language_requested
+                                .language_status
+                                .requested_generation
                                 .is_some_and(|requested| generation >= requested) =>
                     {
                         messages.push(crate::i18n::common::Text::LanguageSaved.get().to_owned());
@@ -175,7 +248,6 @@ impl PreferencePersistence {
                         messages.push(crate::i18n::common::language_save_failed(&(error)))
                     }
                     PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
-                        self.language_terminal_observed = true;
                         if !closing && matches!(event, PreferenceWriteEvent::Panicked) {
                             messages.push(
                                 crate::i18n::common::Text::LanguageWriterStopped
@@ -224,10 +296,9 @@ impl PreferencePersistence {
             || self.appearance.as_ref().is_some_and(|writer| {
                 !self.appearance_status.terminal_observed && !writer.is_finished()
             })
-            || self
-                .language
-                .as_ref()
-                .is_some_and(|writer| !self.language_terminal_observed && !writer.is_finished())
+            || self.language.as_ref().is_some_and(|writer| {
+                !self.language_status.terminal_observed && !writer.is_finished()
+            })
         {
             return false;
         }
@@ -273,7 +344,7 @@ impl PreferencePersistence {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc::{self, Sender, SyncSender};
+    use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -328,6 +399,195 @@ mod tests {
             },
         };
         (writer, sender, release)
+    }
+
+    fn live_language() -> io::Result<(LanguagePreferencesWriter, Receiver<()>, tempfile::TempDir)> {
+        let directory = tempfile::tempdir()?;
+        let (wake, awakened) = mpsc::channel();
+        let writer =
+            LanguagePreferencesWriter::spawn(directory.path().join("language"), move || {
+                let _sent = wake.send(());
+            })?;
+        Ok((writer, awakened, directory))
+    }
+
+    #[test]
+    fn idle_acknowledgments_follow_drained_generations_for_each_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (columns, column_events, release_columns) = controlled_columns();
+        let (appearance, appearance_events, release_appearance) = controlled_appearance();
+        let (language, language_wakes, _directory) = live_language()?;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        assert!(persistence.required_acknowledgments_complete());
+
+        persistence.submit_columns(default_column_states())?;
+        persistence.submit_appearance(UiAppearance::default())?;
+        assert!(!persistence.required_acknowledgments_complete());
+        column_events.send(PreferenceWriteEvent::Saved { generation: 1 })?;
+        // The column write completed, but its acknowledgment has not yet
+        // passed through the UI-thread drain.
+        assert!(!persistence.required_acknowledgments_complete());
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+        appearance_events.send(PreferenceWriteEvent::Saved { generation: 1 })?;
+        assert!(!persistence.required_acknowledgments_complete());
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+
+        persistence.submit_language(LanguagePreference::English)?;
+        assert!(!persistence.required_acknowledgments_complete());
+        language_wakes.recv_timeout(Duration::from_secs(5))?;
+        assert!(!persistence.required_acknowledgments_complete());
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+
+        persistence.submit_columns(default_column_states())?;
+        persistence.submit_columns(default_column_states())?;
+        assert!(!persistence.required_acknowledgments_complete());
+        column_events.send(PreferenceWriteEvent::Saved { generation: 2 })?;
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+        column_events.send(PreferenceWriteEvent::Saved { generation: 3 })?;
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+
+        persistence.submit_language(LanguagePreference::Japanese)?;
+        assert!(!persistence.required_acknowledgments_complete());
+        language_wakes.recv_timeout(Duration::from_secs(5))?;
+        assert!(!persistence.required_acknowledgments_complete());
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+        release_columns.send(())?;
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+        Ok(())
+    }
+
+    #[test]
+    fn idle_acknowledgments_fail_closed_on_failure_terminal_and_unavailable_writers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (columns, column_events, release_columns) = controlled_columns();
+        let (appearance, appearance_events, release_appearance) = controlled_appearance();
+        let (language, _language_wakes, _directory) = live_language()?;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        persistence.submit_columns(default_column_states())?;
+        column_events.send(PreferenceWriteEvent::Failed {
+            generation: 1,
+            error: "blocked".to_owned(),
+        })?;
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+        column_events.send(PreferenceWriteEvent::Saved { generation: 1 })?;
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+
+        column_events.send(PreferenceWriteEvent::Stopped)?;
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+        appearance_events.send(PreferenceWriteEvent::Panicked)?;
+        persistence.drain(false);
+        assert!(persistence.appearance_status.terminal_observed);
+        assert!(!persistence.required_acknowledgments_complete());
+        release_columns.send(())?;
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+
+        let (appearance, _events, release_appearance) = controlled_appearance();
+        let (language, _wakes, _directory) = live_language()?;
+        let mut persistence = PreferencePersistence::new(None, Some(appearance));
+        persistence.install_language_writer(language);
+        assert!(!persistence.required_acknowledgments_complete());
+        assert!(persistence.submit_columns(default_column_states()).is_err());
+        assert!(!persistence.required_acknowledgments_complete());
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+
+        let (columns, _events, release_columns) = controlled_columns();
+        let (appearance, _events, release_appearance) = controlled_appearance();
+        let (language, _wakes, _directory) = live_language()?;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        release_columns.send(())?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !persistence
+            .columns
+            .as_ref()
+            .is_some_and(PreferencesWriter::is_finished)
+        {
+            assert!(Instant::now() < deadline, "column writer did not stop");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!persistence.required_acknowledgments_complete());
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+        Ok(())
+    }
+
+    #[test]
+    fn idle_language_failure_needs_a_later_drained_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (columns, _column_events, release_columns) = controlled_columns();
+        let (appearance, _appearance_events, release_appearance) = controlled_appearance();
+        let (language, language_wakes, directory) = live_language()?;
+        let path = directory.path().join("language");
+        std::fs::create_dir(&path)?;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        persistence.submit_language(LanguagePreference::English)?;
+        language_wakes.recv_timeout(Duration::from_secs(5))?;
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+
+        std::fs::remove_dir(&path)?;
+        persistence.submit_language(LanguagePreference::Japanese)?;
+        language_wakes.recv_timeout(Duration::from_secs(5))?;
+        assert!(!persistence.required_acknowledgments_complete());
+        persistence.drain(false);
+        assert!(persistence.required_acknowledgments_complete());
+        release_columns.send(())?;
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+        Ok(())
+    }
+
+    #[test]
+    fn idle_acknowledgments_reject_failed_submission_and_saturated_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (columns, _column_events, release_columns) = controlled_columns();
+        let (appearance, _appearance_events, release_appearance) = controlled_appearance();
+        let (language, _language_wakes, _directory) = live_language()?;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        assert!(persistence.required_acknowledgments_complete());
+        persistence
+            .columns
+            .as_mut()
+            .expect("controlled column writer")
+            .shutdown_with(default_column_states())?;
+        assert!(persistence.submit_columns(default_column_states()).is_err());
+        assert!(!persistence.required_acknowledgments_complete());
+        release_columns.send(())?;
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+
+        let (mut columns, column_events, release_columns) = controlled_columns();
+        let (appearance, _appearance_events, release_appearance) = controlled_appearance();
+        let (language, _language_wakes, _directory) = live_language()?;
+        columns.writer.next_generation = u64::MAX - 1;
+        let mut persistence = PreferencePersistence::new(Some(columns), Some(appearance));
+        persistence.install_language_writer(language);
+        persistence.submit_columns(default_column_states())?;
+        column_events.send(PreferenceWriteEvent::Saved {
+            generation: u64::MAX,
+        })?;
+        persistence.drain(false);
+        assert!(!persistence.required_acknowledgments_complete());
+        release_columns.send(())?;
+        release_appearance.send(())?;
+        persistence.shutdown_and_join(default_column_states(), UiAppearance::default());
+        Ok(())
     }
 
     #[test]

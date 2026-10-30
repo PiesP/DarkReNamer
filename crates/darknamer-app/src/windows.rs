@@ -1017,6 +1017,23 @@ impl AppState {
             19 => (self.model_revision as u32) as LRESULT,
             20 => ((self.model_revision >> 32) as u32) as LRESULT,
             21 => isize::from(u8::from(shared.is_none_or(IconShared::is_unavailable))),
+            22 => {
+                // Idle-close preconditions: no foreground worker, settled
+                // icons, drained preference acks, no prompt, no close request.
+                let no_foreground_worker = self.admission_worker.is_none()
+                    && self.import_worker.is_none()
+                    && self.plan_worker.is_none()
+                    && self.apply_worker.is_none();
+                let no_prompt = !self.confirmation_pending && self.active_prompt.is_none();
+                isize::from(u8::from(no_foreground_worker))
+                    | (isize::from(u8::from(settled)) << 1)
+                    | (isize::from(u8::from(
+                        self.preference_persistence
+                            .required_acknowledgments_complete(),
+                    )) << 2)
+                    | (isize::from(u8::from(no_prompt)) << 3)
+                    | (isize::from(u8::from(!self.close_pending)) << 4)
+            }
             _ => return None,
         };
         (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
@@ -1521,6 +1538,51 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_close_selector_preserves_existing_status_and_rejects_unknown_selectors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(11), Some(1));
+        assert_eq!(state.icon_status_value(21), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        assert_eq!(state.icon_status_value(23), None);
+
+        state.preference_persistence = PreferencePersistence::new(
+            Some(PreferencesWriter::spawn(
+                state.column_preferences_path.clone(),
+                || {},
+            )?),
+            Some(AppearancePreferencesWriter::spawn(
+                state.appearance_preferences_path.clone(),
+                || {},
+            )?),
+        );
+        state.preference_persistence.install_language_writer(
+            crate::preferences::LanguagePreferencesWriter::spawn(
+                state.language_preferences_path.clone(),
+                || {},
+            )?,
+        );
+        assert_eq!(state.icon_status_value(22), Some(0b11111));
+        state.icon_unresolved_rows = 1;
+        assert_eq!(state.icon_status_value(22), Some(0b11101));
+        state.icon_unresolved_rows = 0;
+        state.confirmation_pending = true;
+        assert_eq!(state.icon_status_value(22), Some(0b10111));
+        state.confirmation_pending = false;
+        state.active_prompt = Some(1);
+        assert_eq!(state.icon_status_value(22), Some(0b10111));
+        state.active_prompt = None;
+        state.close_pending = true;
+        assert_eq!(state.icon_status_value(22), Some(0b01111));
+        state
+            .preference_persistence
+            .shutdown_and_join(state.column_states, state.appearance);
+        Ok(())
+    }
 
     #[test]
     fn unread_preferences_survive_message_loop_failure_shutdown()
