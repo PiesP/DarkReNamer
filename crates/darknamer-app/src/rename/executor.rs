@@ -468,13 +468,15 @@ impl<'a> RenameExecutor<'a> {
             });
         }
 
-        let mut completed = Vec::with_capacity(schedule.len());
+        // Successful forward mutations form a prefix of this immutable schedule.
+        let mut completed_prefix = 0;
         for (step_index, step) in schedule.iter().enumerate() {
             if control.cancellation_requested() {
                 return Ok(self.rollback(
                     plan.id,
                     ExecutionFailure::Cancelled { step: step_index },
-                    &completed,
+                    &schedule,
+                    completed_prefix,
                     entries,
                     control,
                 ));
@@ -499,7 +501,8 @@ impl<'a> RenameExecutor<'a> {
                         step: step_index,
                         error,
                     },
-                    &completed,
+                    &schedule,
+                    completed_prefix,
                     entries,
                     control,
                 ));
@@ -547,7 +550,8 @@ impl<'a> RenameExecutor<'a> {
                         step: step_index,
                         error,
                     },
-                    &completed,
+                    &schedule,
+                    completed_prefix,
                     entries,
                     control,
                 ));
@@ -555,7 +559,8 @@ impl<'a> RenameExecutor<'a> {
             #[cfg(test)]
             super::failpoint::hit(&format!("forward-rename-{step_index}"));
             entries.set_state(step.entry, forward_state(step.temporary_phase));
-            completed.push((step_index, step.clone()));
+            debug_assert_eq!(completed_prefix, step_index);
+            completed_prefix += 1;
             if let Err(error) = self
                 .journal
                 .completed(step_index, JournalDirection::Forward)
@@ -577,7 +582,7 @@ impl<'a> RenameExecutor<'a> {
             super::failpoint::hit(&format!("forward-completed-{step_index}"));
             control.progress(ExecutionProgress {
                 phase: ExecutionPhase::Forward,
-                completed: completed.len(),
+                completed: completed_prefix,
                 total: schedule.len(),
             });
         }
@@ -593,7 +598,8 @@ impl<'a> RenameExecutor<'a> {
                 ExecutionFailure::Cancelled {
                     step: schedule.len(),
                 },
-                &completed,
+                &schedule,
+                completed_prefix,
                 entries,
                 control,
             ));
@@ -745,7 +751,8 @@ impl<'a> RenameExecutor<'a> {
         &mut self,
         plan: PlanId,
         failure: ExecutionFailure,
-        completed: &[(usize, ScheduleStep)],
+        schedule: &[ScheduleStep],
+        completed_prefix: usize,
         mut entries: IndexedEntryExecutions,
         control: &dyn ExecutionControl,
     ) -> ExecutionReport {
@@ -753,16 +760,17 @@ impl<'a> RenameExecutor<'a> {
         control.progress(ExecutionProgress {
             phase: ExecutionPhase::Rollback,
             completed: 0,
-            total: completed.len(),
+            total: completed_prefix,
         });
         let mut restored = 0_usize;
-        for (step_index, step) in completed.iter().rev() {
+        for step_index in (0..completed_prefix).rev() {
+            let step = &schedule[step_index];
             if let Err(error) = self
                 .journal
-                .prepared(*step_index, JournalDirection::Rollback)
+                .prepared(step_index, JournalDirection::Rollback)
             {
                 rollback_failures.push(RollbackFailure::Journal {
-                    step: *step_index,
+                    step: step_index,
                     error,
                 });
                 entries.set_state(step.entry, RenameState::Indeterminate);
@@ -783,15 +791,15 @@ impl<'a> RenameExecutor<'a> {
                 if error.certainty == MutationCertainty::NotApplied
                     && let Err(journal_error) = self
                         .journal
-                        .not_applied(*step_index, JournalDirection::Rollback)
+                        .not_applied(step_index, JournalDirection::Rollback)
                 {
                     rollback_failures.push(RollbackFailure::Journal {
-                        step: *step_index,
+                        step: step_index,
                         error: journal_error,
                     });
                 }
                 rollback_failures.push(RollbackFailure::Backend {
-                    step: *step_index,
+                    step: step_index,
                     error,
                 });
                 entries.set_state(step.entry, RenameState::Indeterminate);
@@ -802,10 +810,10 @@ impl<'a> RenameExecutor<'a> {
             entries.set_state(step.entry, rollback_state(step.temporary_phase));
             if let Err(error) = self
                 .journal
-                .completed(*step_index, JournalDirection::Rollback)
+                .completed(step_index, JournalDirection::Rollback)
             {
                 rollback_failures.push(RollbackFailure::Journal {
-                    step: *step_index,
+                    step: step_index,
                     error,
                 });
                 entries.set_state(step.entry, RenameState::Indeterminate);
@@ -817,7 +825,7 @@ impl<'a> RenameExecutor<'a> {
             control.progress(ExecutionProgress {
                 phase: ExecutionPhase::Rollback,
                 completed: restored,
-                total: completed.len(),
+                total: completed_prefix,
             });
         }
 
@@ -828,15 +836,15 @@ impl<'a> RenameExecutor<'a> {
                     super::failpoint::hit("terminal-rolled-back");
                     control.progress(ExecutionProgress {
                         phase: ExecutionPhase::Terminal,
-                        completed: completed.len(),
-                        total: completed.len(),
+                        completed: completed_prefix,
+                        total: completed_prefix,
                     });
                     ExecutionOutcome::RolledBack { failure }
                 }
                 Err(error) => ExecutionOutcome::RecoveryRequired {
                     failure,
                     rollback_failures: vec![RollbackFailure::Journal {
-                        step: completed.len(),
+                        step: completed_prefix,
                         error,
                     }]
                     .into_boxed_slice(),
