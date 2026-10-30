@@ -1116,9 +1116,9 @@ and four 2,250-row additions. The Cancel case accepts the confirmation and
 cancels an active Apply worker; dismissing the confirmation does not qualify.
 Preserve failures before diagnosing a new attempt; do not rerun valid samples.
 
-The first representative import records the UI owner's QPC tick after its live
-Paths worker makes the owned Cancel button visible, enabled, and laid out with
-positive native geometry. A before/after
+The first representative import records the UI owner's QPC tick after the same
+Paths import and admission lifecycle makes the owned Cancel button visible,
+enabled, and laid out with positive native geometry. A before/after
 revision frame binds this committed control state to the exact process and Open
 invocation, even if the transient import status text is coalesced before it is
 written to the status control. Report the Open-to-control-commit interval for
