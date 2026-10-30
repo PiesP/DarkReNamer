@@ -39,6 +39,8 @@ REFERENCE_SCOPE = ["full-context-semantics-v1"]
 RUN_MODES = {"full-context", "standard", "text-scale", "tooltip"}
 PAIR_MODE = "appearance-pair"
 PERFORMANCE_MODE = "performance-sample"
+READINESS_BRACKET_CONTRACT = "qpc-polled-readiness-v1"
+READINESS_LEGACY_TIP = "d5b1df1c2ca95d258b2839a995753b1c043af265"
 FOCUSED_CLEAR_MODE = "focused-10k-clear"
 FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
 FOCUSED_CLEAR_SCOPE = "focused-10k-clear-v1"
@@ -775,6 +777,8 @@ def validate_guest_platform(value: object, label: str) -> dict:
 
 def validate_request(value: object) -> dict:
     fields = {"mode", "appearance", "desktop", "text_scale_percent"}
+    if isinstance(value, dict) and "readiness_bracket_contract" in value:
+        fields.add("readiness_bracket_contract")
     if isinstance(value, dict) and value.get("mode") == PAIR_MODE and "high_contrast" in value:
         fields.add("high_contrast")
     if isinstance(value, dict) and value.get("mode") == PERFORMANCE_MODE:
@@ -794,6 +798,10 @@ def validate_request(value: object) -> dict:
     if isinstance(value, dict) and value.get("mode") == RUNTIME_BASELINE_MODE:
         fields.add("runtime_baseline_plan")
     request = exact_keys(value, fields, "request")
+    require("readiness_bracket_contract" not in request or
+            (request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE} and
+             request["readiness_bracket_contract"] == READINESS_BRACKET_CONTRACT),
+            "Readiness bracket contract is invalid for this request.")
     require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
@@ -858,6 +866,17 @@ def validate_request(value: object) -> dict:
     return request
 
 
+def requires_readiness_brackets(source_sha: str, source_repo: Path | None = None) -> bool:
+    """Only verified source at or before the frozen pre-bracket tip is legacy."""
+    if SHA1.fullmatch(source_sha) is None:
+        return True
+    repo = Path(source_repo) if source_repo is not None else Path.cwd()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", source_sha,
+         READINESS_LEGACY_TIP], capture_output=True, check=False)
+    return result.returncode != 0
+
+
 def validate_reference(value: object, run_id: str) -> dict:
     reference = exact_keys(
         value,
@@ -875,7 +894,8 @@ def validate_reference(value: object, run_id: str) -> dict:
 
 
 def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
-                            expected_profile_sha256: str | None = None) -> tuple[dict, bytes]:
+                            expected_profile_sha256: str | None = None,
+                            source_repo: Path | None = None) -> tuple[dict, bytes]:
     value, data = read_json(run_root, Path("input-manifest.json"), "input manifest")
     required = {
         "schema_version", "run_id", "source_sha", "source_tree", "bundle_manifest",
@@ -922,6 +942,10 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
+    if request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE} and \
+            requires_readiness_brackets(manifest["source_sha"], source_repo):
+        require(request.get("readiness_bracket_contract") == READINESS_BRACKET_CONTRACT,
+                "Current-source readiness bracket contract is missing.")
     if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance:
         require(manifest["acceptance_profile_id"] in
                 ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance else
@@ -3627,7 +3651,8 @@ def validate_response_timeline(scenario: dict, samples: list[dict], order: str) 
 
 
 def validate_performance_metrics(scenario: dict, *,
-                                 expected_response_schema_version: int | None = None) -> dict:
+                                 expected_response_schema_version: int | None = None,
+                                 require_readiness_brackets: bool = False) -> dict:
     plan = exact_keys(scenario.get("plan"),
                       {"ordinary_rows", "long_path_rows", "extension_classes",
                        "add_remove_reset_cycles", "idle_seconds", "sample_interval_ms", "long_path_order"},
@@ -3826,6 +3851,27 @@ def validate_performance_metrics(scenario: dict, *,
                                              "long-visible", "extensions", "cycle-1", "cycle-2", "cycle-3")),
             "Performance samples do not cover idle and each expensive import/refresh phase.")
     timeline_metrics = validate_response_timeline(scenario, samples, order) if timeline_enabled else None
+    readiness_metrics = None
+    if require_readiness_brackets:
+        require(timeline_enabled, "Readiness bracket contract requires the raw response timeline.")
+        long_order = ("long-visible", "long-hidden") if order == "visible-hidden" else (
+            "long-hidden", "long-visible")
+        import_operations = ("ordinary-100", "ordinary-1000") + tuple(
+            f"ordinary-10000-{number}" for number in range(1, 5)) + long_order + (
+            "extensions", "cycle-1", "cycle-2", "cycle-3")
+        observations = [("startup", "import-command-enabled", None)]
+        observations.extend((operation, predicate, None)
+                            for operation in import_operations
+                            for predicate in ("expected-row-count", "import-command-enabled"))
+        readiness_metrics = validate_readiness_brackets(
+            scenario.get("readiness_brackets"), process_id=scenario["process_id"],
+            process_start_utc_ticks=scenario["process_start_utc_ticks"],
+            main_window_handle=scenario["environment"]["main_window"]["hwnd"],
+            operations=observations,
+            timeline_events=scenario["response_timeline"]["events"])
+        require(readiness_metrics["observations"][1]["first_true_end_ticks"] <
+                scenario["response_timeline"]["events"][0]["ticks"],
+                "Performance startup command readiness follows the first workload.")
     phase_summary = scenario.get("phase_summary")
     require(isinstance(phase_summary, list) and len(phase_summary) == len(phase_order),
             "Performance per-phase sampling summary is missing.")
@@ -3867,7 +3913,8 @@ def validate_performance_metrics(scenario: dict, *,
             "probe_timeout_count": sum(row["probe_status"] == "timeout" for row in samples),
             "probe_failure_unknown_count": sum(row["probe_status"] == "failure_unknown" for row in samples),
             "wakeups": "not_run",
-            **({"response_timeline": timeline_metrics} if timeline_metrics is not None else {})}
+            **({"response_timeline": timeline_metrics} if timeline_metrics is not None else {}),
+            **({"readiness_brackets": readiness_metrics} if readiness_metrics is not None else {})}
 
 
 def validate_performance_lifecycle(lifecycles: object, scenario: dict, application_sha256: str) -> None:
@@ -5078,14 +5125,16 @@ def validate_picker_run(root: Path, run_id: str, source_sha: str, repo: Path) ->
 
 def validate_performance_run(root: Path, run_id: str, source_sha: str, *,
                              expected_profile_sha256: str | None = None,
-                             expected_response_schema_version: int = 0) -> dict:
+                             expected_response_schema_version: int = 0,
+                             source_repo: Path | None = None) -> dict:
     owned = expected_profile_sha256 is not None
     require(run_id in {(owned_performance_run_id(order) if owned else performance_run_id(order))
                        for order in PERFORMANCE_ORDERS}, "Performance run id is invalid.")
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(), "Performance run directory is missing or unsafe.")
     manifest, input_bytes = validate_input_manifest(
-        run_root, source_sha, expected_profile_sha256=expected_profile_sha256)
+        run_root, source_sha, expected_profile_sha256=expected_profile_sha256,
+        source_repo=source_repo)
     require(manifest["request"]["mode"] == PERFORMANCE_MODE, "Performance request mode is missing.")
     input_hash = sha256_bytes(input_bytes)
     _, cleanup_bytes = validate_cleanup(run_root, input_hash)
@@ -5155,7 +5204,9 @@ def validate_performance_run(root: Path, run_id: str, source_sha: str, *,
             captures[0].get("sha256") == files["performance-empty.png"]["sha256"],
             "Performance empty-idle PNG evidence is missing or unbound.")
     metrics = validate_performance_metrics(
-        scenario, expected_response_schema_version=expected_response_schema_version)
+        scenario, expected_response_schema_version=expected_response_schema_version,
+        require_readiness_brackets=manifest["request"].get(
+            "readiness_bracket_contract") == READINESS_BRACKET_CONTRACT)
     return {"run_id": run_id, "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
             "bundle_mode": "prepared" if "prepared_bundle" in manifest else "built",
@@ -5665,6 +5716,140 @@ RUNTIME_STARTUP_INTERVALS = {
 }
 
 
+def validate_readiness_brackets(value: object, *, process_id: int,
+                                process_start_utc_ticks: int, main_window_handle: int,
+                                operations: list[tuple[str, str, int | None]],
+                                startup_ready_ticks: int | None = None,
+                                timeline_events: list[dict] | None = None) -> dict:
+    """Validate raw observer queries; these bound observation, not screen presentation."""
+    require(isinstance(value, list) and len(value) == len(operations) + 1,
+            "Readiness bracket inventory is missing or duplicated.")
+    frequency = None
+    previous_end = 0
+    boundaries = {(row["operation"], row["step"]): row["ticks"]
+                  for row in (timeline_events or [])}
+    summaries = []
+    for index, record in enumerate(value):
+        expected_operation, expected_predicate, _ = (
+            ("startup-main-window", "bound-main-window", None) if index == 0
+            else operations[index - 1])
+        fields = {"operation", "predicate", "observation", "qpc_frequency",
+                  "process_id", "process_start_utc_ticks", "main_window_handle"}
+        fields.update({"begin_ticks", "end_ticks"} if index == 0 else {"probes"})
+        row = exact_keys(record, fields, f"readiness bracket {index}")
+        require(row["operation"] == expected_operation and
+                row["predicate"] == expected_predicate and
+                row["observation"] == ("opaque-observer-envelope" if index == 0 else
+                                       "polled-monotonic-predicate"),
+                "Readiness bracket operation or predicate differs.")
+        require(int_equals(row["process_id"], process_id) and
+                int_equals(row["process_start_utc_ticks"], process_start_utc_ticks) and
+                int_equals(row["main_window_handle"], main_window_handle),
+                "Readiness bracket product process or main window identity differs.")
+        observed_frequency = checked_int(row["qpc_frequency"], 1, 10**10,
+                                         "readiness QPC frequency")
+        frequency = observed_frequency if frequency is None else frequency
+        require(observed_frequency == frequency, "Readiness QPC clock changed within one process.")
+        if index == 0:
+            begin = checked_int(row["begin_ticks"], 1, 2**63 - 1, "main discovery begin")
+            end = checked_int(row["end_ticks"], 1, 2**63 - 1, "main discovery end")
+            require(begin < end and end - begin <= 600 * frequency,
+                    "Main-window discovery envelope is invalid.")
+            previous_end = end
+            summaries.append({"operation": expected_operation,
+                              "observation": "opaque-observer-envelope",
+                              "begin_ticks": begin, "end_ticks": end})
+            continue
+        probes = row["probes"]
+        require(isinstance(probes, list) and 1 <= len(probes) <= 6001,
+                "Readiness query count is missing or unbounded.")
+        first_begin = None
+        last_false_begin = None
+        last_false_end = None
+        for probe_index, probe in enumerate(probes):
+            query = exact_keys(probe, {"begin_ticks", "end_ticks", "ready"},
+                               f"readiness query {index}:{probe_index}")
+            begin = checked_int(query["begin_ticks"], 1, 2**63 - 1,
+                                "readiness query begin")
+            end = checked_int(query["end_ticks"], 1, 2**63 - 1,
+                              "readiness query end")
+            require(type(query["ready"]) is bool and begin <= end and
+                    begin > previous_end and end - begin <= 600 * frequency and
+                    (query["ready"] is (probe_index == len(probes) - 1)),
+                    "Readiness queries are unordered, failed, or premature.")
+            first_begin = begin if first_begin is None else first_begin
+            previous_end = end
+            if not query["ready"]:
+                last_false_begin, last_false_end = begin, end
+        bracket_begin = last_false_begin if last_false_begin is not None else first_begin
+        bracket_end = previous_end
+        require(bracket_end - bracket_begin <= 600 * frequency and
+                (last_false_end is None or last_false_end < probes[-1]["begin_ticks"]),
+                "Readiness observation bracket is inverted or out of bounds.")
+        expected_end = operations[index - 1][2]
+        if expected_end is None and timeline_events is not None:
+            step = "rows_observed" if expected_predicate == "expected-row-count" else "command_ready"
+            expected_end = boundaries.get((expected_operation, step))
+        require(expected_end is None or bracket_end == expected_end,
+                "Readiness first-positive query differs from its declared endpoint.")
+        if expected_operation == "startup" and startup_ready_ticks is not None:
+            require(bracket_end == startup_ready_ticks,
+                    "Startup readiness bracket differs from the raw startup clock.")
+        summaries.append({"operation": expected_operation, "predicate": expected_predicate,
+                          "observation": "polled-monotonic-predicate",
+                          "query_count": len(probes),
+                          "last_false_begin_ticks": last_false_begin,
+                          "first_true_end_ticks": bracket_end,
+                          "uncertainty_ms": (bracket_end - bracket_begin) * 1000 / frequency,
+                          "actual_intervals_ms": [
+                              (probes[i]["begin_ticks"] - probes[i - 1]["end_ticks"]) *
+                              1000 / frequency for i in range(1, len(probes))]})
+    return {"qpc_frequency": frequency, "observations": summaries}
+
+
+def validate_idle_cpu_windows(value: object, *, process_id: int,
+                              process_start_utc_ticks: int, main_window_handle: int,
+                              frequency: int, startup_ready_ticks: int) -> list[dict]:
+    require(isinstance(value, list) and len(value) == 2,
+            "Runtime idle CPU windows are missing or duplicated.")
+    summaries = []
+    previous_end = startup_ready_ticks
+    for index, phase in enumerate(("empty-idle", "populated-idle")):
+        window = exact_keys(value[index], {"phase", "before", "after"},
+                            f"runtime {phase} CPU window")
+        require(window["phase"] == phase, "Runtime idle CPU window phase order differs.")
+        snapshots = []
+        for name in ("before", "after"):
+            snapshot = exact_keys(window[name], {"begin_ticks", "end_ticks", "process_id",
+                "process_start_utc_ticks", "main_window_handle", "cpu_total_ticks"},
+                f"runtime {phase} {name} CPU snapshot")
+            begin = checked_int(snapshot["begin_ticks"], 1, 2**63 - 1,
+                                "runtime idle CPU query begin")
+            end = checked_int(snapshot["end_ticks"], 1, 2**63 - 1,
+                              "runtime idle CPU query end")
+            checked_int(snapshot["cpu_total_ticks"], 0, 2**63 - 1,
+                        "runtime process CPU total ticks")
+            require(begin <= end and end - begin <= 30 * frequency and
+                    int_equals(snapshot["process_id"], process_id) and
+                    int_equals(snapshot["process_start_utc_ticks"], process_start_utc_ticks) and
+                    int_equals(snapshot["main_window_handle"], main_window_handle),
+                    "Runtime idle CPU query or process binding differs.")
+            snapshots.append(snapshot)
+        before, after = snapshots
+        elapsed_lower_ms = (after["begin_ticks"] - before["end_ticks"]) * 1000 / frequency
+        elapsed_upper_ms = (after["end_ticks"] - before["begin_ticks"]) * 1000 / frequency
+        cpu_delta_ms = (after["cpu_total_ticks"] - before["cpu_total_ticks"]) / 10000
+        require(before["begin_ticks"] > previous_end and
+                elapsed_lower_ms >= 30000 and elapsed_upper_ms <= 600000 and
+                0 <= cpu_delta_ms <= elapsed_upper_ms * 64,
+                "Runtime idle CPU interval is short, inverted, or impossible.")
+        previous_end = after["end_ticks"]
+        summaries.append({"phase": phase, "elapsed_lower_ms": elapsed_lower_ms,
+                          "elapsed_upper_ms": elapsed_upper_ms,
+                          "cpu_delta_ms": cpu_delta_ms})
+    return summaries
+
+
 def validate_runtime_startup(value: object, label: str) -> dict:
     startup = exact_keys(value, {"clock", *RUNTIME_STARTUP_INTERVALS,
         "main_hwnd_bound", "empty_grid", "import_command_enabled"}, label)
@@ -5764,7 +5949,8 @@ def validate_runtime_early_host_receipt(run_root: Path, files: dict[str, dict],
     return receipt
 
 
-def validate_runtime_baseline_metrics(scenario: object) -> dict:
+def validate_runtime_baseline_metrics(scenario: object, *,
+                                      require_readiness_brackets: bool = False) -> dict:
     scenario = exact_keys(scenario, {"mode", "plan", "system_resolution", "executable_sha256",
         "cells", "environment", "disk_unchanged", "journal_residue_count", "wakeups", "appearance"},
         "runtime baseline scenario")
@@ -5799,7 +5985,8 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
             "process_id", "process_start_utc_ticks", "startup", "preference_before",
             "preference_after", "menu", "empty_idle", "import", "icon_settlement",
             "populated_idle", "transforms", "samples", "phase_summary", "normal_exit_code",
-            "disk_unchanged", "journal_residue_count", "environment"},
+            "disk_unchanged", "journal_residue_count", "environment"} |
+            ({"readiness_brackets", "idle_cpu_windows"} if require_readiness_brackets else set()),
             f"runtime baseline cell {index}")
         expected_id = RUNTIME_BASELINE_PLAN["startup_cells"][index]
         expected_value, language = ((0, "ko") if index < 2 else (2, "en"))
@@ -5849,10 +6036,25 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
                 type(nested(environment, "main_window", "hwnd")) is int and
                 nested(environment, "main_window", "hwnd") > 0,
                 "Runtime baseline cell display or bound main HWND differs.")
+        if require_readiness_brackets:
+            readiness = validate_readiness_brackets(
+                cell["readiness_brackets"], process_id=cell["process_id"],
+                process_start_utc_ticks=cell["process_start_utc_ticks"],
+                main_window_handle=environment["main_window"]["hwnd"],
+                operations=[("startup", "import-command-enabled", startup["clock"]["command_ready_ticks"])] +
+                ([ ("runtime-import-1000", "expected-row-count", cell["import"]["row_observed_ticks"]),
+                   ("runtime-import-1000", "import-command-enabled", cell["import"]["command_ready_ticks"]) ]
+                 if index == 0 else []),
+                startup_ready_ticks=startup["clock"]["command_ready_ticks"])
+            if index == 0:
+                require(readiness["observations"][2]["first_true_end_ticks"] <=
+                        readiness["observations"][3]["first_true_end_ticks"],
+                        "Runtime import readiness completed before row observation.")
         validate_runtime_appearance(environment, cell["process_id"])
         if index:
             require(all(cell[name] is None for name in ("empty_idle", "import", "icon_settlement",
-                "populated_idle", "transforms", "samples", "phase_summary")),
+                "populated_idle", "transforms", "samples", "phase_summary") +
+                (("idle_cpu_windows",) if require_readiness_brackets else ())),
                 "Saved-language startup cell contained undeclared workload.")
             metrics.append({"id": expected_id, "startup_ms": request_ms, "startup": startup})
             continue
@@ -5862,11 +6064,25 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
                            "populated idle")["rows"], 1000),
                 "Runtime baseline fresh System idle state differs.")
         imported = exact_keys(cell["import"], {"rows", "observed_rows", "data_ready_ms",
-            "command_ready_after_rows_ms"}, "runtime import")
+            "command_ready_after_rows_ms"} |
+            ({"open_ticks", "row_observed_ticks", "command_ready_ticks"}
+             if require_readiness_brackets else set()), "runtime import")
         require(int_equals(imported["rows"], 1000) and int_equals(imported["observed_rows"], 1000) and
                 runtime_ms(imported["data_ready_ms"], "import data ready", minimum=0.001) > 0 and
                 runtime_ms(imported["command_ready_after_rows_ms"], "import command ready") >= 0,
                 "Runtime baseline one ordinary import or command readiness differs.")
+        if require_readiness_brackets:
+            require(all(type(imported[name]) is int and imported[name] > 0 for name in
+                        ("open_ticks", "row_observed_ticks", "command_ready_ticks")) and
+                    imported["open_ticks"] < imported["row_observed_ticks"] <=
+                    imported["command_ready_ticks"],
+                    "Runtime import raw readiness endpoints are unordered.")
+            cpu_windows = validate_idle_cpu_windows(
+                cell["idle_cpu_windows"], process_id=cell["process_id"],
+                process_start_utc_ticks=cell["process_start_utc_ticks"],
+                main_window_handle=environment["main_window"]["hwnd"],
+                frequency=startup["clock"]["qpc_frequency"],
+                startup_ready_ticks=startup["clock"]["command_ready_ticks"])
         receipt = validate_runtime_icon_receipt(cell["icon_settlement"], "runtime icon settlement")
         after = validate_icon_status(cell["populated_idle"]["end_status"], 1000,
                                      "runtime populated idle icon status")
@@ -5893,6 +6109,7 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
         metrics.append({"id": expected_id, "startup_ms": request_ms, "startup": startup,
                         "import": imported, "transforms": transforms,
                         "icon_settled_observed_ms": receipt["icon_settled_observed_ms"],
+                        **({"idle_cpu_windows": cpu_windows} if require_readiness_brackets else {}),
                         **validate_runtime_samples(cell)})
     require(len({(cell["process_id"], cell["process_start_utc_ticks"]) for cell in cells}) == 3,
             "Runtime baseline startup cells reused a product process.")
@@ -5903,12 +6120,14 @@ def validate_runtime_baseline_metrics(scenario: object) -> dict:
     return {"cells": metrics, "wakeups": "not-measured"}
 
 
-def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> dict:
+def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str,
+                                  *, source_repo: Path | None = None) -> dict:
     require(run_id == RUNTIME_BASELINE_RUN_ID, "Runtime baseline run id is invalid.")
     run_root = root / run_id
     require(run_root.is_dir() and not run_root.is_symlink(), "Runtime baseline run directory is missing.")
     manifest, input_bytes = validate_input_manifest(
-        run_root, source_sha, expected_profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256)
+        run_root, source_sha, expected_profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256,
+        source_repo=source_repo)
     require(manifest["request"]["mode"] == RUNTIME_BASELINE_MODE,
             "Runtime baseline request mode differs.")
     input_hash = sha256_bytes(input_bytes)
@@ -5965,7 +6184,9 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
             observations.get("run_id") == run_id,
             "Runtime baseline raw observer or observation identity differs.")
     scenario = observations.get("scenario")
-    metrics = validate_runtime_baseline_metrics(scenario)
+    metrics = validate_runtime_baseline_metrics(
+        scenario, require_readiness_brackets=manifest["request"].get(
+            "readiness_bracket_contract") == READINESS_BRACKET_CONTRACT)
     require(scenario["executable_sha256"] == artifacts["application"]["sha256"],
             "Runtime baseline scenario executable hash differs.")
     cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
@@ -6068,7 +6289,8 @@ def main(repo: Path, argv=None) -> int:
                               cwd=repo, capture_output=True, check=False)
         require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
                 "Runtime baseline source profile differs from reviewed V2 revision-3 bytes.")
-        measured = validate_runtime_baseline_run(root, args.runs[0], args.expected_source_sha)
+        measured = validate_runtime_baseline_run(
+            root, args.runs[0], args.expected_source_sha, source_repo=repo)
         print(json.dumps({"schema_version": 1, "diagnostic": RUNTIME_BASELINE_MODE,
                           "status": "measured", "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",
@@ -6109,6 +6331,7 @@ def main(repo: Path, argv=None) -> int:
         measured = validate_performance_run(
             root, args.runs[0], args.expected_source_sha,
             expected_profile_sha256=profile_digest,
+            source_repo=repo,
             expected_response_schema_version=selected_performance_response_schema(
                 repo, args.expected_source_sha))
         print(json.dumps({"schema_version": 1, "diagnostic": PERFORMANCE_MODE,

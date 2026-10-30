@@ -29,8 +29,105 @@ from gui_regression_fixture import (
 )
 
 
+class ReadinessBracketTests(unittest.TestCase):
+    def test_only_verified_prechange_lineage_may_omit_contract(self):
+        self.assertFalse(evidence.requires_readiness_brackets(evidence.READINESS_LEGACY_TIP))
+        self.assertTrue(evidence.requires_readiness_brackets('a' * 40))
+        with mock.patch.object(evidence.subprocess, 'run',
+                               return_value=SimpleNamespace(returncode=1)):
+            self.assertTrue(evidence.requires_readiness_brackets('b' * 40))
+
+    def record(self, probes):
+        return [
+            {'operation': 'startup-main-window', 'predicate': 'bound-main-window',
+             'observation': 'opaque-observer-envelope', 'qpc_frequency': 10000000,
+             'process_id': 41, 'process_start_utc_ticks': 638965440000000000,
+             'main_window_handle': 900, 'begin_ticks': 100, 'end_ticks': 200},
+            {'operation': 'startup', 'predicate': 'import-command-enabled',
+             'observation': 'polled-monotonic-predicate', 'qpc_frequency': 10000000,
+             'process_id': 41, 'process_start_utc_ticks': 638965440000000000,
+             'main_window_handle': 900, 'probes': probes},
+        ]
+
+    def validate(self, records, end):
+        return evidence.validate_readiness_brackets(
+            records, process_id=41, process_start_utc_ticks=638965440000000000,
+            main_window_handle=900,
+            operations=[('startup', 'import-command-enabled', end)],
+            startup_ready_ticks=end)
+
+    def test_last_false_to_first_true_and_actual_query_gaps(self):
+        probes = [{'begin_ticks': 300, 'end_ticks': 310, 'ready': False},
+                  {'begin_ticks': 1000310, 'end_ticks': 1000320, 'ready': False},
+                  {'begin_ticks': 2000320, 'end_ticks': 2000340, 'ready': True}]
+        receipt = self.validate(self.record(probes), 2000340)['observations'][1]
+        self.assertEqual(receipt['last_false_begin_ticks'], 1000310)
+        self.assertEqual(receipt['first_true_end_ticks'], 2000340)
+        self.assertEqual(len(receipt['actual_intervals_ms']), 2)
+        self.assertAlmostEqual(receipt['uncertainty_ms'], 100.003)
+
+    def test_first_query_true_retains_only_its_query_uncertainty(self):
+        receipt = self.validate(self.record([
+            {'begin_ticks': 300, 'end_ticks': 320, 'ready': True}]), 320)['observations'][1]
+        self.assertIsNone(receipt['last_false_begin_ticks'])
+        self.assertAlmostEqual(receipt['uncertainty_ms'], 0.002)
+
+    def test_rejects_identity_drift_premature_true_and_inverted_queries(self):
+        valid = self.record([{'begin_ticks': 300, 'end_ticks': 310, 'ready': False},
+                             {'begin_ticks': 1000310, 'end_ticks': 1000320, 'ready': True}])
+        changes = (
+            lambda rows: rows[1].__setitem__('process_id', 42),
+            lambda rows: rows[1].__setitem__('process_start_utc_ticks', 638965440000000001),
+            lambda rows: rows[1].__setitem__('main_window_handle', 901),
+            lambda rows: rows[1]['probes'][0].__setitem__('ready', True),
+            lambda rows: rows[1]['probes'][1].__setitem__('begin_ticks', 309),
+            lambda rows: rows[1]['probes'][1].__setitem__('end_ticks', 300),
+            lambda rows: rows[1].pop('probes'),
+        )
+        for change in changes:
+            rows = deepcopy(valid)
+            change(rows)
+            with self.subTest(change=change), self.assertRaises(evidence.EvidenceError):
+                self.validate(rows, 1000320)
+        with self.assertRaises(evidence.EvidenceError):
+            self.validate(valid, 1000321)
+
+    def test_exact_idle_cpu_windows_require_30s_and_same_owned_process(self):
+        def snapshot(begin, end, cpu):
+            return {'begin_ticks': begin, 'end_ticks': end, 'process_id': 41,
+                    'process_start_utc_ticks': 638965440000000000,
+                    'main_window_handle': 900, 'cpu_total_ticks': cpu}
+        windows = [
+            {'phase': 'empty-idle', 'before': snapshot(100, 110, 1000000),
+             'after': snapshot(300000110, 300000120, 1500000)},
+            {'phase': 'populated-idle', 'before': snapshot(400000100, 400000110, 2000000),
+             'after': snapshot(700000110, 700000120, 3000000)},
+        ]
+        result = evidence.validate_idle_cpu_windows(
+            windows, process_id=41, process_start_utc_ticks=638965440000000000,
+            main_window_handle=900, frequency=10000000, startup_ready_ticks=50)
+        self.assertEqual([row['cpu_delta_ms'] for row in result], [50.0, 100.0])
+        self.assertEqual([row['elapsed_lower_ms'] for row in result], [30000.0, 30000.0])
+        for change in (
+            lambda rows: rows[0]['after'].__setitem__('begin_ticks', 300000109),
+            lambda rows: rows[1]['before'].__setitem__('process_id', 42),
+            lambda rows: rows[1]['after'].__setitem__('cpu_total_ticks', 100),
+        ):
+            rows = deepcopy(windows)
+            change(rows)
+            with self.subTest(change=change), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_idle_cpu_windows(
+                    rows, process_id=41, process_start_utc_ticks=638965440000000000,
+                    main_window_handle=900, frequency=10000000, startup_ready_ticks=50)
+
+
 class SyntheticFixtureTestCase(unittest.TestCase):
     def setUp(self):
+        # Synthetic SOURCE is not a Git commit; each fixture models the historical
+        # pre-bracket producer unless an individual test overrides this boundary.
+        lineage = mock.patch.object(evidence, 'requires_readiness_brackets', return_value=False)
+        lineage.start()
+        self.addCleanup(lineage.stop)
         self.temporary = None
         self.addCleanup(self.cleanup_fixture)
         self.reset_fixture()
@@ -3931,6 +4028,31 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         write_json(postlaunch_path, postlaunch)
         self.refresh_runtime(run)
         return run
+
+    def test_current_source_manifest_cannot_delete_readiness_contract(self):
+        run = self.runtime_run()
+        path = run / 'input-manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['request']['readiness_bracket_contract'] = evidence.READINESS_BRACKET_CONTRACT
+        write_json(path, manifest)
+        with mock.patch.object(evidence, 'requires_readiness_brackets', return_value=True):
+            evidence.validate_input_manifest(
+                run, SOURCE, expected_profile_sha256=evidence.OWNED_PERFORMANCE_PROFILE_SHA256)
+            manifest['request'].pop('readiness_bracket_contract')
+            write_json(path, manifest)
+            with self.assertRaisesRegex(evidence.EvidenceError, 'contract is missing'):
+                evidence.validate_input_manifest(
+                    run, SOURCE, expected_profile_sha256=evidence.OWNED_PERFORMANCE_PROFILE_SHA256)
+
+    def test_declared_runtime_contract_rejects_missing_product_brackets(self):
+        run = self.runtime_run()
+        path = run / 'input-manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['request']['readiness_bracket_contract'] = evidence.READINESS_BRACKET_CONTRACT
+        write_json(path, manifest)
+        self.refresh_runtime(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
 
     def test_complete_producer_shape_three_process_runtime_evidence(self):
         run = self.runtime_run()
