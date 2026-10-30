@@ -165,6 +165,23 @@ public static class DarkReNamerVmAcceptanceNative {
     }
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint process) { return Windows; }
 }
+public sealed class DarkReNamerGuiApplyClockFrame {
+    public ulong Frequency, Revision, InitialApplyAcceptedTicks;
+    public ulong ConfirmationAcceptedTicks, CancelAcceptedTicks;
+    public uint CancelKind;
+}
+public static class DarkReNamerIconStatusObserver {
+    public static long CapturedStartUtcTicks;
+    public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(
+        object process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window != new IntPtr(5151) ||
+            expectedStartUtcTicks != CapturedStartUtcTicks)
+            throw new InvalidOperationException("GUI Apply clock target process identity changed.");
+        return new DarkReNamerGuiApplyClockFrame {
+            Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency, Revision = 7
+        };
+    }
+}
 '@
 
 & {
@@ -464,6 +481,27 @@ public static class DarkReNamerVmAcceptanceNative {
     $startupSource = ${function:Start-AcceptanceApplication}.ToString()
     if ($startupSource -cnotmatch '(?s)-Label \$Label\s+\$application\.main_bound_ticks = \[Diagnostics.Stopwatch\]::GetTimestamp\(\)\s+\$window = \$binding.element') {
         throw 'The main-bound QPC endpoint is not immediately after the exact window wait.'
+    }
+    if ($null -ne $application.PSObject.Properties['process_start_utc_ticks']) {
+        throw 'Startup fixture unexpectedly added the GUI Apply observer timestamp to Application.'
+    }
+    $capturedStart = [long]$process.StartTime.ToUniversalTime().Ticks
+    [DarkReNamerIconStatusObserver]::CapturedStartUtcTicks = $capturedStart
+    $clock = Read-ObserverGuiApplyClockFrame -Application $application `
+        -ExpectedStartUtcTicks $capturedStart
+    if ($clock.process_id -ne $process.Id -or
+        $clock.process_start_utc_ticks -ne $capturedStart -or
+        $clock.main_window_handle -ne 5151 -or $clock.revision -ne 7 -or
+        $clock.query_begin_ticks -gt $clock.query_end_ticks) {
+        throw 'GUI Apply clock lost its captured process lifetime binding.'
+    }
+    Assert-Fails -Expected 'target process identity changed' -Action {
+        Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks ($capturedStart - 1)
+    }
+    $scenarioSource = ${function:Invoke-ObserverGuiApplyFeedbackScenario}.ToString()
+    if ($scenarioSource -match '(?i)\$application\.process_start_utc_ticks') {
+        throw 'GUI Apply scenario still reads a timestamp absent from Application.'
     }
 }
 

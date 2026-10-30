@@ -3966,11 +3966,12 @@ function Get-ObserverGuiApplyFixtureState {
 }
 
 function Read-ObserverGuiApplyClockFrame {
-    param([Parameter(Mandatory)][object] $Application)
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks)
     $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
     $frame = [DarkReNamerIconStatusObserver]::ReadGuiApplyClockBound(
         $Application.process, [IntPtr]$Application.main_handle,
-        [long]$Application.process_start_utc_ticks)
+        $ExpectedStartUtcTicks)
     $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
     return [ordered]@{
         query_begin_ticks=$begin; query_end_ticks=$end;
@@ -3980,7 +3981,7 @@ function Read-ObserverGuiApplyClockFrame {
         cancel_accepted_ticks=[long]$frame.CancelAcceptedTicks;
         cancel_kind=[int]$frame.CancelKind;
         process_id=[int]$Application.process.Id;
-        process_start_utc_ticks=[long]$Application.process_start_utc_ticks;
+        process_start_utc_ticks=$ExpectedStartUtcTicks;
         main_window_handle=[long]$Application.main_handle }
 }
 
@@ -4102,7 +4103,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds `
             -Label 'GUI Apply functional status' -RequireWindowHandle
         $sampler.SetPhase('planning')
-        $initialClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
+        $initialClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
         $applyTrigger = Start-ObserverApplyFromPublicUi -Application $application `
             -SessionId $SessionId -Label 'measured public Apply'
         if ($applyTrigger.input -cne 'visible-command-rail') {
@@ -4116,7 +4118,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
         } else { $null }
         $readyConfirmation = Wait-ObserverApplyConfirmationReady -Application $application `
             -SessionId $SessionId -WaitSeconds $WaitSeconds
-        $initialClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+        $initialClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
         $initialFeedbackEnd = if ($null -ne $planningFeedback) {
             [long]$planningFeedback.probes[-1].end_ticks
         } else { [long]$readyConfirmation.bracket.probes[-1].end_ticks }
@@ -4149,7 +4152,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
             -Label 'measured Apply acceptance' -RequireEnabled -RequireWindowHandle
         $sampler.SetPhase('execution')
-        $confirmationClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
+        $confirmationClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
         $invocationTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
         $confirmInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
             -Element $confirm -Label 'measured Apply acceptance'
@@ -4161,7 +4165,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                     $value.StartsWith('실행 준비 완료:', [StringComparison]::Ordinal) -or
                     $value.StartsWith('파일 변경 중:', [StringComparison]::Ordinal))
             }
-        $confirmationClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+        $confirmationClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
         if ($confirmationClockBefore.confirmation_accepted_ticks -ne 0 -or
             $confirmationClockAfter.revision -le $confirmationClockBefore.revision -or
             $confirmationClockAfter.confirmation_accepted_ticks -lt $invocationTicks -or
@@ -4180,7 +4185,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
                 -Label 'active worker Cancel' -RequireEnabled -RequireWindowHandle
             if ($cancel.Current.IsOffscreen) { throw 'Active worker Cancel is hidden before request.' }
-            $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
+            $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
             $cancelRequestTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
             $cancelInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
                 -Element $cancel -Label 'active worker Cancel request'
@@ -4195,7 +4201,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                         ($value -ceq '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' -or
                          $value.StartsWith('취소 요청됨 · 처리 결과를 기다려 주세요', [StringComparison]::Ordinal)))
                 }
-            $cancelClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+            $cancelClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
             if ($cancelClockBefore.cancel_accepted_ticks -ne 0 -or
                 $cancelClockAfter.revision -le $cancelClockBefore.revision -or
                 $cancelClockAfter.cancel_kind -ne 4 -or
@@ -4242,7 +4249,7 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 $syncBegin = [long][Diagnostics.Stopwatch]::GetTimestamp()
                 $synchronized = [DarkReNamerIconStatusObserver]::ReadPreviewSynchronizationBound(
                     $application.process, [IntPtr]$application.main_handle,
-                    [long]$application.process_start_utc_ticks)
+                    [long]$ObservationSink.process_start_utc_ticks)
                 $syncEnd = [long][Diagnostics.Stopwatch]::GetTimestamp()
                 if ($synchronized -ne 1) { return $false }
                 $nativeSyncReads.Add([ordered]@{
@@ -4250,7 +4257,7 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                     qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
                     query_begin_ticks=$syncBegin; query_end_ticks=$syncEnd;
                     process_id=[int]$application.process.Id;
-                    process_start_utc_ticks=[long]$application.process_start_utc_ticks;
+                    process_start_utc_ticks=[long]$ObservationSink.process_start_utc_ticks;
                     main_window_handle=[long]$application.main_handle })
                 return $true
             }
@@ -4300,19 +4307,19 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             -Predicate 'close-readiness-mask31' -Probe {
                 return [bool]([DarkReNamerIconStatusObserver]::ReadCloseReadinessBound(
                     $application.process, [IntPtr]$application.main_handle,
-                    [long]$application.process_start_utc_ticks) -eq 31)
+                    [long]$ObservationSink.process_start_utc_ticks) -eq 31)
             }
         $closeReadyBegin = [long][Diagnostics.Stopwatch]::GetTimestamp()
         $closeFlags = [DarkReNamerIconStatusObserver]::ReadCloseReadinessBound(
             $application.process, [IntPtr]$application.main_handle,
-            [long]$application.process_start_utc_ticks)
+            [long]$ObservationSink.process_start_utc_ticks)
         $closeReadyEnd = [long][Diagnostics.Stopwatch]::GetTimestamp()
         if ($closeFlags -ne 31) { throw 'GUI Apply idle close prerequisites are not all acknowledged.' }
         $ObservationSink['close_readiness'] = [ordered]@{
             selector=22; required_mask=31; flags=[int]$closeFlags;
             query_begin_ticks=$closeReadyBegin; query_end_ticks=$closeReadyEnd;
             process_id=[int]$application.process.Id;
-            process_start_utc_ticks=[long]$application.process_start_utc_ticks;
+            process_start_utc_ticks=[long]$ObservationSink.process_start_utc_ticks;
             main_window_handle=[long]$application.main_handle }
         $ObservationSink['normal_close'] = Close-AcceptanceApplication -Application $application `
             -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary -MeasureExit
