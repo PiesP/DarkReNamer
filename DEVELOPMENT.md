@@ -1649,6 +1649,16 @@ valid saved System, and valid saved English. Every cell records the process
 creation bracket, bound main window, empty list, enabled path-list import
 command, exact preference record hash, localized menu radio state, VM region,
 normal close, and owned process Job cleanup.
+For this run, the controller writes `runtime-baseline-early-host.json` into the
+protected host output immediately after the registered observer task starts. The receipt
+binds the generated run, managed desktop, source and manifest hashes to the
+verified executable under the trusted task root's `bundle` directory. The
+guest workspace's staged bundle is not the task's executable path. The host
+reads back the exclusive receipt bytes before collecting results. A collector
+must separately bind its captured PID, process start ticks, loaded image path,
+and image hash to the first canonical product lifecycle; a late receipt or
+different process is incomplete evidence. A failed publication retains the
+existing uncertain-start cleanup path.
 
 Startup retains raw QPC frequency and launch-request, process-creation begin/end,
 exact main-window binding, and command-ready ticks. Main-window binding is the

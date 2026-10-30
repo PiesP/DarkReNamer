@@ -3881,12 +3881,45 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             keyboard={'status': 'not_run'}, accessibility={'status': 'not_run'},
             screenshots=[{'file': 'runtime-baseline-populated.png',
                 'sha256': digest((output / 'runtime-baseline-populated.png').read_bytes())}])
-        write_json(raw_path, raw)
         transport_path = output / 'transport.json'
         transport = json.loads(transport_path.read_text())
         transport['raw_cleanup'] = clean_controller_cleanup_v3(profile_sha256=profile_sha,
             process_jobs=jobs, source_sha=SOURCE,
             bundle_sha256=manifest['bundle_manifest']['sha256'])
+        transport['runtime_early_desktop_nonce'] = 'd' * 32
+        owned = transport['raw_cleanup']['owned_resource_evidence']
+        trusted_root = owned['root_records']['trusted']['path']
+        trusted_bundle = trusted_root + r'\bundle'
+        trusted_application = trusted_bundle + r'\DarkReNamer.exe'
+        for life in lives:
+            life['process_lifecycle']['executable_path'] = trusted_application
+        task = owned['task_execution']
+        task['action_arguments'] = task['action_arguments'].replace(
+            ' -ElevatedObserver', f' -BundleRoot "{trusted_bundle}" -ElevatedObserver')
+        task['observer_lifecycle']['command_line'] = (
+            '"' + task['action_executable'] + '" ' + task['action_arguments'])
+        raw['observer_lifecycle'] = deepcopy(task['observer_lifecycle'])
+        write_json(raw_path, raw)
+        write_json(output / 'runtime-baseline-early-host.json', {
+            'schema_version': 1, 'kind': 'runtime_baseline_early_host_identity',
+            'run_id': run.name, 'run_name': owned['run_name'],
+            'host_output_root': str(output),
+            'input_manifest_sha256': digest(manifest_path.read_bytes()),
+            'source_sha': SOURCE, 'tooling_source_sha': SOURCE,
+            'bundle_manifest_sha256': manifest['bundle_manifest']['sha256'],
+            'application_sha256': app_hash,
+            'vm_id': transport['vm_id'], 'runner_sid': owned['runner_sid'],
+            'runner_session_id': owned['runner_session_id'],
+            'guest_root': owned['root_records']['guest']['path'],
+            'trusted_task_root': trusted_root,
+            'trusted_application_path': trusted_application,
+            'action_executable': task['action_executable'],
+            'action_arguments_sha256': digest(task['action_arguments'].encode('utf-8')),
+            'action_working_directory': trusted_root,
+            'task_principal_sid': owned['runner_sid'],
+            'desktop_lease_id': transport['desktop_lease_id'], 'desktop_nonce': 'd' * 32,
+            'anchor_nonce': owned['protected_anchor_initial']['anchor_nonce'],
+            'root_created_utc': '2026-09-29T00:00:01.0000000Z'})
         # The controller canonicalizes inventory identities, independently of launch order.
         declared = transport['raw_cleanup']['owned_resource_evidence']['declared_processes']
         declared.sort(key=lambda row: f"{row['pid']}|{row['start_time_utc_ticks']}")
@@ -3913,6 +3946,47 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
                 '--diagnostic', evidence.RUNTIME_BASELINE_MODE,
                 '--acceptance-profile-id', evidence.V2_PROFILE_ID]), 0)
         self.assertEqual(json.loads(output.getvalue())['status'], 'measured')
+
+    def test_runtime_early_host_receipt_requires_indexed_source_task_and_trusted_image(self):
+        run = self.runtime_run()
+        path = run / 'output/runtime-baseline-early-host.json'
+        original = path.read_bytes()
+        mutations = (
+            ('schema', lambda r: r.__setitem__('schema_version', 2)),
+            ('run', lambda r: r.__setitem__('run_name', 'DarkReNamerTests-' + 'f' * 32)),
+            ('manifest', lambda r: r.__setitem__('input_manifest_sha256', 'f' * 64)),
+            ('source', lambda r: r.__setitem__('source_sha', 'f' * 40)),
+            ('bundle', lambda r: r.__setitem__('bundle_manifest_sha256', 'f' * 64)),
+            ('application', lambda r: r.__setitem__('application_sha256', 'f' * 64)),
+            ('vm', lambda r: r.__setitem__('vm_id', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')),
+            ('sid', lambda r: r.__setitem__('runner_sid', 'S-1-5-21-1-1-1-1')),
+            ('session', lambda r: r.__setitem__('runner_session_id', 3)),
+            ('guest-root', lambda r: r.__setitem__('guest_root', r['trusted_task_root'])),
+            ('trusted-root', lambda r: r.__setitem__('trusted_task_root', r['guest_root'])),
+            ('guest-exe', lambda r: r.__setitem__(
+                'trusted_application_path', r['guest_root'] + r'\bundle\DarkReNamer.exe')),
+            ('action', lambda r: r.__setitem__('action_arguments_sha256', 'f' * 64)),
+            ('action-root', lambda r: r.__setitem__('action_working_directory', r['guest_root'])),
+            ('principal', lambda r: r.__setitem__('task_principal_sid', 'S-1-5-21-1-1-1-1')),
+            ('lease', lambda r: r.__setitem__('desktop_lease_id', 'f' * 32)),
+            ('anchor', lambda r: r.__setitem__('anchor_nonce', 'f' * 32)),
+            ('root-time', lambda r: r.__setitem__('root_created_utc', '2020-01-01T00:00:00.0000000Z')),
+            ('output-root', lambda r: r.__setitem__('host_output_root', '/wrong/output')),
+            ('type', lambda r: r.__setitem__('trusted_application_path', 7)),
+            ('extra', lambda r: r.__setitem__('unknown', True)),
+            ('missing', lambda r: r.pop('anchor_nonce')),
+        )
+        for name, mutate in mutations:
+            receipt = json.loads(original)
+            mutate(receipt)
+            write_json(path, receipt)
+            self.refresh_runtime(run)
+            with self.subTest(mutation=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
+        path.unlink()
+        self.refresh_runtime(run)
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_runtime_baseline_run(self.root, run.name, SOURCE)
 
     def test_canonical_inventory_is_unordered_but_cells_lifecycles_and_jobs_are_ordered(self):
         run = self.runtime_run()

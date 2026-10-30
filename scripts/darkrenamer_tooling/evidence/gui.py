@@ -5690,6 +5690,80 @@ def validate_runtime_startup(value: object, label: str) -> dict:
     return startup
 
 
+def validate_runtime_early_host_receipt(run_root: Path, files: dict[str, dict],
+                                        manifest: dict, transport: dict, owned: dict,
+                                        input_hash: str) -> dict:
+    leaf = "runtime-baseline-early-host.json"
+    require(leaf in files and files[leaf]["bytes"] <= 8192,
+            "Runtime baseline early host receipt is missing or oversized.")
+    receipt, data = read_json(run_root / "output", Path(leaf), "runtime baseline early host receipt")
+    receipt = exact_keys(receipt, {"schema_version", "kind", "run_id", "run_name",
+        "host_output_root", "input_manifest_sha256", "source_sha", "tooling_source_sha",
+        "bundle_manifest_sha256", "application_sha256", "vm_id", "runner_sid",
+        "runner_session_id", "guest_root", "trusted_task_root", "trusted_application_path",
+        "action_executable", "action_arguments_sha256", "action_working_directory",
+        "task_principal_sid", "desktop_lease_id",
+        "desktop_nonce", "anchor_nonce", "root_created_utc"}, "runtime early host receipt")
+    require(len(data) == files[leaf]["bytes"] and sha256_bytes(data) == files[leaf]["sha256"],
+            "Runtime baseline early host receipt differs from indexed bytes.")
+    for name in ("run_id", "run_name", "input_manifest_sha256", "source_sha",
+                 "tooling_source_sha", "bundle_manifest_sha256", "application_sha256",
+                 "vm_id", "runner_sid", "guest_root", "trusted_task_root",
+                 "trusted_application_path", "action_executable", "action_arguments_sha256",
+                 "action_working_directory", "task_principal_sid",
+                 "desktop_lease_id", "anchor_nonce"):
+        require(type(receipt[name]) is str and 0 < len(receipt[name]) <= 4096,
+                f"Runtime baseline early host {name} is invalid.")
+    roots = owned["root_records"]
+    task = owned["task_execution"]
+    anchor = owned["protected_anchor_initial"]
+    trusted_bundle = roots["trusted"]["path"] + r"\bundle"
+    expected_application = trusted_bundle + r"\DarkReNamer.exe"
+    output_path = receipt["host_output_root"]
+    require(type(output_path) is str and len(output_path) <= 4096 and
+            (output_path.startswith("/") or re.match(r"^[A-Za-z]:\\", output_path)) and
+            output_path.replace("\\", "/").endswith("/" + manifest["run_id"] + "/output") and
+            ".." not in output_path.replace("\\", "/").split("/"),
+            "Runtime baseline early host output path is not bound to its run leaf.")
+    created = receipt["root_created_utc"]
+    require(type(created) is str and
+            re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z", created) is not None and
+            created >= anchor["pre_name_utc"],
+            "Runtime baseline early root creation time is invalid.")
+    require(int_equals(receipt["schema_version"], 1) and
+            receipt["kind"] == "runtime_baseline_early_host_identity" and
+            receipt["run_id"] == manifest["run_id"] == RUNTIME_BASELINE_RUN_ID and
+            receipt["run_name"] == owned["run_name"] == task["task_name"] and
+            receipt["input_manifest_sha256"] == input_hash and
+            receipt["source_sha"] == manifest["source_sha"] and
+            receipt["tooling_source_sha"] == manifest.get("tooling_source_sha", manifest["source_sha"]) ==
+                anchor["source_sha"] and
+            receipt["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] ==
+                anchor["bundle_sha256"] and
+            receipt["application_sha256"] == manifest["artifacts"]["application"]["sha256"] and
+            receipt["vm_id"] == transport["vm_id"] == anchor["vm_id"] and
+            receipt["runner_sid"] == owned["runner_sid"] and
+            int_equals(receipt["runner_session_id"], owned["runner_session_id"]) and
+            receipt["guest_root"].casefold() == roots["guest"]["path"].casefold() and
+            receipt["trusted_task_root"].casefold() == roots["trusted"]["path"].casefold() and
+            receipt["trusted_application_path"].casefold() == expected_application.casefold() and
+            receipt["action_executable"].casefold() == task["action_executable"].casefold() and
+            receipt["action_arguments_sha256"] ==
+                sha256_bytes(task["action_arguments"].encode("utf-8")) and
+            receipt["action_working_directory"].casefold() ==
+                roots["trusted"]["path"].casefold() and
+            receipt["task_principal_sid"] == owned["runner_sid"] and
+            ('-bundleroot "' + trusted_bundle + '"').casefold() in
+                task["action_arguments"].casefold() and
+            receipt["desktop_lease_id"] == transport["desktop_lease_id"] and
+            type(receipt["desktop_nonce"]) is str and
+            re.fullmatch(r"[0-9a-f]{32}", receipt["desktop_nonce"]) is not None and
+            receipt["desktop_nonce"] == transport.get("runtime_early_desktop_nonce") and
+            receipt["anchor_nonce"] == anchor["anchor_nonce"],
+            "Runtime baseline early host receipt differs from the bound source, task, or owned roots.")
+    return receipt
+
+
 def validate_runtime_baseline_metrics(scenario: object) -> dict:
     scenario = exact_keys(scenario, {"mode", "plan", "system_resolution", "executable_sha256",
         "cells", "environment", "disk_unchanged", "journal_residue_count", "wakeups", "appearance"},
@@ -5898,6 +5972,8 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
                                         profile_sha256=manifest["acceptance_profile_sha256"])
     validate_current_protected_transport(manifest, transport)
     owned = cleanup["owned_resource_evidence"]
+    early_receipt = validate_runtime_early_host_receipt(
+        run_root, files, manifest, transport, owned, input_hash)
     jobs = raw.get("process_job_cleanup")
     require(type(jobs) is list and len(jobs) == 3 and
             typed_equal(jobs, owned["process_job_cleanup"]) and
@@ -5929,7 +6005,8 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
                            "exit_observed", "exit_method", "exit_code"}, "runtime product lifecycle")
         path = life["executable_path"]
         require(type(path) is str and re.fullmatch(r"[A-Za-z]:\\.+", path) is not None and
-                (shared_executable_path is None or path == shared_executable_path),
+                (shared_executable_path is None or path == shared_executable_path) and
+                path.casefold() == early_receipt["trusted_application_path"].casefold(),
                 "Runtime baseline product executable paths differ or are not absolute Windows paths.")
         shared_executable_path = path
         require(int_equals(life["pid"], cell["process_id"]) and
