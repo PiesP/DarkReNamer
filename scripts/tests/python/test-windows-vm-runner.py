@@ -944,8 +944,72 @@ class VmRunnerTests(unittest.TestCase):
                  self.assertRaises(SystemExit):
                 vm.parse_arguments(base + selector + ['--baseline-repetitions', '6'])
 
+    @staticmethod
+    def write_baseline_symbol_fixture(private_root, bundle, manifest):
+        private_root.mkdir(mode=0o700)
+        rows = []
+        for role, binary in [('application', manifest['application'])] + [
+                ('test:' + item['file'], item) for item in manifest['test_binaries']]:
+            exe = binary['file']
+            pdb = Path(exe).with_suffix('.pdb').name
+            measurement = exe + '.measurement.json'
+            shutil.copyfile(bundle / exe, private_root / exe)
+            (private_root / pdb).write_bytes((exe + '-matching-pdb').encode())
+            row = {'role': role, 'exe': exe, 'pdb': pdb, 'measurement': measurement,
+                   'executable_sha256': binary['sha256'],
+                   'pdb_sha256': vm.sha256(private_root / pdb),
+                   'codeview_guid': '4f7eddc7-cf33-b9e9-4c4c-44205044422e',
+                   'codeview_age': 1}
+            (private_root / measurement).write_text(json.dumps({
+                'schema_version': 1, 'executable': {'sha256': row['executable_sha256']},
+                'debug_symbols': {'pdb_sha256': row['pdb_sha256'],
+                                  'guid': row['codeview_guid'], 'age': row['codeview_age']}}))
+            rows.append(row)
+        (private_root / 'private-symbols.json').write_text(json.dumps({
+            'schema_version': 1, 'source_sha': manifest['source_sha'],
+            'source_state': 'clean', 'target': manifest['target'],
+            'test_profile': 'release',
+            'bundle_manifest_sha256': vm.sha256(bundle / 'bundle.json'),
+            'binaries': rows}))
+
+    def test_frozen_private_symbols_reject_added_missing_or_changed_files(self):
+        bundle = self.root / 'symbol-bundle'
+        bundle.mkdir()
+        (bundle / 'bundle.json').write_text('{}')
+        (bundle / 'binary.exe').write_bytes(b'one immutable test binary')
+        (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
+        manifest = {'source_sha': 'b' * 40, 'target': vm.TARGET,
+                    'test_binaries': [{'file': 'binary.exe',
+                                       'sha256': vm.sha256(bundle / 'binary.exe')}],
+                    'application': {'file': 'DarkReNamer.exe',
+                                    'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
+        private = self.root / 'symbol-private'
+        self.write_baseline_symbol_fixture(private, bundle, manifest)
+        original = {path.name: path.read_bytes() for path in private.iterdir()}
+        frozen = vm.frozen_private_symbol_files(
+            private, manifest, vm.sha256(bundle / 'bundle.json'))
+        self.assertEqual(set(frozen), set(original))
+        for name, replacement in (
+                ('extra.txt', b'added'), ('binary.pdb', None),
+                ('binary.pdb', b'changed'),
+                ('binary.exe.measurement.json', b'{"changed":true}'),
+                ('private-symbols.json', b'{"changed":true}')):
+            with self.subTest(name=name, replacement=replacement):
+                path = private / name
+                if replacement is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(replacement)
+                with self.assertRaises((OSError, RuntimeError, ValueError)):
+                    vm.frozen_private_symbol_files(
+                        private, manifest, vm.sha256(bundle / 'bundle.json'), frozen)
+                if name in original:
+                    path.write_bytes(original[name])
+                else:
+                    path.unlink()
+
     def test_runtime_model_six_invocations_reuse_one_binary_and_preserve_failure(self):
-        for failure in (None, 3, 'drift', 'source-drift'):
+        for failure in (None, 3, 'drift', 'source-drift', 'pdb-drift', 'receipt-drift'):
             with self.subTest(failure=failure):
                 output = self.root / ('runtime-six-' + str(failure))
                 args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
@@ -960,17 +1024,17 @@ class VmRunnerTests(unittest.TestCase):
                 def build(_repo, bundle, _tooling, *, runtime_model, private_symbol_output):
                     self.assertTrue(runtime_model)
                     builds.append(bundle)
-                    private_symbol_output.mkdir()
-                    (private_symbol_output / 'private-symbols.json').write_text('{}')
                     bundle.mkdir()
                     (bundle / 'bundle.json').write_text('{}')
                     (bundle / 'binary.exe').write_bytes(b'one immutable test binary')
                     (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
-                    return {'source_sha': 'b' * 40,
+                    manifest = {'source_sha': 'b' * 40, 'target': vm.TARGET,
                             'test_binaries': [{'name': 'darknamer_app', 'file': 'binary.exe',
                                                'sha256': vm.sha256(bundle / 'binary.exe')}],
                             'application': {'file': 'DarkReNamer.exe',
                                             'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
+                    self.write_baseline_symbol_fixture(private_symbol_output, bundle, manifest)
+                    return manifest
 
                 def controller(attempt, selected, *_unused):
                     calls.append((attempt, vm.sha256(attempt / 'binary.exe')))
@@ -980,6 +1044,10 @@ class VmRunnerTests(unittest.TestCase):
                         (output / 'bundle' / 'binary.exe').write_bytes(b'changed after first copy')
                     if failure == 'source-drift':
                         current_source['sha'] = 'c' * 40
+                    if failure == 'pdb-drift':
+                        (selected.private_symbol_output / 'binary.pdb').write_bytes(b'changed after first run')
+                    if failure == 'receipt-drift':
+                        (selected.private_symbol_output / 'private-symbols.json').write_text('{"changed":true}')
                     (attempt / 'result.json').write_text('{}')
 
                 def verify(attempt, manifest, *_unused):
@@ -1000,7 +1068,9 @@ class VmRunnerTests(unittest.TestCase):
                                      int(failure is not None))
                 expected_count = 6 if failure is None else 3 if failure == 3 else 1
                 self.assertEqual((len(builds), len(calls), len(validations)),
-                                 (1, expected_count, expected_count - (failure in (3, 'source-drift'))))
+                                 (1, expected_count,
+                                  expected_count - (failure in (3, 'source-drift',
+                                                               'pdb-drift', 'receipt-drift'))))
                 self.assertEqual({digest for _, digest in calls},
                                  {vm.sha256(calls[0][0] / 'binary.exe')})
                 attempts = json.loads((output / 'attempts.json').read_text())
@@ -1009,8 +1079,11 @@ class VmRunnerTests(unittest.TestCase):
                                  (['failed'] if failure is not None else []))
                 self.assertEqual((output / 'plan.json').is_file(), True)
                 plan = json.loads((output / 'plan.json').read_text())
-                self.assertEqual(plan['private_symbol_receipt_sha256'],
-                                 vm.sha256(args.private_symbol_output / 'private-symbols.json'))
+                if failure != 'receipt-drift':
+                    self.assertEqual(plan['private_symbol_receipt_sha256'],
+                                     vm.sha256(args.private_symbol_output / 'private-symbols.json'))
+                if failure in ('pdb-drift', 'receipt-drift'):
+                    self.assertIn('private_symbol_error_type', attempts[-1])
                 self.assertEqual(plan['bundle_files_sha256']['bundle.json'],
                                  vm.sha256(output / 'bundle' / 'bundle.json'))
                 for row in attempts:
@@ -1033,17 +1106,17 @@ class VmRunnerTests(unittest.TestCase):
         def build(_repo, bundle, _tooling, *, refresh_profile, private_symbol_output):
             self.assertTrue(refresh_profile)
             builds.append(bundle)
-            private_symbol_output.mkdir()
-            (private_symbol_output / 'private-symbols.json').write_text('{}')
             bundle.mkdir()
             (bundle / 'bundle.json').write_text('{}')
             (bundle / 'binary.exe').write_bytes(b'one immutable test binary')
             (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
-            return {'source_sha': 'b' * 40,
+            manifest = {'source_sha': 'b' * 40, 'target': vm.TARGET,
                     'test_binaries': [{'name': 'darknamer_app', 'file': 'binary.exe',
                                        'sha256': vm.sha256(bundle / 'binary.exe')}],
                     'application': {'file': 'DarkReNamer.exe',
                                     'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
+            self.write_baseline_symbol_fixture(private_symbol_output, bundle, manifest)
+            return manifest
 
         def controller(attempt, selected, *_unused):
             calls.append((selected.refresh_profile_order, vm.sha256(attempt / 'binary.exe')))
