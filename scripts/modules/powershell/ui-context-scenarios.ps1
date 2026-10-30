@@ -4033,6 +4033,54 @@ function Wait-ObserverActiveCancelAvailability {
     } while ($true)
 }
 
+function Find-ObserverActiveWorkerCancel {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId)
+    Initialize-AcceptanceNative
+    Initialize-AcceptanceNativeOpen
+    $Application.process.Refresh()
+    if ($Application.process.HasExited) {
+        throw 'Active worker Cancel process exited before control lookup.'
+    }
+    Assert-AutomationBinding -Element $Application.main -Process $Application.process `
+        -ExpectedSession $SessionId -Label 'active worker Cancel main window' -RequireWindowHandle
+    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    if ($mainHandle -eq [IntPtr]::Zero -or [IntPtr]$Application.main_handle -ne $mainHandle) {
+        throw 'Active worker Cancel main window changed before control lookup.'
+    }
+    $handle = [DarkReNamerAcceptanceNativeOpen]::GetDlgItem($mainHandle, 1009)
+    $unique = [DarkReNamerVmAcceptanceNative]::FindUniqueDirectChildById(
+        $mainHandle, 1009, [uint32]$Application.process.Id)
+    if ($handle -eq [IntPtr]::Zero -or $unique -ne $handle -or
+        -not [DarkReNamerAcceptanceNativeOpen]::IsWindow($handle) -or
+        [DarkReNamerAcceptanceNativeOpen]::GetParent($handle) -ne $mainHandle -or
+        [DarkReNamerAcceptanceNativeOpen]::GetDlgCtrlID($handle) -ne 1009) {
+        throw 'Active worker Cancel is not the exact native direct child ID 1009.'
+    }
+    $processId = [uint32]0
+    $threadId = [DarkReNamerAcceptanceNativeOpen]::GetWindowThreadProcessId($handle, [ref]$processId)
+    if ($threadId -eq 0 -or $processId -ne $Application.process.Id) {
+        throw 'Active worker Cancel native control is outside the bound process.'
+    }
+    $className = [Text.StringBuilder]::new(32)
+    if ([DarkReNamerAcceptanceNativeOpen]::GetClassName($handle, $className, $className.Capacity) -le 0 -or
+        $className.ToString() -cne 'Button') {
+        throw 'Active worker Cancel native control is not a Button.'
+    }
+    $cancel = [Windows.Automation.AutomationElement]::FromHandle($handle)
+    if ($null -eq $cancel) {
+        throw 'Active worker Cancel native control has no UI Automation element.'
+    }
+    Assert-AutomationBinding -Element $cancel -Process $Application.process `
+        -ExpectedSession $SessionId -Label 'active worker Cancel' -RequireWindowHandle
+    if ($cancel.Current.AutomationId -cne '1009' -or
+        $cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        [IntPtr]$cancel.Current.NativeWindowHandle -ne $handle) {
+        throw 'Active worker Cancel UI Automation identity differs from the native child.'
+    }
+    $cancel
+}
+
 function Invoke-ObserverGuiApplyFeedbackScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -4229,10 +4277,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 before=$confirmationClockBefore; after=$confirmationClockAfter };
             first_feedback=$executionFeedback }
         if ($cancelCase) {
-            $cancel = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
-                -ExpectedSession $SessionId -AutomationId '1009' `
-                -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
-                -Label 'active worker Cancel' -RequireEnabled -RequireWindowHandle
+            $cancel = Find-ObserverActiveWorkerCancel -Application $application `
+                -SessionId $SessionId
             Wait-ObserverActiveCancelAvailability -Application $application -Cancel $cancel -Status $status `
                 -SessionId $SessionId -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
                 -ExpectedMainWindowHandle $ObservationSink.main_window_handle `

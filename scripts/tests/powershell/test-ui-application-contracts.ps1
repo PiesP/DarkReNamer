@@ -84,6 +84,9 @@ namespace Windows.Automation {
         public static readonly object AutomationIdProperty = "AutomationId", ControlTypeProperty = "ControlType";
         public ElementInfo Current = new ElementInfo();
         public List<AutomationElement> Children = new List<AutomationElement>();
+        public bool RejectDescendants;
+        public static AutomationElement FromHandleElement;
+        public static AutomationElement FromHandle(IntPtr handle) { return FromHandleElement; }
         public Dictionary<object, object> Patterns = new Dictionary<object, object>();
         public int FocusCalls;
         public long FirstFocusTicks;
@@ -93,6 +96,8 @@ namespace Windows.Automation {
         }
         public bool TryGetCurrentPattern(object key, out object value) { return Patterns.TryGetValue(key, out value); }
         public AutomationElement[] FindAll(TreeScope scope, Condition condition) {
+            if (scope == TreeScope.Descendants && RejectDescendants)
+                throw new InvalidOperationException("Main-window descendant traversal is forbidden.");
             var result = new List<AutomationElement>();
             foreach (var child in Children) {
                 if (condition.Matches(child)) result.Add(child);
@@ -129,7 +134,38 @@ public static class DarkReNamerVmNative {
     public static IntPtr GetForegroundWindow() { return Foreground; }
     public static bool SetForegroundWindow(IntPtr window) { Foreground = window; return true; }
 }
+public static class DarkReNamerAcceptanceNativeOpen {
+    public static string Mode = "normal";
+    public static uint ProcessId;
+    public static IntPtr GetDlgItem(IntPtr main, int id) {
+        if (main != new IntPtr(10) || id != 1009)
+            throw new InvalidOperationException("Cancel lookup changed its bound main HWND or control ID.");
+        return Mode == "missing" ? IntPtr.Zero : new IntPtr(21);
+    }
+    public static bool IsWindow(IntPtr window) { return Mode != "dead"; }
+    public static IntPtr GetParent(IntPtr window) { return new IntPtr(Mode == "parent" ? 99 : 10); }
+    public static int GetDlgCtrlID(IntPtr window) { return Mode == "id" ? 42 : 1009; }
+    public static uint GetWindowThreadProcessId(IntPtr window, out uint processId) {
+        processId = ProcessId + (uint)(Mode == "pid" ? 1 : 0);
+        return Mode == "thread" ? 0U : 1U;
+    }
+    public static int GetClassName(IntPtr window, System.Text.StringBuilder value, int capacity) {
+        value.Append(Mode == "class" ? "Edit" : "Button");
+        return value.Length;
+    }
+}
 public static class DarkReNamerVmAcceptanceNative {
+    public static string CancelMode = "normal";
+    public static uint CancelProcessId;
+    public static IntPtr FindUniqueDirectChildById(IntPtr main, int id, uint expectedPid) {
+        if (main != new IntPtr(10) || id != 1009 || expectedPid != CancelProcessId)
+            throw new InvalidOperationException("Cancel native child scan changed its bound target.");
+        if (CancelMode == "duplicate")
+            throw new InvalidOperationException("Multiple or unbound native direct children share the control ID.");
+        if (CancelMode == "cycle" || CancelMode == "budget")
+            throw new InvalidOperationException("Native main-window child enumeration cycled or exceeded its bound.");
+        return new IntPtr(CancelMode == "mismatch" ? 22 : 21);
+    }
     public struct Point { public int X, Y; }
     public class ClipboardSnapshot {
         public uint SequenceNumber;
@@ -246,6 +282,63 @@ public static class DarkReNamerIconStatusObserver {
     $cancel.Current.ProcessId = 99
     Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'not bound to the expected process'
     $cancel.Current.ProcessId = $process.Id
+    [DarkReNamerVmNative]::HitProcess = 42
+}
+
+& {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    [DarkReNamerAcceptanceNativeOpen]::ProcessId = [uint32]$process.Id
+    [DarkReNamerVmAcceptanceNative]::CancelProcessId = [uint32]$process.Id
+    $main = [Windows.Automation.AutomationElement]::new()
+    $main.Current.ProcessId = $process.Id
+    $main.Current.NativeWindowHandle = 10
+    $main.RejectDescendants = $true
+    $cancel = [Windows.Automation.AutomationElement]::new()
+    $cancel.Current.ProcessId = $process.Id
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1009'
+    [Windows.Automation.AutomationElement]::FromHandleElement = $cancel
+    $application = @{ process=$process; main=$main; main_handle=10L }
+    $arguments = @{ Application=$application; SessionId=$process.SessionId }
+    $cancel.Current.IsEnabled = $false
+    $cancel.Current.IsOffscreen = $true
+    if ((Find-ObserverActiveWorkerCancel @arguments) -ne $cancel) {
+        throw 'Active worker Cancel did not resolve its exact native child HWND.'
+    }
+    $cancel.Current.IsEnabled = $true
+    $cancel.Current.IsOffscreen = $false
+    foreach ($mode in @('missing', 'dead', 'parent', 'id', 'pid', 'thread', 'class')) {
+        [DarkReNamerAcceptanceNativeOpen]::Mode = $mode
+        Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'active worker Cancel'
+    }
+    [DarkReNamerAcceptanceNativeOpen]::Mode = 'normal'
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'duplicate'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'Multiple or unbound native direct children'
+    foreach ($mode in @('cycle', 'budget')) {
+        [DarkReNamerVmAcceptanceNative]::CancelMode = $mode
+        Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'cycled or exceeded its bound'
+    }
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'mismatch'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'exact native direct child ID 1009'
+    [DarkReNamerVmAcceptanceNative]::CancelMode = 'normal'
+    $cancel.Current.NativeWindowHandle = 22
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1008'
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.AutomationId = '1009'
+    $cancel.Current.ControlType = [Windows.Automation.ControlType]::Edit
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'UI Automation identity differs'
+    $cancel.Current.ControlType = [Windows.Automation.ControlType]::Button
+    [DarkReNamerVmNative]::HitProcess = 99
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'native control belongs to another process'
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    $arguments.SessionId = $process.SessionId + 1
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'not bound to the expected process and desktop session'
+    $arguments.SessionId = $process.SessionId
+    $application.main_handle = 99L
+    Assert-Fails { Find-ObserverActiveWorkerCancel @arguments } 'main window changed'
     [DarkReNamerVmNative]::HitProcess = 42
 }
 

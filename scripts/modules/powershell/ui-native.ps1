@@ -1084,6 +1084,25 @@ public static class DarkReNamerVmAcceptanceNative {
         if ((code & 0x2010) != 0x2010 || (code & 0x0020) != 0) return 0;
         return GetDlgCtrlID(button);
     }
+    public static IntPtr FindUniqueDirectChildById(IntPtr main, int controlId, uint expectedPid) {
+        IntPtr match = IntPtr.Zero;
+        HashSet<IntPtr> seen = new HashSet<IntPtr>();
+        IntPtr child = GetWindow(main, 5); // GW_CHILD; follow only direct HWND siblings.
+        for (int inspected = 0; child != IntPtr.Zero; inspected++) {
+            if (inspected >= 1024 || !seen.Add(child))
+                throw new InvalidOperationException("Native main-window child enumeration cycled or exceeded its bound.");
+            if (GetDlgCtrlID(child) == controlId) {
+                uint childPid;
+                if (GetParent(child) != main ||
+                    GetWindowThreadProcessId(child, out childPid) == 0 || childPid != expectedPid ||
+                    match != IntPtr.Zero)
+                    throw new InvalidOperationException("Multiple or unbound native direct children share the control ID.");
+                match = child;
+            }
+            child = GetWindow(child, 2); // GW_HWNDNEXT.
+        }
+        return match;
+    }
     public static int ReadButtonState(IntPtr button) {
         if (button == IntPtr.Zero) throw new ArgumentException("Button handle is missing.");
         return checked((int)SendMessageW(button, 0x00F2, IntPtr.Zero, IntPtr.Zero).ToInt64());

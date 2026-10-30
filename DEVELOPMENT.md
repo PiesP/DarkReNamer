@@ -1137,9 +1137,11 @@ journal checks follow the timed operation-ready endpoint. Idle close begins
 only after selector 22 reports mask 31; final normal-close persistence remains
 inside the exit interval. UIA and status observations do not establish pixel
 presentation time.
-Before the Cancel request, the observer waits at most five seconds for the same
-process/session-bound Cancel button 1009 to be enabled, onscreen, and laid out
-with positive bounds. This availability precondition is outside the measured
+Before the Cancel request, the observer resolves the owned main window's direct
+native child Cancel button 1009 by HWND and control ID without traversing the
+ListView subtree. It then waits at most five seconds for that same
+process/session-bound button to be enabled, onscreen, and laid out with positive
+bounds. Lookup and availability are outside the measured
 request-to-acknowledgment interval. A terminal operation, lost binding, or
 timeout fails the Cancel case.
 The final positive operation-ready query also requires selector 34 to report
