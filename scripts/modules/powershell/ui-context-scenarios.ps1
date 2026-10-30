@@ -3965,6 +3965,25 @@ function Get-ObserverGuiApplyFixtureState {
     $rows.ToArray()
 }
 
+function Read-ObserverGuiApplyClockFrame {
+    param([Parameter(Mandatory)][object] $Application)
+    $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $frame = [DarkReNamerIconStatusObserver]::ReadGuiApplyClockBound(
+        $Application.process, [IntPtr]$Application.main_handle,
+        [long]$Application.process_start_utc_ticks)
+    $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{
+        query_begin_ticks=$begin; query_end_ticks=$end;
+        qpc_frequency=[long]$frame.Frequency; revision=[long]$frame.Revision;
+        initial_apply_accepted_ticks=[long]$frame.InitialApplyAcceptedTicks;
+        confirmation_accepted_ticks=[long]$frame.ConfirmationAcceptedTicks;
+        cancel_accepted_ticks=[long]$frame.CancelAcceptedTicks;
+        cancel_kind=[int]$frame.CancelKind;
+        process_id=[int]$Application.process.Id;
+        process_start_utc_ticks=[long]$Application.process_start_utc_ticks;
+        main_window_handle=[long]$Application.main_handle }
+}
+
 function Invoke-ObserverGuiApplyFeedbackScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -4083,6 +4102,7 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds `
             -Label 'GUI Apply functional status' -RequireWindowHandle
         $sampler.SetPhase('planning')
+        $initialClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
         $applyTrigger = Start-ObserverApplyFromPublicUi -Application $application `
             -SessionId $SessionId -Label 'measured public Apply'
         if ($applyTrigger.input -cne 'visible-command-rail') {
@@ -4096,6 +4116,18 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
         } else { $null }
         $readyConfirmation = Wait-ObserverApplyConfirmationReady -Application $application `
             -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $initialClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+        $initialFeedbackEnd = if ($null -ne $planningFeedback) {
+            [long]$planningFeedback.probes[-1].end_ticks
+        } else { [long]$readyConfirmation.bracket.probes[-1].end_ticks }
+        if ($initialClockBefore.initial_apply_accepted_ticks -ne 0 -or
+            $initialClockBefore.confirmation_accepted_ticks -ne 0 -or
+            $initialClockBefore.cancel_accepted_ticks -ne 0 -or
+            $initialClockAfter.revision -le $initialClockBefore.revision -or
+            $initialClockAfter.initial_apply_accepted_ticks -lt $applyTrigger.request_ticks -or
+            $initialClockAfter.initial_apply_accepted_ticks -gt $initialFeedbackEnd) {
+            throw 'GUI Apply initial owner acceptance is stale or follows its feedback.'
+        }
         $confirmation = $readyConfirmation.window
         $tree = Get-ObserverWindowTree -Window $confirmation -Process $application.process `
             -SessionId $SessionId -Label 'GUI Apply confirmation scope'
@@ -4106,7 +4138,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
         }
         $ObservationSink['apply_request'] = [ordered]@{
             input=$applyTrigger.input; request_ticks=[long]$applyTrigger.request_ticks;
-            owner_thread_acceptance='not-measured';
+            owner_thread_acceptance=[ordered]@{
+                before=$initialClockBefore; after=$initialClockAfter };
             planning_feedback=$planningFeedback;
             confirmation_ready=$readyConfirmation.bracket;
             confirmation_handle=[long]$confirmation.Current.NativeWindowHandle;
@@ -4116,7 +4149,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
             -Label 'measured Apply acceptance' -RequireEnabled -RequireWindowHandle
         $sampler.SetPhase('execution')
-        $acceptedTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
+        $confirmationClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
+        $invocationTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
         $confirmInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
             -Element $confirm -Label 'measured Apply acceptance'
         $executionFeedback = Wait-ObserverMeasuredReadiness -Application $application `
@@ -4127,15 +4161,26 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                     $value.StartsWith('실행 준비 완료:', [StringComparison]::Ordinal) -or
                     $value.StartsWith('파일 변경 중:', [StringComparison]::Ordinal))
             }
+        $confirmationClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+        if ($confirmationClockBefore.confirmation_accepted_ticks -ne 0 -or
+            $confirmationClockAfter.revision -le $confirmationClockBefore.revision -or
+            $confirmationClockAfter.confirmation_accepted_ticks -lt $invocationTicks -or
+            $confirmationClockAfter.confirmation_accepted_ticks -gt
+                $executionFeedback.probes[-1].end_ticks) {
+            throw 'GUI Apply confirmation owner acceptance is stale or follows execution feedback.'
+        }
         $ObservationSink['apply_execution'] = [ordered]@{
-            accepted_ticks=$acceptedTicks; first_feedback=$executionFeedback;
-            outcome=$(if ($cancelCase) { 'cancelled' } else { 'completed' }) }
+            invocation_ticks=$invocationTicks;
+            owner_thread_acceptance=[ordered]@{
+                before=$confirmationClockBefore; after=$confirmationClockAfter };
+            first_feedback=$executionFeedback }
         if ($cancelCase) {
             $cancel = Find-UniqueAutomationElement -Root $application.main -Process $application.process `
                 -ExpectedSession $SessionId -AutomationId '1009' `
                 -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
                 -Label 'active worker Cancel' -RequireEnabled -RequireWindowHandle
             if ($cancel.Current.IsOffscreen) { throw 'Active worker Cancel is hidden before request.' }
+            $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application
             $cancelRequestTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
             $cancelInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
                 -Element $cancel -Label 'active worker Cancel request'
@@ -4150,8 +4195,18 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                         ($value -ceq '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' -or
                          $value.StartsWith('취소 요청됨 · 처리 결과를 기다려 주세요', [StringComparison]::Ordinal)))
                 }
+            $cancelClockAfter = Read-ObserverGuiApplyClockFrame -Application $application
+            if ($cancelClockBefore.cancel_accepted_ticks -ne 0 -or
+                $cancelClockAfter.revision -le $cancelClockBefore.revision -or
+                $cancelClockAfter.cancel_kind -ne 4 -or
+                $cancelClockAfter.cancel_accepted_ticks -lt $cancelRequestTicks -or
+                $cancelClockAfter.cancel_accepted_ticks -gt $ack.probes[-1].end_ticks) {
+                throw 'GUI Apply Cancel owner acceptance is stale or follows acknowledgment.'
+            }
             $ObservationSink['cancel'] = [ordered]@{
                 request_ticks=$cancelRequestTicks; acknowledgment=$ack;
+                owner_thread_acceptance=[ordered]@{
+                    before=$cancelClockBefore; after=$cancelClockAfter };
                 control_id=1009; requested_from='active-apply-worker' }
             Complete-AutomationControlInvoke -State $cancelInvocation -TimeoutSeconds $WaitSeconds
         }
@@ -4186,6 +4241,12 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             }
         $ObservationSink['apply_execution']['operation_ready'] = $ready
         $ObservationSink['apply_execution']['result_status'] = [string]$status.Current.Name
+        $ObservationSink['apply_execution']['outcome'] = if (-not $cancelCase) { 'completed' }
+            elseif ($ObservationSink['apply_execution']['result_status'] -ceq
+                '파일 변경을 시작하기 전에 취소했습니다.') { 'cancelled-before-mutation' }
+            elseif ($ObservationSink['apply_execution']['result_status'] -ceq
+                '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.') { 'rolled-back' }
+            else { 'cancelled-rollback-unproven' }
         $ObservationSink['apply_execution']['rows'] = [int]$grid.pattern.Current.RowCount
         $ObservationSink['apply_execution']['import_command_enabled'] = [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
             [IntPtr]$application.main_handle, [uint32]0x801D)

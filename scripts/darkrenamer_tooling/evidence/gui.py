@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import statistics
 import subprocess
 import sys
 import uuid
@@ -6301,6 +6302,72 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str,
             "release_campaign": "not-run"}
 
 
+def validate_gui_apply_owner_clock(value: object, *, event: str, request_ticks: int,
+                                   feedback_end_ticks: int, frequency: int, pid: int,
+                                   start: int, hwnd: int,
+                                   previous: dict | None = None) -> tuple[int, dict]:
+    pair = exact_keys(value, {"before", "after"}, f"GUI Apply {event} owner acceptance")
+    fields = {"query_begin_ticks", "query_end_ticks", "qpc_frequency", "revision",
+              "initial_apply_accepted_ticks", "confirmation_accepted_ticks",
+              "cancel_accepted_ticks", "cancel_kind", "process_id",
+              "process_start_utc_ticks", "main_window_handle"}
+    before, after = (exact_keys(pair[side], fields, f"GUI Apply {event} {side} clock")
+                     for side in ("before", "after"))
+    for frame in (before, after):
+        require(all(int_equals(frame[key], expected) for key, expected in (
+            ("qpc_frequency", frequency), ("process_id", pid),
+            ("process_start_utc_ticks", start), ("main_window_handle", hwnd))),
+            "GUI Apply owner clock frequency or process identity differs.")
+        begin = checked_int(frame["query_begin_ticks"], 1, 2**63 - 1,
+                            "GUI Apply clock query begin")
+        end = checked_int(frame["query_end_ticks"], 1, 2**63 - 1,
+                          "GUI Apply clock query end")
+        require(begin <= end and end - begin <= frequency and
+                checked_int(frame["revision"], 0, 2**63 - 1,
+                            "GUI Apply clock revision") >= 0 and
+                all(checked_int(frame[key], 0, 2**63 - 1,
+                                f"GUI Apply {key}") >= 0 for key in (
+                    "initial_apply_accepted_ticks", "confirmation_accepted_ticks",
+                    "cancel_accepted_ticks")) and
+                checked_int(frame["cancel_kind"], 0, 4,
+                            "GUI Apply cancel kind") in (0, 4) and
+                ((frame["cancel_accepted_ticks"] == 0) == (frame["cancel_kind"] == 0)),
+                "GUI Apply clock frame is invalid or unbounded.")
+    key = {"initial": "initial_apply_accepted_ticks",
+           "confirmation": "confirmation_accepted_ticks",
+           "cancel": "cancel_accepted_ticks"}[event]
+    require(before["query_end_ticks"] < request_ticks <= feedback_end_ticks <
+            after["query_begin_ticks"] and
+            before[key] == 0 and after["revision"] == before["revision"] + 1 and
+            request_ticks <= after[key] <= feedback_end_ticks and
+            after[key] <= after["query_begin_ticks"] and
+            (after["cancel_kind"] == 4 if event == "cancel" else
+             after["cancel_kind"] == 0),
+            "GUI Apply owner acceptance is stale, unordered, or follows feedback.")
+    if event == "initial":
+        require(before["revision"] == 0 and
+                all(before[name] == 0 for name in (
+                    "initial_apply_accepted_ticks", "confirmation_accepted_ticks",
+                    "cancel_accepted_ticks")) and
+                after["confirmation_accepted_ticks"] == after["cancel_accepted_ticks"] == 0,
+                "GUI Apply initial owner event was already present before invocation.")
+    else:
+        require(previous is not None and
+                previous["query_end_ticks"] < before["query_begin_ticks"] and
+                before["revision"] == previous["revision"] and
+                before["initial_apply_accepted_ticks"] ==
+                    after["initial_apply_accepted_ticks"] ==
+                    previous["initial_apply_accepted_ticks"] and
+                (event != "cancel" or
+                 before["confirmation_accepted_ticks"] ==
+                    after["confirmation_accepted_ticks"] ==
+                    previous["confirmation_accepted_ticks"]) and
+                (event != "confirmation" or
+                 before["cancel_accepted_ticks"] == after["cancel_accepted_ticks"] == 0),
+                "GUI Apply owner clock no longer matches the prior accepted event.")
+    return after[key], after
+
+
 def validate_gui_apply_metrics(scenario: object, initial: object, final: object) -> dict:
     scenario = exact_keys(scenario, {
         "mode", "case", "count", "qpc_frequency", "executable_sha256",
@@ -6396,18 +6463,19 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
         "owner_thread_acceptance",
         "planning_feedback", "confirmation_ready", "confirmation_handle",
         "expected_changed_rows"}, "GUI Apply request")
-    execution = exact_keys(scenario["apply_execution"], {"accepted_ticks", "first_feedback",
+    execution = exact_keys(scenario["apply_execution"], {"invocation_ticks",
+        "owner_thread_acceptance", "first_feedback",
         "outcome", "operation_ready", "result_status", "rows",
         "import_command_enabled", "apply_command_enabled"}, "GUI Apply execution")
     requested = checked_int(request["request_ticks"], 1, 2**63 - 1, "Apply request")
-    accepted = checked_int(execution["accepted_ticks"], 1, 2**63 - 1, "confirmation accepted")
+    invoked = checked_int(execution["invocation_ticks"], 1, 2**63 - 1,
+                          "confirmation invocation")
     require(request["input"] == "visible-command-rail" and
-            request["owner_thread_acceptance"] == "not-measured" and
             int_equals(request["expected_changed_rows"], count) and
             int_equals(request["confirmation_handle"],
                        checked_int(request["confirmation_handle"], 1, 2**63 - 1,
                                    "confirmation HWND")) and
-            previous_command < requested < accepted,
+            previous_command < requested < invoked,
             "GUI Apply input or confirmation order differs.")
     planning = request["planning_feedback"]
     if count >= 1000:
@@ -6421,20 +6489,39 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
         require(planning is None, "GUI Apply short case contains undeclared planning feedback.")
     confirmation = request["confirmation_ready"]
     require(isinstance(confirmation, dict) and
-            confirmation["probes"][-1]["end_ticks"] < accepted,
+            confirmation["probes"][-1]["end_ticks"] < invoked,
             "GUI Apply confirmation was not actionable before acceptance.")
     operations.append(("apply-confirmation", "bound-actionable-confirmation",
                        confirmation["probes"][-1]["end_ticks"]))
+    initial_feedback_end = (planning["probes"][-1]["end_ticks"] if planning is not None
+                            else confirmation["probes"][-1]["end_ticks"])
+    initial_accepted, initial_frame = validate_gui_apply_owner_clock(
+        request["owner_thread_acceptance"], event="initial", request_ticks=requested,
+        feedback_end_ticks=initial_feedback_end, frequency=frequency,
+        pid=pid, start=start, hwnd=hwnd)
+    require(confirmation["probes"][-1]["end_ticks"] <
+            initial_frame["query_begin_ticks"] and
+            initial_frame["query_end_ticks"] < invoked,
+            "Initial Apply owner clock was read outside the post-confirmation interval.")
     feedback = execution["first_feedback"]
     require(isinstance(feedback, dict) and
-            accepted <= feedback["probes"][0]["begin_ticks"],
+            invoked <= feedback["probes"][0]["begin_ticks"],
             "GUI Apply execution feedback predates confirmation acceptance.")
     operations.append(("apply-accepted", "execution-busy-status",
                        feedback["probes"][-1]["end_ticks"]))
+    accepted, confirmation_frame = validate_gui_apply_owner_clock(
+        execution["owner_thread_acceptance"], event="confirmation",
+        request_ticks=invoked, feedback_end_ticks=feedback["probes"][-1]["end_ticks"],
+        frequency=frequency, pid=pid, start=start, hwnd=hwnd, previous=initial_frame)
+    require(confirmation["probes"][-1]["end_ticks"] <
+            execution["owner_thread_acceptance"]["before"]["query_begin_ticks"],
+            "Confirmation owner clock was read before the actionable confirmation.")
     cancel_request = None
+    cancel_accepted = None
     if cancelled:
         cancellation = exact_keys(scenario["cancel"], {"request_ticks", "acknowledgment",
-            "control_id", "requested_from"}, "active Apply cancellation")
+            "owner_thread_acceptance", "control_id", "requested_from"},
+            "active Apply cancellation")
         cancel_request = checked_int(cancellation["request_ticks"], 1, 2**63 - 1,
                                      "active Apply Cancel request")
         ack = cancellation["acknowledgment"]
@@ -6446,18 +6533,29 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 "Active Apply Cancel is not after execution feedback.")
         operations.append(("active-apply-cancel", "cancel-request-acknowledged",
                            ack["probes"][-1]["end_ticks"]))
+        cancel_accepted, _ = validate_gui_apply_owner_clock(
+            cancellation["owner_thread_acceptance"], event="cancel",
+            request_ticks=cancel_request, feedback_end_ticks=ack["probes"][-1]["end_ticks"],
+            frequency=frequency, pid=pid, start=start, hwnd=hwnd,
+            previous=confirmation_frame)
+        require(feedback["probes"][-1]["end_ticks"] <
+                cancellation["owner_thread_acceptance"]["before"]["query_begin_ticks"],
+                "Cancel owner clock was read before execution feedback.")
     ready = execution["operation_ready"]
+    cancel_outcomes = {
+        "파일 변경을 시작하기 전에 취소했습니다.": "cancelled-before-mutation",
+        "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.": "rolled-back",
+        "요청에 따라 변경을 취소했습니다.": "cancelled-rollback-unproven",
+    }
     require(isinstance(ready, dict) and
             ready["probes"][-1]["end_ticks"] >
                 (cancel_request if cancelled else feedback["probes"][-1]["end_ticks"]) and
-            execution["outcome"] == ("cancelled" if cancelled else "completed") and
+            execution["outcome"] == (cancel_outcomes.get(execution["result_status"])
+                                      if cancelled else "completed") and
             int_equals(execution["rows"], count) and
             execution["import_command_enabled"] is True and
             execution["apply_command_enabled"] is cancelled and
-            (execution["result_status"] in {
-                "파일 변경을 시작하기 전에 취소했습니다.",
-                "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.",
-                "요청에 따라 변경을 취소했습니다."} if cancelled else
+            (execution["result_status"] in cancel_outcomes if cancelled else
              execution["result_status"] ==
                  f"{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다."),
             "GUI Apply terminal model, native row, command, or cancellation result differs.")
@@ -6517,11 +6615,21 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
             "apply_planning_feedback_upper_ms":
                 (planning["probes"][-1]["end_ticks"] - requested) * 1000 / frequency
                 if planning is not None else "not-measured",
+            "apply_initial_owner_acceptance_ms":
+                (initial_accepted - requested) * 1000 / frequency,
             "apply_execution_feedback_upper_ms":
                 (feedback["probes"][-1]["end_ticks"] - accepted) * 1000 / frequency,
+            "apply_execution_feedback_from_invocation_upper_ms":
+                (feedback["probes"][-1]["end_ticks"] - invoked) * 1000 / frequency,
             "cancel_acknowledgment_upper_ms":
                 (scenario["cancel"]["acknowledgment"]["probes"][-1]["end_ticks"] -
                  cancel_request) * 1000 / frequency if cancelled else "not-measured",
+            "cancel_owner_to_acknowledgment_upper_ms":
+                (scenario["cancel"]["acknowledgment"]["probes"][-1]["end_ticks"] -
+                 cancel_accepted) * 1000 / frequency if cancelled else "not-measured",
+            "cancel_to_operation_ready_upper_ms":
+                (ready["probes"][-1]["end_ticks"] - cancel_request) * 1000 / frequency
+                if cancelled else "not-measured",
             "apply_request_to_confirmation_upper_ms":
                 (confirmation["probes"][-1]["end_ticks"] - requested) * 1000 / frequency,
             "confirm_to_operation_ready_upper_ms":
@@ -6626,17 +6734,114 @@ def validate_gui_apply_run(root: Path, run_id: str, source_sha: str,
             "GUI Apply imported screenshot is absent or unbound.")
     return {"run_id": run_id, "source_sha": source_sha,
             "application_sha256": artifacts["application"]["sha256"],
+            "observer_sha256": artifacts["observer"]["sha256"],
+            "runner_sha256": artifacts["runner"]["sha256"],
+            "profile_sha256": manifest["acceptance_profile_sha256"],
+            "bundle_manifest_sha256": manifest["bundle_manifest"]["sha256"],
+            "process_id": scenario["process_id"],
+            "process_start_utc_ticks": scenario["process_start_utc_ticks"],
+            "input_manifest_sha256": input_hash,
+            "collection_sha256": sha256_bytes(collection_bytes),
+            "cleanup_sha256": sha256_bytes(cleanup_bytes),
+            "observer_result_sha256": sha256_bytes(raw_bytes),
             "bundle_mode": "prepared", "metrics": metrics,
             "owned_cleanup": owned["owned_cleanup"],
             "transport_status": transport["status"],
             "full_four_run_regression": "not-run", "release_campaign": "not-run"}
 
 
+def validate_gui_apply_campaign_index(index_path: Path, source_sha: str,
+                                      *, source_repo: Path | None = None) -> dict:
+    require(index_path.is_absolute() and
+            index_path == Path(os.path.normpath(index_path)) and
+            SAFE_LEAF.fullmatch(index_path.name) is not None,
+            "GUI Apply campaign index path is not a fixed ordinary file.")
+    index, _ = read_json(checked_root(index_path.parent), Path(index_path.name),
+                         "GUI Apply campaign index")
+    index = exact_keys(index, {"schema_version", "diagnostic", "source_sha", "runs"},
+                       "GUI Apply campaign index")
+    order = ["success-100", "success-1000", "success-10000",
+             *("success-1000" for _ in range(5)), "cancel-10000"]
+    require(int_equals(index["schema_version"], 1) and
+            index["diagnostic"] == "gui-apply-feedback-campaign-v1" and
+            index["source_sha"] == source_sha and
+            isinstance(index["runs"], list) and len(index["runs"]) == len(order),
+            "GUI Apply campaign declaration is incomplete or from another source.")
+    results = []
+    roots = set()
+    identities = set()
+    previous_start = 0
+    artifact_binding = None
+    receipt_fields = ("input_manifest_sha256", "collection_sha256",
+                      "cleanup_sha256", "observer_result_sha256")
+    for number, (case, item) in enumerate(zip(order, index["runs"], strict=True), 1):
+        item = exact_keys(item, {"case", "result_root", *receipt_fields},
+                          f"GUI Apply campaign run {number}")
+        require(item["case"] == case and type(item["result_root"]) is str,
+                "GUI Apply campaign case order or result root differs.")
+        root = checked_root(Path(item["result_root"]))
+        require(str(root) not in roots, "GUI Apply campaign reused a result root.")
+        roots.add(str(root))
+        measured = validate_gui_apply_run(root, GUI_APPLY_RUN_PREFIX + case, source_sha,
+                                          source_repo=source_repo)
+        require(all(item[field] == measured[field] and
+                    checked_digest(item[field], f"GUI Apply {field}")
+                    for field in receipt_fields),
+                "GUI Apply campaign receipt hashes differ from canonical run evidence.")
+        binding = tuple(measured[field] for field in (
+            "source_sha", "application_sha256", "observer_sha256", "runner_sha256",
+            "profile_sha256", "bundle_manifest_sha256"))
+        artifact_binding = binding if artifact_binding is None else artifact_binding
+        require(binding == artifact_binding,
+                "GUI Apply campaign changed source, executable, observer, runner, or profile.")
+        identity = (measured["process_id"], measured["process_start_utc_ticks"])
+        require(identity not in identities and identity[1] > previous_start,
+                "GUI Apply campaign reused or reordered a product process identity.")
+        identities.add(identity)
+        previous_start = identity[1]
+        results.append(measured)
+    repeated = [results[1], *results[3:8]]
+    summaries = {}
+    goals = {"import_first_feedback_upper_ms": 200,
+             "apply_planning_feedback_upper_ms": 200,
+             "apply_execution_feedback_upper_ms": 200,
+             "idle_close_to_exit_upper_ms": 500}
+    for field in (*goals, "apply_request_to_confirmation_upper_ms",
+                  "confirm_to_operation_ready_upper_ms"):
+        values = [row["metrics"][field] for row in repeated]
+        require(all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+                    for value in values),
+                f"GUI Apply campaign {field} is missing a measured representative value.")
+        goal = goals.get(field)
+        median = statistics.median(values)
+        summaries[field] = {"values_ms": values, "median_ms": median,
+                            "range_ms": [min(values), max(values)],
+                            "provisional_goal_ms": goal,
+                            "median_within_goal": median <= goal if goal is not None else None,
+                            "exceedance_runs": [index + 1 for index, value in enumerate(values)
+                                                if goal is not None and value > goal]}
+    return {"schema_version": 1, "diagnostic": "gui-apply-feedback-campaign-v1",
+            "status": "measured", "campaign_complete": True, "source_sha": source_sha,
+            "application_sha256": artifact_binding[1],
+            "profile_sha256": artifact_binding[4],
+            "run_count": len(results), "representative_count": len(repeated),
+            "runs": results, "representative_summaries": summaries,
+            "cancel_case_disposition": results[-1]["metrics"]["outcome"],
+            "cancel_case_feedback_upper_ms":
+                results[-1]["metrics"]["cancel_acknowledgment_upper_ms"],
+            "cancel_case_owner_to_acknowledgment_upper_ms":
+                results[-1]["metrics"]["cancel_owner_to_acknowledgment_upper_ms"],
+            "cancel_case_to_operation_ready_upper_ms":
+                results[-1]["metrics"]["cancel_to_operation_ready_upper_ms"],
+            "p95": "not-estimated", "release_campaign": "not-run"}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result-root", required=True, type=Path)
+    parser.add_argument("--result-root", type=Path)
     parser.add_argument("--expected-source-sha", required=True)
-    parser.add_argument("--run", action="append", required=True, dest="runs")
+    parser.add_argument("--run", action="append", dest="runs")
+    parser.add_argument("--gui-apply-campaign-index", type=Path)
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
     parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE])
@@ -6648,6 +6853,24 @@ def main(repo: Path, argv=None) -> int:
     args = parse_arguments(argv)
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
+    if args.gui_apply_campaign_index is not None:
+        require(args.result_root is None and not args.runs and
+                args.diagnostic == GUI_APPLY_MODE and
+                args.acceptance_profile_id == V2_PROFILE_ID and
+                not args.require_complete_set and args.configuration_set is None,
+                "GUI Apply campaign index is a separate nine-run verifier invocation.")
+        blob = subprocess.run(["git", "show",
+                               f"{args.expected_source_sha}:config/vm-automated-v2.json"],
+                              cwd=repo, capture_output=True, check=False)
+        require(blob.returncode == 0 and
+                sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
+                "GUI Apply campaign profile differs from reviewed V2 revision-3 bytes.")
+        report = validate_gui_apply_campaign_index(
+            args.gui_apply_campaign_index, args.expected_source_sha, source_repo=repo)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    require(args.result_root is not None and args.runs is not None,
+            "GUI evidence requires a result root and declared runs.")
     require(args.acceptance_profile_id is None or args.diagnostic is None or
             (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
             "Fixed GUI profile selection cannot be used for this diagnostic.")
@@ -6666,7 +6889,8 @@ def main(repo: Path, argv=None) -> int:
         measured = validate_gui_apply_run(root, args.runs[0], args.expected_source_sha,
                                           source_repo=repo)
         print(json.dumps({"schema_version": 1, "diagnostic": GUI_APPLY_MODE,
-                          "status": "measured", "source_sha": args.expected_source_sha,
+                          "status": "case-measured", "campaign_complete": False,
+                          "source_sha": args.expected_source_sha,
                           "runs": [measured], "full_four_run_regression": "not-run",
                           "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
         return 0

@@ -4531,16 +4531,35 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 'rows_observed_ticks': observed['probes'][-1]['end_ticks'],
                 'command_ready_ticks': command['probes'][-1]['end_ticks'],
                 'first_feedback': feedback})
+        def frame(revision, initial=0, confirmation=0, cancel_ticks=0):
+            begin = tick()
+            return {'query_begin_ticks': begin, 'query_end_ticks': begin + 1,
+                'qpc_frequency': frequency, 'revision': revision,
+                'initial_apply_accepted_ticks': initial,
+                'confirmation_accepted_ticks': confirmation,
+                'cancel_accepted_ticks': cancel_ticks,
+                'cancel_kind': 4 if cancel_ticks else 0,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd}
+
+        initial_before = frame(0)
         requested = tick()
         planning = probe('apply-request', 'planning-status') if count >= 1000 else None
         confirmation = probe('apply-confirmation', 'bound-actionable-confirmation')
-        accepted = tick()
+        initial_after = frame(1, requested + 1)
+        confirmation_before = frame(1, requested + 1)
+        invoked = tick()
         execution_feedback = probe('apply-accepted', 'execution-busy-status')
+        confirmation_after = frame(2, requested + 1, invoked + 1)
         cancel = None
         if cancelled:
+            cancel_before = frame(2, requested + 1, invoked + 1)
             cancel_requested = tick()
             ack = probe('active-apply-cancel', 'cancel-request-acknowledged')
+            cancel_after = frame(3, requested + 1, invoked + 1, cancel_requested + 1)
             cancel = {'request_ticks': cancel_requested, 'acknowledgment': ack,
+                      'owner_thread_acceptance': {'before': cancel_before,
+                                                  'after': cancel_after},
                       'control_id': 1009, 'requested_from': 'active-apply-worker'}
         ready = probe('apply-result', 'cancelled-result-and-commands' if cancelled
                       else 'completed-result-rows-and-commands')
@@ -4560,11 +4579,16 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 'poll_count': 2, 'unstable_query_attempts': 0,
                 'sampled_peak_pending': 0, 'sampled_peak_unresolved_rows': 0},
             'apply_request': {'input': 'visible-command-rail', 'request_ticks': requested,
-                'owner_thread_acceptance': 'not-measured',
+                'owner_thread_acceptance': {'before': initial_before,
+                                            'after': initial_after},
                 'planning_feedback': planning, 'confirmation_ready': confirmation,
                 'confirmation_handle': 999, 'expected_changed_rows': count},
-            'apply_execution': {'accepted_ticks': accepted, 'first_feedback': execution_feedback,
-                'outcome': 'cancelled' if cancelled else 'completed', 'operation_ready': ready,
+            'apply_execution': {'invocation_ticks': invoked,
+                'owner_thread_acceptance': {'before': confirmation_before,
+                                            'after': confirmation_after},
+                'first_feedback': execution_feedback,
+                'outcome': 'cancelled-rollback-unproven' if cancelled else 'completed',
+                'operation_ready': ready,
                 'result_status': '요청에 따라 변경을 취소했습니다.' if cancelled else
                     f'{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다.',
                 'rows': count, 'import_command_enabled': True,
@@ -4601,7 +4625,7 @@ class GuiApplyEndpointTests(unittest.TestCase):
             'identity': lambda x: x['close_readiness'].__setitem__('process_id', 42),
             'frequency': lambda x: x['normal_close'].__setitem__('qpc_frequency', 9),
             'order': lambda x: x.__setitem__('verification_begin_ticks',
-                x['apply_execution']['accepted_ticks']),
+                x['apply_execution']['invocation_ticks']),
             'premature_rows': lambda x: x['imports'][0].__setitem__('rows_observed_ticks',
                 x['imports'][0]['open_ticks']),
             'command': lambda x: x['apply_execution'].__setitem__('import_command_enabled', False),
@@ -4626,13 +4650,153 @@ class GuiApplyEndpointTests(unittest.TestCase):
             lambda x: x['cancel']['acknowledgment']['probes'][-1].__setitem__(
                 'end_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks']),
             lambda x: x['cancel'].__setitem__('request_ticks',
-                x['apply_execution']['accepted_ticks']),
+                x['apply_execution']['invocation_ticks']),
             lambda x: x.pop('cancel'),
         ):
             changed = deepcopy(scenario)
             mutate(changed)
             with self.assertRaises(evidence.EvidenceError):
                 evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_owner_acceptance_rejects_preinput_stale_or_drifting_clock(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        changes = {
+            'preinput': lambda x: x['apply_execution']['owner_thread_acceptance']
+                ['after'].__setitem__('confirmation_accepted_ticks',
+                    x['apply_execution']['invocation_ticks'] - 1),
+            'stale_revision': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('revision',
+                    x['cancel']['owner_thread_acceptance']['before']['revision']),
+            'skipped_revision': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('revision',
+                    x['cancel']['owner_thread_acceptance']['before']['revision'] + 2),
+            'overlapping_clock_query': lambda x: x['cancel']['owner_thread_acceptance']
+                ['before'].__setitem__('query_begin_ticks',
+                    x['apply_execution']['owner_thread_acceptance']['after']
+                     ['query_end_ticks'] - 1),
+            'stale_event': lambda x: x['cancel']['owner_thread_acceptance']
+                ['before'].__setitem__('cancel_accepted_ticks', 1),
+            'frequency': lambda x: x['apply_request']['owner_thread_acceptance']
+                ['after'].__setitem__('qpc_frequency', 9),
+            'process': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('process_start_utc_ticks', 1),
+            'wrong_cancel_kind': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('cancel_kind', 0),
+            'bool_cancel_kind': lambda x: x['cancel']['owner_thread_acceptance']
+                ['after'].__setitem__('cancel_kind', True),
+        }
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_cancel_terminal_disposition_is_derived_from_status(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        statuses = {
+            '파일 변경을 시작하기 전에 취소했습니다.': 'cancelled-before-mutation',
+            '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.': 'rolled-back',
+            '요청에 따라 변경을 취소했습니다.': 'cancelled-rollback-unproven',
+        }
+        for status, outcome in statuses.items():
+            changed = deepcopy(scenario)
+            changed['apply_execution'].update(result_status=status, outcome=outcome)
+            with self.subTest(outcome=outcome):
+                self.assertEqual(evidence.validate_gui_apply_metrics(
+                    changed, initial, final)['outcome'], outcome)
+                changed['apply_execution']['outcome'] = 'rolled-back' \
+                    if outcome != 'rolled-back' else 'cancelled-before-mutation'
+                with self.assertRaises(evidence.EvidenceError):
+                    evidence.validate_gui_apply_metrics(changed, initial, final)
+
+
+class GuiApplyCampaignTests(unittest.TestCase):
+    @staticmethod
+    def payload(base):
+        order = ['success-100', 'success-1000', 'success-10000',
+                 *(['success-1000'] * 5), 'cancel-10000']
+        source = 'a' * 40
+        receipts = {key: 'b' * 64 for key in (
+            'input_manifest_sha256', 'collection_sha256', 'cleanup_sha256',
+            'observer_result_sha256')}
+        metrics = {key: 100.0 for key in (
+            'import_first_feedback_upper_ms', 'apply_planning_feedback_upper_ms',
+            'apply_execution_feedback_upper_ms', 'idle_close_to_exit_upper_ms',
+            'apply_request_to_confirmation_upper_ms',
+            'confirm_to_operation_ready_upper_ms',
+            'cancel_acknowledgment_upper_ms',
+            'cancel_owner_to_acknowledgment_upper_ms',
+            'cancel_to_operation_ready_upper_ms')}
+        rows, measured = [], []
+        for index, case in enumerate(order):
+            root = base / f'run-{index + 1}'
+            root.mkdir()
+            rows.append({'case': case, 'result_root': str(root), **receipts})
+            measured.append({'run_id': evidence.GUI_APPLY_RUN_PREFIX + case,
+                'source_sha': source, 'application_sha256': 'c' * 64,
+                'observer_sha256': 'd' * 64, 'runner_sha256': 'e' * 64,
+                'profile_sha256': evidence.OWNED_PERFORMANCE_PROFILE_SHA256,
+                'bundle_manifest_sha256': 'f' * 64,
+                'process_id': index + 1,
+                'process_start_utc_ticks': index + 1,
+                **receipts, 'metrics': {**metrics,
+                    'outcome': 'cancelled-rollback-unproven' if index == 8 else 'completed'}})
+        return {'schema_version': 1, 'diagnostic': 'gui-apply-feedback-campaign-v1',
+                'source_sha': source, 'runs': rows}, measured
+
+    def test_nine_canonical_runs_and_median_dispositions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            self.assertEqual(report['run_count'], 9)
+            self.assertEqual(report['representative_count'], 6)
+            self.assertEqual(report['representative_summaries']
+                ['idle_close_to_exit_upper_ms']['median_ms'], 100.0)
+            self.assertEqual(report['p95'], 'not-estimated')
+
+    def test_discloses_values_range_and_goal_exceedances_without_sla_claim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            values = (100.0, 210.0, 220.0, 230.0, 240.0, 250.0)
+            for row, value in zip([measured[1], *measured[3:8]], values, strict=True):
+                row['metrics']['apply_execution_feedback_upper_ms'] = value
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            summary = report['representative_summaries']['apply_execution_feedback_upper_ms']
+            self.assertEqual(summary['values_ms'], list(values))
+            self.assertEqual(summary['range_ms'], [100.0, 250.0])
+            self.assertEqual(summary['median_ms'], 225.0)
+            self.assertEqual(summary['exceedance_runs'], [2, 3, 4, 5, 6])
+            self.assertFalse(summary['median_within_goal'])
+
+    def test_rejects_missing_duplicate_or_reordered_representatives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            path = base / 'campaign.json'
+            cases = (
+                (lambda i, m: i['runs'].pop(3)),
+                (lambda i, m: m[3].update(process_id=m[2]['process_id'],
+                    process_start_utc_ticks=m[2]['process_start_utc_ticks'])),
+                (lambda i, m: i['runs'][3].update(case='success-10000')),
+                (lambda i, m: i['runs'][3].update(collection_sha256='0' * 64)),
+                (lambda i, m: m[3].update(application_sha256='0' * 64)),
+            )
+            for change in cases:
+                bad_index, bad_measured = deepcopy(index), deepcopy(measured)
+                change(bad_index, bad_measured)
+                path.write_text(json.dumps(bad_index), encoding='utf-8')
+                with mock.patch.object(evidence, 'validate_gui_apply_run',
+                                       side_effect=bad_measured):
+                    with self.assertRaises(evidence.EvidenceError):
+                        evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
 
 
 if __name__ == "__main__":
