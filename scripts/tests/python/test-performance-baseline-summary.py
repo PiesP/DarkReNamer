@@ -182,6 +182,13 @@ class BaselineSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbid a provenance amendment"):
             baseline.summarize(records, PLAN_SHA, {"schema": "other"}, "0" * 64)
 
+    def test_regular_input_preserves_crlf_and_control_z_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "raw-input.json"
+            payload = b'{"line": 1}\r\n{"line": 2}\r\n\x1a'
+            path.write_bytes(payload)
+            self.assertEqual(baseline.read_regular(path, "raw input"), payload)
+
     def test_cli_requires_exact_amendment_bytes_for_v2_and_forbids_it_for_v1(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

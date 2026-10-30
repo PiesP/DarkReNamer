@@ -442,7 +442,8 @@ def no_duplicates(pairs):
 
 
 def read_regular(path, label):
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     descriptor = os.open(path, flags)
     try:
         info = os.fstat(descriptor)
@@ -486,7 +487,8 @@ def main(argv=None):
                        if amendment_bytes is not None else None)
     payload = (json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
     require(len(payload) <= MAX_INPUT_BYTES, "summary exceeds the bounded output size")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
     descriptor = os.open(args.output, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as stream:
