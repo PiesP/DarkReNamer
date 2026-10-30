@@ -2812,6 +2812,7 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
             row.get('exit_code') != 0 or
             [row.get(key) for key in ('passed', 'failed', 'ignored')] != [1, 0, 0]):
         raise ValueError('Refresh native test result is incomplete.')
+    verify_virtual_execution_job(row, result.get('process_job_cleanup'))
     checked_artifact(root, binary)
     checked_artifact(root, manifest['application'])
     checked_artifact(root, manifest['runner'])

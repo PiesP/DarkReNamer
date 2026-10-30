@@ -1417,7 +1417,14 @@ class VmRunnerTests(unittest.TestCase):
             'record_schema_version': 4},
             gui=None, tests=[dict(self.test, status='passed', job_cleanup=True,
                                   exit_code=0, passed=1, failed=0, ignored=0,
-                                  stdout=stdout, stderr=stderr)])
+                                  stdout=stdout, stderr=stderr,
+                                  process_lifecycle={'pid': 1234,
+                                      'start_time_utc_ticks': '638975000000000000'})],
+            process_job_cleanup=[{
+                'pid': 1234, 'process_start_time_utc_ticks': '638975000000000000',
+                'status': 'clean', 'job_empty': True, 'job_closed': True,
+                'capture_complete': True, 'had_survivors': False,
+                'forced_termination': False, 'active_processes_at_close': 0}])
         self.result['transport'].update(task_kind='core', status='collected')
         with (mock.patch.object(vm, 'verify_controller_cleanup'),
               mock.patch.object(vm, '_verify_v2_result_owned_binding'),
@@ -1427,6 +1434,21 @@ class VmRunnerTests(unittest.TestCase):
                 'ssh', None, 'a' * 64)
             self.assertEqual(observed['filtered_out'], 3)
             self.assertEqual(observed['scenarios'], 12)
+            original_job = copy.deepcopy(self.result['process_job_cleanup'][0])
+            for mutation in ({'pid': 4321},
+                             {'process_start_time_utc_ticks': '638975000000000001'},
+                             {'job_closed': False}, {'forced_termination': True}):
+                self.result['process_job_cleanup'][0] = original_job | mutation
+                with self.subTest(job=mutation), self.assertRaisesRegex(ValueError, 'process Job'):
+                    vm.verify_refresh_profile_result(
+                        self.root, self.manifest, self.result, 'hidden-visible',
+                        'ssh', None, 'a' * 64)
+            self.result['process_job_cleanup'] = []
+            with self.assertRaisesRegex(ValueError, 'process Job'):
+                vm.verify_refresh_profile_result(
+                    self.root, self.manifest, self.result, 'hidden-visible',
+                    'ssh', None, 'a' * 64)
+            self.result['process_job_cleanup'] = [original_job]
             for wrong in (None, 3):
                 self.manifest['diagnostic']['record_schema_version'] = wrong
                 with self.assertRaisesRegex(ValueError, 'fixed optimized test bundle'):
