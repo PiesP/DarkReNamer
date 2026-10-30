@@ -52,9 +52,9 @@ class ReadinessBracketTests(unittest.TestCase):
     def validate(self, records, end):
         return evidence.validate_readiness_brackets(
             records, process_id=41, process_start_utc_ticks=638965440000000000,
-            main_window_handle=900,
+            main_window_handle=900, expected_frequency=10000000,
             operations=[('startup', 'import-command-enabled', end)],
-            startup_ready_ticks=end)
+            startup_ready_ticks=end, expected_main_bound_ticks=200)
 
     def test_last_false_to_first_true_and_actual_query_gaps(self):
         probes = [{'begin_ticks': 300, 'end_ticks': 310, 'ready': False},
@@ -82,6 +82,8 @@ class ReadinessBracketTests(unittest.TestCase):
             lambda rows: rows[1]['probes'][0].__setitem__('ready', True),
             lambda rows: rows[1]['probes'][1].__setitem__('begin_ticks', 309),
             lambda rows: rows[1]['probes'][1].__setitem__('end_ticks', 300),
+            lambda rows: rows[0].__setitem__('end_ticks', 201),
+            lambda rows: [row.__setitem__('qpc_frequency', 20000000) for row in rows],
             lambda rows: rows[1].pop('probes'),
         )
         for change in changes:

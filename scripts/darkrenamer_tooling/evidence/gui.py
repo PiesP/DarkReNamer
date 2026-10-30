@@ -3867,6 +3867,7 @@ def validate_performance_metrics(scenario: dict, *,
             scenario.get("readiness_brackets"), process_id=scenario["process_id"],
             process_start_utc_ticks=scenario["process_start_utc_ticks"],
             main_window_handle=scenario["environment"]["main_window"]["hwnd"],
+            expected_frequency=scenario["response_timeline"]["qpc_frequency"],
             operations=observations,
             timeline_events=scenario["response_timeline"]["events"])
         require(readiness_metrics["observations"][1]["first_true_end_ticks"] <
@@ -5718,8 +5719,10 @@ RUNTIME_STARTUP_INTERVALS = {
 
 def validate_readiness_brackets(value: object, *, process_id: int,
                                 process_start_utc_ticks: int, main_window_handle: int,
+                                expected_frequency: int,
                                 operations: list[tuple[str, str, int | None]],
                                 startup_ready_ticks: int | None = None,
+                                expected_main_bound_ticks: int | None = None,
                                 timeline_events: list[dict] | None = None) -> dict:
     """Validate raw observer queries; these bound observation, not screen presentation."""
     require(isinstance(value, list) and len(value) == len(operations) + 1,
@@ -5749,11 +5752,13 @@ def validate_readiness_brackets(value: object, *, process_id: int,
         observed_frequency = checked_int(row["qpc_frequency"], 1, 10**10,
                                          "readiness QPC frequency")
         frequency = observed_frequency if frequency is None else frequency
-        require(observed_frequency == frequency, "Readiness QPC clock changed within one process.")
+        require(observed_frequency == frequency == expected_frequency,
+                "Readiness QPC clock differs from the bound product observation clock.")
         if index == 0:
             begin = checked_int(row["begin_ticks"], 1, 2**63 - 1, "main discovery begin")
             end = checked_int(row["end_ticks"], 1, 2**63 - 1, "main discovery end")
-            require(begin < end and end - begin <= 600 * frequency,
+            require(begin < end and end - begin <= 600 * frequency and
+                    (expected_main_bound_ticks is None or end == expected_main_bound_ticks),
                     "Main-window discovery envelope is invalid.")
             previous_end = end
             summaries.append({"operation": expected_operation,
@@ -6041,6 +6046,8 @@ def validate_runtime_baseline_metrics(scenario: object, *,
                 cell["readiness_brackets"], process_id=cell["process_id"],
                 process_start_utc_ticks=cell["process_start_utc_ticks"],
                 main_window_handle=environment["main_window"]["hwnd"],
+                expected_frequency=startup["clock"]["qpc_frequency"],
+                expected_main_bound_ticks=startup["clock"]["main_window_bound_ticks"],
                 operations=[("startup", "import-command-enabled", startup["clock"]["command_ready_ticks"])] +
                 ([ ("runtime-import-1000", "expected-row-count", cell["import"]["row_observed_ticks"]),
                    ("runtime-import-1000", "import-command-enabled", cell["import"]["command_ready_ticks"]) ]
