@@ -338,14 +338,25 @@ function Assert-DrControllerRuntimeBaselineProcesses {
     $expectedPlan = [ordered]@{ startup_cells=$ids; idle_seconds=30; populated_rows=1000;
         sample_interval_ms=200; icon_poll_interval_ms=100; maximum_seconds=600;
         transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' }
+    $readinessContract = $InputManifest.request.PSObject.Properties['readiness_bracket_contract']
+    $requestNames = @($InputManifest.request.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ','
+    $expectedNames = 'appearance,desktop,mode,runtime_baseline_plan,text_scale_percent'
+    if ($null -ne $readinessContract) {
+        $expectedNames = 'appearance,desktop,mode,readiness_bracket_contract,runtime_baseline_plan,text_scale_percent'
+    }
+    if ($null -eq $InputManifest.request.PSObject.Properties['runtime_baseline_plan']) {
+        throw 'Runtime baseline frozen production plan or result differs.'
+    }
     if (($InputManifest.request.runtime_baseline_plan | ConvertTo-Json -Depth 5 -Compress) -cne
         ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
+        $requestNames -cne $expectedNames -or
+        ($null -ne $readinessContract -and ($readinessContract.Value -isnot [string] -or
+            $readinessContract.Value -cne 'qpc-polled-readiness-v1')) -or
         $InputManifest.request.appearance -cne 'light' -or
         $InputManifest.request.text_scale_percent -ne 100 -or
         $InputManifest.request.desktop.width -ne 1366 -or
         $InputManifest.request.desktop.height -ne 768 -or
         $InputManifest.request.desktop.dpi -ne 96 -or
-        @($InputManifest.request.PSObject.Properties.Name).Count -ne 5 -or
         $InputManifest.prepared_bundle.origin -cne 'external-prepared-source-built-bundle' -or
         $InputManifest.prepared_bundle.bundle_manifest_sha256 -cne $InputManifest.bundle_manifest.sha256 -or
         $InputManifest.prepared_bundle.application_sha256 -cne $InputManifest.artifacts.application.sha256 -or
@@ -513,6 +524,12 @@ function New-DrControllerOwnedPerformancePredelete {
     $runtimeRun = $runId -ceq 'runtime-baseline-v2-1366x768-96-text100'
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
+    $readinessContract = $input.request.PSObject.Properties['readiness_bracket_contract']
+    $requestNames = @($input.request.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ','
+    $performanceNames = 'appearance,desktop,mode,performance_plan,text_scale_percent'
+    if ($null -ne $readinessContract) {
+        $performanceNames = 'appearance,desktop,mode,performance_plan,readiness_bracket_contract,text_scale_percent'
+    }
     if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun) {
         throw 'Owned diagnostic frozen run ID differs.'
     }
@@ -525,6 +542,9 @@ function New-DrControllerOwnedPerformancePredelete {
             elseif ($customRun) { 'custom-input-identity-observation' }
             elseif ($runtimeRun) { 'runtime-baseline' }
             else { 'performance-sample' }) -or
+        ($null -ne $readinessContract -and ($readinessContract.Value -isnot [string] -or
+            $readinessContract.Value -cne 'qpc-polled-readiness-v1' -or
+            -not ($runtimeRun -or $performanceRun))) -or
         ($pickerRun -and ($input.request.picker_identity_plan.PSObject.Properties.Name.Count -ne 8 -or
             (@($input.request.picker_identity_plan.PSObject.Properties.Name | Sort-Object) -join ',') -cne
                 'command_timeout_ms,fixture_file_limit,full_performance_sample,idle_ms,maximum_seconds,ordinary_rows,picker_settle_ms,sample_interval_ms' -or
@@ -557,7 +577,8 @@ function New-DrControllerOwnedPerformancePredelete {
             $input.request.custom_input_plan.full_performance_sample -isnot [bool] -or
             $input.request.custom_input_plan.full_performance_sample -or
             $null -ne $input.request.PSObject.Properties['performance_plan'])) -or
-        ($performanceRun -and $input.request.performance_plan.long_path_order -cne $columnOrder) -or
+        ($performanceRun -and ($requestNames -cne $performanceNames -or
+            $input.request.performance_plan.long_path_order -cne $columnOrder)) -or
         $original.owned_cleanup_failure_context.acceptance_mode -cne $input.request.mode -or
         $profile.schema -cne 'darkrenamer-vm-automated-profile-v3' -or
         $profile.profile_id -cne 'vm-automated-v2-owned-resources' -or

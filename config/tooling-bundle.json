@@ -281,7 +281,7 @@
       "bundle": "tooling-contracts-owned-cleanup.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.owned_cleanup",
-      "sha256": "d87ad97c187099d221d05fce01d9d6eebb5c8e02d23ae01a2593f1e30f14cb7f",
+      "sha256": "0b530597a4addcfb35ff2bd4404102911480867c4c4ef6846fd39936b2ae005c",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -627,7 +627,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "d4e9155a880c0bc8d9f01d1b34f2f29a84dd30edd45d73b2cedbe2d2146e13e0",
+      "sha256": "4442528e3ded0b7a6a70f8105fb585216433262145c079d1503a0fd09aef6232",
       "dependencies": []
     },
     {
@@ -799,7 +799,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e06d346ad6169e2abf6855f450d84316cad963c89ca514bdeddc55d7abd7f232",
+      "sha256": "01a22fdb5e7b93aca2de9b4dd4ac9a2e7d443a0c039fde57a089bf8e47ebeb28",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

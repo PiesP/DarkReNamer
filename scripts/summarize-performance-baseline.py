@@ -15,6 +15,16 @@ Input schema (all listed fields are required; extra fields are rejected):
    "unavailable_scopes":[{"id":"scope", "reason":"specific cause"}, ...],
    "unavailable_metrics":[{"scope":"scope", "id":"metric", "reason":"cause"}, ...]}
 
+  v2 retains the v1 fields and uses schema darkrenamer-baseline-records-v2.
+  It additionally requires product_input_sha256, provenance_amendment_sha256,
+  and scope_provenance, a map of available scope IDs to SOURCE_PROVENANCE.
+  SOURCE_PROVENANCE = {"source_sha":"40 hex", "source_tree":"40 hex",
+                       "harness_sha":"40 hex", "product_input_sha256":"64 hex"}
+  The top source pins identify the original native reference. V2 must be paired
+  with --provenance-amendment, whose exact bytes match the declared digest.
+  The amendment declares all four scope provenances, the common product-input
+  digest, the original plan digest, a UTC declaration time, and a specific reason.
+
   SCOPE = {"id":"runtime-baseline|performance-sample|runtime-model|refresh-stages",
            "artifact_sha256":"64 hex", "pdb_sha256":"64 hex",
            "profile_sha256":"64 hex", "fixture_sha256":"64 hex",
@@ -108,6 +118,12 @@ RUN_KEYS = {"index", "source_sha", "source_tree", "harness_sha",
             "validity", "cleanup", "unknown_probe_failures", "metrics"}
 PIN_KEYS = ("source_sha", "source_tree", "harness_sha", "artifact_sha256",
             "pdb_sha256", "profile_sha256", "fixture_sha256", "environment_sha256")
+SOURCE_KEYS = ("source_sha", "source_tree", "harness_sha")
+PROVENANCE_KEYS = set(SOURCE_KEYS) | {"product_input_sha256"}
+DOCUMENT_KEYS = {"schema", *SOURCE_KEYS, "frozen_plan_sha256", "scopes",
+                 "unavailable_scopes", "unavailable_metrics"}
+V2_KEYS = DOCUMENT_KEYS | {"product_input_sha256", "provenance_amendment_sha256",
+                           "scope_provenance"}
 BRACKET_KEYS = {"qpc_frequency", "last_negative_begin_ticks",
                 "last_negative_end_ticks", "first_positive_begin_ticks",
                 "first_positive_end_ticks"}
@@ -202,7 +218,8 @@ def cpu_window(value, reported_delta):
             "CPU delta differs from the raw process totals")
 
 
-def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes):
+def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes,
+                  include_provenance=False):
     exact(scope, SCOPE_KEYS, "scope")
     sid = scope["id"]
     require(sid in SCOPES, "unknown scope")
@@ -285,18 +302,67 @@ def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes):
                         "spread_status": "defined" if spread is not None else "undefined-zero-median",
                         "bracket_counts": [len(row["metrics"][mid]["brackets"]) for row in run_rows],
                         "disposition": "accepted" if center <= metric["budget"] else "exceeded"})
-    return {"id": sid, "artifact_sha256": scope["artifact_sha256"],
-            "pdb_sha256": scope["pdb_sha256"], "metrics": results,
-            "runs": run_rows}
+    result = {"id": sid, "artifact_sha256": scope["artifact_sha256"],
+              "pdb_sha256": scope["pdb_sha256"], "metrics": results,
+              "runs": run_rows}
+    if include_provenance:
+        result["scope_provenance"] = source.copy()
+    return result
 
 
-def summarize(document, plan_hash):
-    exact(document, {"schema", "source_sha", "source_tree", "harness_sha",
-                     "frozen_plan_sha256", "scopes", "unavailable_scopes",
-                     "unavailable_metrics"}, "baseline document")
-    require(document["schema"] == "darkrenamer-baseline-records-v1",
+def v2_provenance(document, plan_hash, amendment, amendment_hash, available_ids):
+    require(amendment is not None and amendment_hash is not None,
+            "v2 records require a provenance amendment and its exact digest")
+    digest(amendment_hash, HEX64, "provenance amendment digest")
+    digest(document["product_input_sha256"], HEX64, "product_input_sha256")
+    digest(document["provenance_amendment_sha256"], HEX64,
+           "provenance_amendment_sha256")
+    require(document["provenance_amendment_sha256"] == amendment_hash,
+            "provenance amendment digest differs from records")
+    exact(amendment, {"schema", "original_frozen_plan_sha256", "product_input_sha256",
+                      "scope_provenance", "declared_at", "reason"},
+          "provenance amendment")
+    require(amendment["schema"] == "darkrenamer-baseline-provenance-amendment-v1",
+            "unsupported provenance amendment schema")
+    require(amendment["original_frozen_plan_sha256"] == plan_hash,
+            "provenance amendment differs from the frozen plan")
+    require(amendment["product_input_sha256"] == document["product_input_sha256"],
+            "provenance amendment product input differs")
+    declared_at = utc(amendment["declared_at"], "provenance amendment declaration")
+    brief(amendment["reason"], "provenance amendment reason")
+    exact(amendment["scope_provenance"], set(SCOPES), "amendment scope provenance")
+    exact(document["scope_provenance"], available_ids, "record scope provenance")
+    for sid, provenance in amendment["scope_provenance"].items():
+        exact(provenance, PROVENANCE_KEYS, f"{sid} source provenance")
+        for key in SOURCE_KEYS:
+            digest(provenance[key], HEX40, f"{sid} {key}")
+        digest(provenance["product_input_sha256"], HEX64,
+               f"{sid} product_input_sha256")
+        require(provenance["product_input_sha256"] == document["product_input_sha256"],
+                f"{sid} product input differs from the common fingerprint")
+        if sid in available_ids:
+            require(document["scope_provenance"][sid] == provenance,
+                    f"{sid} scope provenance differs from amendment")
+    for sid in ("runtime-model", "refresh-stages"):
+        require(all(amendment["scope_provenance"][sid][key] == document[key]
+                    for key in SOURCE_KEYS),
+                f"{sid} native reference source differs from the frozen baseline")
+    for scope in document["scopes"]:
+        if scope["id"] in ("runtime-baseline", "performance-sample"):
+            for run in scope["runs"]:
+                require(declared_at <= utc(run["started_at"], "GUI run start"),
+                        "provenance amendment was declared after a GUI run")
+
+
+def summarize(document, plan_hash, amendment=None, amendment_hash=None):
+    require(type(document) is dict and document.get("schema") in
+            ("darkrenamer-baseline-records-v1", "darkrenamer-baseline-records-v2"),
             "unsupported baseline record schema")
-    for key in ("source_sha", "source_tree", "harness_sha"):
+    v2 = document["schema"] == "darkrenamer-baseline-records-v2"
+    exact(document, V2_KEYS if v2 else DOCUMENT_KEYS, "baseline document")
+    require(v2 or (amendment is None and amendment_hash is None),
+            "v1 records forbid a provenance amendment")
+    for key in SOURCE_KEYS:
         digest(document[key], HEX40, key)
     require(document["frozen_plan_sha256"] == plan_hash,
             "records are not bound to the selected frozen plan")
@@ -317,6 +383,8 @@ def summarize(document, plan_hash):
             set(scope_ids) | set(unavailable_scopes) == set(SCOPES) and
             not (set(scope_ids) & set(unavailable_scopes)),
             "all four scopes need one available or unavailable disposition")
+    if v2:
+        v2_provenance(document, plan_hash, amendment, amendment_hash, set(scope_ids))
     missing_metrics = {}
     for row in document["unavailable_metrics"]:
         exact(row, {"scope", "id", "reason"}, "unavailable metric")
@@ -327,19 +395,26 @@ def summarize(document, plan_hash):
     seen_processes = set()
     receipt_hashes = {"validation_receipt_sha256": set(),
                       "observation_receipt_sha256": set()}
-    results = [scope_summary(scope, document,
+    results = [scope_summary(scope, document["scope_provenance"][scope["id"]]
+                             if v2 else document,
                              {mid for sid, mid in missing_metrics if sid == scope["id"]},
-                             seen_processes, receipt_hashes)
+                             seen_processes, receipt_hashes, v2)
                for scope in document["scopes"]]
     product = {row["id"]: row for row in document["scopes"]}
     if "runtime-baseline" in product and "performance-sample" in product:
+        if v2:
+            require(all(document["scope_provenance"]["runtime-baseline"][key] ==
+                        document["scope_provenance"]["performance-sample"][key]
+                        for key in SOURCE_KEYS),
+                    "the two product GUI scopes used different source provenance")
         for key in ("artifact_sha256", "pdb_sha256"):
             require(product["runtime-baseline"][key] == product["performance-sample"][key],
                     "the two product GUI scopes used different executable pairs")
     exceeded = any(metric["disposition"] == "exceeded"
                    for scope in results for metric in scope["metrics"])
     incomplete = bool(unavailable_scopes or missing_metrics)
-    return {"schema": "darkrenamer-baseline-summary-v1",
+    result = {"schema": "darkrenamer-baseline-summary-v2" if v2 else
+             "darkrenamer-baseline-summary-v1",
             "source_sha": document["source_sha"], "source_tree": document["source_tree"],
             "harness_sha": document["harness_sha"],
             "frozen_plan_sha256": plan_hash,
@@ -351,6 +426,11 @@ def summarize(document, plan_hash):
             "pending_separate_scope": ["#220 list attribution or candidate decision",
                                        "#221 real GUI Apply, feedback and idle close"],
             "evidence_boundary": "Arithmetic and declared pins only; original VM receipts require their canonical independent verifiers. No p95, equivalence, or release claim."}
+    if v2:
+        result["product_input_sha256"] = document["product_input_sha256"]
+        result["provenance_amendment_sha256"] = amendment_hash
+        result["scope_provenance"] = document["scope_provenance"]
+    return result
 
 
 def no_duplicates(pairs):
@@ -362,7 +442,8 @@ def no_duplicates(pairs):
 
 
 def read_regular(path, label):
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     descriptor = os.open(path, flags)
     try:
         info = os.fstat(descriptor)
@@ -382,6 +463,8 @@ def main(argv=None):
                         help="sanitized records already checked against raw evidence")
     parser.add_argument("--plan", required=True, type=Path,
                         help="frozen prospective issue #219 plan")
+    parser.add_argument("--provenance-amendment", type=Path,
+                        help="required exact amendment file for v2 records; forbidden for v1")
     parser.add_argument("--output", required=True, type=Path,
                         help="new summary file; never overwrites")
     args = parser.parse_args(argv)
@@ -394,10 +477,18 @@ def main(argv=None):
     records = json.loads(read_regular(args.input, "sanitized input"),
                          object_pairs_hook=no_duplicates,
                          parse_constant=lambda _: require(False, "nonfinite JSON constant"))
-    result = summarize(records, plan_hash)
+    amendment_bytes = (read_regular(args.provenance_amendment, "provenance amendment")
+                       if args.provenance_amendment is not None else None)
+    amendment = (json.loads(amendment_bytes, object_pairs_hook=no_duplicates,
+                            parse_constant=lambda _: require(False, "nonfinite JSON constant"))
+                 if amendment_bytes is not None else None)
+    result = summarize(records, plan_hash, amendment,
+                       hashlib.sha256(amendment_bytes).hexdigest()
+                       if amendment_bytes is not None else None)
     payload = (json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
     require(len(payload) <= MAX_INPUT_BYTES, "summary exceeds the bounded output size")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
     descriptor = os.open(args.output, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as stream:

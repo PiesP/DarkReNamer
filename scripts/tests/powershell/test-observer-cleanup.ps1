@@ -170,7 +170,10 @@ public static class DarkReNamerVmAcceptanceNative {
             run_id=$runId;source_sha=$sourceSha;bundle_manifest=@{sha256=$bundleRef.sha256};
             acceptance_profile_id='vm-automated-v2-owned-resources';
             acceptance_profile_sha256=$profileSha;acceptance_profile=@{sha256=$profileSha};
-            request=@{mode='performance-sample';performance_plan=@{long_path_order='hidden-visible'}};
+            request=@{mode='performance-sample';appearance='light';
+                desktop=@{width=1366;height=768;dpi=96};text_scale_percent=100;
+                readiness_bracket_contract='qpc-polled-readiness-v1';
+                performance_plan=@{long_path_order='hidden-visible'}};
             artifacts=@{application=@{sha256=$appSha}}})
         $transportRef=Save-DrOwnedFixture 'original-transport.json' ([ordered]@{
             status='failed';task_kind='ui';owned_cleanup_failure_context=[ordered]@{
@@ -324,6 +327,7 @@ public static class DarkReNamerVmAcceptanceNative {
             acceptance_profile_sha256=$profileSha;acceptance_profile=@{sha256=$profileSha};
             request=[ordered]@{mode='runtime-baseline';appearance='light';
                 desktop=@{width=1366;height=768;dpi=96};text_scale_percent=100;
+                readiness_bracket_contract='qpc-polled-readiness-v1';
                 runtime_baseline_plan=$runtimePlan};artifacts=@{application=@{sha256=$appSha}};
             prepared_bundle=@{origin='external-prepared-source-built-bundle';
                 bundle_manifest_sha256=$bundleRef.sha256;application_sha256=$appSha}}
@@ -344,6 +348,25 @@ public static class DarkReNamerVmAcceptanceNative {
         Assert-DrControllerRuntimeBaselineProcesses -InputManifest $runtimeParsed.input `
             -Result $runtimeParsed.result -Observations $runtimeParsed.observations `
             -OwnedEvidence $runtimeParsed.owned
+        $legacyRuntime=$runtimeFixture | ConvertFrom-Json
+        $legacyRuntime.input.request.PSObject.Properties.Remove('readiness_bracket_contract')
+        Assert-DrControllerRuntimeBaselineProcesses -InputManifest $legacyRuntime.input `
+            -Result $legacyRuntime.result -Observations $legacyRuntime.observations `
+            -OwnedEvidence $legacyRuntime.owned
+        foreach ($mutation in @('wrong-tag','boolean-tag','numeric-tag','unknown-field','missing-plan')) {
+            $bad=$runtimeFixture | ConvertFrom-Json
+            switch ($mutation) {
+                'wrong-tag' { $bad.input.request.readiness_bracket_contract='QPC-polled-readiness-v1' }
+                'boolean-tag' { $bad.input.request.readiness_bracket_contract=$true }
+                'numeric-tag' { $bad.input.request.readiness_bracket_contract=1 }
+                'unknown-field' { $bad.input.request | Add-Member -NotePropertyName unreviewed -NotePropertyValue 1 }
+                'missing-plan' { $bad.input.request.PSObject.Properties.Remove('runtime_baseline_plan') }
+            }
+            Assert-Fails {
+                Assert-DrControllerRuntimeBaselineProcesses -InputManifest $bad.input `
+                    -Result $bad.result -Observations $bad.observations -OwnedEvidence $bad.owned
+            } 'Runtime baseline'
+        }
         foreach ($mutation in @('missing-cell','duplicate-cell','wrong-lifetime','wrong-session',
             'wrong-executable','forced-close','missing-job','wrong-declared','bad-plan','bool-time','wrong-observer')) {
             $bad=$runtimeFixture | ConvertFrom-Json

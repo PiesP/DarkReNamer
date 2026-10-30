@@ -104,6 +104,10 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
                         'acceptance_profile': {'sha256': OWNED_PERFORMANCE_PROFILE_SHA256},
                         'bundle_manifest': {'sha256': bundle_sha},
                         'request': {'mode': 'performance-sample',
+                                    'appearance': 'light',
+                                    'desktop': {'width': 1366, 'height': 768, 'dpi': 96},
+                                    'text_scale_percent': 100,
+                                    'readiness_bracket_contract': 'qpc-polled-readiness-v1',
                                     'performance_plan': {'long_path_order': 'hidden-visible'}},
                         'artifacts': {'application': {'sha256': application_sha}}}
             observations = {'run_id': run_id,
@@ -153,6 +157,29 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
                                              receipt_bytes, signal_bytes, lease_bytes)
             write(predelete_path, frozen)
             verify()
+            performance_request = deepcopy(manifest['request'])
+            def bind_request(request):
+                manifest['request'] = request
+                data = write(root / 'owned-performance-input-manifest.json', manifest)
+                ref = {'file': 'owned-performance-input-manifest.json',
+                       'bytes': len(data), 'sha256': digest(data)}
+                indexed[ref['file']] = refs[ref['file']] = ref
+                write(predelete_path, frozen)
+            legacy_request = deepcopy(performance_request)
+            legacy_request.pop('readiness_bracket_contract')
+            bind_request(legacy_request)
+            verify()
+            for mutation in ('wrong-tag', 'boolean-tag', 'numeric-tag', 'unknown-field'):
+                request = deepcopy(performance_request)
+                if mutation == 'wrong-tag': request['readiness_bracket_contract'] = 'QPC-polled-readiness-v1'
+                elif mutation == 'boolean-tag': request['readiness_bracket_contract'] = True
+                elif mutation == 'numeric-tag': request['readiness_bracket_contract'] = 1
+                else: request['unreviewed'] = 1
+                bind_request(request)
+                with self.subTest(performance_request=mutation), self.assertRaises(EvidenceError):
+                    verify()
+            bind_request(performance_request)
+            verify()
             for mutation in ('missing', 'stale-hash', 'wrong-root', 'wrong-observation',
                              'wrong-profile', 'wrong-lease'):
                 with self.subTest(mutation=mutation):
@@ -197,12 +224,15 @@ class OwnedPerformanceRestorationTests(unittest.TestCase):
             original['owned_cleanup_failure_context']['source_result'] = indexed['acceptance-result.json']
             write(predelete_path, frozen)
             verify()
-            for mutation in ('wrong-mode', 'wrong-plan', 'wrong-profile', 'missing-observation'):
+            for mutation in ('wrong-mode', 'wrong-plan', 'wrong-profile', 'missing-observation',
+                             'misplaced-bracket'):
                 with self.subTest(picker_mutation=mutation):
                     changed = deepcopy(manifest)
                     if mutation == 'wrong-mode': changed['request']['mode'] = 'performance-sample'
                     elif mutation == 'wrong-plan': changed['request']['picker_identity_plan']['idle_ms'] = 30000
                     elif mutation == 'wrong-profile': changed['acceptance_profile_sha256'] = 'e' * 64
+                    elif mutation == 'misplaced-bracket':
+                        changed['request']['readiness_bracket_contract'] = 'qpc-polled-readiness-v1'
                     else: changed['request'].pop('picker_identity_plan')
                     write(root / 'owned-performance-input-manifest.json', changed)
                     indexed['owned-performance-input-manifest.json'] = {
@@ -864,7 +894,9 @@ class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
             'artifacts': {'application': {'sha256': self.application_sha}},
             'request': {'mode': 'runtime-baseline', 'appearance': 'light',
                 'desktop': {'width': 1366, 'height': 768, 'dpi': 96},
-                'text_scale_percent': 100, 'runtime_baseline_plan': deepcopy(RUNTIME_BASELINE_PLAN)}}
+                'text_scale_percent': 100,
+                'readiness_bracket_contract': 'qpc-polled-readiness-v1',
+                'runtime_baseline_plan': deepcopy(RUNTIME_BASELINE_PLAN)}}
         evidence = self.original['raw_cleanup']['owned_resource_evidence']
         cells, lifecycles, jobs = [], [], []
         for index, name in enumerate(RUNTIME_BASELINE_PLAN['startup_cells']):
@@ -960,6 +992,34 @@ class RuntimeBaselineOwnedCleanupTests(unittest.TestCase):
     def test_complete_runtime_failure_keeps_acceptance_rejected(self):
         self.assertEqual(self.verify(), {'environment': 'strict-failed',
                                         'owned_cleanup': 'owned-clean', 'acceptance': 'rejected'})
+
+    def test_runtime_request_accepts_exact_legacy_and_bracket_shapes_only(self):
+        self.verify()
+        current = deepcopy(self.manifest)
+        self.manifest['request'].pop('readiness_bracket_contract')
+        self.freeze()
+        self.verify()
+        for mutation in ('wrong-tag', 'boolean-tag', 'numeric-tag', 'unknown-field',
+                         'missing-plan', 'nested-tag', 'misplaced-mode'):
+            self.manifest = deepcopy(current)
+            request = self.manifest['request']
+            if mutation == 'wrong-tag':
+                request['readiness_bracket_contract'] = 'QPC-polled-readiness-v1'
+            elif mutation == 'boolean-tag':
+                request['readiness_bracket_contract'] = True
+            elif mutation == 'numeric-tag':
+                request['readiness_bracket_contract'] = 1
+            elif mutation == 'unknown-field':
+                request['unreviewed'] = 1
+            elif mutation == 'missing-plan':
+                del request['runtime_baseline_plan']
+            elif mutation == 'nested-tag':
+                request['desktop']['readiness_bracket_contract'] = 'qpc-polled-readiness-v1'
+            else:
+                request['mode'] = 'performance-sample'
+            self.freeze()
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                self.verify()
 
     def test_runtime_inventory_membership_keeps_ordered_process_proofs_strict(self):
         evidence = self.original['raw_cleanup']['owned_resource_evidence']

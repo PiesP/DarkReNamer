@@ -29,6 +29,7 @@ OWNED_PERFORMANCE_RUN = re.compile(
 PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
 CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
 RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
+READINESS_BRACKET_CONTRACT = "qpc-polled-readiness-v1"
 RUNTIME_BASELINE_CELLS = ["fresh-system", "saved-system", "saved-english"]
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": RUNTIME_BASELINE_CELLS, "idle_seconds": 30,
@@ -511,9 +512,17 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
             result.get("acceptance_observations") == observations,
             "Owned performance frozen input, profile, result, or observations differ.")
     if runtime:
-        request = require_exact_keys(manifest.get("request"), {
+        request_fields = {
             "mode", "appearance", "desktop", "text_scale_percent", "runtime_baseline_plan",
-        }, "Runtime baseline request")
+        }
+        raw_request = manifest.get("request")
+        if type(raw_request) is dict and "readiness_bracket_contract" in raw_request:
+            request_fields.add("readiness_bracket_contract")
+        request = require_exact_keys(raw_request, request_fields, "Runtime baseline request")
+        require("readiness_bracket_contract" not in request or
+                (type(request["readiness_bracket_contract"]) is str and
+                 request["readiness_bracket_contract"] == READINESS_BRACKET_CONTRACT),
+                "Runtime baseline readiness bracket contract differs.")
         require(request["appearance"] == "light" and
                 request["desktop"] == {"width": 1366, "height": 768, "dpi": 96} and
                 type(request["text_scale_percent"]) is int and request["text_scale_percent"] == 100,
@@ -528,6 +537,21 @@ def _owned_performance_predelete(root: Path, original: dict, receipt: dict,
                 bundle.get("application", {}).get("sha256") == result["application"]["sha256"],
                 "Runtime baseline prepared source bundle or application differs.")
         _runtime_baseline_processes(original, result)
+    elif match is not None:
+        request_fields = {"mode", "appearance", "desktop", "text_scale_percent",
+                          "performance_plan"}
+        raw_request = manifest.get("request")
+        if type(raw_request) is dict and "readiness_bracket_contract" in raw_request:
+            request_fields.add("readiness_bracket_contract")
+        request = require_exact_keys(raw_request, request_fields, "Performance request")
+        require("readiness_bracket_contract" not in request or
+                (type(request["readiness_bracket_contract"]) is str and
+                 request["readiness_bracket_contract"] == READINESS_BRACKET_CONTRACT),
+                "Performance readiness bracket contract differs.")
+    else:
+        request = manifest.get("request")
+        require(type(request) is dict and "readiness_bracket_contract" not in request,
+                "Readiness bracket contract is restricted to measured baseline modes.")
     verify_owned_performance_text_scale(observations)
 
 
