@@ -1,5 +1,5 @@
 use super::{
-    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANDIDATE_JOURNAL_LEAF,
+    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANDIDATE_JOURNAL_LEAF, GuiAcceptanceClock,
     PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton, PreparedTaskDialogDisposition,
     PreparedTaskDialogPolicy, PreparedTaskDialogSession, PreparedTaskDialogSpec,
     PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE, WM_APP_APPLY_COMPLETE,
@@ -591,6 +591,9 @@ fn preview_is_ready_for_apply(window: HWND, state: &AppState) -> bool {
 }
 
 pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
+    // Capture entry before validation, but publish only for a command admitted
+    // to planning; a busy/rejected click must not erase a live operation's clock.
+    let entered_at = GuiAcceptanceClock::read_tick();
     if !preview_is_ready_for_apply(window, state) {
         return;
     }
@@ -609,6 +612,7 @@ pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
         message(window, RT::ApplyBusy.get(), "DarkReNamer");
         return;
     }
+    state.acceptance_clock.record_apply_at(entered_at);
     let revision = state.revision();
     let request = build_plan_request(&state.model, revision);
     start_plan_worker(window, state, revision, request);
@@ -708,12 +712,23 @@ fn run_prepared_apply_task_dialog(
     select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
 ) {
     let answer = select(window, &prepared.spec);
+    // The native choice has returned to the owner thread here. This is not
+    // the button callback time; the exact live session is checked below.
+    let returned_at = GuiAcceptanceClock::read_tick();
     let Some(mut state_lease) = try_app_state(window) else {
         return;
     };
     let state = state_lease.state_mut();
     let disposition =
         take_prepared_task_dialog(state, prepared.session, PreparedTaskDialogPolicy::Mutable);
+    if disposition == PreparedTaskDialogDisposition::Accepted
+        && answer.as_ref().is_ok_and(|answer| {
+            destructive_prompt_choice(*answer, APPLY_CONFIRM_BUTTON_ID)
+                == DestructivePromptChoice::Confirm
+        })
+    {
+        state.acceptance_clock.record_confirmation_at(returned_at);
+    }
     update_controls(state);
     if disposition == PreparedTaskDialogDisposition::Closed {
         try_finish_window_close(window, state);
@@ -1414,27 +1429,47 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
     if !cancel_control_state(state.worker_activity()).is_enabled() {
         return;
     }
+    // Kind values are 1=admission, 2=import, 3=plan, 4=Apply.
     let progress = match active_worker_kind(state.worker_activity()) {
         Some(ActiveWorkerKind::Admission) => state.admission_worker.as_ref().map(|worker| {
             worker.cancellation.store(true, Ordering::Release);
+            let accepted_at = GuiAcceptanceClock::read_tick();
             let (_, snapshot) = worker.progress.load();
-            admission_cancellation_status(snapshot)
+            (1, accepted_at, admission_cancellation_status(snapshot))
         }),
         Some(ActiveWorkerKind::Import) => state.import_worker.as_ref().map(|worker| {
             worker.request_cancel();
-            RT::ImportCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                2,
+                accepted_at,
+                RT::ImportCancellationProgress.get().to_owned(),
+            )
         }),
         Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            RT::PlanCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                3,
+                accepted_at,
+                RT::PlanCancellationProgress.get().to_owned(),
+            )
         }),
         Some(ActiveWorkerKind::Apply) => state.apply_worker.as_ref().map(|worker| {
             worker.cancellation.request();
-            RT::ApplyCancellationProgress.get().to_owned()
+            let accepted_at = GuiAcceptanceClock::read_tick();
+            (
+                4,
+                accepted_at,
+                RT::ApplyCancellationProgress.get().to_owned(),
+            )
         }),
         None => None,
     };
-    if let Some(progress) = progress {
+    if let Some((kind, accepted_at, progress)) = progress {
+        state
+            .acceptance_clock
+            .record_cancellation_at(kind, accepted_at);
         state.set_progress_status(progress);
         update_controls(state);
     }

@@ -234,6 +234,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 #[cfg(test)]
 use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 #[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{
@@ -723,6 +724,117 @@ fn try_app_state(window: HWND) -> Option<CallbackStateLease<AppState, DropTarget
     unsafe { CallbackState::try_lease(app_state_slot(window)) }
 }
 
+/// UI-thread-only diagnostic latches. A zero tick means no matching event yet.
+struct GuiAcceptanceClock {
+    frequency: u64,
+    apply_command: u64,
+    confirmation: u64,
+    cancellation: u64,
+    cancellation_kind: u8,
+    revision: u64,
+    last_tick: u64,
+    valid: bool,
+}
+
+impl GuiAcceptanceClock {
+    fn new() -> Self {
+        let mut frequency = 0_i64;
+        // SAFETY: the writable scalar remains live for this synchronous API call.
+        let available = unsafe { QueryPerformanceFrequency(&mut frequency) } != 0;
+        Self::with_frequency(if available && frequency > 0 {
+            frequency as u64
+        } else {
+            0
+        })
+    }
+
+    const fn with_frequency(frequency: u64) -> Self {
+        Self {
+            frequency,
+            apply_command: 0,
+            confirmation: 0,
+            cancellation: 0,
+            cancellation_kind: 0,
+            revision: 0,
+            last_tick: 0,
+            valid: frequency > 0,
+        }
+    }
+
+    fn read_tick() -> Option<u64> {
+        let mut tick = 0_i64;
+        // SAFETY: the writable scalar remains live for this synchronous API call.
+        (unsafe { QueryPerformanceCounter(&mut tick) } != 0 && tick > 0).then_some(tick as u64)
+    }
+
+    fn advance(&mut self, tick: Option<u64>) -> Option<u64> {
+        let Some(tick) = tick.filter(|tick| self.valid && *tick > self.last_tick) else {
+            self.valid = false;
+            return None;
+        };
+        let Some(revision) = self.revision.checked_add(1) else {
+            self.valid = false;
+            return None;
+        };
+        self.last_tick = tick;
+        self.revision = revision;
+        Some(tick)
+    }
+
+    fn record_apply_at(&mut self, tick: Option<u64>) {
+        if let Some(tick) = self.advance(tick) {
+            self.apply_command = tick;
+            self.confirmation = 0;
+            self.cancellation = 0;
+            self.cancellation_kind = 0;
+        }
+    }
+
+    fn record_confirmation_at(&mut self, tick: Option<u64>) {
+        if self.apply_command == 0 {
+            self.valid = false;
+            return;
+        }
+        if let Some(tick) = self.advance(tick) {
+            self.confirmation = tick;
+            self.cancellation = 0;
+            self.cancellation_kind = 0;
+        }
+    }
+
+    fn record_cancellation_at(&mut self, kind: u8, tick: Option<u64>) {
+        if !(1..=4).contains(&kind) || (kind == 4 && self.confirmation == 0) {
+            self.valid = false;
+            return;
+        }
+        if let Some(tick) = self.advance(tick) {
+            self.cancellation = tick;
+            self.cancellation_kind = kind;
+        }
+    }
+
+    fn selector_value(&self, selector: usize) -> Option<LRESULT> {
+        if !self.valid {
+            return None;
+        }
+        let value = match selector {
+            23 => (self.frequency as u32) as LRESULT,
+            24 => ((self.frequency >> 32) as u32) as LRESULT,
+            25 => (self.apply_command as u32) as LRESULT,
+            26 => ((self.apply_command >> 32) as u32) as LRESULT,
+            27 => (self.confirmation as u32) as LRESULT,
+            28 => ((self.confirmation >> 32) as u32) as LRESULT,
+            29 => (self.cancellation as u32) as LRESULT,
+            30 => ((self.cancellation >> 32) as u32) as LRESULT,
+            31 => (self.revision as u32) as LRESULT,
+            32 => ((self.revision >> 32) as u32) as LRESULT,
+            33 => self.cancellation_kind as LRESULT,
+            _ => return None,
+        };
+        Some(value)
+    }
+}
+
 struct AppState {
     list_window: HWND,
     status_message: HWND,
@@ -769,6 +881,7 @@ struct AppState {
     admission_worker: Option<AdmissionWorker>,
     import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
+    acceptance_clock: GuiAcceptanceClock,
     close_pending: bool,
     confirmation_pending: bool,
     active_prompt: Option<u64>,
@@ -930,6 +1043,7 @@ impl AppState {
             admission_worker: None,
             import_worker: None,
             preference_persistence: PreferencePersistence::default(),
+            acceptance_clock: GuiAcceptanceClock::new(),
             close_pending: false,
             confirmation_pending: false,
             active_prompt: None,
@@ -1036,6 +1150,7 @@ impl AppState {
                     | (isize::from(u8::from(no_prompt)) << 3)
                     | (isize::from(u8::from(!self.close_pending)) << 4)
             }
+            23..=33 => self.acceptance_clock.selector_value(selector)?,
             _ => return None,
         };
         (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
@@ -1542,6 +1657,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn acceptance_clock_latches_ordered_events_and_rejects_unstable_frames() {
+        let high = 1_u64 << 32;
+        let mut clock = GuiAcceptanceClock::with_frequency(high + 10);
+        assert_eq!(clock.selector_value(23), Some(10));
+        assert_eq!(clock.selector_value(24), Some(1));
+        assert_eq!(clock.selector_value(25), Some(0));
+        assert_eq!(clock.selector_value(27), Some(0));
+        assert_eq!(clock.selector_value(29), Some(0));
+        assert_eq!(clock.selector_value(31), Some(0));
+        assert_eq!(clock.selector_value(33), Some(0));
+        assert_eq!(clock.selector_value(34), None);
+
+        clock.record_apply_at(Some(high + 100));
+        assert_eq!(clock.selector_value(25), Some(100));
+        assert_eq!(clock.selector_value(26), Some(1));
+        assert_eq!(clock.selector_value(31), Some(1));
+        clock.record_confirmation_at(Some(high + 200));
+        assert_eq!(clock.selector_value(27), Some(200));
+        assert_eq!(clock.selector_value(28), Some(1));
+        assert_eq!(clock.selector_value(31), Some(2));
+        clock.record_cancellation_at(4, Some(high + 300));
+        assert_eq!(clock.selector_value(29), Some(300));
+        assert_eq!(clock.selector_value(30), Some(1));
+        assert_eq!(clock.selector_value(31), Some(3));
+        assert_eq!(clock.selector_value(33), Some(4));
+
+        clock.record_apply_at(Some(high + 400));
+        assert_eq!(clock.selector_value(25), Some(400));
+        assert_eq!(clock.selector_value(27), Some(0));
+        assert_eq!(clock.selector_value(29), Some(0));
+        assert_eq!(clock.selector_value(33), Some(0));
+        assert_eq!(clock.selector_value(31), Some(4));
+        clock.record_confirmation_at(Some(high + 399));
+        assert_eq!(clock.selector_value(23), None);
+        assert_eq!(clock.selector_value(31), None);
+
+        let mut saturated = GuiAcceptanceClock::with_frequency(10);
+        saturated.revision = u64::MAX;
+        saturated.record_apply_at(Some(1));
+        assert_eq!(saturated.selector_value(25), None);
+        let mut unavailable = GuiAcceptanceClock::with_frequency(0);
+        unavailable.record_apply_at(None);
+        assert_eq!(unavailable.selector_value(23), None);
+        let mut orphan = GuiAcceptanceClock::with_frequency(10);
+        orphan.record_confirmation_at(Some(1));
+        assert_eq!(orphan.selector_value(27), None);
+        let mut premature_cancel = GuiAcceptanceClock::with_frequency(10);
+        premature_cancel.record_apply_at(Some(1));
+        premature_cancel.record_cancellation_at(4, Some(2));
+        assert_eq!(premature_cancel.selector_value(29), None);
+    }
+
+    #[test]
+    fn cancel_without_active_worker_does_not_latch_acceptance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.acceptance_clock = GuiAcceptanceClock::with_frequency(10);
+        request_active_worker_cancel(&mut state);
+        assert_eq!(state.icon_status_value(29), Some(0));
+        assert_eq!(state.icon_status_value(31), Some(0));
+        assert_eq!(state.icon_status_value(33), Some(0));
+        state.acceptance_clock = GuiAcceptanceClock::with_frequency(0);
+        assert_eq!(state.icon_status_value(23), None);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        Ok(())
+    }
+
+    #[test]
     fn idle_close_selector_preserves_existing_status_and_rejects_unknown_selectors()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -1550,7 +1735,7 @@ mod tests {
         assert_eq!(state.icon_status_value(11), Some(1));
         assert_eq!(state.icon_status_value(21), Some(1));
         assert_eq!(state.icon_status_value(22), Some(0b11011));
-        assert_eq!(state.icon_status_value(23), None);
+        assert_eq!(state.icon_status_value(34), None);
 
         state.preference_persistence = PreferencePersistence::new(
             Some(PreferencesWriter::spawn(
