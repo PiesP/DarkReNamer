@@ -42,6 +42,11 @@ Input schema (all listed fields are required; extra fields are rejected):
              "first_positive_begin_ticks":integer,
              "first_positive_end_ticks":integer}
 
+CPU metric samples additionally require cpu_window with qpc_frequency and
+before/after objects containing begin_ticks, end_ticks and cpu_total_ticks.
+These raw values independently reproduce the CPU delta and the actual idle
+duration bracket. Startup/import metrics require their query brackets.
+
 An unavailable scope or metric needs its own specific reason. Complete input
 must cover the fixed metric inventory below; omission is not a passing value.
 """
@@ -106,6 +111,13 @@ PIN_KEYS = ("source_sha", "source_tree", "harness_sha", "artifact_sha256",
 BRACKET_KEYS = {"qpc_frequency", "last_negative_begin_ticks",
                 "last_negative_end_ticks", "first_positive_begin_ticks",
                 "first_positive_end_ticks"}
+CPU_METRICS = {"empty_idle_cpu_delta_ms", "populated_idle_cpu_delta_ms"}
+READINESS_COUNTS = {
+    "fresh_system_ready_ms": 1, "saved_system_ready_ms": 1,
+    "saved_english_ready_ms": 1, "ordinary_100_ms": 1,
+    "ordinary_1000_ms": 1, "ordinary_10000_ms": 4,
+    "long_hidden_1000_ms": 1, "long_visible_1000_ms": 1,
+}
 
 
 def require(ok, message):
@@ -171,6 +183,25 @@ def bracket(value):
                 "negative and positive queries are reversed or overlap")
 
 
+def cpu_window(value, reported_delta):
+    exact(value, {"qpc_frequency", "before", "after"}, "CPU window")
+    frequency = positive_int(value["qpc_frequency"], "CPU QPC frequency")
+    for key in ("before", "after"):
+        snapshot = exact(value[key], {"begin_ticks", "end_ticks", "cpu_total_ticks"},
+                         "CPU snapshot")
+        begin = positive_int(snapshot["begin_ticks"], "CPU snapshot begin")
+        end = positive_int(snapshot["end_ticks"], "CPU snapshot end")
+        require(type(snapshot["cpu_total_ticks"]) is int and
+                snapshot["cpu_total_ticks"] >= 0 and begin <= end,
+                "CPU snapshot has invalid ordering or total")
+    before, after = value["before"], value["after"]
+    require((after["begin_ticks"] - before["end_ticks"]) * 1000 / frequency >= 30000,
+            "CPU window does not cover an actual 30-second idle interval")
+    delta_ticks = after["cpu_total_ticks"] - before["cpu_total_ticks"]
+    require(delta_ticks >= 0 and abs(reported_delta - delta_ticks / 10000) <= 0.00051,
+            "CPU delta differs from the raw process totals")
+
+
 def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes):
     exact(scope, SCOPE_KEYS, "scope")
     sid = scope["id"]
@@ -227,14 +258,21 @@ def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes):
             require(pair not in seen_processes, "process identity was reused")
             seen_processes.add(pair)
         for mid, sample in run["metrics"].items():
-            exact(sample, {"value", "process_cell", "brackets"}, "metric sample")
+            fields = {"value", "process_cell", "brackets"}
+            if mid in CPU_METRICS:
+                fields.add("cpu_window")
+            exact(sample, fields, "metric sample")
             require(sample["process_cell"] == definitions[mid]["process_cell"],
                     "metric points at the wrong process")
             number(sample["value"], "metric value")
             require(type(sample["brackets"]) is list and len(sample["brackets"]) <= 4,
                     "metric has an invalid bracket set")
+            require(len(sample["brackets"]) >= READINESS_COUNTS.get(mid, 0),
+                    "readiness metric lacks its observed query brackets")
             for item in sample["brackets"]:
                 bracket(item)
+            if mid in CPU_METRICS:
+                cpu_window(sample["cpu_window"], sample["value"])
         run_rows.append(run)
     results = []
     for mid, metric in definitions.items():

@@ -48,6 +48,22 @@ def fixture():
                          "metrics": {mid: {"value": budget / 2,
                                            "process_cell": cell, "brackets": []}
                                      for mid, (_, budget, cell) in expected.items()}})
+            for mid, sample in runs[-1]["metrics"].items():
+                sample["brackets"] = [{
+                    "qpc_frequency": 10000000,
+                    "last_negative_begin_ticks": None,
+                    "last_negative_end_ticks": None,
+                    "first_positive_begin_ticks": 100 + probe * 20,
+                    "first_positive_end_ticks": 110 + probe * 20,
+                } for probe in range(baseline.READINESS_COUNTS.get(mid, 0))]
+                if mid in baseline.CPU_METRICS:
+                    sample["cpu_window"] = {
+                        "qpc_frequency": 10000000,
+                        "before": {"begin_ticks": 100, "end_ticks": 110,
+                                   "cpu_total_ticks": 10000},
+                        "after": {"begin_ticks": 300000110, "end_ticks": 300000120,
+                                  "cpu_total_ticks": 10000 + int(sample["value"] * 10000)},
+                    }
         scopes.append({"id": sid, **pins, "metrics": metrics, "runs": runs})
     return {"schema": "darkrenamer-baseline-records-v1", **SOURCE,
             "frozen_plan_sha256": PLAN_SHA, "scopes": scopes,
@@ -162,6 +178,23 @@ class BaselineSummaryTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 records = copy.deepcopy(original)
                 mutate(records["scopes"][1]["runs"][0])
+                with self.assertRaisesRegex(ValueError, expected):
+                    baseline.summarize(records, PLAN_SHA)
+
+    def test_cpu_delta_and_idle_duration_are_recomputed_from_raw_queries(self):
+        original = fixture()
+        cases = [
+            (lambda samples: samples["empty_idle_cpu_delta_ms"]["cpu_window"]["after"].update(
+                begin_ticks=299000110), "actual 30-second"),
+            (lambda samples: samples["empty_idle_cpu_delta_ms"].update(value=1),
+             "CPU delta differs"),
+            (lambda samples: samples["fresh_system_ready_ms"].update(brackets=[]),
+             "lacks its observed query brackets"),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                records = copy.deepcopy(original)
+                mutate(records["scopes"][0]["runs"][0]["metrics"])
                 with self.assertRaisesRegex(ValueError, expected):
                     baseline.summarize(records, PLAN_SHA)
 
