@@ -4567,12 +4567,19 @@ class GuiApplyEndpointTests(unittest.TestCase):
         if cancelled:
             cancel_before = frame(len(stages) + 2, requested + 1, invoked + 1)
             cancel_requested = tick()
-            ack = probe('active-apply-cancel', 'cancel-request-acknowledged')
+            ack = probe('active-apply-cancel', 'first-corresponding-cancel-feedback')
             cancel_after = frame(len(stages) + 3, requested + 1, invoked + 1, cancel_requested + 1)
-            cancel = {'request_ticks': cancel_requested, 'acknowledgment': ack,
+            cancel = {'request_ticks': cancel_requested, 'first_feedback': ack,
+                      'first_feedback_observation': {
+                          'kind': 'intermediate-request-status',
+                          'status': '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.',
+                          'cancel_enabled': False, 'cancel_offscreen': False,
+                          'control_id': 1009, 'control_handle': 9009},
+                      'intermediate_ack': 'observed',
                       'owner_thread_acceptance': {'before': cancel_before,
                                                   'after': cancel_after},
-                      'control_id': 1009, 'requested_from': 'active-apply-worker'}
+                      'control_id': 1009, 'control_handle': 9009,
+                      'requested_from': 'active-apply-worker'}
         ready = probe('apply-result', 'cancelled-result-and-commands' if cancelled
                       else 'completed-result-rows-and-commands')
         ready_probe = ready['probes'][-1]
@@ -4766,10 +4773,10 @@ class GuiApplyEndpointTests(unittest.TestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.validate_gui_apply_metrics(scenario, initial, missing)
 
-    def test_cancel_acknowledgment_cannot_be_terminal_or_before_request(self):
+    def test_cancel_first_feedback_cannot_follow_ready_or_precede_request(self):
         scenario, initial, final = self.valid('cancel-10000')
         for mutate in (
-            lambda x: x['cancel']['acknowledgment']['probes'][-1].__setitem__(
+            lambda x: x['cancel']['first_feedback']['probes'][-1].__setitem__(
                 'end_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks']),
             lambda x: x['cancel'].__setitem__('request_ticks',
                 x['apply_execution']['invocation_ticks']),
@@ -4778,6 +4785,45 @@ class GuiApplyEndpointTests(unittest.TestCase):
             changed = deepcopy(scenario)
             mutate(changed)
             with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_terminal_first_is_feedback_without_intermediate_ack(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        observation = scenario['cancel']['first_feedback_observation']
+        observation.update(kind='terminal-cancel-status',
+                           status=scenario['apply_execution']['result_status'],
+                           cancel_enabled=False, cancel_offscreen=True)
+        scenario['cancel']['intermediate_ack'] = 'not-observed'
+        metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+        self.assertEqual(metrics['cancel_first_corresponding_feedback_kind'],
+                         'terminal-cancel-status')
+        self.assertEqual(metrics['cancel_intermediate_ack_upper_ms'], 'not-observed')
+        self.assertGreater(metrics['cancel_first_corresponding_feedback_upper_ms'], 0)
+        for mutate in (
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'status', '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'),
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'status', '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.'),
+            lambda x: x['cancel'].__setitem__('intermediate_ack', 'observed'),
+            lambda x: x['cancel']['first_feedback_observation'].__setitem__(
+                'kind', 'unknown'),
+            lambda x: x['cancel']['first_feedback_observation'].pop('status'),
+        ):
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_intermediate_first_requires_visible_disabled_cancel(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+        self.assertGreater(metrics['cancel_intermediate_ack_upper_ms'], 0)
+        for key, value in (('cancel_enabled', True), ('cancel_offscreen', True),
+                           ('status', '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'),
+                           ('control_handle', 999)):
+            changed = deepcopy(scenario)
+            changed['cancel']['first_feedback_observation'][key] = value
+            with self.subTest(key=key), self.assertRaises(evidence.EvidenceError):
                 evidence.validate_gui_apply_metrics(changed, initial, final)
 
     def test_owner_acceptance_rejects_preinput_stale_or_drifting_clock(self):
@@ -4846,8 +4892,10 @@ class GuiApplyCampaignTests(unittest.TestCase):
             'apply_execution_feedback_upper_ms', 'idle_close_to_exit_upper_ms',
             'apply_request_to_confirmation_upper_ms',
             'confirm_to_operation_ready_upper_ms',
-            'cancel_acknowledgment_upper_ms',
-            'cancel_owner_to_acknowledgment_upper_ms',
+            'cancel_owner_acceptance_ms',
+            'cancel_first_corresponding_feedback_upper_ms',
+            'cancel_owner_to_first_feedback_upper_ms',
+            'cancel_intermediate_ack_upper_ms',
             'cancel_to_operation_ready_upper_ms')}
         rows, measured = [], []
         for index, case in enumerate(order):
@@ -4862,6 +4910,8 @@ class GuiApplyCampaignTests(unittest.TestCase):
                 'process_id': index + 1,
                 'process_start_utc_ticks': index + 1,
                 **receipts, 'metrics': {**metrics,
+                    'cancel_first_corresponding_feedback_kind':
+                        'intermediate-request-status' if index == 8 else 'not-measured',
                     'outcome': 'cancelled-rollback-unproven' if index == 8 else 'completed'}})
         return {'schema_version': 1, 'diagnostic': 'gui-apply-feedback-campaign-v1',
                 'source_sha': source, 'runs': rows}, measured
@@ -4878,7 +4928,29 @@ class GuiApplyCampaignTests(unittest.TestCase):
             self.assertEqual(report['representative_count'], 6)
             self.assertEqual(report['representative_summaries']
                 ['idle_close_to_exit_upper_ms']['median_ms'], 100.0)
+            self.assertEqual(report['cancel_case_first_feedback_kind'],
+                             'intermediate-request-status')
+            self.assertEqual(report['cancel_case_intermediate_ack_upper_ms'], 100.0)
             self.assertEqual(report['p95'], 'not-estimated')
+
+    def test_terminal_first_campaign_does_not_grade_intermediate_ack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            index, measured = self.payload(base)
+            measured[-1]['metrics'].update(
+                cancel_first_corresponding_feedback_kind='terminal-cancel-status',
+                cancel_intermediate_ack_upper_ms='not-observed')
+            path = base / 'campaign.json'
+            path.write_text(json.dumps(index), encoding='utf-8')
+            with mock.patch.object(evidence, 'validate_gui_apply_run', side_effect=measured):
+                report = evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+            self.assertEqual(report['cancel_case_first_feedback_kind'],
+                             'terminal-cancel-status')
+            self.assertTrue(report['cancel_case_first_feedback_within_200_ms'])
+            self.assertEqual(report['cancel_case_intermediate_ack_upper_ms'],
+                             'not-observed')
+            self.assertEqual(report['cancel_case_intermediate_ack_within_200_ms'],
+                             'inconclusive')
 
     def test_discloses_values_range_and_goal_exceedances_without_sla_claim(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -6376,7 +6376,8 @@ def validate_gui_apply_owner_clock(value: object, *, event: str, request_ticks: 
     require(before["query_end_ticks"] < request_ticks <= feedback_end_ticks <
             after["query_begin_ticks"] and
             before[key] == 0 and after["revision"] == before["revision"] + 1 and
-            request_ticks <= after[key] <= feedback_end_ticks and
+            (request_ticks < after[key] if event == "cancel" else
+             request_ticks <= after[key]) and after[key] <= feedback_end_ticks and
             after[key] <= after["query_begin_ticks"] and
             (after["cancel_kind"] == 4 if event == "cancel" else
              after["cancel_kind"] == 0),
@@ -6556,24 +6557,56 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
             "Confirmation owner clock was read before the actionable confirmation.")
     cancel_request = None
     cancel_accepted = None
+    cancel_first_feedback = None
+    intermediate_ack_observed = False
     if cancelled:
-        cancellation = exact_keys(scenario["cancel"], {"request_ticks", "acknowledgment",
-            "owner_thread_acceptance", "control_id", "requested_from"},
+        cancellation = exact_keys(scenario["cancel"], {"request_ticks", "first_feedback",
+            "first_feedback_observation", "intermediate_ack", "owner_thread_acceptance",
+            "control_id", "control_handle", "requested_from"},
             "active Apply cancellation")
         cancel_request = checked_int(cancellation["request_ticks"], 1, 2**63 - 1,
                                      "active Apply Cancel request")
-        ack = cancellation["acknowledgment"]
+        cancel_first_feedback = cancellation["first_feedback"]
+        observed = exact_keys(cancellation["first_feedback_observation"], {
+            "kind", "status", "cancel_enabled", "cancel_offscreen", "control_id",
+            "control_handle"}, "first corresponding Cancel feedback")
+        intermediate_ack_observed = observed["kind"] == "intermediate-request-status"
+        intermediate_status = (
+            observed["status"] == "적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요." or
+            isinstance(observed["status"], str) and
+            observed["status"].startswith("취소 요청됨 · 처리 결과를 기다려 주세요"))
+        terminal_statuses = {
+            "파일 변경을 시작하기 전에 취소했습니다.",
+            "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.",
+            "요청에 따라 변경을 취소했습니다.",
+        }
         require(int_equals(cancellation["control_id"], 1009) and
                 cancellation["requested_from"] == "active-apply-worker" and
-                isinstance(ack, dict) and
+                isinstance(cancel_first_feedback, dict) and
                 feedback["probes"][-1]["end_ticks"] < cancel_request <=
-                ack["probes"][0]["begin_ticks"],
+                cancel_first_feedback["probes"][0]["begin_ticks"] and
+                int_equals(observed["control_id"], 1009) and
+                checked_int(cancellation["control_handle"], 1, 2**63 - 1,
+                            "Cancel control handle") ==
+                checked_int(observed["control_handle"], 1, 2**63 - 1,
+                            "observed Cancel control handle") and
+                type(observed["cancel_enabled"]) is bool and
+                type(observed["cancel_offscreen"]) is bool and
+                isinstance(observed["status"], str) and
+                ((intermediate_ack_observed and intermediate_status and
+                  observed["cancel_enabled"] is False and
+                  observed["cancel_offscreen"] is False and
+                  cancellation["intermediate_ack"] == "observed") or
+                 (observed["kind"] == "terminal-cancel-status" and
+                  observed["status"] in terminal_statuses and
+                  cancellation["intermediate_ack"] == "not-observed")),
                 "Active Apply Cancel is not after execution feedback.")
-        operations.append(("active-apply-cancel", "cancel-request-acknowledged",
-                           ack["probes"][-1]["end_ticks"]))
+        operations.append(("active-apply-cancel", "first-corresponding-cancel-feedback",
+                           cancel_first_feedback["probes"][-1]["end_ticks"]))
         cancel_accepted, _ = validate_gui_apply_owner_clock(
             cancellation["owner_thread_acceptance"], event="cancel",
-            request_ticks=cancel_request, feedback_end_ticks=ack["probes"][-1]["end_ticks"],
+            request_ticks=cancel_request,
+            feedback_end_ticks=cancel_first_feedback["probes"][-1]["end_ticks"],
             frequency=frequency, pid=pid, start=start, hwnd=hwnd,
             previous=confirmation_frame)
         require(feedback["probes"][-1]["end_ticks"] <
@@ -6606,6 +6639,9 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 (cancel_request if cancelled else feedback["probes"][-1]["end_ticks"]) and
             execution["outcome"] == (cancel_outcomes.get(execution["result_status"])
                                       if cancelled else "completed") and
+            (not cancelled or intermediate_ack_observed or
+             cancellation["first_feedback_observation"]["status"] ==
+                execution["result_status"]) and
             int_equals(execution["rows"], count) and
             execution["import_command_enabled"] is True and
             execution["apply_command_enabled"] is cancelled and
@@ -6625,7 +6661,7 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
     after_imports = 2 * len(imports)
     references.extend((after_imports + offset, record) for offset, record in enumerate(
         ([planning] if planning is not None else []) + [confirmation, feedback] +
-        ([scenario["cancel"]["acknowledgment"]] if cancelled else []) + [ready, wait]))
+        ([scenario["cancel"]["first_feedback"]] if cancelled else []) + [ready, wait]))
     require(all(typed_equal(actual[index], record) for index, record in references),
             "GUI Apply endpoint references differ from their raw observer brackets.")
     verified_begin = checked_int(scenario["verification_begin_ticks"], 1, 2**63 - 1,
@@ -6678,12 +6714,21 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 (feedback["probes"][-1]["end_ticks"] - accepted) * 1000 / frequency,
             "apply_execution_feedback_from_invocation_upper_ms":
                 (feedback["probes"][-1]["end_ticks"] - invoked) * 1000 / frequency,
-            "cancel_acknowledgment_upper_ms":
-                (scenario["cancel"]["acknowledgment"]["probes"][-1]["end_ticks"] -
+            "cancel_owner_acceptance_ms":
+                (cancel_accepted - cancel_request) * 1000 / frequency
+                if cancelled else "not-measured",
+            "cancel_first_corresponding_feedback_kind":
+                cancellation["first_feedback_observation"]["kind"] if cancelled else "not-measured",
+            "cancel_first_corresponding_feedback_upper_ms":
+                (cancel_first_feedback["probes"][-1]["end_ticks"] -
                  cancel_request) * 1000 / frequency if cancelled else "not-measured",
-            "cancel_owner_to_acknowledgment_upper_ms":
-                (scenario["cancel"]["acknowledgment"]["probes"][-1]["end_ticks"] -
+            "cancel_owner_to_first_feedback_upper_ms":
+                (cancel_first_feedback["probes"][-1]["end_ticks"] -
                  cancel_accepted) * 1000 / frequency if cancelled else "not-measured",
+            "cancel_intermediate_ack_upper_ms":
+                (cancel_first_feedback["probes"][-1]["end_ticks"] -
+                 cancel_request) * 1000 / frequency if intermediate_ack_observed
+                else "not-observed" if cancelled else "not-measured",
             "cancel_to_operation_ready_upper_ms":
                 (ready["probes"][-1]["end_ticks"] - cancel_request) * 1000 / frequency
                 if cancelled else "not-measured",
@@ -6878,6 +6923,31 @@ def validate_gui_apply_campaign_index(index_path: Path, source_sha: str,
                             "median_within_goal": median <= goal if goal is not None else None,
                             "exceedance_runs": [index + 1 for index, value in enumerate(values)
                                                 if goal is not None and value > goal]}
+    cancel_metrics = results[-1]["metrics"]
+    cancel_kind = cancel_metrics["cancel_first_corresponding_feedback_kind"]
+    require(cancel_kind in ("intermediate-request-status", "terminal-cancel-status") and
+            type(cancel_metrics["cancel_first_corresponding_feedback_upper_ms"]) in
+                (int, float) and
+            math.isfinite(cancel_metrics["cancel_first_corresponding_feedback_upper_ms"]) and
+            cancel_metrics["cancel_first_corresponding_feedback_upper_ms"] >= 0 and
+            type(cancel_metrics["cancel_owner_acceptance_ms"]) in (int, float) and
+            math.isfinite(cancel_metrics["cancel_owner_acceptance_ms"]) and
+            cancel_metrics["cancel_owner_acceptance_ms"] >= 0 and
+            type(cancel_metrics["cancel_owner_to_first_feedback_upper_ms"]) in
+                (int, float) and
+            math.isfinite(cancel_metrics["cancel_owner_to_first_feedback_upper_ms"]) and
+            cancel_metrics["cancel_owner_to_first_feedback_upper_ms"] >= 0 and
+            type(cancel_metrics["cancel_to_operation_ready_upper_ms"]) in
+                (int, float) and
+            math.isfinite(cancel_metrics["cancel_to_operation_ready_upper_ms"]) and
+            cancel_metrics["cancel_to_operation_ready_upper_ms"] >= 0 and
+            ((cancel_kind == "intermediate-request-status" and
+              type(cancel_metrics["cancel_intermediate_ack_upper_ms"]) in (int, float) and
+              math.isfinite(cancel_metrics["cancel_intermediate_ack_upper_ms"]) and
+              cancel_metrics["cancel_intermediate_ack_upper_ms"] >= 0) or
+             (cancel_kind == "terminal-cancel-status" and
+              cancel_metrics["cancel_intermediate_ack_upper_ms"] == "not-observed")),
+            "GUI Apply campaign Cancel feedback metrics differ from the typed endpoint.")
     return {"schema_version": 1, "diagnostic": "gui-apply-feedback-campaign-v1",
             "status": "measured", "campaign_complete": True, "source_sha": source_sha,
             "application_sha256": artifact_binding[1],
@@ -6885,10 +6955,20 @@ def validate_gui_apply_campaign_index(index_path: Path, source_sha: str,
             "run_count": len(results), "representative_count": len(repeated),
             "runs": results, "representative_summaries": summaries,
             "cancel_case_disposition": results[-1]["metrics"]["outcome"],
-            "cancel_case_feedback_upper_ms":
-                results[-1]["metrics"]["cancel_acknowledgment_upper_ms"],
-            "cancel_case_owner_to_acknowledgment_upper_ms":
-                results[-1]["metrics"]["cancel_owner_to_acknowledgment_upper_ms"],
+            "cancel_case_first_feedback_kind": cancel_kind,
+            "cancel_case_first_corresponding_feedback_upper_ms":
+                cancel_metrics["cancel_first_corresponding_feedback_upper_ms"],
+            "cancel_case_first_feedback_within_200_ms":
+                cancel_metrics["cancel_first_corresponding_feedback_upper_ms"] <= 200,
+            "cancel_case_owner_acceptance_ms":
+                cancel_metrics["cancel_owner_acceptance_ms"],
+            "cancel_case_owner_to_first_feedback_upper_ms":
+                cancel_metrics["cancel_owner_to_first_feedback_upper_ms"],
+            "cancel_case_intermediate_ack_upper_ms":
+                cancel_metrics["cancel_intermediate_ack_upper_ms"],
+            "cancel_case_intermediate_ack_within_200_ms":
+                (cancel_metrics["cancel_intermediate_ack_upper_ms"] <= 200
+                 if cancel_kind == "intermediate-request-status" else "inconclusive"),
             "cancel_case_to_operation_ready_upper_ms":
                 results[-1]["metrics"]["cancel_to_operation_ready_upper_ms"],
             "p95": "not-estimated", "release_campaign": "not-run"}

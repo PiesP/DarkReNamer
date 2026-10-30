@@ -21,6 +21,29 @@ function Assert-Equal {
 
 $nativeSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'))
 $scenarioSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-context-scenarios.ps1'))
+Assert-Equal (Resolve-ObserverCancelFeedbackKind `
+    -Status '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' `
+    -CancelEnabled $false -CancelOffscreen $false) 'intermediate-request-status' `
+    'Visible disabled Cancel request status is intermediate acknowledgment'
+Assert-Equal (Resolve-ObserverCancelFeedbackKind `
+    -Status '요청에 따라 변경을 취소했습니다.' `
+    -CancelEnabled $false -CancelOffscreen $true) 'terminal-cancel-status' `
+    'Terminal Cancel status remains corresponding feedback when offscreen'
+foreach ($terminalStatus in @(
+    '파일 변경을 시작하기 전에 취소했습니다.',
+    '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.')) {
+    Assert-Equal (Resolve-ObserverCancelFeedbackKind `
+        -Status $terminalStatus -CancelEnabled $true -CancelOffscreen $true) `
+        'terminal-cancel-status' 'Every explicit terminal cancellation is feedback'
+}
+Assert-Equal (Resolve-ObserverCancelFeedbackKind `
+    -Status '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.' `
+    -CancelEnabled $false -CancelOffscreen $true) '' `
+    'Ordinary success cannot qualify as Cancel feedback'
+Assert-Equal (Resolve-ObserverCancelFeedbackKind `
+    -Status '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' `
+    -CancelEnabled $true -CancelOffscreen $false) '' `
+    'Enabled Cancel cannot qualify as intermediate acknowledgment'
 $emptyPerformanceRows = @(Convert-ObserverPerformanceSampleRows -Samples @() -Timeline)
 Assert-Equal $emptyPerformanceRows.Count 0 'Failed sampler with no completed rows remains an empty partial snapshot'
 if ($scenarioSource -notmatch '(?s)\$ObservationSink\[''response_timeline''\]\s*=\s*\[ordered\]@\{[^}]*qpc_frequency\s*=\s*\[long\]\[Diagnostics.Stopwatch\]::Frequency') {

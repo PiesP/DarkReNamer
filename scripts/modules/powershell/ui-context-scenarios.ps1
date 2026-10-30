@@ -4081,6 +4081,23 @@ function Find-ObserverActiveWorkerCancel {
     $cancel
 }
 
+function Resolve-ObserverCancelFeedbackKind {
+    param([Parameter(Mandatory)][string] $Status,
+        [Parameter(Mandatory)][bool] $CancelEnabled,
+        [Parameter(Mandatory)][bool] $CancelOffscreen)
+    if (-not $CancelEnabled -and -not $CancelOffscreen -and
+        ($Status -ceq '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' -or
+         $Status.StartsWith('취소 요청됨 · 처리 결과를 기다려 주세요', [StringComparison]::Ordinal))) {
+        return 'intermediate-request-status'
+    }
+    if ($Status -ceq '파일 변경을 시작하기 전에 취소했습니다.' -or
+        $Status -ceq '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.' -or
+        $Status -ceq '요청에 따라 변경을 취소했습니다.') {
+        return 'terminal-cancel-status'
+    }
+    return ''
+}
+
 function Invoke-ObserverGuiApplyFeedbackScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -4286,33 +4303,55 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
             $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
                 -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
             $cancelRequestTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
+            $ObservationSink['cancel'] = [ordered]@{
+                request_ticks=$cancelRequestTicks; first_feedback=$null;
+                first_feedback_observation=$null; intermediate_ack='not-observed';
+                owner_thread_acceptance=[ordered]@{ before=$cancelClockBefore; after=$null };
+                control_id=1009;
+                control_handle=[long]$cancel.Current.NativeWindowHandle;
+                requested_from='active-apply-worker' }
             $cancelInvocation = Start-AutomationControlInvoke -OwnedProcess $application.owned `
                 -Element $cancel -Label 'active worker Cancel request'
-            $ack = Wait-ObserverMeasuredReadiness -Application $application `
+            $cancelHandle = [long]$cancel.Current.NativeWindowHandle
+            $firstFeedback = Wait-ObserverMeasuredReadiness -Application $application `
                 -WaitSeconds ([Math]::Min(5, $WaitSeconds)) -PollMilliseconds 10 `
-                -Operation 'active-apply-cancel' -Predicate 'cancel-request-acknowledged' -Probe {
-                    if ($cancel.Current.IsOffscreen) {
-                        throw 'Apply cancellation reached terminal state before acknowledgment was observed.'
+                -Operation 'active-apply-cancel' -Predicate 'first-corresponding-cancel-feedback' -Probe {
+                    Assert-AutomationBinding -Element $cancel -Process $application.process `
+                        -ExpectedSession $SessionId -Label 'active worker Cancel feedback' -RequireWindowHandle
+                    if ($cancel.Current.AutomationId -cne '1009' -or
+                        $cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+                        [long]$cancel.Current.NativeWindowHandle -ne $cancelHandle) {
+                        throw 'Active worker Cancel feedback changed its bound control.'
                     }
-                    $value = $status.Current.Name
-                    return [bool](-not $cancel.Current.IsEnabled -and
-                        ($value -ceq '적용 취소를 요청했습니다. 파일 처리 결과가 표시될 때까지 기다려 주세요.' -or
-                         $value.StartsWith('취소 요청됨 · 처리 결과를 기다려 주세요', [StringComparison]::Ordinal)))
+                    $value = [string]$status.Current.Name
+                    $offscreen = [bool]$cancel.Current.IsOffscreen
+                    $enabled = [bool]$cancel.Current.IsEnabled
+                    $kind = Resolve-ObserverCancelFeedbackKind -Status $value `
+                        -CancelEnabled $enabled -CancelOffscreen $offscreen
+                    if ($kind -cne '') {
+                        $ObservationSink['cancel']['first_feedback_observation'] = [ordered]@{
+                            kind=$kind;
+                            status=$value; cancel_enabled=$enabled; cancel_offscreen=$offscreen;
+                            control_id=1009; control_handle=$cancelHandle }
+                        return $true
+                    }
+                    return $false
                 }
+            $ObservationSink['cancel']['first_feedback'] = $firstFeedback
+            $firstPositive = $ObservationSink['cancel']['first_feedback_observation']
+            if ($firstPositive.kind -ceq 'intermediate-request-status') {
+                $ObservationSink['cancel']['intermediate_ack'] = 'observed'
+            }
             $cancelClockAfter = Read-ObserverGuiApplyClockFrame -Application $application `
                 -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
+            $ObservationSink['cancel']['owner_thread_acceptance']['after'] = $cancelClockAfter
             if ($cancelClockBefore.cancel_accepted_ticks -ne 0 -or
                 $cancelClockAfter.revision -le $cancelClockBefore.revision -or
                 $cancelClockAfter.cancel_kind -ne 4 -or
-                $cancelClockAfter.cancel_accepted_ticks -lt $cancelRequestTicks -or
-                $cancelClockAfter.cancel_accepted_ticks -gt $ack.probes[-1].end_ticks) {
-                throw 'GUI Apply Cancel owner acceptance is stale or follows acknowledgment.'
+                $cancelClockAfter.cancel_accepted_ticks -le $cancelRequestTicks -or
+                $cancelClockAfter.cancel_accepted_ticks -gt $firstFeedback.probes[-1].end_ticks) {
+                throw 'GUI Apply Cancel owner acceptance is stale or follows first feedback.'
             }
-            $ObservationSink['cancel'] = [ordered]@{
-                request_ticks=$cancelRequestTicks; acknowledgment=$ack;
-                owner_thread_acceptance=[ordered]@{
-                    before=$cancelClockBefore; after=$cancelClockAfter };
-                control_id=1009; requested_from='active-apply-worker' }
             Complete-AutomationControlInvoke -State $cancelInvocation -TimeoutSeconds $WaitSeconds
         }
         Complete-AutomationControlInvoke -State $confirmInvocation -TimeoutSeconds $WaitSeconds
