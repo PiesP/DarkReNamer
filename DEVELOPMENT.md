@@ -1126,6 +1126,10 @@ journal checks follow the timed operation-ready endpoint. Idle close begins
 only after selector 22 reports mask 31; final normal-close persistence remains
 inside the exit interval. UIA and status observations do not establish pixel
 presentation time.
+The final positive operation-ready query also requires selector 34 to report
+native preview synchronization for the bound process and HWND. Its raw query
+interval must lie inside that readiness probe; a later synchronized state cannot
+repair an earlier incomplete endpoint.
 
 After every canonical run passes, create a private campaign index with
 `schema_version: 1`, `diagnostic: "gui-apply-feedback-campaign-v1"`, the exact

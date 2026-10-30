@@ -1151,6 +1151,9 @@ impl AppState {
                     | (isize::from(u8::from(!self.close_pending)) << 4)
             }
             23..=33 => self.acceptance_clock.selector_value(selector)?,
+            // The final Apply result is not native-row-ready after a failed
+            // incremental update and failed fallback rebuild.
+            34 => isize::from(u8::from(self.preview_synchronization.is_synchronized())),
             _ => return None,
         };
         (shared.map_or(0, IconShared::status_revision) == revision_before).then_some(value)
@@ -1727,6 +1730,25 @@ mod tests {
     }
 
     #[test]
+    fn preview_synchronization_status_tracks_failure_and_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        assert_eq!(state.icon_status_value(0), Some(1));
+        assert_eq!(state.icon_status_value(22), Some(0b11011));
+        assert_eq!(state.icon_status_value(34), Some(0));
+
+        state.mark_preview_synchronized();
+        assert_eq!(state.icon_status_value(34), Some(1));
+        state.mark_preview_sync_failed();
+        assert_eq!(state.icon_status_value(34), Some(0));
+        state.mark_preview_synchronized();
+        assert_eq!(state.icon_status_value(34), Some(1));
+        assert_eq!(state.icon_status_value(35), None);
+        Ok(())
+    }
+
+    #[test]
     fn idle_close_selector_preserves_existing_status_and_rejects_unknown_selectors()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -1735,7 +1757,8 @@ mod tests {
         assert_eq!(state.icon_status_value(11), Some(1));
         assert_eq!(state.icon_status_value(21), Some(1));
         assert_eq!(state.icon_status_value(22), Some(0b11011));
-        assert_eq!(state.icon_status_value(34), None);
+        assert_eq!(state.icon_status_value(34), Some(0));
+        assert_eq!(state.icon_status_value(35), None);
 
         state.preference_persistence = PreferencePersistence::new(
             Some(PreferencesWriter::spawn(

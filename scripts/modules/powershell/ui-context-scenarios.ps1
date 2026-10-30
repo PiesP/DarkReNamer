@@ -4216,6 +4216,7 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
         }
         $sampler.SetPhase('result')
         $expectedStatus = '{0}개 변경 완료 · 목록에 실제 결과를 반영했습니다.' -f $count
+        $nativeSyncReads = [Collections.Generic.List[object]]::new()
         $ready = Wait-ObserverMeasuredReadiness -Application $application -WaitSeconds $WaitSeconds `
             -Operation 'apply-result' `
             -Predicate $(if ($cancelCase) { 'cancelled-result-and-commands' } else {
@@ -4236,10 +4237,28 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 $first = [string]$grid.pattern.GetItem(0, 0).Current.Name
                 $last = [string]$grid.pattern.GetItem($count - 1, 0).Current.Name
                 $prefix = if ($cancelCase) { '' } else { 'sample-' }
-                return [bool]($first -ceq ($prefix + 'ordinary-00000.txt') -and
-                    $last -ceq ($prefix + $lastName))
+                if ($first -cne ($prefix + 'ordinary-00000.txt') -or
+                    $last -cne ($prefix + $lastName)) { return $false }
+                $syncBegin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+                $synchronized = [DarkReNamerIconStatusObserver]::ReadPreviewSynchronizationBound(
+                    $application.process, [IntPtr]$application.main_handle,
+                    [long]$application.process_start_utc_ticks)
+                $syncEnd = [long][Diagnostics.Stopwatch]::GetTimestamp()
+                if ($synchronized -ne 1) { return $false }
+                $nativeSyncReads.Add([ordered]@{
+                    selector=34; value=[int]$synchronized;
+                    qpc_frequency=[long][Diagnostics.Stopwatch]::Frequency;
+                    query_begin_ticks=$syncBegin; query_end_ticks=$syncEnd;
+                    process_id=[int]$application.process.Id;
+                    process_start_utc_ticks=[long]$application.process_start_utc_ticks;
+                    main_window_handle=[long]$application.main_handle })
+                return $true
             }
+        if ($nativeSyncReads.Count -ne 1) {
+            throw 'GUI Apply native preview synchronization was not observed in the ready probe.'
+        }
         $ObservationSink['apply_execution']['operation_ready'] = $ready
+        $ObservationSink['apply_execution']['native_preview_synchronization'] = $nativeSyncReads[0]
         $ObservationSink['apply_execution']['result_status'] = [string]$status.Current.Name
         $ObservationSink['apply_execution']['outcome'] = if (-not $cancelCase) { 'completed' }
             elseif ($ObservationSink['apply_execution']['result_status'] -ceq

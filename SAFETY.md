@@ -566,6 +566,10 @@ foreground worker or owned prompt, settled icons, successfully drained required
 preference acknowledgments from healthy writers, and no pending close. The
 query performs no joins, event draining or persistence work. Observing this
 state does not promise how long normal close and its final writes will take.
+Selector 34 reads the existing preview synchronization state in O(1); a failed
+incremental row update and failed fallback rebuild report unsynchronized even
+if a terminal result status was posted. The source-bound observer requires this
+native state within its final positive Apply readiness probe.
 
 `windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
 worker initializes and balances COM on that same STA, pumps its own message

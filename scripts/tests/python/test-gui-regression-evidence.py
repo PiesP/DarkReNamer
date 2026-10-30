@@ -4563,6 +4563,12 @@ class GuiApplyEndpointTests(unittest.TestCase):
                       'control_id': 1009, 'requested_from': 'active-apply-worker'}
         ready = probe('apply-result', 'cancelled-result-and-commands' if cancelled
                       else 'completed-result-rows-and-commands')
+        ready_probe = ready['probes'][-1]
+        native_sync = {'selector': 34, 'value': 1, 'qpc_frequency': frequency,
+                       'query_begin_ticks': ready_probe['begin_ticks'],
+                       'query_end_ticks': ready_probe['end_ticks'],
+                       'process_id': pid, 'process_start_utc_ticks': start,
+                       'main_window_handle': hwnd}
         verified_begin = tick()
         verified_end = tick()
         close_wait = probe('idle-close', 'close-readiness-mask31')
@@ -4589,6 +4595,7 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 'first_feedback': execution_feedback,
                 'outcome': 'cancelled-rollback-unproven' if cancelled else 'completed',
                 'operation_ready': ready,
+                'native_preview_synchronization': native_sync,
                 'result_status': '요청에 따라 변경을 취소했습니다.' if cancelled else
                     f'{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다.',
                 'rows': count, 'import_command_enabled': True,
@@ -4617,7 +4624,25 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 scenario, initial, final = self.valid(case)
                 metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
                 self.assertEqual(metrics['count'], int(case.split('-')[-1]))
+                self.assertTrue(metrics['native_preview_synchronized'])
                 self.assertEqual(metrics['presentation_latency'], 'not-measured')
+
+    def test_rejects_native_preview_failure_or_late_or_foreign_query(self):
+        scenario, initial, final = self.valid()
+        for name, mutate in {
+            'failed_fallback': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('value', 0),
+            'missing': lambda x: x['apply_execution'].pop('native_preview_synchronization'),
+            'wrong_selector': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('selector', 22),
+            'foreign_process': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('process_id', 42),
+            'foreign_window': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('main_window_handle', 901),
+            'wrong_clock': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__('qpc_frequency', 9),
+            'after_endpoint': lambda x: x['apply_execution']['native_preview_synchronization'].__setitem__(
+                'query_begin_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks'] + 1),
+        }.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
 
     def test_rejects_identity_order_completion_command_journal_exit_and_survivors(self):
         scenario, initial, final = self.valid()

@@ -1998,6 +1998,24 @@ public static class DarkReNamerIconStatusObserver {
         return flags;
     }
 
+    // Selector 34 reads the UI owner's native ListView/model synchronization
+    // state. A failed update is never a completed, actionable Apply endpoint.
+    public static uint ReadPreviewSynchronizationBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Preview synchronization target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Preview synchronization HWND does not belong to the owned process.");
+        uint synchronized = Scalar(window, 34);
+        if (synchronized > 1 || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+            GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Preview synchronization or process identity changed.");
+        return synchronized;
+    }
+
     // Additive selectors 23..33 expose QPC event clocks only for this diagnostic.
     // A matching revision around all split scalars proves one owner-thread frame.
     public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(

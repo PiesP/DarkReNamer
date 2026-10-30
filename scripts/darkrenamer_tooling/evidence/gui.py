@@ -6465,7 +6465,7 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
         "expected_changed_rows"}, "GUI Apply request")
     execution = exact_keys(scenario["apply_execution"], {"invocation_ticks",
         "owner_thread_acceptance", "first_feedback",
-        "outcome", "operation_ready", "result_status", "rows",
+        "outcome", "operation_ready", "native_preview_synchronization", "result_status", "rows",
         "import_command_enabled", "apply_command_enabled"}, "GUI Apply execution")
     requested = checked_int(request["request_ticks"], 1, 2**63 - 1, "Apply request")
     invoked = checked_int(execution["invocation_ticks"], 1, 2**63 - 1,
@@ -6542,6 +6542,22 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 cancellation["owner_thread_acceptance"]["before"]["query_begin_ticks"],
                 "Cancel owner clock was read before execution feedback.")
     ready = execution["operation_ready"]
+    native_sync = exact_keys(execution["native_preview_synchronization"], {
+        "selector", "value", "qpc_frequency", "query_begin_ticks", "query_end_ticks",
+        "process_id", "process_start_utc_ticks", "main_window_handle"},
+        "GUI Apply native preview synchronization")
+    final_probe = ready["probes"][-1]
+    sync_begin = checked_int(native_sync["query_begin_ticks"], 1, 2**63 - 1,
+                             "GUI Apply native synchronization query begin")
+    sync_end = checked_int(native_sync["query_end_ticks"], 1, 2**63 - 1,
+                           "GUI Apply native synchronization query end")
+    require(int_equals(native_sync["selector"], 34) and
+            int_equals(native_sync["value"], 1) and
+            all(int_equals(native_sync[key], value) for key, value in
+                (("qpc_frequency", frequency), ("process_id", pid),
+                 ("process_start_utc_ticks", start), ("main_window_handle", hwnd))) and
+            final_probe["begin_ticks"] <= sync_begin <= sync_end <= final_probe["end_ticks"],
+            "GUI Apply native preview was not synchronized inside its final ready probe.")
     cancel_outcomes = {
         "파일 변경을 시작하기 전에 취소했습니다.": "cancelled-before-mutation",
         "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.": "rolled-back",
@@ -6637,6 +6653,7 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
             "idle_close_to_exit_upper_ms":
                 (close["exit_observed_ticks"] - close["request_ticks"]) * 1000 / frequency,
             "qpc_frequency": frequency, "query_uncertainty": brackets["observations"],
+            "native_preview_synchronized": True,
             "presentation_latency": "not-measured", "sample_count": len(samples)}
 
 
