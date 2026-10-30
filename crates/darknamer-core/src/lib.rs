@@ -10,7 +10,6 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
-use std::mem;
 use std::sync::{Arc, Weak};
 
 mod windows_leaf_name;
@@ -2061,15 +2060,25 @@ impl LegacyList {
             return false;
         }
 
-        let mut original = mem::take(&mut self.items)
-            .into_iter()
-            .map(Some)
-            .collect::<Vec<_>>();
-        self.items = Vec::with_capacity(original.len());
-        for index in order {
-            if let Some(item) = original[index].take() {
-                self.items.push(item);
+        // order[destination] is the original position. Follow each cycle,
+        // placing its next source at the current destination. The final
+        // position already holds the cycle's first item; identity marks visited.
+        for start in 0..order.len() {
+            let mut current = start;
+            while order[current] != current {
+                let next = order[current];
+                order[current] = current;
+                if next == start {
+                    break;
+                }
+                self.items.swap(current, next);
+                current = next;
             }
+        }
+        // The old changed path requested output capacity for the current length.
+        // Request the same post-sort retention after earlier row removals.
+        if self.items.capacity() > self.items.len() {
+            self.items.shrink_to_fit();
         }
         true
     }
@@ -2603,6 +2612,176 @@ mod tests {
 
     fn item(path: String) -> LegacyListItem {
         LegacyListItem::new(path, false, 0, 0, 0)
+    }
+
+    #[test]
+    fn sort_in_place_follows_multiple_cycles_with_complete_rows() {
+        let mut list = LegacyList::new();
+        for (position, name) in ["c", "a", "b", "e", "d"].into_iter().enumerate() {
+            assert_eq!(
+                list.append(LegacyListItem::new(
+                    format!(r"C:\source-{position}\{name}.txt"),
+                    position % 2 == 0,
+                    position as u32 + 1,
+                    position as u64 + 10,
+                    position as u64 + 20,
+                )),
+                Ok(true)
+            );
+        }
+        assert_eq!(list.manual_change(0, "renamed-c.txt"), Ok(true));
+        assert_eq!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .map(|rows| rows.len()),
+            Ok(5)
+        );
+        let original = list.items.clone();
+        let capacity = list.items.capacity();
+        let source_revision = list.source_revision;
+        let identity = Arc::clone(&list.identity);
+        let proposal_units = list.proposed_name_utf16_units;
+        let planned_units = list.planned_path_utf16_units;
+
+        assert!(list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        for (sorted, original_index) in [1, 2, 0, 4, 3].into_iter().enumerate() {
+            assert_eq!(list.items[sorted], original[original_index]);
+            assert!(Arc::ptr_eq(
+                &list.items[sorted].destination_parent,
+                &original[original_index].destination_parent
+            ));
+        }
+        let post_sort_capacity = list.items.capacity();
+        assert!(post_sort_capacity >= list.len());
+        assert!(post_sort_capacity <= capacity);
+        assert_eq!(list.source_revision, source_revision);
+        assert!(Arc::ptr_eq(&list.identity, &identity));
+        assert_eq!(list.proposed_name_utf16_units, proposal_units);
+        assert_eq!(list.planned_path_utf16_units, planned_units);
+        assert!(!list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        assert_eq!(list.items.capacity(), post_sort_capacity);
+    }
+
+    #[test]
+    fn sort_in_place_keeps_equal_keys_stable_and_small_lists_unchanged() {
+        let mut empty = LegacyList::new();
+        assert!(!empty.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        assert_eq!(empty.append(item(r"C:\single\same.txt".into())), Ok(true));
+        assert!(!empty.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+
+        let mut list = LegacyList::new();
+        for (position, name) in ["same", "other", "same", "first", "same"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                list.append(item(format!(r"C:\source-{position}\{name}.txt"))),
+                Ok(true)
+            );
+        }
+        let original = list.items.clone();
+        assert!(list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        for (sorted, original_index) in [3, 1, 0, 2, 4].into_iter().enumerate() {
+            assert_eq!(list.items[sorted], original[original_index]);
+        }
+        assert!(!list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+    }
+
+    #[test]
+    fn sort_in_place_handles_every_small_permutation() {
+        fn check(prefix: &mut Vec<usize>, used: &mut [bool]) {
+            if prefix.len() == used.len() {
+                let mut list = LegacyList::new();
+                for &rank in prefix.iter() {
+                    assert_eq!(list.append(item(format!(r"C:\root\{rank}.txt"))), Ok(true));
+                }
+                let expected_changed = prefix
+                    .iter()
+                    .enumerate()
+                    .any(|(index, rank)| index != *rank);
+                assert_eq!(
+                    list.sort_by_changed(
+                        LegacySortMode::NameAscending,
+                        LegacyText::case_insensitive_cmp
+                    ),
+                    expected_changed,
+                    "input permutation: {prefix:?}"
+                );
+                for (rank, row) in list.items().iter().enumerate() {
+                    assert_eq!(
+                        row.source_path(),
+                        &LegacyText::from(format!(r"C:\root\{rank}.txt")),
+                        "input permutation: {prefix:?}"
+                    );
+                }
+                return;
+            }
+            for rank in 0..used.len() {
+                if used[rank] {
+                    continue;
+                }
+                used[rank] = true;
+                prefix.push(rank);
+                check(prefix, used);
+                prefix.pop();
+                used[rank] = false;
+            }
+        }
+
+        for size in 0..=6 {
+            check(&mut Vec::new(), &mut vec![false; size]);
+        }
+    }
+
+    #[test]
+    fn sort_in_place_controls_capacity_after_removals() {
+        let mut list = LegacyList::new();
+        for rank in 0..64 {
+            assert_eq!(
+                list.append(item(format!(r"C:\root\{rank:03}.txt"))),
+                Ok(true)
+            );
+        }
+        assert_eq!(list.remove_rows(&(3..64).collect::<Vec<_>>()), 61);
+        let retained_capacity = list.items.capacity();
+        assert!(retained_capacity > list.len());
+        assert!(!list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        assert_eq!(list.items.capacity(), retained_capacity);
+
+        list.items.swap(0, 2);
+        assert!(list.sort_by_changed(
+            LegacySortMode::NameAscending,
+            LegacyText::case_insensitive_cmp
+        ));
+        for (rank, row) in list.items().iter().enumerate() {
+            assert_eq!(
+                row.source_path(),
+                &LegacyText::from(format!(r"C:\root\{rank:03}.txt"))
+            );
+        }
+        // shrink_to_fit may retain spare slots; only a non-increase is guaranteed.
+        assert!(list.items.capacity() >= list.len());
+        assert!(list.items.capacity() <= retained_capacity);
     }
 
     fn assert_bounded_chunks<F>(index: &LegacyAppendIndex<F>, source_count: usize)
