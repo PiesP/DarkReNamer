@@ -372,6 +372,23 @@ function Wait-ObserverPathImportDialog {
     } while ((Get-Date) -lt $deadline)
     throw 'Bound native path-list import dialog was not found before the bounded deadline.'
 }
+function Read-ObserverImportFeedbackClockFrame {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks)
+    $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $frame = [DarkReNamerIconStatusObserver]::ReadImportFeedbackClockBound(
+        $Application.process, [IntPtr]$Application.main_handle,
+        $ExpectedStartUtcTicks)
+    $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{
+        query_begin_ticks=$begin; query_end_ticks=$end;
+        qpc_frequency=[long]$frame.Frequency; revision=[long]$frame.Revision;
+        import_feedback_ticks=[long]$frame.ImportFeedbackTicks;
+        process_id=[int]$Application.process.Id;
+        process_start_utc_ticks=$ExpectedStartUtcTicks;
+        main_window_handle=[long]$Application.main_handle }
+}
+
 function Import-GuiRegressionPathList {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -384,6 +401,7 @@ function Import-GuiRegressionPathList {
         [switch] $IncludeOpenTicks,
         [switch] $RecordReadinessBrackets,
         [switch] $MeasureFirstFeedback,
+        [long] $ExpectedStartUtcTicks = 0,
         [ValidateRange(0, 500)][int] $PickerSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents,
         [string] $TimelineOperation
@@ -408,6 +426,17 @@ function Import-GuiRegressionPathList {
         if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
         Start-Sleep -Milliseconds 100
     }
+    $importClockBefore = if ($MeasureFirstFeedback) {
+        if ($ExpectedStartUtcTicks -le 0) {
+            throw 'Import feedback requires the captured product start time.'
+        }
+        $before = Read-ObserverImportFeedbackClockFrame -Application $Application `
+            -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+        if ($before.import_feedback_ticks -ne 0 -or $before.revision -ne 0) {
+            throw 'The first import feedback clock is stale before opening the picker.'
+        }
+        $before
+    } else { $null }
     $pickerRequestTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId `
         -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x56 -Label 'path-list import shortcut'
@@ -417,15 +446,6 @@ function Import-GuiRegressionPathList {
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
     $nativeOpen = Resolve-AcceptanceNativeOpen -Dialog $dialog -Process $Application.process -ExpectedSession $SessionId
-    $status = if ($MeasureFirstFeedback) {
-        Find-UniqueAutomationElement -Root $Application.main -Process $Application.process `
-            -ExpectedSession $SessionId -AutomationId '1007' `
-            -ControlType ([Windows.Automation.ControlType]::Text) -TimeoutSeconds $WaitSeconds `
-            -Label 'import functional status' -RequireWindowHandle
-    } else { $null }
-    if ($MeasureFirstFeedback -and $status.Current.Name -ceq '가져오기 파일을 읽는 중입니다. 취소를 요청할 수 있습니다...') {
-        throw 'Import feedback was already present before the bound Open invocation.'
-    }
     if ($PickerSettleMilliseconds -gt 0) {
         Start-Sleep -Milliseconds $PickerSettleMilliseconds
     }
@@ -435,16 +455,9 @@ function Import-GuiRegressionPathList {
         Start-AutomationControlInvoke -OwnedProcess $Application.owned `
             -Element $nativeOpen.Element -Label 'path-list import Open'
     } else { $null }
-    if ($MeasureFirstFeedback) {
-        $feedback = Wait-ObserverMeasuredReadiness -Application $Application -WaitSeconds ([Math]::Min(5, $WaitSeconds)) `
-            -PollMilliseconds 10 -Operation 'import-open' -Predicate 'bound-import-reading-status' -Probe {
-                if ($Grid.pattern.Current.RowCount -ge $ExpectedRows) {
-                    throw 'Import reached terminal row count before its first functional feedback was observed.'
-                }
-                return [bool]($status.Current.Name -ceq '가져오기 파일을 읽는 중입니다. 취소를 요청할 수 있습니다...')
-            }
+    if (-not $MeasureFirstFeedback) {
+        Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
     }
-    else { Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open' }
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
     if ($null -ne $openInvocation) {
         Complete-AutomationControlInvoke -State $openInvocation -TimeoutSeconds $WaitSeconds
@@ -503,6 +516,21 @@ function Import-GuiRegressionPathList {
         } else { [Math]::Round($readinessWatch.Elapsed.TotalMilliseconds, 3) }
     }
     else { $commandReadyTicks = [Diagnostics.Stopwatch]::GetTimestamp() }
+    $feedback = if ($MeasureFirstFeedback) {
+        $after = Read-ObserverImportFeedbackClockFrame -Application $Application `
+            -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+        if ($after.revision -ne $importClockBefore.revision + 1 -or
+            $importClockBefore.query_end_ticks -ge $pickerRequestTicks -or
+            $openTicks -le $pickerRequestTicks -or
+            $openTicks -ge $after.import_feedback_ticks -or
+            $after.import_feedback_ticks -ge $rowObservedTicks -or
+            $commandReadyTicks -ge $after.query_begin_ticks) {
+            throw 'Import cancel-control feedback clock is missing, stale, or follows ready rows.'
+        }
+        [ordered]@{
+            definition='owner-thread-import-cancel-control-availability-committed';
+            before=$importClockBefore; after=$after }
+    } else { $null }
     if ($null -ne $TimelineEvents) {
         foreach ($boundary in @(
             @('picker_request', $pickerRequestTicks, 0),

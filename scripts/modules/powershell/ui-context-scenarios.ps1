@@ -4072,6 +4072,7 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid `
                 -MeasureCommandReadiness -IncludeOpenTicks -RecordReadinessBrackets `
                 -MeasureFirstFeedback:($stage.id -ceq 'initial' -and $count -ge 1000) `
+                -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
                 -TimelineOperation ('gui-apply-' + $stage.id)
             $imports.Add([ordered]@{ id=$stage.id; expected_rows=$stage.rows;
                 open_ticks=[long]$import.open_ticks; rows_observed_ticks=[long]$import.row_observed_ticks;

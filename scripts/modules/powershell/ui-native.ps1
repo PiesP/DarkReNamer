@@ -1954,6 +1954,10 @@ public sealed class DarkReNamerGuiApplyClockFrame {
     public uint CancelKind;
 }
 
+public sealed class DarkReNamerGuiImportFeedbackClockFrame {
+    public ulong Frequency, Revision, ImportFeedbackTicks;
+}
+
 public static class DarkReNamerIconStatusObserver {
     private const uint StatusMessage = 0x8056; // WM_APP + 0x56, version 1.
     [DllImport("user32.dll", SetLastError=true)]
@@ -2049,6 +2053,36 @@ public static class DarkReNamerIconStatusObserver {
             return frame;
         }
         throw new InvalidOperationException("GUI Apply owner clock frame changed during query.");
+    }
+
+    // Selectors 35..36 latch the first Paths import's committed native Cancel
+    // control availability. This is an owner-thread state change, not a pixel
+    // presentation or the possibly coalesced status text.
+    public static DarkReNamerGuiImportFeedbackClockFrame ReadImportFeedbackClockBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Import feedback target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Import feedback HWND does not belong to the owned process.");
+        for (int attempt = 0; attempt < 4; attempt++) {
+            ulong before = Pair(window, 31);
+            DarkReNamerGuiImportFeedbackClockFrame frame = new DarkReNamerGuiImportFeedbackClockFrame {
+                Frequency = Pair(window, 23),
+                ImportFeedbackTicks = Pair(window, 35),
+            };
+            ulong after = Pair(window, 31);
+            if (before != after) continue;
+            if (frame.Frequency != (ulong)System.Diagnostics.Stopwatch.Frequency ||
+                frame.Frequency == 0 || process.HasExited ||
+                process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+                GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+                throw new InvalidOperationException("Import feedback clock or target changed during query.");
+            frame.Revision = after;
+            return frame;
+        }
+        throw new InvalidOperationException("Import feedback clock frame changed during query.");
     }
 
     public static DarkReNamerIconStatusSnapshot ReadBound(

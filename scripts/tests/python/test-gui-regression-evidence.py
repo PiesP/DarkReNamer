@@ -4520,13 +4520,25 @@ class GuiApplyEndpointTests(unittest.TestCase):
 
         imports = []
         stages = [count] if count <= 1000 else [1000, 3250, 5500, 7750, 10000]
+        def import_frame(revision, feedback=0):
+            begin = tick()
+            return {'query_begin_ticks': begin, 'query_end_ticks': begin + 1,
+                'qpc_frequency': frequency, 'revision': revision,
+                'import_feedback_ticks': feedback,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd}
+
         for index, rows in enumerate(stages):
             stage = 'initial' if index == 0 else f'remainder-{index - 1}'
+            feedback_before = import_frame(0) if index == 0 and count >= 1000 else None
             opened = tick()
-            feedback = probe('import-open', 'bound-import-reading-status') \
-                if index == 0 and count >= 1000 else None
+            committed = opened + 1
             observed = probe('gui-apply-' + stage, 'expected-row-count')
             command = probe('gui-apply-' + stage, 'import-command-enabled')
+            feedback = {'definition':
+                'owner-thread-import-cancel-control-availability-committed',
+                'before': feedback_before, 'after': import_frame(1, committed)} \
+                if feedback_before is not None else None
             imports.append({'id': stage, 'expected_rows': rows, 'open_ticks': opened,
                 'rows_observed_ticks': observed['probes'][-1]['end_ticks'],
                 'command_ready_ticks': command['probes'][-1]['end_ticks'],
@@ -4542,21 +4554,21 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 'process_id': pid, 'process_start_utc_ticks': start,
                 'main_window_handle': hwnd}
 
-        initial_before = frame(0)
+        initial_before = frame(len(stages))
         requested = tick()
         planning = probe('apply-request', 'planning-status') if count >= 1000 else None
         confirmation = probe('apply-confirmation', 'bound-actionable-confirmation')
-        initial_after = frame(1, requested + 1)
-        confirmation_before = frame(1, requested + 1)
+        initial_after = frame(len(stages) + 1, requested + 1)
+        confirmation_before = frame(len(stages) + 1, requested + 1)
         invoked = tick()
         execution_feedback = probe('apply-accepted', 'execution-busy-status')
-        confirmation_after = frame(2, requested + 1, invoked + 1)
+        confirmation_after = frame(len(stages) + 2, requested + 1, invoked + 1)
         cancel = None
         if cancelled:
-            cancel_before = frame(2, requested + 1, invoked + 1)
+            cancel_before = frame(len(stages) + 2, requested + 1, invoked + 1)
             cancel_requested = tick()
             ack = probe('active-apply-cancel', 'cancel-request-acknowledged')
-            cancel_after = frame(3, requested + 1, invoked + 1, cancel_requested + 1)
+            cancel_after = frame(len(stages) + 3, requested + 1, invoked + 1, cancel_requested + 1)
             cancel = {'request_ticks': cancel_requested, 'acknowledgment': ack,
                       'owner_thread_acceptance': {'before': cancel_before,
                                                   'after': cancel_after},
@@ -4626,6 +4638,91 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 self.assertEqual(metrics['count'], int(case.split('-')[-1]))
                 self.assertTrue(metrics['native_preview_synchronized'])
                 self.assertEqual(metrics['presentation_latency'], 'not-measured')
+                if metrics['count'] >= 1000:
+                    feedback = scenario['imports'][0]['first_feedback']
+                    self.assertEqual(metrics['import_first_feedback_committed_ms'],
+                        (feedback['after']['import_feedback_ticks'] -
+                         scenario['imports'][0]['open_ticks']) * 1000 /
+                        scenario['qpc_frequency'])
+                    self.assertGreater(metrics['import_feedback_clock_discovery_upper_ms'],
+                                       metrics['import_first_feedback_committed_ms'])
+                else:
+                    self.assertEqual(metrics['import_first_feedback_committed_ms'],
+                                     'not-measured')
+
+    def test_rejects_missing_stale_foreign_or_late_import_control_feedback(self):
+        scenario, initial, final = self.valid('success-1000')
+        feedback = scenario['imports'][0]['first_feedback']
+        changes = {
+            'missing': lambda s: s['imports'][0].__setitem__('first_feedback', None),
+            'wrong-definition': lambda s: s['imports'][0]['first_feedback']
+                .__setitem__('definition', 'queued-status-text'),
+            'prior-event': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('import_feedback_ticks', 1),
+            'prior-revision': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('revision', 1),
+            'skipped-revision': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('revision', 2),
+            'event-before-open': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', s['imports'][0]['open_ticks']),
+            'event-after-rows': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', s['imports'][0]['rows_observed_ticks']),
+            'discovery-before-ready': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('query_begin_ticks', s['imports'][0]['command_ready_ticks']),
+            'overlap-open': lambda s: s['imports'][0]['first_feedback']['before']
+                .__setitem__('query_end_ticks', s['imports'][0]['open_ticks']),
+            'wrong-frequency': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('qpc_frequency', 1),
+            'foreign-process': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('process_start_utc_ticks', 1),
+            'foreign-hwnd': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('main_window_handle', 1),
+            'bool-tick': lambda s: s['imports'][0]['first_feedback']['after']
+                .__setitem__('import_feedback_ticks', True),
+        }
+        self.assertEqual(feedback['before']['revision'], 0)
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+        changed = deepcopy(scenario)
+        changed['readiness_brackets'].insert(1, {
+            'operation': 'import-open', 'predicate': 'bound-import-reading-status',
+            'observation': 'polled-monotonic-predicate',
+            'qpc_frequency': scenario['qpc_frequency'],
+            'process_id': scenario['process_id'],
+            'process_start_utc_ticks': scenario['process_start_utc_ticks'],
+            'main_window_handle': scenario['main_window_handle'],
+            'probes': [{'begin_ticks': scenario['imports'][0]['open_ticks'],
+                        'end_ticks': scenario['imports'][0]['open_ticks'] + 1,
+                        'ready': True}],
+        })
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_short_unmeasured_import_may_finish_without_a_laid_out_cancel_button(self):
+        scenario, initial, final = self.valid('success-100')
+        frames = [scenario['apply_request']['owner_thread_acceptance'][side]
+                  for side in ('before', 'after')]
+        frames.extend(scenario['apply_execution']['owner_thread_acceptance'][side]
+                      for side in ('before', 'after'))
+        for frame in frames:
+            frame['revision'] -= 1
+        self.assertEqual(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['import_first_feedback_committed_ms'],
+            'not-measured')
+
+    def test_later_ten_thousand_row_stages_do_not_require_separate_feedback_events(self):
+        scenario, initial, final = self.valid('success-10000')
+        frames = [scenario['apply_request']['owner_thread_acceptance'][side]
+                  for side in ('before', 'after')]
+        frames.extend(scenario['apply_execution']['owner_thread_acceptance'][side]
+                      for side in ('before', 'after'))
+        for frame in frames:
+            frame['revision'] -= 4
+        self.assertGreater(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['import_first_feedback_committed_ms'], 0)
 
     def test_rejects_native_preview_failure_or_late_or_foreign_query(self):
         scenario, initial, final = self.valid()
@@ -4745,7 +4842,7 @@ class GuiApplyCampaignTests(unittest.TestCase):
             'input_manifest_sha256', 'collection_sha256', 'cleanup_sha256',
             'observer_result_sha256')}
         metrics = {key: 100.0 for key in (
-            'import_first_feedback_upper_ms', 'apply_planning_feedback_upper_ms',
+            'import_first_feedback_committed_ms', 'apply_planning_feedback_upper_ms',
             'apply_execution_feedback_upper_ms', 'idle_close_to_exit_upper_ms',
             'apply_request_to_confirmation_upper_ms',
             'confirm_to_operation_ready_upper_ms',

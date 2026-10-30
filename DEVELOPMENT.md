@@ -1116,8 +1116,19 @@ and four 2,250-row additions. The Cancel case accepts the confirmation and
 cancels an active Apply worker; dismissing the confirmation does not qualify.
 Preserve failures before diagnosing a new attempt; do not rerun valid samples.
 
-Raw QPC query brackets retain Open-to-first-import-feedback, initial Apply
-feedback and actionable confirmation, post-confirmation execution feedback,
+The first representative import records the UI owner's QPC tick after its live
+Paths worker makes the owned Cancel button visible, enabled, and laid out with
+positive native geometry. A before/after
+revision frame binds this committed control state to the exact process and Open
+invocation, even if the transient import status text is coalesced before it is
+written to the status control. Report the Open-to-control-commit interval for
+the 200 ms proposal and the later clock-discovery upper interval separately.
+Neither value proves UIA discovery, pixel presentation, or uninterrupted click
+response. The initial fresh-process clock must have no earlier import event;
+all subsequent import stages remain ordinary row and command observations.
+
+Raw QPC query brackets retain initial Apply feedback and actionable confirmation,
+post-confirmation execution feedback,
 terminal model/native/command readiness, active Cancel acknowledgment, and idle
 close-to-held-process-exit. UI-thread acceptance clock frames distinguish input
 invocation from actual Apply admission, affirmative confirmation return and

@@ -170,6 +170,9 @@ public sealed class DarkReNamerGuiApplyClockFrame {
     public ulong ConfirmationAcceptedTicks, CancelAcceptedTicks;
     public uint CancelKind;
 }
+public sealed class DarkReNamerGuiImportFeedbackClockFrame {
+    public ulong Frequency, Revision, ImportFeedbackTicks;
+}
 public static class DarkReNamerIconStatusObserver {
     public static long CapturedStartUtcTicks;
     public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(
@@ -179,6 +182,16 @@ public static class DarkReNamerIconStatusObserver {
             throw new InvalidOperationException("GUI Apply clock target process identity changed.");
         return new DarkReNamerGuiApplyClockFrame {
             Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency, Revision = 7
+        };
+    }
+    public static DarkReNamerGuiImportFeedbackClockFrame ReadImportFeedbackClockBound(
+        object process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window != new IntPtr(5151) ||
+            expectedStartUtcTicks != CapturedStartUtcTicks)
+            throw new InvalidOperationException("Import feedback target process identity changed.");
+        return new DarkReNamerGuiImportFeedbackClockFrame {
+            Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency,
+            Revision = 1, ImportFeedbackTicks = 9876
         };
     }
 }
@@ -497,6 +510,19 @@ public static class DarkReNamerIconStatusObserver {
     }
     Assert-Fails -Expected 'target process identity changed' -Action {
         Read-ObserverGuiApplyClockFrame -Application $application `
+            -ExpectedStartUtcTicks ($capturedStart - 1)
+    }
+    $importClock = Read-ObserverImportFeedbackClockFrame -Application $application `
+        -ExpectedStartUtcTicks $capturedStart
+    if ($importClock.process_id -ne $process.Id -or
+        $importClock.process_start_utc_ticks -ne $capturedStart -or
+        $importClock.main_window_handle -ne 5151 -or
+        $importClock.revision -ne 1 -or $importClock.import_feedback_ticks -ne 9876 -or
+        $importClock.query_begin_ticks -gt $importClock.query_end_ticks) {
+        throw 'Import feedback clock lost its captured process lifetime binding.'
+    }
+    Assert-Fails -Expected 'target process identity changed' -Action {
+        Read-ObserverImportFeedbackClockFrame -Application $application `
             -ExpectedStartUtcTicks ($capturedStart - 1)
     }
     $scenarioSource = ${function:Invoke-ObserverGuiApplyFeedbackScenario}.ToString()

@@ -6302,9 +6302,46 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str,
             "release_campaign": "not-run"}
 
 
+def validate_gui_import_feedback_clock(value: object, *, opened: int, observed: int,
+                                       command: int, frequency: int, pid: int,
+                                       start: int, hwnd: int) -> tuple[int, int]:
+    pair = exact_keys(value, {"definition", "before", "after"},
+                      "GUI import feedback event")
+    require(pair["definition"] ==
+            "owner-thread-import-cancel-control-availability-committed",
+            "GUI import feedback does not identify the native control state.")
+    fields = {"query_begin_ticks", "query_end_ticks", "qpc_frequency", "revision",
+              "import_feedback_ticks", "process_id", "process_start_utc_ticks",
+              "main_window_handle"}
+    before, after = (exact_keys(pair[side], fields, f"GUI import feedback {side} clock")
+                     for side in ("before", "after"))
+    for frame in (before, after):
+        require(all(int_equals(frame[key], expected) for key, expected in (
+            ("qpc_frequency", frequency), ("process_id", pid),
+            ("process_start_utc_ticks", start), ("main_window_handle", hwnd))),
+            "GUI import feedback clock frequency or product identity differs.")
+        begin = checked_int(frame["query_begin_ticks"], 1, 2**63 - 1,
+                            "import feedback query begin")
+        end = checked_int(frame["query_end_ticks"], 1, 2**63 - 1,
+                          "import feedback query end")
+        checked_int(frame["revision"], 0, 2**63 - 1, "import feedback revision")
+        checked_int(frame["import_feedback_ticks"], 0, 2**63 - 1,
+                    "import feedback event tick")
+        require(begin <= end and end - begin <= frequency,
+                "GUI import feedback query interval is invalid or unbounded.")
+    tick = after["import_feedback_ticks"]
+    require(before["revision"] == before["import_feedback_ticks"] == 0 and
+            before["query_end_ticks"] < opened < tick < observed <= command <
+            after["query_begin_ticks"] <= after["query_end_ticks"] and
+            after["revision"] == 1 and tick < after["query_begin_ticks"],
+            "GUI import control feedback is missing, stale, or follows ready rows.")
+    return tick, after["query_end_ticks"]
+
+
 def validate_gui_apply_owner_clock(value: object, *, event: str, request_ticks: int,
                                    feedback_end_ticks: int, frequency: int, pid: int,
                                    start: int, hwnd: int,
+                                   permitted_prior_revisions: range = range(1),
                                    previous: dict | None = None) -> tuple[int, dict]:
     pair = exact_keys(value, {"before", "after"}, f"GUI Apply {event} owner acceptance")
     fields = {"query_begin_ticks", "query_end_ticks", "qpc_frequency", "revision",
@@ -6345,7 +6382,7 @@ def validate_gui_apply_owner_clock(value: object, *, event: str, request_ticks: 
              after["cancel_kind"] == 0),
             "GUI Apply owner acceptance is stale, unordered, or follows feedback.")
     if event == "initial":
-        require(before["revision"] == 0 and
+        require(before["revision"] in permitted_prior_revisions and
                 all(before[name] == 0 for name in (
                     "initial_apply_accepted_ticks", "confirmation_accepted_ticks",
                     "cancel_accepted_ticks")) and
@@ -6418,6 +6455,8 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
             "GUI Apply import stage count differs.")
     operations = []
     previous_command = 0
+    import_feedback_tick = None
+    import_feedback_discovered = None
     for index, (item, expected_rows) in enumerate(zip(imports, rows, strict=True)):
         item = exact_keys(item, {"id", "expected_rows", "open_ticks",
                                  "rows_observed_ticks", "command_ready_ticks", "first_feedback"},
@@ -6432,14 +6471,11 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 previous_command < opened < observed <= command,
                 "GUI Apply import Open, row, or command order differs.")
         if index == 0 and count >= 1000:
-            feedback = item["first_feedback"]
-            require(isinstance(feedback, dict) and feedback.get("operation") == "import-open" and
-                    feedback.get("predicate") == "bound-import-reading-status" and
-                    opened <= feedback["probes"][0]["begin_ticks"] and
-                    feedback["probes"][-1]["end_ticks"] < observed,
-                    "GUI Apply import first feedback is missing or follows terminal rows.")
-            operations.append(("import-open", "bound-import-reading-status",
-                               feedback["probes"][-1]["end_ticks"]))
+            import_feedback_tick, import_feedback_discovered = \
+                validate_gui_import_feedback_clock(
+                    item["first_feedback"], opened=opened, observed=observed,
+                    command=command, frequency=frequency, pid=pid, start=start,
+                    hwnd=hwnd)
         else:
             require(item["first_feedback"] is None,
                     "GUI Apply import feedback was attached to a different stage.")
@@ -6498,7 +6534,9 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
     initial_accepted, initial_frame = validate_gui_apply_owner_clock(
         request["owner_thread_acceptance"], event="initial", request_ticks=requested,
         feedback_end_ticks=initial_feedback_end, frequency=frequency,
-        pid=pid, start=start, hwnd=hwnd)
+        pid=pid, start=start, hwnd=hwnd,
+        permitted_prior_revisions=range(1 if count >= 1000 else 0,
+                                        len(imports) + 1))
     require(confirmation["probes"][-1]["end_ticks"] <
             initial_frame["query_begin_ticks"] and
             initial_frame["query_end_ticks"] < invoked,
@@ -6583,8 +6621,8 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
         process_id=pid, process_start_utc_ticks=start, main_window_handle=hwnd,
         expected_frequency=frequency, operations=operations)
     actual = scenario["readiness_brackets"][1:]
-    references = [(0, imports[0]["first_feedback"])] if count >= 1000 else []
-    after_imports = (1 if count >= 1000 else 0) + 2 * len(imports)
+    references = []
+    after_imports = 2 * len(imports)
     references.extend((after_imports + offset, record) for offset, record in enumerate(
         ([planning] if planning is not None else []) + [confirmation, feedback] +
         ([scenario["cancel"]["acknowledgment"]] if cancelled else []) + [ready, wait]))
@@ -6625,9 +6663,12 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object)
                 sample.get("main_window_handle") == hwnd for sample in samples),
             "GUI Apply resource samples are missing or changed process identity.")
     return {"case": case, "count": count, "outcome": execution["outcome"],
-            "import_first_feedback_upper_ms":
-                (imports[0]["first_feedback"]["probes"][-1]["end_ticks"] -
-                 imports[0]["open_ticks"]) * 1000 / frequency if count >= 1000 else "not-measured",
+            "import_first_feedback_committed_ms":
+                (import_feedback_tick - imports[0]["open_ticks"]) * 1000 / frequency
+                if import_feedback_tick is not None else "not-measured",
+            "import_feedback_clock_discovery_upper_ms":
+                (import_feedback_discovered - imports[0]["open_ticks"]) * 1000 / frequency
+                if import_feedback_discovered is not None else "not-measured",
             "apply_planning_feedback_upper_ms":
                 (planning["probes"][-1]["end_ticks"] - requested) * 1000 / frequency
                 if planning is not None else "not-measured",
@@ -6819,7 +6860,7 @@ def validate_gui_apply_campaign_index(index_path: Path, source_sha: str,
         results.append(measured)
     repeated = [results[1], *results[3:8]]
     summaries = {}
-    goals = {"import_first_feedback_upper_ms": 200,
+    goals = {"import_first_feedback_committed_ms": 200,
              "apply_planning_feedback_upper_ms": 200,
              "apply_execution_feedback_upper_ms": 200,
              "idle_close_to_exit_upper_ms": 500}
