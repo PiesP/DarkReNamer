@@ -1977,6 +1977,13 @@ public sealed class DarkReNamerGuiImportFeedbackClockFrame {
     public ulong Frequency, Revision, ImportFeedbackTicks;
 }
 
+public sealed class DarkReNamerImportTraceFrame {
+    public uint SchemaVersion, Flags, OwnerThreadId;
+    public ulong Frequency, Revision, Generation, Session;
+    public ulong InitialModelRevision, FinalModelRevision;
+    public ulong[] Events;
+}
+
 public static class DarkReNamerIconStatusObserver {
     private const uint StatusMessage = 0x8056; // WM_APP + 0x56, version 1.
     [DllImport("user32.dll", SetLastError=true)]
@@ -2001,6 +2008,40 @@ public static class DarkReNamerIconStatusObserver {
         uint low = Scalar(window, lowSelector);
         uint high = Scalar(window, lowSelector + 1);
         return ((ulong)high << 32) | low;
+    }
+
+    // The owner publishes a fixed latest-operation frame. Queries happen after
+    // row/command discovery; they cannot turn discovery time into event time.
+    public static DarkReNamerImportTraceFrame ReadImportTraceBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Import trace target process identity changed.");
+        uint pid;
+        uint thread = GetWindowThreadProcessId(window, out pid);
+        if (thread == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Import trace HWND does not belong to the owned process.");
+        for (int attempt = 0; attempt < 4; attempt++) {
+            ulong before = Pair(window, 41);
+            DarkReNamerImportTraceFrame frame = new DarkReNamerImportTraceFrame {
+                SchemaVersion = Scalar(window, 40), Frequency = Pair(window, 23),
+                Generation = Pair(window, 43), Session = Pair(window, 45),
+                InitialModelRevision = Pair(window, 47), FinalModelRevision = Pair(window, 49),
+                Flags = Scalar(window, 51), OwnerThreadId = thread, Events = new ulong[16],
+            };
+            for (int index = 0; index < frame.Events.Length; index++)
+                frame.Events[index] = Pair(window, 52 + 2 * index);
+            ulong after = Pair(window, 41);
+            if (before != after) continue;
+            if (frame.SchemaVersion != 1 || (frame.Flags & ~255u) != 0 ||
+                frame.Frequency == 0 || frame.Frequency != (ulong)System.Diagnostics.Stopwatch.Frequency ||
+                process.HasExited || process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+                GetWindowThreadProcessId(window, out pid) != thread || pid != (uint)process.Id)
+                throw new InvalidOperationException("Import trace schema, clock, or target changed during query.");
+            frame.Revision = after;
+            return frame;
+        }
+        throw new InvalidOperationException("Import trace frame changed during query.");
     }
 
     // Selector 22 is an additive, read-only GUI close precondition. An older

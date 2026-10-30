@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
@@ -210,8 +210,25 @@ public sealed class DarkReNamerGuiApplyClockFrame {
 public sealed class DarkReNamerGuiImportFeedbackClockFrame {
     public ulong Frequency, Revision, ImportFeedbackTicks;
 }
+public sealed class DarkReNamerImportTraceFrame {
+    public uint SchemaVersion = 1, Flags = 121, OwnerThreadId = 77;
+    public ulong Frequency, Revision = 17, Generation = 2, Session = 4;
+    public ulong InitialModelRevision = 1, FinalModelRevision = 2;
+    public ulong[] Events = new ulong[16];
+}
 public static class DarkReNamerIconStatusObserver {
     public static long CapturedStartUtcTicks;
+    public static DarkReNamerImportTraceFrame ReadImportTraceBound(
+        object process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window != new IntPtr(5151) ||
+            expectedStartUtcTicks != CapturedStartUtcTicks)
+            throw new InvalidOperationException("Import trace target process identity changed.");
+        var frame = new DarkReNamerImportTraceFrame {
+            Frequency = (ulong)System.Diagnostics.Stopwatch.Frequency
+        };
+        frame.Events[0] = 9876; frame.Events[13] = 9999;
+        return frame;
+    }
     public static DarkReNamerGuiApplyClockFrame ReadGuiApplyClockBound(
         object process, IntPtr window, long expectedStartUtcTicks) {
         if (process == null || window != new IntPtr(5151) ||
@@ -671,6 +688,22 @@ public static class DarkReNamerIconStatusObserver {
             -ExpectedStartUtcTicks ($capturedStart - 1)
     }
     $scenarioSource = ${function:Invoke-ObserverGuiApplyFeedbackScenario}.ToString()
+    $trace = Read-ObserverImportTraceFrame -Application $application `
+        -ExpectedStartUtcTicks $capturedStart
+    if ($trace.process_id -ne $process.Id -or $trace.owner_thread_id -ne 77 -or
+        $trace.process_start_utc_ticks -ne $capturedStart -or
+        $trace.main_window_handle -ne 5151 -or $trace.generation -ne 2 -or
+        $trace.session_id -ne 4 -or $trace.initial_model_revision -ne 1 -or
+        $trace.final_model_revision -ne 2 -or $trace.trace_revision -ne 17 -or
+        $trace.events.accepted_import_start -ne 9876 -or $trace.events.import_command_ready -ne 9999 -or
+        $trace.events.Count -ne 16 -or $trace.events.icons_settled -ne 0 -or
+        $trace.query_begin_ticks -gt $trace.query_end_ticks) {
+        throw 'Import trace lost its event slots or captured operation/process binding.'
+    }
+    Assert-Fails -Expected 'target process identity changed' -Action {
+        Read-ObserverImportTraceFrame -Application $application `
+            -ExpectedStartUtcTicks ($capturedStart - 1)
+    }
     if ($scenarioSource -match '(?i)\$application\.process_start_utc_ticks') {
         throw 'GUI Apply scenario still reads a timestamp absent from Application.'
     }
