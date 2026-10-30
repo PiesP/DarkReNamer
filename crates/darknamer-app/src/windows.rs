@@ -4667,6 +4667,8 @@ mod tests {
             // SAFETY: the test-owned child gets its first actionable rectangle,
             // as the production layout does after its posted callback.
             assert_ne!(
+                // SAFETY: cancel is a live child HWND and this call only places
+                // its test-owned rectangle inside the visible parent.
                 unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
                 0
             );
@@ -4693,7 +4695,7 @@ mod tests {
             let worker_id = state
                 .admission_worker
                 .as_ref()
-                .expect("controlled admission worker")
+                .ok_or_else(|| io::Error::other("controlled admission worker missing"))?
                 .handle
                 .thread()
                 .id();
@@ -4708,25 +4710,29 @@ mod tests {
             assert!(state.import_feedback_phase.is_none());
             release
                 .send(())
-                .expect("release controlled admission worker");
+                .map_err(|_| io::Error::other("controlled admission worker release failed"))?;
             state
                 .admission_worker
                 .take()
-                .expect("controlled admission worker")
+                .ok_or_else(|| io::Error::other("controlled admission worker missing"))?
                 .handle
                 .join()
-                .expect("controlled admission worker joins");
+                .map_err(|_| io::Error::other("controlled admission worker join failed"))?;
             assert!(!worker::import_cancel_control_ready(parent, status_message));
             assert!(!worker::import_cancel_control_ready(status_message, cancel));
             assert!(!worker::import_cancel_control_ready(null_mut(), cancel));
             // SAFETY: a positive but off-client rectangle cannot be clicked
             // through the owner and must not qualify as available feedback.
             assert_ne!(
+                // SAFETY: cancel remains a live child HWND and its new rectangle
+                // is used only for this off-client visibility test.
                 unsafe { SetWindowPos(cancel, null_mut(), 700, 10, 70, 30, SWP_NOACTIVATE) },
                 0
             );
             assert!(!worker::import_cancel_control_ready(parent, cancel));
             assert_ne!(
+                // SAFETY: cancel remains a live child HWND and is restored to
+                // its test-owned rectangle inside the visible parent.
                 unsafe { SetWindowPos(cancel, null_mut(), 10, 10, 70, 30, SWP_NOACTIVATE) },
                 0
             );
@@ -4734,11 +4740,15 @@ mod tests {
             // changes and is restored to hidden/disabled before teardown.
             unsafe { EnableWindow(cancel, 0) };
             assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: cancel is still a live test-owned child HWND; the test
+            // checks visibility after hiding it and then disables it again.
             unsafe {
                 EnableWindow(cancel, 1);
                 ShowWindow(cancel, SW_HIDE);
             }
             assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: cancel remains a live test-owned child HWND until the
+            // parent is destroyed after this closure returns.
             unsafe { EnableWindow(cancel, 0) };
             Ok(())
         })();
