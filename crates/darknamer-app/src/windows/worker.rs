@@ -1,14 +1,14 @@
 use super::{
-    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANDIDATE_JOURNAL_LEAF, GuiAcceptanceClock,
-    PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton, PreparedTaskDialogDisposition,
-    PreparedTaskDialogPolicy, PreparedTaskDialogSession, PreparedTaskDialogSpec,
-    PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE, WM_APP_APPLY_COMPLETE,
-    WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE, WM_APP_PLAN_COMPLETE,
-    WM_APP_PREFERENCES_WAKE, apply_cancel_control_state, begin_prepared_task_dialog,
-    cleanup_file_journal, clear_selection, compare_windows, finish_import_worker_result,
-    legacy_path, message, path_wide, proposal_mutation_error_message, read_legacy_text_cancellable,
-    refresh, schedule_focus_target, schedule_icon_poll, select_rows, selected_indices,
-    take_prepared_task_dialog, try_app_state, update_controls,
+    ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANCEL_WORKER_ID, CANDIDATE_JOURNAL_LEAF,
+    GuiAcceptanceClock, PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton,
+    PreparedTaskDialogDisposition, PreparedTaskDialogPolicy, PreparedTaskDialogSession,
+    PreparedTaskDialogSpec, PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE,
+    WM_APP_APPLY_COMPLETE, WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE,
+    WM_APP_PLAN_COMPLETE, WM_APP_PREFERENCES_WAKE, apply_cancel_control_state,
+    begin_prepared_task_dialog, cleanup_file_journal, clear_selection, compare_windows,
+    finish_import_worker_result, legacy_path, message, path_wide, proposal_mutation_error_message,
+    read_legacy_text_cancellable, refresh, schedule_focus_target, schedule_icon_poll, select_rows,
+    selected_indices, take_prepared_task_dialog, try_app_state, update_controls,
 };
 use crate::APPLY_CONFIRM_BUTTON_ID;
 use crate::ActiveWorkerKind;
@@ -80,6 +80,10 @@ use std::thread;
 use std::thread::JoinHandle;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
@@ -133,6 +137,21 @@ impl ImportWorker {
         // requests cancellation of pending synchronous I/O; completion remains
         // asynchronous and the result is always discarded after a request.
         unsafe { CancelSynchronousIo(self.handle.as_raw_handle()) };
+    }
+}
+
+pub(super) fn import_cancel_control_ready(owner: HWND, cancel: HWND) -> bool {
+    if owner.is_null() || cancel.is_null() {
+        return false;
+    }
+    // SAFETY: these are pointer-free queries of the live UI-thread owner and
+    // its copied child HWND; invalid or foreign controls fail the exact parent
+    // and ID checks before their availability can qualify feedback.
+    unsafe {
+        GetParent(cancel) == owner
+            && GetDlgCtrlID(cancel) == i32::from(CANCEL_WORKER_ID)
+            && IsWindowVisible(cancel) != 0
+            && IsWindowEnabled(cancel) != 0
     }
 }
 
@@ -205,6 +224,17 @@ pub(super) fn start_import_worker_from(
     state.mutation_locked = true;
     state.set_progress_status(RT::ImportReading.get());
     update_controls(state);
+    if matches!(kind, ImportKind::Paths) {
+        // The cancel button's native visible/enabled state is a functional
+        // import acknowledgment even if the transient status text is coalesced
+        // away. Only the same registered Paths session may latch this event.
+        let ready = state.import_worker.as_ref().is_some_and(|worker| {
+            worker.session_id == session_id && matches!(worker.kind, ImportKind::Paths)
+        }) && import_cancel_control_ready(window, state.cancel_worker);
+        state
+            .acceptance_clock
+            .record_import_feedback_at(ready.then(GuiAcceptanceClock::read_tick).flatten());
+    }
     Ok(())
 }
 

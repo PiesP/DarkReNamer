@@ -283,7 +283,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMenuItemCount, GetMenuItemInfoW, GetSubMenu, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, IDCANCEL, IDOK, IsWindow, IsWindowVisible, KillTimer, MENUITEMINFOW,
     MF_BYCOMMAND, MF_CHECKED, MF_GRAYED, MF_OWNERDRAW, MF_SEPARATOR, MIIM_DATA, MIIM_SUBMENU,
-    MNC_EXECUTE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+    MNC_EXECUTE, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
     SetForegroundWindow, SetMenu, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_COMMAND,
     WM_NOTIFY, WM_TIMER, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
     WS_VISIBLE,
@@ -727,6 +727,7 @@ fn try_app_state(window: HWND) -> Option<CallbackStateLease<AppState, DropTarget
 /// UI-thread-only diagnostic latches. A zero tick means no matching event yet.
 struct GuiAcceptanceClock {
     frequency: u64,
+    import_feedback: u64,
     apply_command: u64,
     confirmation: u64,
     cancellation: u64,
@@ -751,6 +752,7 @@ impl GuiAcceptanceClock {
     const fn with_frequency(frequency: u64) -> Self {
         Self {
             frequency,
+            import_feedback: 0,
             apply_command: 0,
             confirmation: 0,
             cancellation: 0,
@@ -787,6 +789,12 @@ impl GuiAcceptanceClock {
             self.confirmation = 0;
             self.cancellation = 0;
             self.cancellation_kind = 0;
+        }
+    }
+
+    fn record_import_feedback_at(&mut self, tick: Option<u64>) {
+        if let Some(tick) = self.advance(tick) {
+            self.import_feedback = tick;
         }
     }
 
@@ -829,6 +837,8 @@ impl GuiAcceptanceClock {
             31 => (self.revision as u32) as LRESULT,
             32 => ((self.revision >> 32) as u32) as LRESULT,
             33 => self.cancellation_kind as LRESULT,
+            35 => (self.import_feedback as u32) as LRESULT,
+            36 => ((self.import_feedback >> 32) as u32) as LRESULT,
             _ => return None,
         };
         Some(value)
@@ -1150,7 +1160,7 @@ impl AppState {
                     | (isize::from(u8::from(no_prompt)) << 3)
                     | (isize::from(u8::from(!self.close_pending)) << 4)
             }
-            23..=33 => self.acceptance_clock.selector_value(selector)?,
+            23..=33 | 35..=36 => self.acceptance_clock.selector_value(selector)?,
             // The final Apply result is not native-row-ready after a failed
             // incremental update and failed fallback rebuild.
             34 => isize::from(u8::from(self.preview_synchronization.is_synchronized())),
@@ -1670,20 +1680,30 @@ mod tests {
         assert_eq!(clock.selector_value(29), Some(0));
         assert_eq!(clock.selector_value(31), Some(0));
         assert_eq!(clock.selector_value(33), Some(0));
+        assert_eq!(clock.selector_value(35), Some(0));
+        assert_eq!(clock.selector_value(36), Some(0));
         assert_eq!(clock.selector_value(34), None);
+
+        clock.record_import_feedback_at(Some(high + 50));
+        assert_eq!(clock.selector_value(35), Some(50));
+        assert_eq!(clock.selector_value(36), Some(1));
+        assert_eq!(clock.selector_value(31), Some(1));
+        clock.record_import_feedback_at(Some(high + 75));
+        assert_eq!(clock.selector_value(35), Some(75));
+        assert_eq!(clock.selector_value(31), Some(2));
 
         clock.record_apply_at(Some(high + 100));
         assert_eq!(clock.selector_value(25), Some(100));
         assert_eq!(clock.selector_value(26), Some(1));
-        assert_eq!(clock.selector_value(31), Some(1));
+        assert_eq!(clock.selector_value(31), Some(3));
         clock.record_confirmation_at(Some(high + 200));
         assert_eq!(clock.selector_value(27), Some(200));
         assert_eq!(clock.selector_value(28), Some(1));
-        assert_eq!(clock.selector_value(31), Some(2));
+        assert_eq!(clock.selector_value(31), Some(4));
         clock.record_cancellation_at(4, Some(high + 300));
         assert_eq!(clock.selector_value(29), Some(300));
         assert_eq!(clock.selector_value(30), Some(1));
-        assert_eq!(clock.selector_value(31), Some(3));
+        assert_eq!(clock.selector_value(31), Some(5));
         assert_eq!(clock.selector_value(33), Some(4));
 
         clock.record_apply_at(Some(high + 400));
@@ -1691,10 +1711,19 @@ mod tests {
         assert_eq!(clock.selector_value(27), Some(0));
         assert_eq!(clock.selector_value(29), Some(0));
         assert_eq!(clock.selector_value(33), Some(0));
-        assert_eq!(clock.selector_value(31), Some(4));
+        assert_eq!(clock.selector_value(31), Some(6));
         clock.record_confirmation_at(Some(high + 399));
         assert_eq!(clock.selector_value(23), None);
         assert_eq!(clock.selector_value(31), None);
+        assert_eq!(clock.selector_value(35), None);
+
+        let mut missing = GuiAcceptanceClock::with_frequency(10);
+        missing.record_import_feedback_at(None);
+        assert_eq!(missing.selector_value(35), None);
+        let mut nonmonotonic = GuiAcceptanceClock::with_frequency(10);
+        nonmonotonic.record_import_feedback_at(Some(10));
+        nonmonotonic.record_import_feedback_at(Some(10));
+        assert_eq!(nonmonotonic.selector_value(36), None);
 
         let mut saturated = GuiAcceptanceClock::with_frequency(10);
         saturated.revision = u64::MAX;
@@ -1744,7 +1773,9 @@ mod tests {
         assert_eq!(state.icon_status_value(34), Some(0));
         state.mark_preview_synchronized();
         assert_eq!(state.icon_status_value(34), Some(1));
-        assert_eq!(state.icon_status_value(35), None);
+        assert_eq!(state.icon_status_value(35), Some(0));
+        assert_eq!(state.icon_status_value(36), Some(0));
+        assert_eq!(state.icon_status_value(37), None);
         Ok(())
     }
 
@@ -1758,7 +1789,9 @@ mod tests {
         assert_eq!(state.icon_status_value(21), Some(1));
         assert_eq!(state.icon_status_value(22), Some(0b11011));
         assert_eq!(state.icon_status_value(34), Some(0));
-        assert_eq!(state.icon_status_value(35), None);
+        assert_eq!(state.icon_status_value(35), Some(0));
+        assert_eq!(state.icon_status_value(36), Some(0));
+        assert_eq!(state.icon_status_value(37), None);
 
         state.preference_persistence = PreferencePersistence::new(
             Some(PreferencesWriter::spawn(
@@ -4607,9 +4640,31 @@ mod tests {
             assert_eq!(window_text(cancel)?, STATUS_CANCEL_LABEL);
             // SAFETY: cancel remains live and the enabled query has no pointers.
             assert_eq!(unsafe { IsWindowEnabled(cancel) }, 0);
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            // SAFETY: these test-owned HWNDs remain live until the enclosing
+            // scope destroys their parent; a visible parent is needed for the
+            // same effective visibility query used by the production latch.
+            unsafe {
+                ShowWindow(parent, SW_SHOW);
+                EnableWindow(cancel, 1);
+                ShowWindow(cancel, SW_SHOW);
+            }
+            assert!(worker::import_cancel_control_ready(parent, cancel));
+            assert!(!worker::import_cancel_control_ready(parent, status_message));
+            assert!(!worker::import_cancel_control_ready(null_mut(), cancel));
+            // SAFETY: the live test button remains owned through both state
+            // changes and is restored to hidden/disabled before teardown.
+            unsafe { EnableWindow(cancel, 0) };
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            unsafe {
+                EnableWindow(cancel, 1);
+                ShowWindow(cancel, SW_HIDE);
+            }
+            assert!(!worker::import_cancel_control_ready(parent, cancel));
+            unsafe { EnableWindow(cancel, 0) };
             Ok(())
         })();
-        // SAFETY: parent is the hidden test HWND and destroys all child controls.
+        // SAFETY: parent is the test-owned HWND and destroys all child controls.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }

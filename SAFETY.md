@@ -570,6 +570,16 @@ Selector 34 reads the existing preview synchronization state in O(1); a failed
 incremental row update and failed fallback rebuild report unsynchronized even
 if a terminal result status was posted. The source-bound observer requires this
 native state within its final positive Apply readiness probe.
+Selectors 35 and 36 expose the latest Paths-import feedback tick from the same
+UI-thread clock. The latch occurs only after the matching live import worker
+has updated controls and the owned Cancel button has been checked as a direct
+child with the expected ID, effectively visible and enabled. `GetParent`,
+`GetDlgCtrlID`, `IsWindowVisible`, and `IsWindowEnabled` read copied live HWNDs
+without crossing process ownership; a missing or foreign child, unavailable
+QPC tick, or nonmonotonic clock invalidates the diagnostic and does not change
+product behavior. A fresh process has a zero tick before its first Paths Open.
+This timestamp bounds owner-thread control availability, not a transient status
+text write, UIA discovery, a pixel presentation, or click response.
 
 `windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
 worker initializes and balances COM on that same STA, pumps its own message
