@@ -124,6 +124,7 @@ namespace Windows.Automation {
 public static class DarkReNamerVmNative {
     public static uint HitProcess = 42, HitThread = 1;
     public static IntPtr Foreground = new IntPtr(10);
+    public static bool IsWindow(IntPtr window) { return window != IntPtr.Zero; }
     public static uint GetWindowThreadProcessId(IntPtr window, out uint process) { process = HitProcess; return HitThread; }
     public static IntPtr GetForegroundWindow() { return Foreground; }
     public static bool SetForegroundWindow(IntPtr window) { Foreground = window; return true; }
@@ -196,6 +197,54 @@ public static class DarkReNamerIconStatusObserver {
     }
 }
 '@
+
+& {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    [DarkReNamerVmNative]::HitProcess = [uint32]$process.Id
+    $main = [Windows.Automation.AutomationElement]::new()
+    $main.Current.ProcessId = $process.Id
+    $main.Current.NativeWindowHandle = 10
+    $cancel = [Windows.Automation.AutomationElement]::new()
+    $cancel.Current.ProcessId = $process.Id
+    $cancel.Current.NativeWindowHandle = 21
+    $cancel.Current.AutomationId = '1009'
+    $cancel.Current.IsOffscreen = $true
+    $cancel.Current.BoundingRectangle.Width = 0
+    $status = [Windows.Automation.AutomationElement]::new()
+    $status.Current.Name = '파일 변경 중: 0 / 10000'
+    $application = @{ process=$process; main=$main; main_handle=10L }
+    $arguments = @{ Application=$application; Cancel=$cancel; Status=$status;
+        SessionId=$process.SessionId;
+        ExpectedStartUtcTicks=$process.StartTime.ToUniversalTime().Ticks;
+        ExpectedMainWindowHandle=10L; ExpectedRows=10000; WaitSeconds=1 }
+    $script:cancelAvailabilityPolls = 0
+    $script:cancelBecomesAvailable = $true
+    function Start-Sleep {
+        param($Milliseconds)
+        if ($Milliseconds -ne 10) { throw 'Cancel availability changed its polling interval.' }
+        $script:cancelAvailabilityPolls++
+        if ($script:cancelBecomesAvailable) {
+            $cancel.Current.IsOffscreen = $false
+            $cancel.Current.BoundingRectangle.Width = 20
+        }
+        [Threading.Thread]::Sleep($Milliseconds)
+    }
+    Wait-ObserverActiveCancelAvailability @arguments
+    if ($script:cancelAvailabilityPolls -ne 1) {
+        throw 'Initially offscreen Cancel did not wait for the same control to become visible.'
+    }
+    $script:cancelBecomesAvailable = $false
+    $cancel.Current.BoundingRectangle.Width = 0
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'bounded deadline'
+    $cancel.Current.BoundingRectangle.Width = 20
+    $status.Current.Name = '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'terminal state'
+    $status.Current.Name = '파일 변경 중: 0 / 10000'
+    $cancel.Current.ProcessId = 99
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'not bound to the expected process'
+    $cancel.Current.ProcessId = $process.Id
+    [DarkReNamerVmNative]::HitProcess = 42
+}
 
 & {
     function Assert-AutomationBinding { param($Element, $Process, $ExpectedSession, $Label) }

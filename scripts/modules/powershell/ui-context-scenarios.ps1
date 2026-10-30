@@ -3985,6 +3985,54 @@ function Read-ObserverGuiApplyClockFrame {
         main_window_handle=[long]$Application.main_handle }
 }
 
+function Wait-ObserverActiveCancelAvailability {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Cancel,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Status,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks,
+        [Parameter(Mandatory)][long] $ExpectedMainWindowHandle,
+        [Parameter(Mandatory)][int] $ExpectedRows,
+        [Parameter(Mandatory)][int] $WaitSeconds)
+    $cancelHandle = [long]$Cancel.Current.NativeWindowHandle
+    $deadline = [long][Diagnostics.Stopwatch]::GetTimestamp() +
+        [long]([Math]::Min(5, $WaitSeconds) * [Diagnostics.Stopwatch]::Frequency)
+    do {
+        $Application.process.Refresh()
+        if ($Application.process.HasExited -or
+            [long]$Application.process.StartTime.ToUniversalTime().Ticks -ne $ExpectedStartUtcTicks -or
+            [long]$Application.main_handle -ne $ExpectedMainWindowHandle -or
+            [long]$Application.main.Current.NativeWindowHandle -ne $ExpectedMainWindowHandle) {
+            throw 'Active worker Cancel lost its owned process or main window before request.'
+        }
+        Assert-AutomationBinding -Element $Application.main -Process $Application.process `
+            -ExpectedSession $SessionId -Label 'active worker Cancel main window' -RequireWindowHandle
+        Assert-AutomationBinding -Element $Cancel -Process $Application.process `
+            -ExpectedSession $SessionId -Label 'active worker Cancel' -RequireWindowHandle
+        if ($Cancel.Current.AutomationId -cne '1009' -or
+            $Cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+            [long]$Cancel.Current.NativeWindowHandle -ne $cancelHandle) {
+            throw 'Active worker Cancel changed its bound control before request.'
+        }
+        $statusName = [string]$Status.Current.Name
+        if ($statusName -ceq ('{0}개 변경 완료 · 목록에 실제 결과를 반영했습니다.' -f $ExpectedRows) -or
+            $statusName -ceq '파일 변경을 시작하기 전에 취소했습니다.' -or
+            $statusName -ceq '요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.' -or
+            $statusName -ceq '요청에 따라 변경을 취소했습니다.') {
+            throw 'Apply reached a terminal state before active worker Cancel was requested.'
+        }
+        $bounds = $Cancel.Current.BoundingRectangle
+        if ($Cancel.Current.IsEnabled -and -not $Cancel.Current.IsOffscreen -and
+            $bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+            return
+        }
+        if ([Diagnostics.Stopwatch]::GetTimestamp() -ge $deadline) {
+            throw 'Active worker Cancel did not become visible, enabled, and laid out before the bounded deadline.'
+        }
+        Start-Sleep -Milliseconds 10
+    } while ($true)
+}
+
 function Invoke-ObserverGuiApplyFeedbackScenario {
     param([Parameter(Mandatory)][object] $Verified,
         [Parameter(Mandatory)][string] $RuntimeRoot,
@@ -4185,7 +4233,10 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 -ExpectedSession $SessionId -AutomationId '1009' `
                 -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds `
                 -Label 'active worker Cancel' -RequireEnabled -RequireWindowHandle
-            if ($cancel.Current.IsOffscreen) { throw 'Active worker Cancel is hidden before request.' }
+            Wait-ObserverActiveCancelAvailability -Application $application -Cancel $cancel -Status $status `
+                -SessionId $SessionId -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
+                -ExpectedMainWindowHandle $ObservationSink.main_window_handle `
+                -ExpectedRows $count -WaitSeconds $WaitSeconds
             $cancelClockBefore = Read-ObserverGuiApplyClockFrame -Application $application `
                 -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks
             $cancelRequestTicks = [long][Diagnostics.Stopwatch]::GetTimestamp()
