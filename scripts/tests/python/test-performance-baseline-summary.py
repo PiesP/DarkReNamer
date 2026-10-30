@@ -70,7 +70,155 @@ def fixture():
             "unavailable_scopes": [], "unavailable_metrics": []}
 
 
+def v2_fixture(plan_hash=PLAN_SHA):
+    records = fixture()
+    records["schema"] = "darkrenamer-baseline-records-v2"
+    records["frozen_plan_sha256"] = plan_hash
+    records["product_input_sha256"] = "d" * 64
+    original = {**SOURCE, "product_input_sha256": records["product_input_sha256"]}
+    repaired = {"source_sha": "7" * 40, "source_tree": "8" * 40,
+                "harness_sha": "9" * 40,
+                "product_input_sha256": records["product_input_sha256"]}
+    provenance = {sid: copy.deepcopy(repaired if sid in
+                  {"runtime-baseline", "performance-sample"} else original)
+                  for sid in baseline.SCOPES}
+    records["scope_provenance"] = copy.deepcopy(provenance)
+    for scope in records["scopes"]:
+        for run in scope["runs"]:
+            run.update({key: provenance[scope["id"]][key] for key in SOURCE})
+            if scope["id"] in {"runtime-baseline", "performance-sample"}:
+                run["started_at"] = run["started_at"].replace("2026-10-30", "2026-10-31")
+                run["ended_at"] = run["ended_at"].replace("2026-10-30", "2026-10-31")
+    amendment = {"schema": "darkrenamer-baseline-provenance-amendment-v1",
+                 "original_frozen_plan_sha256": plan_hash,
+                 "product_input_sha256": records["product_input_sha256"],
+                 "scope_provenance": copy.deepcopy(provenance),
+                 "declared_at": "2026-10-30T23:00:00Z",
+                 "reason": "GUI observer request shape repair after first runtime admission failed."}
+    amendment_bytes = json.dumps(amendment, separators=(",", ":")).encode()
+    amendment_hash = hashlib.sha256(amendment_bytes).hexdigest()
+    records["provenance_amendment_sha256"] = amendment_hash
+    return records, amendment, amendment_bytes
+
+
 class BaselineSummaryTests(unittest.TestCase):
+    def test_v2_preserves_original_native_and_repaired_gui_source_bindings(self):
+        records, amendment, amendment_bytes = v2_fixture()
+        summary = baseline.summarize(records, PLAN_SHA, amendment,
+                                     hashlib.sha256(amendment_bytes).hexdigest())
+        self.assertEqual(summary["schema"], "darkrenamer-baseline-summary-v2")
+        self.assertEqual(summary["status"], "complete")
+        by_id = {scope["id"]: scope for scope in summary["scope_results"]}
+        self.assertEqual(by_id["runtime-model"]["scope_provenance"],
+                         {**SOURCE, "product_input_sha256": "d" * 64})
+        self.assertEqual(by_id["runtime-baseline"]["scope_provenance"],
+                         {**{key: "789"[index] * 40 for index, key in enumerate(SOURCE)},
+                          "product_input_sha256": "d" * 64})
+        self.assertEqual(summary["source_sha"], SOURCE["source_sha"])
+        self.assertEqual([len(scope["runs"]) for scope in summary["scope_results"]],
+                         [6, 6, 6, 6])
+
+    def test_v2_rejects_implicit_source_and_product_or_amendment_drift(self):
+        original, amendment, amendment_bytes = v2_fixture()
+        amendment_hash = hashlib.sha256(amendment_bytes).hexdigest()
+        cases = [
+            (lambda records, _: records["scopes"][0]["runs"][0].update(source_sha="6" * 40),
+             "source_sha drifted"),
+            (lambda records, _: records["scope_provenance"]["runtime-baseline"].update(
+                source_sha="6" * 40), "differs from amendment"),
+            (lambda records, _: records["scope_provenance"]["runtime-model"].update(
+                product_input_sha256="e" * 64), "differs from amendment"),
+            (lambda records, amend: amend["scope_provenance"]["refresh-stages"].update(
+                product_input_sha256="e" * 64), "product input differs"),
+            (lambda records, _: records.update(provenance_amendment_sha256="e" * 64),
+             "amendment digest differs"),
+            (lambda records, _: records.pop("scope_provenance"), "missing or unexpected fields"),
+            (lambda records, _: records["scope_provenance"]["runtime-model"].update(
+                unreviewed_source="e" * 40), "differs from amendment"),
+            (lambda records, amend: amend.update(unreviewed_source="e" * 40),
+             "missing or unexpected fields"),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                records, amended = copy.deepcopy((original, amendment))
+                mutate(records, amended)
+                with self.assertRaisesRegex(ValueError, expected):
+                    baseline.summarize(records, PLAN_SHA, amended, amendment_hash)
+        with self.assertRaisesRegex(ValueError, "require a provenance amendment"):
+            baseline.summarize(original, PLAN_SHA)
+        late_amendment = copy.deepcopy(amendment)
+        late_amendment["declared_at"] = "2026-11-01T00:00:00Z"
+        late_hash = hashlib.sha256(json.dumps(late_amendment).encode()).hexdigest()
+        late_records = copy.deepcopy(original)
+        late_records["provenance_amendment_sha256"] = late_hash
+        with self.assertRaisesRegex(ValueError, "declared after a GUI run"):
+            baseline.summarize(late_records, PLAN_SHA, late_amendment, late_hash)
+
+    def test_v2_rejects_gui_source_or_executable_pair_drift(self):
+        original, amendment, amendment_bytes = v2_fixture()
+        amendment_hash = hashlib.sha256(amendment_bytes).hexdigest()
+        cases = [
+            (lambda records, amend: (records["scope_provenance"]["performance-sample"].update(
+                source_sha="6" * 40), amend["scope_provenance"]["performance-sample"].update(
+                source_sha="6" * 40), [run.update(source_sha="6" * 40) for run in
+                                       records["scopes"][1]["runs"]]),
+             "different source provenance"),
+            (lambda records, _: (records["scopes"][1].update(pdb_sha256="e" * 64),
+                                 [run.update(pdb_sha256="e" * 64) for run in
+                                  records["scopes"][1]["runs"]]),
+             "different executable pairs"),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                records, amended = copy.deepcopy((original, amendment))
+                mutate(records, amended)
+                with self.assertRaisesRegex(ValueError, expected):
+                    baseline.summarize(records, PLAN_SHA, amended, amendment_hash)
+
+    def test_v1_forbids_amendment_and_retains_v1_output(self):
+        records = fixture()
+        self.assertEqual(baseline.summarize(records, PLAN_SHA)["schema"],
+                         "darkrenamer-baseline-summary-v1")
+        with self.assertRaisesRegex(ValueError, "forbid a provenance amendment"):
+            baseline.summarize(records, PLAN_SHA, {"schema": "other"}, "0" * 64)
+
+    def test_cli_requires_exact_amendment_bytes_for_v2_and_forbids_it_for_v1(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = root / "plan.json"
+            plan.write_text(json.dumps({"schema": "darkrenamer-baseline-prospective-plan-v1",
+                                        "issue": 219, "declared_at": "2026-10-30T00:00:00Z"}))
+            plan_hash = hashlib.sha256(plan.read_bytes()).hexdigest()
+            records, amendment, amendment_bytes = v2_fixture(plan_hash)
+            input_path = root / "records.json"
+            input_path.write_text(json.dumps(records))
+            amendment_path = root / "amendment.json"
+            amendment_path.write_bytes(amendment_bytes)
+            command = [sys.executable, "-I", str(SCRIPT), "--input", str(input_path),
+                       "--plan", str(plan), "--output", str(root / "summary.json")]
+            missing = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("require a provenance amendment", missing.stderr)
+            command.extend(["--provenance-amendment", str(amendment_path)])
+            passed = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertEqual(json.loads((root / "summary.json").read_text())["schema"],
+                             "darkrenamer-baseline-summary-v2")
+            amendment_path.write_text(json.dumps(amendment, indent=2))
+            command[command.index("--output") + 1] = str(root / "wrong-digest.json")
+            mismatch = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertIn("amendment digest differs", mismatch.stderr)
+            self.assertFalse((root / "wrong-digest.json").exists())
+            old_records = fixture()
+            old_records["frozen_plan_sha256"] = plan_hash
+            input_path.write_text(json.dumps(old_records))
+            command[command.index("--output") + 1] = str(root / "v1-with-amendment.json")
+            forbidden = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertNotEqual(forbidden.returncode, 0)
+            self.assertIn("forbid a provenance amendment", forbidden.stderr)
+            self.assertFalse((root / "v1-with-amendment.json").exists())
+
     def test_six_independent_values_use_median_range_and_fixed_budget(self):
         records = fixture()
         metric = "ordinary_100_ms"
