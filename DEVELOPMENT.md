@@ -1641,7 +1641,7 @@ python3 -I scripts/run-gui-regression.py \
   --acceptance-profile-id vm-automated-v2-owned-resources
 ```
 
-The fixed `runtime-baseline-v1-1366x768-96-text100` run requires the prepared
+The fixed `runtime-baseline-v2-1366x768-96-text100` run requires the prepared
 1366×768, 96-DPI, text-100, light managed desktop and a System language that
 resolves to Korean. It starts three sequential fresh product processes with
 separate isolated `LOCALAPPDATA` roots: absent preference with System selected,
@@ -1683,7 +1683,10 @@ icon generation; 30 seconds populated idle with the same settled generation;
 then grow, shrink, and no-op manual-name proposals with reset verification and
 unchanged fixture bytes. The existing 200 ms sampler retains raw CPU time,
 private bytes, working set, thread, handle and GDI counts, responsiveness probes,
-resource-query duration and sample gaps. Summaries are derived from those raw
+resource-query duration and sample gaps. Version 2 also retains each probe's
+absolute QPC begin/end ticks and bound PID, process start, main HWND and thread
+identity, using the startup clock's QPC frequency. The verifier checks interval
+order, duration and identity across samples. Summaries are derived from those raw
 samples. The scenario has a 600-second ceiling and one original populated PNG
 within the existing 32 MiB evidence budget.
 

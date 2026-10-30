@@ -3835,11 +3835,18 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         for phase in evidence.RUNTIME_PHASES:
             for _ in range(150 if phase in {'empty-idle', 'populated-idle'} else 2):
                 elapsed = len(rows) * 200
+                probe_begin = (cells[0]['startup']['clock']['command_ready_ticks'] +
+                               1000000 + elapsed * 10000)
                 rows.append({'phase': phase, 'elapsed_ms': elapsed, 'cpu_ms': elapsed // 4,
                     'private_bytes': 10000000, 'working_set_bytes': 20000000,
                     'threads': 4, 'handles': 100, 'gdi_objects': 20, 'ui_response_ms': 2.0,
                     'probe_status': 'success', 'probe_error_code': 0,
-                    'resource_collection_ms': 3.0, 'sample_gap_ms': 0 if not rows else 200.0})
+                    'resource_collection_ms': 3.0, 'sample_gap_ms': 0 if not rows else 200.0,
+                    'probe_begin_ticks': probe_begin, 'probe_end_ticks': probe_begin + 20000,
+                    'process_id': cells[0]['process_id'],
+                    'process_start_utc_ticks': cells[0]['process_start_utc_ticks'],
+                    'main_window_handle': cells[0]['environment']['main_window']['hwnd'],
+                    'main_thread_id': 42})
         terminal = IconSettlementEvidenceTests.status(2)
         receipt = {'data_ready_ms': 25.0, 'icon_settled_observed_ms': 125.0,
             'first_status': IconSettlementEvidenceTests.status(2, settled=False, pending=2),
@@ -3868,7 +3875,7 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             'disk_unchanged': True, 'journal_residue_count': 0,
             'wakeups': {'status': 'not_run', 'reason': 'no-supported-process-wakeup-counter'},
             'appearance': 'light'}
-        raw['assertions'] = {'overall': 'passed', 'scope': 'runtime-baseline-production-v1',
+        raw['assertions'] = {'overall': 'passed', 'scope': 'runtime-baseline-production-v2',
                              'scenario': scenario}
         raw.update(process_lifecycles=lives, process_job_cleanup=jobs,
             keyboard={'status': 'not_run'}, accessibility={'status': 'not_run'},
@@ -4029,6 +4036,41 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         path.write_bytes(original)
         self.refresh_runtime(run)
 
+    def test_runtime_sample_clock_and_identity_reject_mixed_or_unbounded_rows(self):
+        run = self.runtime_run()
+        path = run / 'output/acceptance-result.json'
+        original = path.read_bytes()
+        mutations = (
+            ('missing-clock', lambda rows, cell: rows[1].pop('probe_begin_ticks')),
+            ('boolean-clock', lambda rows, cell: rows[1].__setitem__('probe_end_ticks', True)),
+            ('before-ready', lambda rows, cell: rows[0].__setitem__(
+                'probe_begin_ticks', cell['startup']['clock']['command_ready_ticks'] - 1)),
+            ('after-deadline', lambda rows, cell: rows[-1].__setitem__(
+                'probe_end_ticks', cell['startup']['clock']['launch_request_ticks'] +
+                600 * cell['startup']['clock']['qpc_frequency'] + 1)),
+            ('inverted-interval', lambda rows, cell: rows[1].__setitem__(
+                'probe_end_ticks', rows[1]['probe_begin_ticks'] - 1)),
+            ('overlap', lambda rows, cell: rows[1].__setitem__(
+                'probe_begin_ticks', rows[0]['probe_end_ticks'] - 1)),
+            ('probe-duration', lambda rows, cell: rows[1].__setitem__(
+                'ui_response_ms', rows[1]['ui_response_ms'] + 1)),
+            ('sample-gap', lambda rows, cell: rows[1].__setitem__('sample_gap_ms', 201.0)),
+            ('pid', lambda rows, cell: rows[1].__setitem__('process_id', cell['process_id'] + 1)),
+            ('start-time', lambda rows, cell: rows[1].__setitem__(
+                'process_start_utc_ticks', cell['process_start_utc_ticks'] + 1)),
+            ('window', lambda rows, cell: rows[1].__setitem__(
+                'main_window_handle', cell['environment']['main_window']['hwnd'] + 1)),
+            ('thread-drift', lambda rows, cell: rows[1].__setitem__('main_thread_id', 43)),
+            ('thread-zero', lambda rows, cell: rows[0].__setitem__('main_thread_id', 0)),
+            ('phase-regression', lambda rows, cell: rows[151].__setitem__('phase', 'empty-idle')),
+        )
+        for name, mutate in mutations:
+            raw = json.loads(original)
+            cell = raw['assertions']['scenario']['cells'][0]
+            mutate(cell['samples'], cell)
+            with self.subTest(mutation=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_runtime_baseline_metrics(raw['assertions']['scenario'])
+
     def test_rehashed_duplicate_raw_qpc_field_is_rejected(self):
         run = self.runtime_run()
         path = run / 'output/acceptance-result.json'
@@ -4124,6 +4166,12 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
         cell['samples'] = [row for row in cell['samples'] if row['phase'] != 'transform-no-op']
         # A real sub-200ms phase can occur entirely between timer callbacks.
         # Get-ObserverPerformancePhaseSummary emits [double]0 as JSON 0.0.
+        previous_begin = None
+        for row in cell['samples']:
+            begin = row['probe_begin_ticks']
+            row['sample_gap_ms'] = (0.0 if previous_begin is None else
+                (begin - previous_begin) * 1000.0 / cell['startup']['clock']['qpc_frequency'])
+            previous_begin = begin
         for summary in cell['phase_summary']:
             rows = [row for row in cell['samples'] if row['phase'] == summary['phase']]
             summary.update(sample_count=len(rows),

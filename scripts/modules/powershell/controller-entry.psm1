@@ -322,7 +322,7 @@ function Assert-DrControllerRuntimeBaselineProcesses {
     $ids = @('fresh-system','saved-system','saved-english')
     $expectedPlan = [ordered]@{ startup_cells=$ids; idle_seconds=30; populated_rows=1000;
         sample_interval_ms=200; icon_poll_interval_ms=100; maximum_seconds=600;
-        transform_cases=@('grow','shrink','no-op') }
+        transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' }
     if (($InputManifest.request.runtime_baseline_plan | ConvertTo-Json -Depth 5 -Compress) -cne
         ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
         $InputManifest.request.appearance -cne 'light' -or
@@ -335,7 +335,7 @@ function Assert-DrControllerRuntimeBaselineProcesses {
         $InputManifest.prepared_bundle.bundle_manifest_sha256 -cne $InputManifest.bundle_manifest.sha256 -or
         $InputManifest.prepared_bundle.application_sha256 -cne $InputManifest.artifacts.application.sha256 -or
         $Result.status -cne 'review_required' -or $Result.assertions.overall -cne 'passed' -or
-        $Result.assertions.scope -cne 'runtime-baseline-production-v1' -or
+        $Result.assertions.scope -cne 'runtime-baseline-production-v2' -or
         $Observations.scenario.mode -cne 'runtime-baseline' -or
         $Observations.scenario.executable_sha256 -cne $InputManifest.artifacts.application.sha256 -or
         ($Result.assertions.scenario | ConvertTo-Json -Depth 24 -Compress) -cne
@@ -495,7 +495,7 @@ function New-DrControllerOwnedPerformancePredelete {
     $runId = [string]$input.run_id
     $pickerRun = $runId -ceq 'picker-identity-observation-v1-1366x768-96-text100'
     $customRun = $runId -ceq 'custom-input-identity-observation-v1-1366x768-96-text100'
-    $runtimeRun = $runId -ceq 'runtime-baseline-v1-1366x768-96-text100'
+    $runtimeRun = $runId -ceq 'runtime-baseline-v2-1366x768-96-text100'
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
     if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun) {
@@ -746,7 +746,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     ($predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -and
                      $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100' -and
                      $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100' -and
-                     $predelete.run_id -cne 'runtime-baseline-v1-1366x768-96-text100') -or
+                     $predelete.run_id -cne 'runtime-baseline-v2-1366x768-96-text100') -or
                     $predelete.vm_id -cne $actualVmId -or
                     $predelete.nonce -cne $expectedNonce -or
                     $predelete.desktop_lease_id -cne $expectedLeaseId -or

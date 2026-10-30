@@ -3463,7 +3463,7 @@ try {
     } 'fixed immutable plan'
     $candidateRuntimeInput = $candidateRegressionInput | ConvertTo-Json -Depth 16 | ConvertFrom-Json
     $candidateRuntimeInput | Add-Member -NotePropertyName run_id `
-        -NotePropertyValue 'runtime-baseline-v1-1366x768-96-text100'
+        -NotePropertyValue 'runtime-baseline-v2-1366x768-96-text100'
     $candidateRuntimeInput | Add-Member -NotePropertyName acceptance_profile_id `
         -NotePropertyValue 'vm-automated-v2-owned-resources'
     $runtimeProfileSha = '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f'
@@ -3480,7 +3480,7 @@ try {
         -NotePropertyValue ([ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
             idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
             icon_poll_interval_ms=100; maximum_seconds=600;
-            transform_cases=@('grow','shrink','no-op') })
+            transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' })
     $savedRuntimeProfile = $script:VmAcceptanceProfileId
     try {
         $script:VmAcceptanceProfileId = 'vm-automated-v2-owned-resources'

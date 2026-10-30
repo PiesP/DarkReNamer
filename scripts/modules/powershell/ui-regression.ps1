@@ -329,13 +329,13 @@ function Assert-GuiRegressionInvocationBinding {
         $expectedPlan = [ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
             idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
             icon_poll_interval_ms=100; maximum_seconds=600;
-            transform_cases=@('grow','shrink','no-op') }
+            transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' }
         $actualPlan = $ManifestInput.request.PSObject.Properties['runtime_baseline_plan']
         if ($null -eq $actualPlan -or
             ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
             ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
             @($ManifestInput.request.PSObject.Properties.Name).Count -ne 5 -or
-            $ManifestInput.run_id -cne 'runtime-baseline-v1-1366x768-96-text100' -or
+            $ManifestInput.run_id -cne 'runtime-baseline-v2-1366x768-96-text100' -or
             $ManifestInput.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
             $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
             $ManifestInput.acceptance_profile_sha256 -cne
@@ -790,7 +790,7 @@ function Invoke-GuiRegressionAcceptance {
         ($RegressionMode -ceq 'custom-input-identity-observation' -and
         [string]$manifestInput.run_id -ceq 'custom-input-identity-observation-v1-1366x768-96-text100') -or
         ($RegressionMode -ceq 'runtime-baseline' -and
-        [string]$manifestInput.run_id -ceq 'runtime-baseline-v1-1366x768-96-text100')
+        [string]$manifestInput.run_id -ceq 'runtime-baseline-v2-1366x768-96-text100')
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     Initialize-TrustedResultWriter `
         -Root $resolved.root `
@@ -1018,7 +1018,7 @@ function Invoke-GuiRegressionAcceptance {
             $result.assertions['scope'] = 'custom-input-identity-observation-v1'
         }
         elseif ($RegressionMode -eq 'runtime-baseline') {
-            $result.assertions['scope'] = 'runtime-baseline-production-v1'
+            $result.assertions['scope'] = 'runtime-baseline-production-v2'
         }
         elseif ($RegressionMode -eq 'icon-settlement') {
             $result.assertions['scope'] = if ($manifestInput.request.endpoint_method -ceq

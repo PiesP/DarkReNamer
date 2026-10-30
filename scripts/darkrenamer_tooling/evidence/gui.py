@@ -128,12 +128,13 @@ FIRST_CLEAR_PLAN = {
 }
 ICON_SETTLEMENT_MODE = "icon-settlement"
 RUNTIME_BASELINE_MODE = "runtime-baseline"
-RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v1-1366x768-96-text100"
+RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": ["fresh-system", "saved-system", "saved-english"],
     "idle_seconds": 30, "populated_rows": 1000, "sample_interval_ms": 200,
     "icon_poll_interval_ms": 100, "maximum_seconds": 600,
     "transform_cases": ["grow", "shrink", "no-op"],
+    "sample_clock_contract": "qpc-identity-v2",
 }
 ICON_SETTLEMENT_RUN_ID = "icon-settlement-v1-1366x768-96-text100"
 ICON_SETTLEMENT_METHOD = "async-status-v1"
@@ -5469,12 +5470,41 @@ def validate_runtime_samples(cell: dict) -> dict:
     require(type(samples) is list and 200 <= len(samples) <= 3000,
             "Runtime baseline raw sample count is incomplete or excessive.")
     grouped = {phase: [] for phase in RUNTIME_PHASES}
+    clock = cell["startup"]["clock"]
+    frequency = clock["qpc_frequency"]
+    first_allowed = clock["command_ready_ticks"]
+    last_allowed = min(2**63 - 1, clock["launch_request_ticks"] + 600 * frequency)
+    main_handle = nested(cell["environment"], "main_window", "hwnd")
     previous_time, previous_cpu, previous_phase = -1, -1, 0
+    previous_begin, previous_end, main_thread = None, None, None
     for index, value in enumerate(samples):
         row = exact_keys(value, {"phase", "elapsed_ms", "cpu_ms", "private_bytes",
             "working_set_bytes", "threads", "handles", "gdi_objects", "ui_response_ms",
-            "probe_status", "probe_error_code", "resource_collection_ms", "sample_gap_ms"},
+            "probe_status", "probe_error_code", "resource_collection_ms", "sample_gap_ms",
+            "probe_begin_ticks", "probe_end_ticks", "process_id", "process_start_utc_ticks",
+            "main_thread_id", "main_window_handle"},
             f"runtime sample {index}")
+        begin = checked_int(row["probe_begin_ticks"], first_allowed, last_allowed,
+                            "runtime sample probe_begin_ticks")
+        end = checked_int(row["probe_end_ticks"], begin, last_allowed,
+                          "runtime sample probe_end_ticks")
+        thread = checked_int(row["main_thread_id"], 1, 0xffffffff,
+                             "runtime sample main_thread_id")
+        require(begin < end and (previous_end is None or previous_end <= begin) and
+                (main_thread is None or thread == main_thread) and
+                int_equals(row["process_id"], cell["process_id"]) and
+                int_equals(row["process_start_utc_ticks"], cell["process_start_utc_ticks"]) and
+                int_equals(row["main_window_handle"], main_handle),
+                "Runtime baseline sample QPC interval or bound process/window/thread identity differs.")
+        probe_ms = (end - begin) * 1000.0 / frequency
+        response_ms = runtime_ms(row["ui_response_ms"], "runtime sample ui_response_ms")
+        gap_ms = runtime_ms(row["sample_gap_ms"], "runtime sample sample_gap_ms")
+        require(probe_ms <= 5000 and abs(response_ms - probe_ms) <= 0.001 and
+                (previous_begin is None or
+                 abs(gap_ms -
+                     (begin - previous_begin) * 1000.0 / frequency) <= 0.001),
+                "Runtime baseline sample QPC interval differs from reported probe or gap time.")
+        previous_begin, previous_end, main_thread = begin, end, thread
         require(type(row["phase"]) is str and row["phase"] in grouped,
                 "Runtime baseline sample phase is invalid.")
         phase_index = RUNTIME_PHASES.index(row["phase"])
@@ -5850,7 +5880,7 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str) -> d
             raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
             raw.get("status") == "review_required" and
             nested(raw, "assertions", "overall") == "passed" and
-            nested(raw, "assertions", "scope") == "runtime-baseline-production-v1" and
+            nested(raw, "assertions", "scope") == "runtime-baseline-production-v2" and
             raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
             nested(raw, "capture", "status") == "passed" and
             nested(raw, "keyboard", "status") == "not_run" and
