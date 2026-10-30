@@ -1024,7 +1024,9 @@ impl AppState {
                     && self.import_worker.is_none()
                     && self.plan_worker.is_none()
                     && self.apply_worker.is_none();
-                let no_prompt = !self.confirmation_pending && self.active_prompt.is_none();
+                let no_prompt = !self.confirmation_pending
+                    && self.active_prompt.is_none()
+                    && self.appearance_dialog.is_none();
                 isize::from(u8::from(no_foreground_worker))
                     | (isize::from(u8::from(settled)) << 1)
                     | (isize::from(u8::from(
@@ -1581,6 +1583,50 @@ mod tests {
         state
             .preference_persistence
             .shutdown_and_join(state.column_states, state.appearance);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_close_selector_tracks_owned_appearance_dialog() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(directory.path(), false, |window| {
+            let (prepared, before) = {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("main window state is unavailable"))?;
+                let state = lease.state_mut();
+                let before = state
+                    .icon_status_value(22)
+                    .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+                let prepared = prepare_appearance_dialog(window, state)
+                    .ok_or_else(|| io::Error::other("appearance dialog was not prepared"))?;
+                (prepared, before)
+            };
+            run_prepared_appearance_action(window, prepared, NativeAppearanceDialogPlatform);
+
+            let mut lease = try_app_state(window)
+                .ok_or_else(|| io::Error::other("main window state disappeared"))?;
+            let state = lease.state_mut();
+            let dialog_owned = state.appearance_dialog.is_some();
+            let prompt_active = state.active_prompt.is_some();
+            let during = state
+                .icon_status_value(22)
+                .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+            let session = cancel_appearance_dialog(window, state)
+                .ok_or_else(|| io::Error::other("owned appearance dialog disappeared"))?;
+            let after = state
+                .icon_status_value(22)
+                .ok_or_else(|| io::Error::other("idle-close status is unavailable"))?;
+            drop(lease);
+            destroy_cancelled_appearance_dialog(session);
+
+            assert_ne!(before & 0b01000, 0);
+            assert!(dialog_owned);
+            assert!(!prompt_active);
+            assert_eq!(during & 0b01000, 0);
+            assert_ne!(after & 0b01000, 0);
+            Ok(())
+        })?;
         Ok(())
     }
 
