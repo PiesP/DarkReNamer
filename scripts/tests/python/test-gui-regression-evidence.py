@@ -4467,5 +4467,173 @@ class RuntimeBaselineEvidenceTests(SyntheticFixtureTestCase):
             self.refresh_runtime(run)
 
 
+class GuiApplyEndpointTests(unittest.TestCase):
+    @staticmethod
+    def fixture(count, cancelled):
+        initial, final = [], []
+        for index in range(count):
+            name = f'ordinary-{index:05d}.txt'
+            row = {'name': name,
+                   'content_sha256': digest(f'gui-apply-{index:05d}'.encode('ascii')),
+                   'identity': f'{index + 1:08x}:{index + 1:016x}'}
+            initial.append(row)
+            final.append({**row, 'name': name if cancelled else 'sample-' + name})
+        return initial, final
+
+    @staticmethod
+    def icon(count):
+        return {'version': 1, 'session': '1', 'generation': '1',
+            'status_revision': '2', 'model_revision': '1', 'bootstrap': 1,
+            'queued': 0, 'inflight': 0, 'undrained': 0, 'unresolved_rows': 0,
+            'cursor': count, 'settled': True, 'worker_joined': False,
+            'reconcile_rows': 0, 'batch_ack': 0, 'demand_exhausted': True,
+            'demand_remaining': 0, 'unavailable_or_retiring': False}
+
+    @classmethod
+    def valid(cls, case='success-100'):
+        count = int(case.split('-')[-1])
+        cancelled = case.startswith('cancel-')
+        initial, final = cls.fixture(count, cancelled)
+        pid, start, hwnd, frequency = 41, 638965440000000000, 900, 10000000
+        clock = 200
+        brackets = [{'operation': 'startup-main-window',
+            'predicate': 'bound-main-window', 'observation': 'opaque-observer-envelope',
+            'qpc_frequency': frequency, 'process_id': pid,
+            'process_start_utc_ticks': start, 'main_window_handle': hwnd,
+            'begin_ticks': 100, 'end_ticks': 150}]
+
+        def tick():
+            nonlocal clock
+            clock += 50
+            return clock
+
+        def probe(operation, predicate):
+            begin = tick()
+            row = {'operation': operation, 'predicate': predicate,
+                'observation': 'polled-monotonic-predicate', 'qpc_frequency': frequency,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd,
+                'probes': [{'begin_ticks': begin, 'end_ticks': begin + 1,
+                            'ready': True}]}
+            brackets.append(row)
+            return row
+
+        imports = []
+        stages = [count] if count <= 1000 else [1000, 3250, 5500, 7750, 10000]
+        for index, rows in enumerate(stages):
+            stage = 'initial' if index == 0 else f'remainder-{index - 1}'
+            opened = tick()
+            feedback = probe('import-open', 'bound-import-reading-status') \
+                if index == 0 and count >= 1000 else None
+            observed = probe('gui-apply-' + stage, 'expected-row-count')
+            command = probe('gui-apply-' + stage, 'import-command-enabled')
+            imports.append({'id': stage, 'expected_rows': rows, 'open_ticks': opened,
+                'rows_observed_ticks': observed['probes'][-1]['end_ticks'],
+                'command_ready_ticks': command['probes'][-1]['end_ticks'],
+                'first_feedback': feedback})
+        requested = tick()
+        planning = probe('apply-request', 'planning-status') if count >= 1000 else None
+        confirmation = probe('apply-confirmation', 'bound-actionable-confirmation')
+        accepted = tick()
+        execution_feedback = probe('apply-accepted', 'execution-busy-status')
+        cancel = None
+        if cancelled:
+            cancel_requested = tick()
+            ack = probe('active-apply-cancel', 'cancel-request-acknowledged')
+            cancel = {'request_ticks': cancel_requested, 'acknowledgment': ack,
+                      'control_id': 1009, 'requested_from': 'active-apply-worker'}
+        ready = probe('apply-result', 'cancelled-result-and-commands' if cancelled
+                      else 'completed-result-rows-and-commands')
+        verified_begin = tick()
+        verified_end = tick()
+        close_wait = probe('idle-close', 'close-readiness-mask31')
+        query_begin, query_end, close_request, exit_observed = (tick() for _ in range(4))
+        job = {'status': 'clean'}
+        icon = cls.icon(count)
+        scenario = {'mode': evidence.GUI_APPLY_MODE, 'case': case, 'count': count,
+            'qpc_frequency': frequency, 'executable_sha256': 'a' * 64,
+            'fixture_initial': {}, 'fixture_final': {}, 'native_process_lifetime': {},
+            'process_id': pid, 'process_start_utc_ticks': start,
+            'main_window_handle': hwnd, 'environment': {}, 'imports': imports,
+            'icon_settlement': {'data_ready_ms': 1, 'icon_settled_observed_ms': 2,
+                'first_status': icon, 'settled_status': icon, 'confirmation_status': icon,
+                'poll_count': 2, 'unstable_query_attempts': 0,
+                'sampled_peak_pending': 0, 'sampled_peak_unresolved_rows': 0},
+            'apply_request': {'input': 'visible-command-rail', 'request_ticks': requested,
+                'owner_thread_acceptance': 'not-measured',
+                'planning_feedback': planning, 'confirmation_ready': confirmation,
+                'confirmation_handle': 999, 'expected_changed_rows': count},
+            'apply_execution': {'accepted_ticks': accepted, 'first_feedback': execution_feedback,
+                'outcome': 'cancelled' if cancelled else 'completed', 'operation_ready': ready,
+                'result_status': '요청에 따라 변경을 취소했습니다.' if cancelled else
+                    f'{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다.',
+                'rows': count, 'import_command_enabled': True,
+                'apply_command_enabled': cancelled},
+            'journal_residue_count': 0, 'verification_begin_ticks': verified_begin,
+            'verification_end_ticks': verified_end,
+            'samples': [{'process_id': pid, 'process_start_utc_ticks': start,
+                         'main_window_handle': hwnd}],
+            'close_readiness_wait': close_wait,
+            'close_readiness': {'selector': 22, 'required_mask': 31, 'flags': 31,
+                'query_begin_ticks': query_begin, 'query_end_ticks': query_end,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd},
+            'normal_close': {'request_ticks': close_request,
+                'exit_observed_ticks': exit_observed, 'qpc_frequency': frequency,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd, 'exit_code': 0, 'job_cleanup': job},
+            'readiness_brackets': brackets, 'appearance': 'light'}
+        if cancelled:
+            scenario['cancel'] = cancel
+        return scenario, initial, final
+
+    def test_success_and_cancel_have_distinct_measured_endpoints(self):
+        for case in ('success-100', 'success-1000', 'success-10000', 'cancel-10000'):
+            with self.subTest(case=case):
+                scenario, initial, final = self.valid(case)
+                metrics = evidence.validate_gui_apply_metrics(scenario, initial, final)
+                self.assertEqual(metrics['count'], int(case.split('-')[-1]))
+                self.assertEqual(metrics['presentation_latency'], 'not-measured')
+
+    def test_rejects_identity_order_completion_command_journal_exit_and_survivors(self):
+        scenario, initial, final = self.valid()
+        changes = {
+            'identity': lambda x: x['close_readiness'].__setitem__('process_id', 42),
+            'frequency': lambda x: x['normal_close'].__setitem__('qpc_frequency', 9),
+            'order': lambda x: x.__setitem__('verification_begin_ticks',
+                x['apply_execution']['accepted_ticks']),
+            'premature_rows': lambda x: x['imports'][0].__setitem__('rows_observed_ticks',
+                x['imports'][0]['open_ticks']),
+            'command': lambda x: x['apply_execution'].__setitem__('import_command_enabled', False),
+            'journal': lambda x: x.__setitem__('journal_residue_count', 1),
+            'exit': lambda x: x['normal_close'].__setitem__('exit_code', 1),
+            'survivors': lambda x: x['normal_close']['job_cleanup'].__setitem__('status', 'failed'),
+            'preference_ack': lambda x: x['close_readiness'].__setitem__('flags', 27),
+        }
+        for name, mutate in changes.items():
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+        missing = deepcopy(final)
+        missing.pop()
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(scenario, initial, missing)
+
+    def test_cancel_acknowledgment_cannot_be_terminal_or_before_request(self):
+        scenario, initial, final = self.valid('cancel-10000')
+        for mutate in (
+            lambda x: x['cancel']['acknowledgment']['probes'][-1].__setitem__(
+                'end_ticks', x['apply_execution']['operation_ready']['probes'][-1]['end_ticks']),
+            lambda x: x['cancel'].__setitem__('request_ticks',
+                x['apply_execution']['accepted_ticks']),
+            lambda x: x.pop('cancel'),
+        ):
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+
 if __name__ == "__main__":
     unittest.main()

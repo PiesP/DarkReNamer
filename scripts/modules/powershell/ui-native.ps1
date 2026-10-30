@@ -1974,6 +1974,24 @@ public static class DarkReNamerIconStatusObserver {
         return ((ulong)high << 32) | low;
     }
 
+    // Selector 22 is an additive, read-only GUI close precondition. An older
+    // product returns the unpublished sentinel and cannot qualify this run.
+    public static uint ReadCloseReadinessBound(
+        System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks)
+            throw new InvalidOperationException("Close readiness target process identity changed.");
+        uint pid;
+        if (GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Close readiness HWND does not belong to the owned process.");
+        uint flags = Scalar(window, 22);
+        if ((flags & ~31u) != 0 || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != expectedStartUtcTicks ||
+            GetWindowThreadProcessId(window, out pid) == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Close readiness flags or process identity changed.");
+        return flags;
+    }
+
     public static DarkReNamerIconStatusSnapshot ReadBound(
         System.Diagnostics.Process process, IntPtr window, long expectedStartUtcTicks) {
         if (process == null || window == IntPtr.Zero || process.HasExited ||

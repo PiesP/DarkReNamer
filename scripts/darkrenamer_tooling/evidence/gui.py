@@ -131,6 +131,15 @@ FIRST_CLEAR_PLAN = {
 ICON_SETTLEMENT_MODE = "icon-settlement"
 RUNTIME_BASELINE_MODE = "runtime-baseline"
 RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
+GUI_APPLY_MODE = "gui-apply-feedback"
+GUI_APPLY_RUN_PREFIX = "gui-apply-feedback-v1-owned-r3-1366x768-96-text100-"
+GUI_APPLY_CASES = ("success-100", "success-1000", "success-10000", "cancel-10000")
+GUI_APPLY_PLAN = {
+    "success_counts": [100, 1000, 10000], "representative_count": 1000,
+    "representative_processes": 6, "first_1000_counts_toward_six": True,
+    "single_cancel_count": 10000, "observation_poll_ms": 10,
+    "close_readiness_selector": 22, "close_readiness_mask": 31,
+}
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": ["fresh-system", "saved-system", "saved-english"],
     "idle_seconds": 30, "populated_rows": 1000, "sample_interval_ms": 200,
@@ -797,12 +806,14 @@ def validate_request(value: object) -> dict:
             fields.add("baseline_product_source_sha")
     if isinstance(value, dict) and value.get("mode") == RUNTIME_BASELINE_MODE:
         fields.add("runtime_baseline_plan")
+    if isinstance(value, dict) and value.get("mode") == GUI_APPLY_MODE:
+        fields.update({"gui_apply_plan", "gui_apply_case"})
     request = exact_keys(value, fields, "request")
     require("readiness_bracket_contract" not in request or
-            (request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE} and
+            (request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} and
              request["readiness_bracket_contract"] == READINESS_BRACKET_CONTRACT),
             "Readiness bracket contract is invalid for this request.")
-    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE},
+    require(request["mode"] in RUN_MODES | {PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE},
             "request.mode is invalid.")
     require(request["appearance"] in ({"light", "dark", "system"} if request["mode"] == PAIR_MODE else {"light", "dark"}), "request.appearance is invalid.")
     desktop = exact_keys(request["desktop"], {"width", "height", "dpi"}, "request.desktop")
@@ -859,6 +870,13 @@ def validate_request(value: object) -> dict:
                 (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
                 typed_equal(request["runtime_baseline_plan"], RUNTIME_BASELINE_PLAN),
                 "Runtime baseline request differs from its fixed plan.")
+    elif request["mode"] == GUI_APPLY_MODE:
+        require(request["appearance"] == "light" and
+                (desktop["width"], desktop["height"], desktop["dpi"], text) == (1366, 768, 96, 100) and
+                request.get("readiness_bracket_contract") == READINESS_BRACKET_CONTRACT and
+                request["gui_apply_case"] in GUI_APPLY_CASES and
+                typed_equal(request["gui_apply_plan"], GUI_APPLY_PLAN),
+                "GUI Apply request differs from its fixed plan.")
     else:
         expected = FIXED_REQUESTS[request["mode"]]
         require((request["appearance"], desktop["width"], desktop["height"], desktop["dpi"], text) == expected,
@@ -917,7 +935,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
         value["request"].get("mode") in RUN_MODES and
         value.get("run_id") == FIXED_V2_RUN_IDS[value["request"]["mode"]])
     if isinstance(value, dict) and isinstance(value.get("request"), dict) and (
-            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance):
+            value["request"].get("mode") in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} or fixed_v2 or owned_performance):
         required.add("acceptance_profile_id")
         if value.get("acceptance_profile_id") == V2_PROFILE_ID or value["request"].get("mode") == FIRST_CLEAR_MODE:
             required.update({"acceptance_profile", "acceptance_profile_sha256"})
@@ -942,13 +960,13 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     for name, row in artifacts.items():
         checked_artifact(run_root, row, f"artifacts.{name}")
     request = validate_request(manifest["request"])
-    if request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE} and \
+    if request["mode"] in {PERFORMANCE_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} and \
             requires_readiness_brackets(manifest["source_sha"], source_repo):
         require(request.get("readiness_bracket_contract") == READINESS_BRACKET_CONTRACT,
                 "Current-source readiness bracket contract is missing.")
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} or fixed_v2 or owned_performance:
         require(manifest["acceptance_profile_id"] in
-                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance else
+                ({V2_PROFILE_ID} if request["mode"] in {ICON_SETTLEMENT_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} or fixed_v2 or owned_performance else
                  {V1_PROFILE_ID} if request["mode"] == FIRST_CLEAR_MODE else {V1_PROFILE_ID, V2_PROFILE_ID}),
                 "GUI diagnostic acceptance profile is unsupported.")
         if request["mode"] == FIRST_CLEAR_MODE:
@@ -969,9 +987,9 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
             require(isinstance(profile, dict) and profile.get("schema") == "darkrenamer-vm-automated-profile-v3" and
                     profile.get("profile_id") == V2_PROFILE_ID and int_equals(profile.get("revision"), 3),
                     "Appearance V2 profile definition is invalid.")
-            if fixed_v2 or owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE}:
+            if fixed_v2 or owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE}:
                 require(expected_profile_sha256 == profile_artifact["sha256"] and
-                        (not (owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE}) or
+                        (not (owned_performance or request["mode"] in {PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE}) or
                          profile_artifact["sha256"] == OWNED_PERFORMANCE_PROFILE_SHA256),
                         "Fixed GUI V2 profile differs from the selected source blob.")
     if request["mode"] == FIRST_CLEAR_MODE:
@@ -988,7 +1006,7 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
     require(isinstance(command, list) and 1 <= len(command) <= 128 and
             all(isinstance(item, str) and 0 < len(item) <= 4096 for item in command),
             "input manifest command must be a bounded argv string array.")
-    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE} or fixed_v2 or owned_performance:
+    if request["mode"] in {PAIR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} or fixed_v2 or owned_performance:
         selected = manifest["acceptance_profile_id"]
         option = "--acceptance-profile-id"
         require(command.count(option) <= 1, "Appearance acceptance profile command is duplicated.")
@@ -1198,8 +1216,24 @@ def validate_input_manifest(run_root: Path, expected_source_sha: str, *,
                             "--expected-prepared-application-sha256", prepared["application_sha256"],
                             "--acceptance-profile-id", V2_PROFILE_ID],
                 "Runtime baseline manifest identity or prepared executable differs.")
+    if request["mode"] == GUI_APPLY_MODE:
+        prepared = exact_keys(manifest.get("prepared_bundle"),
+                              {"origin", "bundle_manifest_sha256", "application_sha256"},
+                              "GUI Apply prepared bundle")
+        case = request["gui_apply_case"]
+        require(prepared["origin"] == "external-prepared-source-built-bundle" and
+                prepared["bundle_manifest_sha256"] == manifest["bundle_manifest"]["sha256"] and
+                prepared["application_sha256"] == artifacts["application"]["sha256"] and
+                manifest["run_id"] == GUI_APPLY_RUN_PREFIX + case and
+                command == ["python3", "-I", "scripts/run-gui-regression.py", "--output-root",
+                            "<external-output-root>", "--connection-profile", "<private-connection-profile>",
+                            "--diagnostic", GUI_APPLY_MODE, "--gui-apply-case", case,
+                            "--prepared-bundle-root", "<external-prepared-bundle-root>",
+                            "--expected-prepared-application-sha256", prepared["application_sha256"],
+                            "--acceptance-profile-id", V2_PROFILE_ID],
+                "GUI Apply manifest identity or prepared executable differs.")
     else:
-        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE}:
+        if request["mode"] not in {PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE}:
             require("prepared_bundle" not in manifest,
                     "Prepared bundle provenance is restricted to performance and focused clear runs.")
     if request["mode"] == "tooltip":
@@ -4600,7 +4634,8 @@ def validate_owned_performance_desktop(run_root: Path, files: dict[str, dict],
 
 def validate_owned_performance_transport(run_root: Path, files: dict[str, dict], manifest: dict,
                                          raw: dict, scenario: dict, postlaunch: dict,
-                                         *, picker: bool = False) -> dict:
+                                         *, picker: bool = False,
+                                         gui_apply: bool = False) -> dict:
     transport = validate_transport_exit(run_root, files, 0)
     cleanup = verify_controller_cleanup(transport.get("raw_cleanup"), profile_id=V2_PROFILE_ID,
                                         profile_sha256=manifest["acceptance_profile_sha256"])
@@ -4645,7 +4680,7 @@ def validate_owned_performance_transport(run_root: Path, files: dict[str, dict],
     checkpoints = native["checkpoints"]
     require(type(checkpoints) is list and [row.get("phase") if type(row) is dict else None
                                                for row in checkpoints] ==
-            (["pre-work", "idle", "post"] if picker else
+            (["pre-work"] if gui_apply else ["pre-work", "idle", "post"] if picker else
              ["pre-work", "idle", "ordinary-10000", "post"]) and
             all(type(row.get("creation_filetime")) is int and row["creation_filetime"] == filetime
                 for row in checkpoints),
@@ -6266,6 +6301,337 @@ def validate_runtime_baseline_run(root: Path, run_id: str, source_sha: str,
             "release_campaign": "not-run"}
 
 
+def validate_gui_apply_metrics(scenario: object, initial: object, final: object) -> dict:
+    scenario = exact_keys(scenario, {
+        "mode", "case", "count", "qpc_frequency", "executable_sha256",
+        "fixture_initial", "fixture_final", "native_process_lifetime", "process_id",
+        "process_start_utc_ticks", "main_window_handle", "environment", "imports",
+        "icon_settlement", "apply_request", "apply_execution", "journal_residue_count",
+        "verification_begin_ticks", "verification_end_ticks", "samples",
+        "close_readiness_wait", "close_readiness", "normal_close", "readiness_brackets",
+        "appearance",
+    } | ({"cancel"} if isinstance(scenario, dict) and scenario.get("case") == "cancel-10000"
+         else set()), "GUI Apply scenario")
+    case = scenario["case"]
+    require(scenario["mode"] == GUI_APPLY_MODE and case in GUI_APPLY_CASES and
+            scenario["appearance"] == "light", "GUI Apply mode or case differs.")
+    count = int(case.split("-")[-1])
+    cancelled = case == "cancel-10000"
+    require(int_equals(scenario["count"], count) and
+            int_equals(scenario["journal_residue_count"], 0),
+            "GUI Apply count or journal disposition differs.")
+    frequency = checked_int(scenario["qpc_frequency"], 1, 10**10, "GUI Apply QPC frequency")
+    pid = checked_int(scenario["process_id"], 1, 0xffffffff, "GUI Apply process")
+    start = checked_int(scenario["process_start_utc_ticks"], 1, 2**63 - 1,
+                        "GUI Apply process start")
+    hwnd = checked_int(scenario["main_window_handle"], 1, 2**63 - 1,
+                       "GUI Apply main window")
+    require(isinstance(initial, list) and isinstance(final, list) and
+            len(initial) == len(final) == count, "GUI Apply full fixture inventories differ.")
+    identities = set()
+    for index, (before, after) in enumerate(zip(initial, final, strict=True)):
+        before = exact_keys(before, {"name", "content_sha256", "identity"},
+                            f"GUI Apply initial file {index}")
+        after = exact_keys(after, {"name", "content_sha256", "identity"},
+                           f"GUI Apply final file {index}")
+        name = f"ordinary-{index:05d}.txt"
+        content = hashlib.sha256(f"gui-apply-{index:05d}".encode("ascii")).hexdigest()
+        identity = before["identity"]
+        require(before["name"] == name and
+                after["name"] == (name if cancelled else "sample-" + name) and
+                before["content_sha256"] == after["content_sha256"] == content and
+                isinstance(identity, str) and
+                re.fullmatch(r"[0-9a-f]{8}:[0-9a-f]{16}", identity) is not None and
+                after["identity"] == identity and identity not in identities,
+                "GUI Apply file name, content, or NTFS identity differs.")
+        identities.add(identity)
+    imports = scenario["imports"]
+    rows = [count] if count <= 1000 else [1000, 3250, 5500, 7750, 10000]
+    require(isinstance(imports, list) and len(imports) == len(rows),
+            "GUI Apply import stage count differs.")
+    operations = []
+    previous_command = 0
+    for index, (item, expected_rows) in enumerate(zip(imports, rows, strict=True)):
+        item = exact_keys(item, {"id", "expected_rows", "open_ticks",
+                                 "rows_observed_ticks", "command_ready_ticks", "first_feedback"},
+                          f"GUI Apply import {index}")
+        stage = "initial" if index == 0 else f"remainder-{index - 1}"
+        opened = checked_int(item["open_ticks"], 1, 2**63 - 1, "import Open")
+        observed = checked_int(item["rows_observed_ticks"], 1, 2**63 - 1,
+                               "import rows observed")
+        command = checked_int(item["command_ready_ticks"], 1, 2**63 - 1,
+                              "import command ready")
+        require(item["id"] == stage and int_equals(item["expected_rows"], expected_rows) and
+                previous_command < opened < observed <= command,
+                "GUI Apply import Open, row, or command order differs.")
+        if index == 0 and count >= 1000:
+            feedback = item["first_feedback"]
+            require(isinstance(feedback, dict) and feedback.get("operation") == "import-open" and
+                    feedback.get("predicate") == "bound-import-reading-status" and
+                    opened <= feedback["probes"][0]["begin_ticks"] and
+                    feedback["probes"][-1]["end_ticks"] < observed,
+                    "GUI Apply import first feedback is missing or follows terminal rows.")
+            operations.append(("import-open", "bound-import-reading-status",
+                               feedback["probes"][-1]["end_ticks"]))
+        else:
+            require(item["first_feedback"] is None,
+                    "GUI Apply import feedback was attached to a different stage.")
+        operations.extend(((f"gui-apply-{stage}", "expected-row-count", observed),
+                           (f"gui-apply-{stage}", "import-command-enabled", command)))
+        previous_command = command
+    icon = exact_keys(scenario["icon_settlement"], {
+        "data_ready_ms", "icon_settled_observed_ms", "first_status", "settled_status",
+        "confirmation_status", "poll_count", "unstable_query_attempts",
+        "sampled_peak_pending", "sampled_peak_unresolved_rows"}, "GUI Apply icon settlement")
+    settled = validate_icon_status(icon["settled_status"], count, "GUI Apply settled icons")
+    confirmed_icons = validate_icon_status(icon["confirmation_status"], count,
+                                           "GUI Apply confirmed icons")
+    require(icon_terminal(settled) and icon_terminal(confirmed_icons) and
+            settled["generation"] == confirmed_icons["generation"] and
+            settled["model_revision"] == confirmed_icons["model_revision"] and
+            runtime_ms(icon["icon_settled_observed_ms"], "GUI Apply icon settlement", minimum=0.001) >=
+            runtime_ms(icon["data_ready_ms"], "GUI Apply icon data ready", minimum=0.001),
+            "GUI Apply icons were not settled before the preview and close path.")
+    request = exact_keys(scenario["apply_request"], {"input", "request_ticks",
+        "owner_thread_acceptance",
+        "planning_feedback", "confirmation_ready", "confirmation_handle",
+        "expected_changed_rows"}, "GUI Apply request")
+    execution = exact_keys(scenario["apply_execution"], {"accepted_ticks", "first_feedback",
+        "outcome", "operation_ready", "result_status", "rows",
+        "import_command_enabled", "apply_command_enabled"}, "GUI Apply execution")
+    requested = checked_int(request["request_ticks"], 1, 2**63 - 1, "Apply request")
+    accepted = checked_int(execution["accepted_ticks"], 1, 2**63 - 1, "confirmation accepted")
+    require(request["input"] == "visible-command-rail" and
+            request["owner_thread_acceptance"] == "not-measured" and
+            int_equals(request["expected_changed_rows"], count) and
+            int_equals(request["confirmation_handle"],
+                       checked_int(request["confirmation_handle"], 1, 2**63 - 1,
+                                   "confirmation HWND")) and
+            previous_command < requested < accepted,
+            "GUI Apply input or confirmation order differs.")
+    planning = request["planning_feedback"]
+    if count >= 1000:
+        require(isinstance(planning, dict) and
+                planning.get("predicate") == "planning-status" and
+                requested <= planning["probes"][0]["begin_ticks"],
+                "GUI Apply planning feedback is missing or predates its request.")
+        operations.append(("apply-request", "planning-status",
+                           planning["probes"][-1]["end_ticks"]))
+    else:
+        require(planning is None, "GUI Apply short case contains undeclared planning feedback.")
+    confirmation = request["confirmation_ready"]
+    require(isinstance(confirmation, dict) and
+            confirmation["probes"][-1]["end_ticks"] < accepted,
+            "GUI Apply confirmation was not actionable before acceptance.")
+    operations.append(("apply-confirmation", "bound-actionable-confirmation",
+                       confirmation["probes"][-1]["end_ticks"]))
+    feedback = execution["first_feedback"]
+    require(isinstance(feedback, dict) and
+            accepted <= feedback["probes"][0]["begin_ticks"],
+            "GUI Apply execution feedback predates confirmation acceptance.")
+    operations.append(("apply-accepted", "execution-busy-status",
+                       feedback["probes"][-1]["end_ticks"]))
+    cancel_request = None
+    if cancelled:
+        cancellation = exact_keys(scenario["cancel"], {"request_ticks", "acknowledgment",
+            "control_id", "requested_from"}, "active Apply cancellation")
+        cancel_request = checked_int(cancellation["request_ticks"], 1, 2**63 - 1,
+                                     "active Apply Cancel request")
+        ack = cancellation["acknowledgment"]
+        require(int_equals(cancellation["control_id"], 1009) and
+                cancellation["requested_from"] == "active-apply-worker" and
+                isinstance(ack, dict) and
+                feedback["probes"][-1]["end_ticks"] < cancel_request <=
+                ack["probes"][0]["begin_ticks"],
+                "Active Apply Cancel is not after execution feedback.")
+        operations.append(("active-apply-cancel", "cancel-request-acknowledged",
+                           ack["probes"][-1]["end_ticks"]))
+    ready = execution["operation_ready"]
+    require(isinstance(ready, dict) and
+            ready["probes"][-1]["end_ticks"] >
+                (cancel_request if cancelled else feedback["probes"][-1]["end_ticks"]) and
+            execution["outcome"] == ("cancelled" if cancelled else "completed") and
+            int_equals(execution["rows"], count) and
+            execution["import_command_enabled"] is True and
+            execution["apply_command_enabled"] is cancelled and
+            (execution["result_status"] in {
+                "파일 변경을 시작하기 전에 취소했습니다.",
+                "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.",
+                "요청에 따라 변경을 취소했습니다."} if cancelled else
+             execution["result_status"] ==
+                 f"{count}개 변경 완료 · 목록에 실제 결과를 반영했습니다."),
+            "GUI Apply terminal model, native row, command, or cancellation result differs.")
+    operations.append(("apply-result", "cancelled-result-and-commands" if cancelled else
+                       "completed-result-rows-and-commands", ready["probes"][-1]["end_ticks"]))
+    wait = scenario["close_readiness_wait"]
+    operations.append(("idle-close", "close-readiness-mask31", wait["probes"][-1]["end_ticks"]))
+    brackets = validate_readiness_brackets(scenario["readiness_brackets"],
+        process_id=pid, process_start_utc_ticks=start, main_window_handle=hwnd,
+        expected_frequency=frequency, operations=operations)
+    actual = scenario["readiness_brackets"][1:]
+    references = [(0, imports[0]["first_feedback"])] if count >= 1000 else []
+    after_imports = (1 if count >= 1000 else 0) + 2 * len(imports)
+    references.extend((after_imports + offset, record) for offset, record in enumerate(
+        ([planning] if planning is not None else []) + [confirmation, feedback] +
+        ([scenario["cancel"]["acknowledgment"]] if cancelled else []) + [ready, wait]))
+    require(all(typed_equal(actual[index], record) for index, record in references),
+            "GUI Apply endpoint references differ from their raw observer brackets.")
+    verified_begin = checked_int(scenario["verification_begin_ticks"], 1, 2**63 - 1,
+                                 "GUI Apply verification begin")
+    verified_end = checked_int(scenario["verification_end_ticks"], 1, 2**63 - 1,
+                               "GUI Apply verification end")
+    close_ready = exact_keys(scenario["close_readiness"], {"selector", "required_mask", "flags",
+        "query_begin_ticks", "query_end_ticks", "process_id", "process_start_utc_ticks",
+        "main_window_handle"}, "GUI Apply idle close readiness")
+    close = exact_keys(scenario["normal_close"], {"request_ticks", "exit_observed_ticks",
+        "qpc_frequency", "process_id", "process_start_utc_ticks", "main_window_handle",
+        "exit_code", "job_cleanup"}, "GUI Apply normal close")
+    require(ready["probes"][-1]["end_ticks"] < verified_begin <= verified_end <=
+            wait["probes"][0]["begin_ticks"] and
+            int_equals(close_ready["selector"], 22) and
+            int_equals(close_ready["required_mask"], 31) and
+            int_equals(close_ready["flags"], 31) and
+            all(int_equals(close_ready[key], value) for key, value in
+                (("process_id", pid), ("process_start_utc_ticks", start),
+                 ("main_window_handle", hwnd))) and
+            wait["probes"][-1]["end_ticks"] < close_ready["query_begin_ticks"] <=
+            close_ready["query_end_ticks"] < close["request_ticks"] <
+            close["exit_observed_ticks"] and
+            all(int_equals(close[key], value) for key, value in
+                (("qpc_frequency", frequency), ("process_id", pid),
+                 ("process_start_utc_ticks", start), ("main_window_handle", hwnd),
+                 ("exit_code", 0))) and
+            isinstance(close["job_cleanup"], dict) and
+            close["job_cleanup"].get("status") == "clean",
+            "GUI Apply verification, idle close readiness, exit, or owned Job order differs.")
+    samples = scenario["samples"]
+    require(isinstance(samples, list) and 1 <= len(samples) <= 3000 and
+            all(isinstance(sample, dict) and sample.get("process_id") == pid and
+                sample.get("process_start_utc_ticks") == start and
+                sample.get("main_window_handle") == hwnd for sample in samples),
+            "GUI Apply resource samples are missing or changed process identity.")
+    return {"case": case, "count": count, "outcome": execution["outcome"],
+            "import_first_feedback_upper_ms":
+                (imports[0]["first_feedback"]["probes"][-1]["end_ticks"] -
+                 imports[0]["open_ticks"]) * 1000 / frequency if count >= 1000 else "not-measured",
+            "apply_planning_feedback_upper_ms":
+                (planning["probes"][-1]["end_ticks"] - requested) * 1000 / frequency
+                if planning is not None else "not-measured",
+            "apply_execution_feedback_upper_ms":
+                (feedback["probes"][-1]["end_ticks"] - accepted) * 1000 / frequency,
+            "cancel_acknowledgment_upper_ms":
+                (scenario["cancel"]["acknowledgment"]["probes"][-1]["end_ticks"] -
+                 cancel_request) * 1000 / frequency if cancelled else "not-measured",
+            "apply_request_to_confirmation_upper_ms":
+                (confirmation["probes"][-1]["end_ticks"] - requested) * 1000 / frequency,
+            "confirm_to_operation_ready_upper_ms":
+                (ready["probes"][-1]["end_ticks"] - accepted) * 1000 / frequency,
+            "idle_close_to_exit_upper_ms":
+                (close["exit_observed_ticks"] - close["request_ticks"]) * 1000 / frequency,
+            "qpc_frequency": frequency, "query_uncertainty": brackets["observations"],
+            "presentation_latency": "not-measured", "sample_count": len(samples)}
+
+
+def validate_gui_apply_run(root: Path, run_id: str, source_sha: str,
+                           *, source_repo: Path | None = None) -> dict:
+    require(run_id in {GUI_APPLY_RUN_PREFIX + case for case in GUI_APPLY_CASES},
+            "GUI Apply run ID is outside its fixed case choices.")
+    run_root = root / run_id
+    require(run_root.is_dir() and not run_root.is_symlink(), "GUI Apply run is missing.")
+    manifest, input_bytes = validate_input_manifest(
+        run_root, source_sha, expected_profile_sha256=OWNED_PERFORMANCE_PROFILE_SHA256,
+        source_repo=source_repo)
+    require(manifest["request"]["mode"] == GUI_APPLY_MODE and
+            run_id == GUI_APPLY_RUN_PREFIX + manifest["request"]["gui_apply_case"],
+            "GUI Apply manifest does not bind its fixed case.")
+    input_hash = sha256_bytes(input_bytes)
+    _, cleanup_bytes = validate_cleanup(run_root, input_hash)
+    _, collection_bytes, files = validate_collection(run_root, input_hash)
+    require(sum(row["bytes"] for row in files.values()) <= 32 * 1024 * 1024 and
+            sum(name.endswith(".png") for name in files) == 1,
+            "GUI Apply run exceeds its fixed 32 MiB/one-PNG output budget.")
+    _, postlaunch = validate_platform_preflight(run_root, manifest, input_hash)
+    normalized, _ = read_json(run_root / "output", Path("run-result.json"),
+                              "GUI Apply normalized result")
+    normalized = exact_keys(normalized, {"schema_version", "diagnostic", "run_id",
+        "input_manifest_sha256", "collection_sha256", "cleanup_sha256", "source_sha",
+        "application_sha256", "observer_sha256", "observer_result_sha256", "status",
+        "exit_code"}, "GUI Apply normalized result")
+    artifacts = manifest["artifacts"]
+    require(int_equals(normalized["schema_version"], 1) and
+            normalized["diagnostic"] == GUI_APPLY_MODE and normalized["run_id"] == run_id and
+            normalized["input_manifest_sha256"] == input_hash and
+            normalized["collection_sha256"] == sha256_bytes(collection_bytes) and
+            normalized["cleanup_sha256"] == sha256_bytes(cleanup_bytes) and
+            normalized["source_sha"] == source_sha and
+            normalized["application_sha256"] == artifacts["application"]["sha256"] and
+            normalized["observer_sha256"] == artifacts["observer"]["sha256"] and
+            normalized["status"] == "review_required" and int_equals(normalized["exit_code"], 0),
+            "GUI Apply normalized result is missing or differs from raw evidence.")
+    raw, raw_bytes = read_json(run_root / "output", Path("acceptance-result.json"),
+                               "GUI Apply observer result")
+    observations, observation_bytes = read_json(run_root / "output",
+        Path("acceptance-observations.json"), "GUI Apply observations")
+    require(normalized["observer_result_sha256"] == sha256_bytes(raw_bytes) ==
+            files["acceptance-result.json"]["sha256"] and
+            sha256_bytes(observation_bytes) == files["acceptance-observations.json"]["sha256"] and
+            raw.get("observations") == {"file": "acceptance-observations.json",
+                                        "sha256": sha256_bytes(observation_bytes)} and
+            typed_equal(raw.get("acceptance_observations"), observations) and
+            typed_equal(nested(raw, "assertions", "scenario"), observations.get("scenario")),
+            "GUI Apply raw observations are unbound or changed.")
+    require(raw.get("source_sha") == source_sha and
+            nested(raw, "application", "sha256") == artifacts["application"]["sha256"] and
+            raw.get("runner_sha256") == artifacts["runner"]["sha256"] and
+            raw.get("acceptance_script_sha256") == artifacts["observer"]["sha256"] and
+            raw.get("status") == "review_required" and
+            nested(raw, "assertions", "overall") == "passed" and
+            nested(raw, "assertions", "scope") == "gui-apply-feedback-v1" and
+            raw.get("process_cleanup") is True and raw.get("guest_cleanup") is True and
+            nested(raw, "capture", "status") == "passed" and
+            nested(raw, "keyboard", "status") == "not_run" and
+            nested(raw, "accessibility", "status") == "not_run" and
+            int_equals(observations.get("schema_version"), 1) and
+            observations.get("run_id") == run_id,
+            "GUI Apply observer scope, source, cleanup, or identity differs.")
+    scenario = observations.get("scenario")
+    require(isinstance(scenario, dict) and
+            scenario.get("executable_sha256") == artifacts["application"]["sha256"],
+            "GUI Apply scenario executable differs from the prepared bundle.")
+    inventories = []
+    for label, leaf in (("initial", "gui-apply-initial.json"),
+                        ("final", "gui-apply-final.json")):
+        reference = exact_keys(scenario.get("fixture_" + label), {"file", "sha256"},
+                               f"GUI Apply {label} inventory reference")
+        require(reference["file"] == leaf and leaf in files and
+                reference["sha256"] == files[leaf]["sha256"],
+                "GUI Apply full inventory is not indexed and bound.")
+        inventory, inventory_bytes = read_json(run_root / "output", Path(leaf),
+                                                f"GUI Apply {label} inventory")
+        require(sha256_bytes(inventory_bytes) == reference["sha256"],
+                "GUI Apply full inventory bytes differ from their reference.")
+        inventories.append(inventory)
+    metrics = validate_gui_apply_metrics(scenario, *inventories)
+    transport = validate_transport_exit(run_root, files, 0)
+    owned = validate_owned_performance_transport(run_root, files, manifest, raw, scenario,
+                                                 postlaunch, gui_apply=True)
+    require(typed_equal(raw["process_job_cleanup"][0], scenario["normal_close"]["job_cleanup"]),
+            "GUI Apply close returned a different owned Job receipt.")
+    verify_owned_performance_text_scale(observations)
+    captures = raw.get("screenshots")
+    leaf = "gui-apply-imported.png"
+    require(leaf in files and isinstance(captures, list) and len(captures) == 1 and
+            captures[0].get("file") == leaf and
+            captures[0].get("sha256") == files[leaf]["sha256"],
+            "GUI Apply imported screenshot is absent or unbound.")
+    return {"run_id": run_id, "source_sha": source_sha,
+            "application_sha256": artifacts["application"]["sha256"],
+            "bundle_mode": "prepared", "metrics": metrics,
+            "owned_cleanup": owned["owned_cleanup"],
+            "transport_status": transport["status"],
+            "full_four_run_regression": "not-run", "release_campaign": "not-run"}
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", required=True, type=Path)
@@ -6273,7 +6639,7 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser.add_argument("--run", action="append", required=True, dest="runs")
     parser.add_argument("--require-complete-set", action="store_true")
     parser.add_argument("--acceptance-profile-id", choices=[V1_PROFILE_ID, V2_PROFILE_ID])
-    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE])
+    parser.add_argument("--diagnostic", choices=[PAIR_MODE, PERFORMANCE_MODE, FOCUSED_CLEAR_MODE, FIRST_CLEAR_MODE, PICKER_MODE, CUSTOM_MODE, ICON_SETTLEMENT_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE])
     parser.add_argument("--configuration-set", choices=["focused"])
     return parser.parse_args(argv)
 
@@ -6283,10 +6649,27 @@ def main(repo: Path, argv=None) -> int:
     require(SHA1.fullmatch(args.expected_source_sha) is not None,
             "--expected-source-sha must be a full lowercase Git SHA.")
     require(args.acceptance_profile_id is None or args.diagnostic is None or
-            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
+            (args.diagnostic in {PERFORMANCE_MODE, PICKER_MODE, CUSTOM_MODE, RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} and args.acceptance_profile_id == V2_PROFILE_ID),
             "Fixed GUI profile selection cannot be used for this diagnostic.")
     root = checked_root(args.result_root)
     require(len(args.runs) == len(set(args.runs)), "Run ids must be unique.")
+    if args.diagnostic == GUI_APPLY_MODE:
+        require(not args.require_complete_set and args.configuration_set is None and
+                len(args.runs) == 1 and
+                args.runs[0] in {GUI_APPLY_RUN_PREFIX + case for case in GUI_APPLY_CASES} and
+                args.acceptance_profile_id == V2_PROFILE_ID,
+                "GUI Apply feedback requires one declared V2-owned case per run.")
+        blob = subprocess.run(["git", "show", f"{args.expected_source_sha}:config/vm-automated-v2.json"],
+                              cwd=repo, capture_output=True, check=False)
+        require(blob.returncode == 0 and sha256_bytes(blob.stdout) == OWNED_PERFORMANCE_PROFILE_SHA256,
+                "GUI Apply source profile differs from reviewed V2 revision-3 bytes.")
+        measured = validate_gui_apply_run(root, args.runs[0], args.expected_source_sha,
+                                          source_repo=repo)
+        print(json.dumps({"schema_version": 1, "diagnostic": GUI_APPLY_MODE,
+                          "status": "measured", "source_sha": args.expected_source_sha,
+                          "runs": [measured], "full_four_run_regression": "not-run",
+                          "release_campaign": "not-run"}, ensure_ascii=False, indent=2))
+        return 0
     if args.diagnostic == RUNTIME_BASELINE_MODE:
         require(not args.require_complete_set and args.configuration_set is None and
                 args.runs == [RUNTIME_BASELINE_RUN_ID] and
