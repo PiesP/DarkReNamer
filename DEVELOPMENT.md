@@ -1092,6 +1092,62 @@ explicit v1 remains available. Preserved v1 failures cannot be reclassified as
 v2 success. Fixed GUI diagnostics do not replace the complete source-bound
 release campaign or human visual acceptance.
 
+### GUI Apply, feedback and idle close diagnostic
+
+The `gui-apply-feedback` diagnostic uses a clean source-built bundle and the
+revision-3 owned-resource profile on the fixed 1366×768, 96-DPI, text-100,
+System/Korean, Light desktop. Run one process per declared case:
+
+```bash
+python3 -I scripts/run-gui-regression.py \
+  --diagnostic gui-apply-feedback --gui-apply-case success-1000 \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --connection-profile /absolute/private/connection-profile.json \
+  --prepared-bundle-root /absolute/private/source-built-bundle \
+  --expected-prepared-application-sha256 "$DARKRENAMER_APPLICATION_SHA256" \
+  --output-root /absolute/private/new-gui-apply-attempt
+```
+
+Keep one EXE/PDB and observer revision for the campaign. The fixed order is
+`success-100`, `success-1000`, `success-10000`, five more `success-1000`, then
+one `cancel-10000`. The first 1,000-file success counts toward the six independent
+representative processes. A 10,000-file import uses the existing 1,000-row start
+and four 2,250-row additions. The Cancel case accepts the confirmation and
+cancels an active Apply worker; dismissing the confirmation does not qualify.
+Preserve failures before diagnosing a new attempt; do not rerun valid samples.
+
+Raw QPC query brackets retain Open-to-first-import-feedback, initial Apply
+feedback and actionable confirmation, post-confirmation execution feedback,
+terminal model/native/command readiness, active Cancel acknowledgment, and idle
+close-to-held-process-exit. UI-thread acceptance clock frames distinguish input
+invocation from actual Apply admission, affirmative confirmation return and
+active-worker cancellation acceptance. Full file-content/NTFS-identity and
+journal checks follow the timed operation-ready endpoint. Idle close begins
+only after selector 22 reports mask 31; final normal-close persistence remains
+inside the exit interval. UIA and status observations do not establish pixel
+presentation time.
+
+After every canonical run passes, create a private campaign index with
+`schema_version: 1`, `diagnostic: "gui-apply-feedback-campaign-v1"`, the exact
+`source_sha`, and ordered `runs`. Each run declares `case`, absolute
+`result_root`, and the canonical `input_manifest_sha256`, `collection_sha256`,
+`cleanup_sha256` and `observer_result_sha256`. Independently verify the index:
+
+```bash
+python3 -I scripts/validate-gui-regression-evidence.py \
+  --diagnostic gui-apply-feedback \
+  --acceptance-profile-id vm-automated-v2-owned-resources \
+  --expected-source-sha "$DARKRENAMER_SOURCE_SHA" \
+  --gui-apply-campaign-index /absolute/private/gui-apply-campaign.json
+```
+
+The verifier checks all nine raw runs and distinct process lifetimes before
+reporting all six representative values, median, range, the provisional 200 ms
+first-feedback and 500 ms median idle-close dispositions, and individual
+exceedances. The single cancellation is descriptive; preserve its actual
+before-mutation, rolled-back or rollback-unproven outcome. No p95, full release
+acceptance, durability shortcut or performance improvement is implied.
+
 ### Paired appearance diagnostic
 
 On a clean, committed source checkout with the prepared VM available, run the

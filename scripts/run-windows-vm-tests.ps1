@@ -26,7 +26,7 @@ param(
     [ValidateRange(0, 5)][int] $VirtualExecutionIteration,
     [string] $AcceptanceOutputRoot,
     [string] $AcceptanceManifest,
-    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline')]
+    [ValidateSet('current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip', 'appearance-pair', 'performance-sample', 'first-clear-observation', 'picker-identity-observation', 'custom-input-identity-observation', 'icon-settlement', 'runtime-baseline', 'gui-apply-feedback')]
     [string] $AcceptanceMode,
     [ValidateSet('system', 'light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
@@ -53,7 +53,7 @@ if ($AcceptanceProfileId -cnotin @('vm-automated-v1-win11-ntfs', 'vm-automated-v
     throw 'Unsupported VM acceptance profile identity.'
 }
 
-$ToolingManifestSha256 = '796615ff0c40c2d0d9e50f70e86b0aab8a574af68b93215dbe8fc10ee2c9dc8f'
+$ToolingManifestSha256 = '6d29e0adc6b88cca3972d70dc974830f3203a45d275af6edfeeae06c5dd2b3ce'
 $ToolingLoaderSha256 = '322bfaad0639f443756a4da7680594ebc86e011e139f49d1c22976db6bc058f1'
 
 function Get-DrBootstrapSha256 {

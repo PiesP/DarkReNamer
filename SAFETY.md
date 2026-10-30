@@ -553,6 +553,20 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+The UI-thread diagnostic clock in `windows.rs` calls
+`QueryPerformanceFrequency` and `QueryPerformanceCounter` with live, writable
+stack `i64` values for each synchronous call. It retains only positive copied
+scalars; an unavailable clock, nonmonotonic event or exhausted revision makes
+the diagnostic unavailable. Apply admission, an affirmative confirmation's
+return to the exact live owner session, and active-worker cancellation latch
+their actual owner-thread ticks without changing authorization or persistence.
+Read-only message selectors expose split scalar values with a revision bracket;
+the observer must reject a changed frame. Idle-close selector 22 requires no
+foreground worker or owned prompt, settled icons, successfully drained required
+preference acknowledgments from healthy writers, and no pending close. The
+query performs no joins, event draining or persistence work. Observing this
+state does not promise how long normal close and its final writes will take.
+
 `windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
 worker initializes and balances COM on that same STA, pumps its own message
 queue between Shell calls, and never receives `AppState`, HWND, model pointers,
