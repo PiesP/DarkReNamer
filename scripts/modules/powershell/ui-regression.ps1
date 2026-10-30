@@ -293,6 +293,12 @@ function Assert-GuiRegressionInvocationBinding {
             ordinary_rows=@(100,1000,10000); long_path_rows=1000; extension_classes=300;
             add_remove_reset_cycles=3; sample_interval_ms=200; long_path_order='hidden-visible' }
         $actualPlan = $ManifestInput.request.PSObject.Properties['performance_plan']
+        $readinessContract = $ManifestInput.request.PSObject.Properties['readiness_bracket_contract']
+        $requestNames = @($ManifestInput.request.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ','
+        $expectedNames = 'appearance,desktop,mode,performance_plan,text_scale_percent'
+        if ($null -ne $readinessContract) {
+            $expectedNames = 'appearance,desktop,mode,performance_plan,readiness_bracket_contract,text_scale_percent'
+        }
         $order = ''
         if ($null -ne $actualPlan) {
             if ($actualPlan.Value -is [Collections.IDictionary]) {
@@ -306,6 +312,9 @@ function Assert-GuiRegressionInvocationBinding {
         }
         if ($order -in @('hidden-visible','visible-hidden')) { $expectedPlan.long_path_order = $order }
         if ($null -eq $actualPlan -or
+            $requestNames -cne $expectedNames -or
+            ($null -ne $readinessContract -and ($readinessContract.Value -isnot [string] -or
+                $readinessContract.Value -cne 'qpc-polled-readiness-v1')) -or
             $ManifestInput.run_id -cne ($expectedRun + $order) -or
             ($ownedPerformance -and ($ManifestInput.acceptance_profile_id -cne
                 'vm-automated-v2-owned-resources' -or
@@ -331,10 +340,18 @@ function Assert-GuiRegressionInvocationBinding {
             icon_poll_interval_ms=100; maximum_seconds=600;
             transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' }
         $actualPlan = $ManifestInput.request.PSObject.Properties['runtime_baseline_plan']
+        $readinessContract = $ManifestInput.request.PSObject.Properties['readiness_bracket_contract']
+        $requestNames = @($ManifestInput.request.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ','
+        $expectedNames = 'appearance,desktop,mode,runtime_baseline_plan,text_scale_percent'
+        if ($null -ne $readinessContract) {
+            $expectedNames = 'appearance,desktop,mode,readiness_bracket_contract,runtime_baseline_plan,text_scale_percent'
+        }
         if ($null -eq $actualPlan -or
+            $requestNames -cne $expectedNames -or
+            ($null -ne $readinessContract -and ($readinessContract.Value -isnot [string] -or
+                $readinessContract.Value -cne 'qpc-polled-readiness-v1')) -or
             ($actualPlan.Value | ConvertTo-Json -Depth 5 -Compress) -cne
             ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
-            @($ManifestInput.request.PSObject.Properties.Name).Count -ne 5 -or
             $ManifestInput.run_id -cne 'runtime-baseline-v2-1366x768-96-text100' -or
             $ManifestInput.acceptance_profile_id -cne 'vm-automated-v2-owned-resources' -or
             $script:VmAcceptanceProfileId -cne 'vm-automated-v2-owned-resources' -or
@@ -459,6 +476,10 @@ function Assert-GuiRegressionInvocationBinding {
     if ($RegressionMode -cne 'runtime-baseline' -and
         $null -ne $ManifestInput.request.PSObject.Properties['runtime_baseline_plan']) {
         throw 'Runtime baseline plan is restricted to its diagnostic.'
+    }
+    if ($RegressionMode -cnotin @('performance-sample', 'runtime-baseline') -and
+        $null -ne $ManifestInput.request.PSObject.Properties['readiness_bracket_contract']) {
+        throw 'Readiness bracket contract is restricted to measured baseline modes.'
     }
     if ($RegressionMode -ceq 'appearance-pair') {
         if ($null -eq $requestedContrast -or $requestedContrast.Value -isnot [bool] -or

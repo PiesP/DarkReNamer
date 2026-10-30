@@ -3522,6 +3522,48 @@ try {
         -Verified $candidateRegressionResolved -RegressionMode performance-sample `
         -Appearance light -TextScalePercent 100 -HighContrast $false `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidatePerformanceInput.request | Add-Member -NotePropertyName readiness_bracket_contract `
+        -NotePropertyValue 'qpc-polled-readiness-v1'
+    Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+        -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+        -Appearance light -TextScalePercent 100 -HighContrast $false `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $ownedPerformanceInput = $candidatePerformanceInput | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+    $ownedPerformanceInput.run_id = 'performance-sample-v2-owned-r3-1366x768-96-text100-hidden-visible'
+    $ownedPerformanceInput | Add-Member -NotePropertyName acceptance_profile_id `
+        -NotePropertyValue 'vm-automated-v2-owned-resources'
+    $ownedPerformanceInput | Add-Member -NotePropertyName acceptance_profile_sha256 `
+        -NotePropertyValue '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f'
+    $ownedPerformanceInput | Add-Member -NotePropertyName acceptance_profile `
+        -NotePropertyValue ([pscustomobject]@{sha256=$ownedPerformanceInput.acceptance_profile_sha256})
+    $savedPerformanceProfile = $script:VmAcceptanceProfileId
+    try {
+        $script:VmAcceptanceProfileId = 'vm-automated-v2-owned-resources'
+        Assert-GuiRegressionInvocationBinding -ManifestInput $ownedPerformanceInput `
+            -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    }
+    finally { $script:VmAcceptanceProfileId = $savedPerformanceProfile }
+    foreach ($invalid in @('QPC-polled-readiness-v1', $true, 1)) {
+        $candidatePerformanceInput.request.readiness_bracket_contract = $invalid
+        Assert-Fails {
+            Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+                -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+                -Appearance light -TextScalePercent 100 -HighContrast $false `
+                -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+        } 'fixed immutable plan'
+    }
+    $candidatePerformanceInput.request.readiness_bracket_contract = 'qpc-polled-readiness-v1'
+    $candidatePerformanceInput.request | Add-Member -NotePropertyName unreviewed -NotePropertyValue 1
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
+            -Verified $candidateRegressionResolved -RegressionMode performance-sample `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'fixed immutable plan'
+    $candidatePerformanceInput.request.PSObject.Properties.Remove('unreviewed')
+    $candidatePerformanceInput.request.PSObject.Properties.Remove('readiness_bracket_contract')
     $candidatePerformanceInput.request.performance_plan.long_path_order = 'visible-hidden'
     $candidatePerformanceInput.run_id = 'performance-sample-v2-1366x768-96-text100-visible-hidden'
     Assert-GuiRegressionInvocationBinding -ManifestInput $candidatePerformanceInput `
@@ -3559,6 +3601,8 @@ try {
     $candidateRuntimeInput.request.PSObject.Properties.Remove('layout_variant')
     $candidateRuntimeInput.request.desktop.width = [long]1366
     $candidateRuntimeInput.request.desktop.height = [long]768
+    $candidateRuntimeInput.request | Add-Member -NotePropertyName readiness_bracket_contract `
+        -NotePropertyValue 'qpc-polled-readiness-v1'
     $candidateRuntimeInput.request | Add-Member -NotePropertyName runtime_baseline_plan `
         -NotePropertyValue ([ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
             idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
@@ -3571,6 +3615,24 @@ try {
             -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
             -Appearance light -TextScalePercent 100 -HighContrast $false `
             -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+        foreach ($invalid in @('QPC-polled-readiness-v1', $true, 1)) {
+            $candidateRuntimeInput.request.readiness_bracket_contract = $invalid
+            Assert-Fails {
+                Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+                    -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
+                    -Appearance light -TextScalePercent 100 -HighContrast $false `
+                    -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+            } 'fixed immutable plan'
+        }
+        $candidateRuntimeInput.request.readiness_bracket_contract = 'qpc-polled-readiness-v1'
+        $candidateRuntimeInput.request | Add-Member -NotePropertyName unreviewed -NotePropertyValue 1
+        Assert-Fails {
+            Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+                -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
+                -Appearance light -TextScalePercent 100 -HighContrast $false `
+                -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+        } 'fixed immutable plan'
+        $candidateRuntimeInput.request.PSObject.Properties.Remove('unreviewed')
         $runtimeManifestBytes = [IO.File]::ReadAllBytes($candidateRegressionInputPath)
         try {
             Write-Utf8Json -Path $candidateRegressionInputPath -Value $candidateRuntimeInput
@@ -3582,6 +3644,11 @@ try {
                 -Appearance light -TextScalePercent 100 -ValidateOnly
         }
         finally { [IO.File]::WriteAllBytes($candidateRegressionInputPath, $runtimeManifestBytes) }
+        $candidateRuntimeInput.request.PSObject.Properties.Remove('readiness_bracket_contract')
+        Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
+            -Verified $candidateRegressionResolved -RegressionMode runtime-baseline `
+            -Appearance light -TextScalePercent 100 -HighContrast $false `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
         foreach ($invalid in @(29, $true)) {
             $candidateRuntimeInput.request.runtime_baseline_plan.idle_seconds = $invalid
             Assert-Fails {
@@ -3593,12 +3660,15 @@ try {
         }
         $candidateRuntimeInput.request.runtime_baseline_plan.idle_seconds = 30
         $candidateRuntimeInput.request.mode = 'standard'
+        $candidateRuntimeInput.request | Add-Member -NotePropertyName readiness_bracket_contract `
+            -NotePropertyValue 'qpc-polled-readiness-v1'
+        $candidateRuntimeInput.request.PSObject.Properties.Remove('runtime_baseline_plan')
         Assert-Fails {
             Assert-GuiRegressionInvocationBinding -ManifestInput $candidateRuntimeInput `
                 -Verified $candidateRegressionResolved -RegressionMode standard `
                 -Appearance light -TextScalePercent 100 -HighContrast $false `
                 -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
-        } 'Runtime baseline plan is restricted'
+        } 'Readiness bracket contract is restricted'
     }
     finally { $script:VmAcceptanceProfileId = $savedRuntimeProfile }
     $candidateFirstClearInput = $candidateRegressionInput | ConvertTo-Json -Depth 8 | ConvertFrom-Json
