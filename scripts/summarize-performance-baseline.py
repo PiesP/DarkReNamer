@@ -53,7 +53,7 @@ if __name__ == "__main__" and not sys.flags.isolated:
     _platform_os.execv(sys.executable, [sys.executable, "-I", __file__, *sys.argv[1:]])
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
@@ -75,8 +75,6 @@ SCOPES = {
         "populated_idle_cpu_delta_ms": ("ms", 150, "fresh-system"),
         "empty_idle_private_mib": ("MiB", 6, "fresh-system"),
         "populated_idle_private_mib": ("MiB", 20, "fresh-system"),
-        "workload_private_peak_mib": ("MiB", 64, "fresh-system"),
-        "workload_private_post_mib": ("MiB", 24, "fresh-system"),
     },
     "performance-sample": {
         "ordinary_100_ms": ("ms", 800, "product"),
@@ -84,6 +82,8 @@ SCOPES = {
         "ordinary_10000_ms": ("ms", 4500, "product"),
         "long_hidden_1000_ms": ("ms", 1000, "product"),
         "long_visible_1000_ms": ("ms", 1000, "product"),
+        "workload_private_peak_mib": ("MiB", 64, "product"),
+        "workload_private_post_mib": ("MiB", 24, "product"),
     },
     "runtime-model": {
         "model_preview_10000_ms": ("ms", 10, "model-test"),

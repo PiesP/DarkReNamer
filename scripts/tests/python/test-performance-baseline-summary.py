@@ -87,11 +87,11 @@ class BaselineSummaryTests(unittest.TestCase):
         records = fixture()
         records["scopes"][0]["metrics"].pop()
         for run in records["scopes"][0]["runs"]:
-            run["metrics"].pop("workload_private_post_mib")
+            run["metrics"].pop("populated_idle_private_mib")
         with self.assertRaisesRegex(ValueError, "metric inventory"):
             baseline.summarize(records, PLAN_SHA)
         records["unavailable_metrics"] = [{"scope": "runtime-baseline",
-                                            "id": "workload_private_post_mib",
+                                            "id": "populated_idle_private_mib",
                                             "reason": "Existing sampler lacks a settled post-workload observation."}]
         self.assertEqual(baseline.summarize(records, PLAN_SHA)["status"], "incomplete")
 
