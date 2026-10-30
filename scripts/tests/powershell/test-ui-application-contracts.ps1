@@ -237,6 +237,9 @@ public static class DarkReNamerIconStatusObserver {
     $cancel.Current.BoundingRectangle.Width = 0
     Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'bounded deadline'
     $cancel.Current.BoundingRectangle.Width = 20
+    $arguments.WaitSeconds = 0
+    Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'bounded deadline'
+    $arguments.WaitSeconds = 1
     $status.Current.Name = '10000개 변경 완료 · 목록에 실제 결과를 반영했습니다.'
     Assert-Fails { Wait-ObserverActiveCancelAvailability @arguments } 'terminal state'
     $status.Current.Name = '파일 변경 중: 0 / 10000'

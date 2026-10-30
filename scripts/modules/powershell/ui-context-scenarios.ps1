@@ -4022,12 +4022,12 @@ function Wait-ObserverActiveCancelAvailability {
             throw 'Apply reached a terminal state before active worker Cancel was requested.'
         }
         $bounds = $Cancel.Current.BoundingRectangle
+        if ([Diagnostics.Stopwatch]::GetTimestamp() -ge $deadline) {
+            throw 'Active worker Cancel did not become visible, enabled, and laid out before the bounded deadline.'
+        }
         if ($Cancel.Current.IsEnabled -and -not $Cancel.Current.IsOffscreen -and
             $bounds.Width -gt 0 -and $bounds.Height -gt 0) {
             return
-        }
-        if ([Diagnostics.Stopwatch]::GetTimestamp() -ge $deadline) {
-            throw 'Active worker Cancel did not become visible, enabled, and laid out before the bounded deadline.'
         }
         Start-Sleep -Milliseconds 10
     } while ($true)
