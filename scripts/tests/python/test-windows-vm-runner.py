@@ -915,6 +915,163 @@ class VmRunnerTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 vm.parse_arguments(invalid)
 
+    def test_six_native_baseline_invocations_require_fixed_diagnostic_and_vm_identity(self):
+        identity = '18338a47-f647-45c4-98b8-6107331e2602'
+        base = ['--ssh-host', 'prepared-vm', '--expected-vm-id', identity,
+                '--private-symbol-output', str(self.root / 'symbols')]
+        for selector, timeout in (('--profile-runtime-model', 1200),
+                                  ('--profile-refresh-stages', 600)):
+            args = vm.parse_arguments(base + [selector, '--baseline-repetitions', '6'])
+            self.assertEqual((args.baseline_repetitions, args.test_timeout_seconds), (6, timeout))
+            for changed in (['--baseline-repetitions', '1'],
+                            ['--baseline-repetitions', '7'],
+                            ['--baseline-repetitions', 'six'],
+                            ['--baseline-repetitions', '6', '--prepare-only']):
+                with self.subTest(selector=selector, changed=changed), \
+                     redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    vm.parse_arguments(base + [selector, *changed])
+            with self.subTest(selector=selector), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                vm.parse_arguments(['--ssh-host', 'prepared-vm', selector,
+                                    '--baseline-repetitions', '6'])
+            with self.subTest(selector=selector, reason='missing-symbols'), \
+                 redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                vm.parse_arguments(['--ssh-host', 'prepared-vm', '--expected-vm-id', identity,
+                                    selector, '--baseline-repetitions', '6'])
+        for selector in ([], ['--focused-icon-tests', '--native-test-profile', 'release'],
+                         ['--virtual-execution-count', '100', '--virtual-execution-iteration', '1']):
+            with self.subTest(selector=selector), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                vm.parse_arguments(base + selector + ['--baseline-repetitions', '6'])
+
+    def test_runtime_model_six_invocations_reuse_one_binary_and_preserve_failure(self):
+        for failure in (None, 3, 'drift', 'source-drift'):
+            with self.subTest(failure=failure):
+                output = self.root / ('runtime-six-' + str(failure))
+                args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                           '--expected-vm-id', '18338a47-f647-45c4-98b8-6107331e2602',
+                                           '--profile-runtime-model', '--baseline-repetitions', '6',
+                                           '--private-symbol-output', str(self.root / ('symbols-' + str(failure))),
+                                           '--output', str(output)])
+                args.acceptance_profile_sha256 = 'a' * 64
+                builds, calls, validations = [], [], []
+                current_source = {'sha': 'b' * 40}
+
+                def build(_repo, bundle, _tooling, *, runtime_model, private_symbol_output):
+                    self.assertTrue(runtime_model)
+                    builds.append(bundle)
+                    private_symbol_output.mkdir()
+                    (private_symbol_output / 'private-symbols.json').write_text('{}')
+                    bundle.mkdir()
+                    (bundle / 'bundle.json').write_text('{}')
+                    (bundle / 'binary.exe').write_bytes(b'one immutable test binary')
+                    (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
+                    return {'source_sha': 'b' * 40,
+                            'test_binaries': [{'name': 'darknamer_app', 'file': 'binary.exe',
+                                               'sha256': vm.sha256(bundle / 'binary.exe')}],
+                            'application': {'file': 'DarkReNamer.exe',
+                                            'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
+
+                def controller(attempt, selected, *_unused):
+                    calls.append((attempt, vm.sha256(attempt / 'binary.exe')))
+                    if failure == len(calls):
+                        raise RuntimeError('injected controller failure')
+                    if failure == 'drift':
+                        (output / 'bundle' / 'binary.exe').write_bytes(b'changed after first copy')
+                    if failure == 'source-drift':
+                        current_source['sha'] = 'c' * 40
+                    (attempt / 'result.json').write_text('{}')
+
+                def verify(attempt, manifest, *_unused):
+                    validations.append(attempt)
+                    self.assertEqual(vm.sha256(attempt / 'binary.exe'),
+                                     manifest['test_binaries'][0]['sha256'])
+                    return {'status': 'passed', 'test_binary_sha256': manifest['test_binaries'][0]['sha256'],
+                            'stdout_sha256': 'c' * 64, 'records': 183}
+
+                with (mock.patch.object(vm, 'prepare_transport', return_value=(output, None, 'pwsh')),
+                      mock.patch.object(vm, 'build_bundle', side_effect=build),
+                      mock.patch.object(vm, 'clean_source_identity',
+                                        side_effect=lambda *_: (REPOSITORY_ROOT, current_source['sha'])),
+                      mock.patch.object(vm, 'run_controller', side_effect=controller),
+                      mock.patch.object(vm, 'verify_runtime_model_result', side_effect=verify),
+                      redirect_stderr(io.StringIO())):
+                    self.assertEqual(vm.run_runtime_model_repetitions(REPOSITORY_ROOT, args, None),
+                                     int(failure is not None))
+                expected_count = 6 if failure is None else 3 if failure == 3 else 1
+                self.assertEqual((len(builds), len(calls), len(validations)),
+                                 (1, expected_count, expected_count - (failure in (3, 'source-drift'))))
+                self.assertEqual({digest for _, digest in calls},
+                                 {vm.sha256(calls[0][0] / 'binary.exe')})
+                attempts = json.loads((output / 'attempts.json').read_text())
+                self.assertEqual([row['status'] for row in attempts],
+                                 ['passed'] * len(validations) +
+                                 (['failed'] if failure is not None else []))
+                self.assertEqual((output / 'plan.json').is_file(), True)
+                plan = json.loads((output / 'plan.json').read_text())
+                self.assertEqual(plan['private_symbol_receipt_sha256'],
+                                 vm.sha256(args.private_symbol_output / 'private-symbols.json'))
+                self.assertEqual(plan['bundle_files_sha256']['bundle.json'],
+                                 vm.sha256(output / 'bundle' / 'bundle.json'))
+                for row in attempts:
+                    self.assertIn('attempt_started_at_utc', row)
+                    self.assertIn('attempt_finished_at_utc', row)
+                for row in attempts[:len(calls)]:
+                    self.assertIn('controller_started_at_utc', row)
+                    self.assertIn('controller_finished_at_utc', row)
+
+    def test_refresh_six_invocations_reuse_one_binary_for_both_orders(self):
+        output = self.root / 'refresh-six'
+        args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
+                                   '--expected-vm-id', '18338a47-f647-45c4-98b8-6107331e2602',
+                                   '--profile-refresh-stages', '--baseline-repetitions', '6',
+                                   '--private-symbol-output', str(self.root / 'refresh-six-symbols'),
+                                   '--output', str(output)])
+        args.acceptance_profile_sha256 = 'a' * 64
+        builds, calls = [], []
+
+        def build(_repo, bundle, _tooling, *, refresh_profile, private_symbol_output):
+            self.assertTrue(refresh_profile)
+            builds.append(bundle)
+            private_symbol_output.mkdir()
+            (private_symbol_output / 'private-symbols.json').write_text('{}')
+            bundle.mkdir()
+            (bundle / 'bundle.json').write_text('{}')
+            (bundle / 'binary.exe').write_bytes(b'one immutable test binary')
+            (bundle / 'DarkReNamer.exe').write_bytes(b'one immutable application')
+            return {'source_sha': 'b' * 40,
+                    'test_binaries': [{'name': 'darknamer_app', 'file': 'binary.exe',
+                                       'sha256': vm.sha256(bundle / 'binary.exe')}],
+                    'application': {'file': 'DarkReNamer.exe',
+                                    'sha256': vm.sha256(bundle / 'DarkReNamer.exe')}}
+
+        def controller(attempt, selected, *_unused):
+            calls.append((selected.refresh_profile_order, vm.sha256(attempt / 'binary.exe')))
+            (attempt / 'result.json').write_text('{}')
+
+        with (mock.patch.object(vm, 'prepare_transport', return_value=(output, None, 'pwsh')),
+              mock.patch.object(vm, 'build_bundle', side_effect=build),
+              mock.patch.object(vm, 'clean_source_identity',
+                                return_value=(REPOSITORY_ROOT, 'b' * 40)),
+              mock.patch.object(vm, 'run_controller', side_effect=controller),
+              mock.patch.object(vm, 'verify_refresh_profile_result', return_value={'status': 'passed'}),
+              redirect_stderr(io.StringIO())):
+            self.assertEqual(vm.run_refresh_profile(REPOSITORY_ROOT, args, None), 0)
+        self.assertEqual((len(builds), len(calls)), (1, 12))
+        self.assertEqual([row[0] for row in calls[:4]],
+                         ['hidden-visible', 'visible-hidden', 'visible-hidden', 'hidden-visible'])
+        self.assertEqual({row[1] for row in calls}, {vm.sha256(output / 'bundle' / 'binary.exe')})
+        attempts = json.loads((output / 'attempts.json').read_text())
+        self.assertEqual([row['status'] for row in attempts], ['passed'] * 12)
+        self.assertEqual([row['repetition'] for row in attempts],
+                         [repetition for repetition in range(1, 7) for _ in range(2)])
+        self.assertTrue(all('controller_started_at_utc' in row and
+                            'controller_finished_at_utc' in row and
+                            'attempt_finished_at_utc' in row for row in attempts))
+        plan = json.loads((output / 'plan.json').read_text())
+        self.assertEqual(plan['private_symbol_receipt_sha256'],
+                         vm.sha256(args.private_symbol_output / 'private-symbols.json'))
+
     def test_virtual_execution_cli_is_bound_to_source_vm_and_one_workload(self):
         base = ['--ssh-host', 'prepared-vm', '--expected-vm-id',
                 '18338a47-f647-45c4-98b8-6107331e2602']
