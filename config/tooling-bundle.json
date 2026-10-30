@@ -573,7 +573,7 @@
       "bundle": "ui-native.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "0f150db3487808a609302e0fab8d40a3e4b53506af03fe94b60903063afbabf5",
+      "sha256": "7e93110e9e3aaa090e2ba5aa2d00022396fe56eb6a225f22976c54b0eb22dc95",
       "dependencies": []
     },
     {
@@ -618,7 +618,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9573aa19b3c223b353fa0a8ccaaff6b02a3ea4636a939e538ea224d707fe9b9b",
+      "sha256": "82ba1f552d565a424b9c03f3f75e6b053b31ccfdbf582422da6feaf2e5d97245",
       "dependencies": []
     },
     {
