@@ -247,14 +247,12 @@ impl PreferencePersistence {
                     PreferenceWriteEvent::Failed { error, .. } if !closing => {
                         messages.push(crate::i18n::common::language_save_failed(&(error)))
                     }
-                    PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
-                        if !closing && matches!(event, PreferenceWriteEvent::Panicked) {
-                            messages.push(
-                                crate::i18n::common::Text::LanguageWriterStopped
-                                    .get()
-                                    .to_owned(),
-                            );
-                        }
+                    PreferenceWriteEvent::Panicked if !closing => {
+                        messages.push(
+                            crate::i18n::common::Text::LanguageWriterStopped
+                                .get()
+                                .to_owned(),
+                        );
                     }
                     _ => {}
                 }
@@ -564,7 +562,7 @@ mod tests {
         persistence
             .columns
             .as_mut()
-            .expect("controlled column writer")
+            .ok_or_else(|| std::io::Error::other("controlled column writer is missing"))?
             .shutdown_with(default_column_states())?;
         assert!(persistence.submit_columns(default_column_states()).is_err());
         assert!(!persistence.required_acknowledgments_complete());
