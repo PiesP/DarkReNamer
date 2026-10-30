@@ -1792,6 +1792,19 @@ per declared cell. Explicit unavailable reasons remain incomplete; exceeded
 budgets remain visible. The reducer validates declarations and arithmetic;
 it does not authenticate the original VM evidence.
 
+When an identified observer defect prevents a scope from producing valid data,
+preserve the failed attempt and every previously accepted scope. A repaired
+cohort may use `darkrenamer-baseline-records-v2` only with a prospective
+`darkrenamer-baseline-provenance-amendment-v1` supplied through
+`--provenance-amendment /absolute/private/provenance-amendment.json`. Bind its
+exact bytes and the original frozen plan digest, declare all four scope sources
+and one common product-input digest, and record its UTC declaration before the
+first repaired GUI invocation. Independently prove that the Git product/build
+inputs and timed workload implementations are unchanged. Keep each scope's
+actual source/tree/harness and EXE/PDB pair; both GUI scopes must share their
+repaired source and artifact pair. This declaration does not establish whole
+harness equivalence or permit selecting or replacing valid timing values.
+
 Use these raw selectors and within-process reductions when creating records:
 
 | Metric group | Raw observation and per-process reduction |
