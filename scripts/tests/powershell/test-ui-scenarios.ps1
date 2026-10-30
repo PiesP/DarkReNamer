@@ -96,20 +96,23 @@ namespace Windows.Automation {
 namespace UIAutomationClientsideProviders { public class UIAutomationClientSideProviders {} }
 '@
 
-# The clock ends after the empty grid/import command observations, before
-# observer capture sizing, native-lifetime verification and environment probes.
+# The clock ends at the measured import-command query after the empty grid,
+# before native-lifetime verification, capture sizing and environment probes.
 $runtimeSource = ${function:Invoke-ObserverRuntimeBaselineScenario}.ToString()
 $gridAt = $runtimeSource.IndexOf('$grid = Get-ObserverGrid')
+$probeAt = $runtimeSource.IndexOf('$readyProbe = Wait-ObserverMeasuredReadiness -Application $application')
+$predicateAt = $runtimeSource.IndexOf("-Operation startup -Predicate 'import-command-enabled' -Probe {")
 $commandAt = $runtimeSource.IndexOf('::IsMenuCommandEnabled(')
-$readyAt = $runtimeSource.IndexOf('$readyTicks = [Diagnostics.Stopwatch]::GetTimestamp()')
+$readyAt = $runtimeSource.IndexOf('$readyTicks = [long]$readyProbe.probes[-1].end_ticks')
 $clockAt = $runtimeSource.IndexOf('$cell.startup = [ordered]@{')
 $resizeAt = $runtimeSource.IndexOf('Ensure-AcceptanceMainWindowCaptureSize')
 $environmentAt = $runtimeSource.IndexOf('$environment = Get-ObserverEnvironmentMetadata')
 $lifetimeAt = $runtimeSource.IndexOf('$nativeLifetime = ')
-if ($gridAt -lt 0 -or $commandAt -le $gridAt -or $readyAt -le $commandAt -or
+if ($gridAt -lt 0 -or $probeAt -le $gridAt -or $predicateAt -le $probeAt -or
+    $commandAt -le $predicateAt -or $readyAt -le $commandAt -or
     $clockAt -le $readyAt -or $resizeAt -le $clockAt -or $environmentAt -le $resizeAt -or
     $lifetimeAt -le $clockAt) {
-    throw 'Runtime ready clock includes capture sizing or environment work, or omits command readiness.'
+    throw 'Runtime ready clock does not end at measured import-command readiness before observer setup.'
 }
 
 $idleCalls = [regex]::Matches($runtimeSource,
