@@ -412,7 +412,12 @@ public static class DarkReNamerVmAcceptanceNative {
 
 & {
     $events = [Collections.Generic.List[string]]::new()
-    $process = [pscustomobject]@{ Id = 42; SessionId = 2 }
+    $process = [pscustomobject]@{
+        Id = 42
+        SessionId = 2
+        StartTime = [datetime]::new(639000000000000201L, [DateTimeKind]::Utc)
+    }
+    $process | Add-Member ScriptMethod Dispose { }
     $owned = [pscustomobject]@{ process = $process; owner = @{}; process_start_time_utc_ticks = '639000000000000201' }
     $window = [Windows.Automation.AutomationElement]::new()
     $startupFixture = @{ owned = $owned; process = $process; window = $window }
@@ -446,6 +451,15 @@ public static class DarkReNamerVmAcceptanceNative {
         $application.main_bound_ticks -gt $window.FirstFocusTicks -or
         $window.FirstFocusTicks -gt $startupFixture.foreground_ticks) {
         throw 'Main-window binding clock did not precede foreground work after the exact wait.'
+    }
+    $discovery = $application.readiness_brackets[0]
+    if ($application.readiness_brackets.Count -ne 1 -or
+        $discovery.process_id -ne $process.Id -or
+        $discovery.process_start_utc_ticks -ne $process.StartTime.Ticks -or
+        $discovery.main_window_handle -ne 5151 -or
+        $discovery.begin_ticks -gt $discovery.end_ticks -or
+        $discovery.end_ticks -ne $application.main_bound_ticks) {
+        throw 'Main-window discovery lost its owned process identity or exact wait endpoint.'
     }
     $startupSource = ${function:Start-AcceptanceApplication}.ToString()
     if ($startupSource -cnotmatch '(?s)-Label \$Label\s+\$application\.main_bound_ticks = \[Diagnostics.Stopwatch\]::GetTimestamp\(\)\s+\$window = \$binding.element') {
