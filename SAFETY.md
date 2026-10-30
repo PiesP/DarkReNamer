@@ -595,6 +595,10 @@ HWND to the captured process lifetime and owner thread. A generation, picker
 session and initial/final model revision distinguish successive imports. Invalid
 clocks, unsupported or incoherent frames remain unavailable diagnostics; they
 cannot change product authorization or recover a failed operation.
+Recorded dependency/revision order distinguishes causally successive events
+that share one quantized QPC tick. A backwards tick, missing predecessor or
+duplicate completion still invalidates the frame. A measured zero-tick interval
+retains its clock-resolution allowance and is distinct from a missing event.
 
 The accepted-import start is the UI owner's validated picker-result boundary,
 not a native Open-button callback. Worker publication ticks follow successful

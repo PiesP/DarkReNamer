@@ -5272,10 +5272,12 @@ public static class DrVmCommandLineNative {
             $preName = Get-DrVmRunnerProcesses -UserSid $runnerSid `
                 -SessionId $runnerSession -IncludeExecutionScope `
                 -ProtectedAnchorContext $global:DrVmProtectedAnchorContext -CreateProtectedAnchor
+            # Retain the rejected collector's bounded diagnostics before the
+            # fail-closed gate; no run name, root or task exists at this point.
+            $global:DrVmProtectedAnchorContext.pre_name_snapshot = $preName
             if ($null -eq $preName -or -not $preName.complete) {
                 throw 'The pre-name VM runner process inventory was incomplete.'
             }
-            $global:DrVmProtectedAnchorContext.pre_name_snapshot = $preName
             $name = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
             $global:DrVmProtectedAnchorContext.run_name = $name
             if ($null -ne $global:DrVmProtectedAnchorContext.proof) {

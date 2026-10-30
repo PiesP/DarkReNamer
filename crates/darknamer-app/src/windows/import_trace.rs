@@ -188,7 +188,9 @@ impl ImportCompletionTrace {
                 return false;
             }
         };
-        let Some(tick) = tick.filter(|tick| *tick != 0 && *tick > self.events[dependency]) else {
+        // Distinct owner callbacks can share one QPC tick. The dependency's
+        // recorded slot establishes their order even at clock resolution.
+        let Some(tick) = tick.filter(|tick| *tick != 0 && *tick >= self.events[dependency]) else {
             self.valid = false;
             return false;
         };
@@ -421,6 +423,21 @@ mod tests {
         let mut trace = ImportCompletionTrace::new(10);
         trace.begin(1, 0, Some(1));
         assert!(!trace.record(1, 0, IMPORT_COMMAND_READY, Some(2)));
+        assert_eq!(trace.selector_value(40), None);
+    }
+
+    #[test]
+    fn equal_quantized_qpc_ticks_preserve_causal_order_but_backward_ticks_fail() {
+        let mut trace = ImportCompletionTrace::new(10_000_000);
+        trace.begin(7, 0, Some(100));
+        assert!(trace.record(7, 0, READING_STATUS_QUEUED, Some(100)));
+        trace.mark_status_coalesced(7, 0);
+        assert_eq!(trace.flags(), STATUS_QUEUED | STATUS_COALESCED);
+        assert_eq!(trace.selector_value(40), Some(1));
+
+        let mut trace = ImportCompletionTrace::new(10_000_000);
+        trace.begin(7, 0, Some(100));
+        assert!(!trace.record(7, 0, READING_STATUS_QUEUED, Some(99)));
         assert_eq!(trace.selector_value(40), None);
     }
 

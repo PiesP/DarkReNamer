@@ -214,6 +214,70 @@ function Invoke-TestAcceptance {
     }
 }
 
+# The actual pre-name gate must preserve failed collector diagnostics before
+# throwing, without allocating a run name or reaching root/task creation.
+& {
+    $controllerPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw 'The pre-name controller gate did not parse.' }
+    $gates = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.StartsWith('if ($useV2) {', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains("throw 'The pre-name VM runner process inventory was incomplete.'")
+    }, $true))
+    if ($gates.Count -ne 1) { throw 'The production pre-name gate is ambiguous.' }
+    $body = $gates[0].Clauses[0].Item2.Extent.Text
+    $gate = [scriptblock]::Create($body.Substring(1, $body.Length - 2))
+    $prior = Get-Variable -Name DrVmProtectedAnchorContext -Scope Global -ErrorAction SilentlyContinue
+    $snapshot = [pscustomobject]@{ complete=$false;processes=@();attempts=3
+        failure_diagnostics=[pscustomobject]@{entries=@([pscustomobject]@{
+            code='owner_nonzero';attempt=3;pid=7002;identity='retained-identity'
+            exception_type=$null;return_code=5});overflow=$false;overflow_count=0} }
+    function New-DrVmProtectedAnchorContext {
+        param($UserSid,$SessionId,$ProfileSha256,$SourceSha,$BundleSha256,$VmId)
+        [pscustomobject]@{pre_name_snapshot=$null;run_name=$null;proof=$null}
+    }
+    function Get-DrVmRunnerProcesses {
+        param($UserSid,$SessionId,$ProtectedAnchorContext,
+            [switch]$IncludeExecutionScope,[switch]$CreateProtectedAnchor)
+        if (-not $IncludeExecutionScope -or -not $CreateProtectedAnchor -or
+            -not [object]::ReferenceEquals($ProtectedAnchorContext,$global:DrVmProtectedAnchorContext)) {
+            throw 'The production gate changed its protected collector contract.'
+        }
+        $snapshot
+    }
+    $runnerSid='S-1-5-21-1-2-3-1001';$runnerSession=2
+    $profileSha256='1'*64;$sourceSha='2'*40;$bundleSha256='3'*64
+    $vmId='18338a47-f647-45c4-98b8-6107331e2602';$name=$null
+    try {
+        $rejected=$false
+        try { & $gate }
+        catch {
+            if ($_.Exception.Message -cne 'The pre-name VM runner process inventory was incomplete.') { throw }
+            $rejected=$true
+        }
+        if (-not $rejected -or $null -ne $name -or
+            $null -ne $global:DrVmProtectedAnchorContext.run_name -or
+            -not [object]::ReferenceEquals($snapshot,$global:DrVmProtectedAnchorContext.pre_name_snapshot) -or
+            $global:DrVmProtectedAnchorContext.pre_name_snapshot.failure_diagnostics.entries[0].return_code -ne 5) {
+            throw 'Rejected pre-name diagnostics were discarded or a run name was allocated.'
+        }
+        $snapshot=[pscustomobject]@{complete=$true;processes=@();attempts=1}
+        . $gate
+        if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
+            $global:DrVmProtectedAnchorContext.run_name -cne $name -or
+            -not [object]::ReferenceEquals($snapshot,$global:DrVmProtectedAnchorContext.pre_name_snapshot)) {
+            throw 'Accepted pre-name inventory changed its naming or snapshot contract.'
+        }
+    }
+    finally {
+        if ($null -ne $prior) { $global:DrVmProtectedAnchorContext=$prior.Value }
+        else { Remove-Variable -Name DrVmProtectedAnchorContext -Scope Global -ErrorAction SilentlyContinue }
+    }
+}
+
 # Exercise failure categories on the production collector and its V2 transport
 # projection. Successful transport retains its exact independently verified keys.
 & {

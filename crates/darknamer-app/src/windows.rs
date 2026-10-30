@@ -2801,12 +2801,12 @@ mod tests {
         state
             .import_trace
             .begin(7, start_revision, GuiAcceptanceClock::read_tick());
-        state.import_trace.record(
+        assert!(state.import_trace.record(
             7,
             start_revision,
             import_trace::READING_STATUS_QUEUED,
             GuiAcceptanceClock::read_tick(),
-        );
+        ));
         state
             .ui_status
             .set_progress(crate::i18n::runtime::Text::ImportReading.get());
@@ -2839,11 +2839,18 @@ mod tests {
             state
                 .import_trace
                 .begin(8, start_revision, GuiAcceptanceClock::read_tick());
-            state.import_trace.record(
-                8,
-                start_revision,
-                import_trace::READING_STATUS_QUEUED,
-                GuiAcceptanceClock::read_tick(),
+            let accepted_tick = state
+                .import_trace
+                .event(import_trace::ACCEPTED_IMPORT_START);
+            let queued_tick = GuiAcceptanceClock::read_tick();
+            assert!(
+                state.import_trace.record(
+                    8,
+                    start_revision,
+                    import_trace::READING_STATUS_QUEUED,
+                    queued_tick,
+                ),
+                "queued status rejected: accepted_tick={accepted_tick}, queued_tick={queued_tick:?}"
             );
             state.ui_status.clear_progress();
             state.ui_status.set_transient("subsequent status");
@@ -2858,7 +2865,15 @@ mod tests {
             let trace = &lease.state().import_trace;
             assert_eq!(trace.event(import_trace::READING_STATUS_ATTEMPT_STARTED), 0);
             assert_eq!(trace.event(import_trace::READING_STATUS_COMMITTED), 0);
-            assert_ne!(trace.flags() & import_trace::STATUS_COALESCED, 0);
+            assert_ne!(
+                trace.flags() & import_trace::STATUS_COALESCED,
+                0,
+                "coalescing missing: flags={:#x}, schema={:?}, queued={}, status_text={:?}",
+                trace.flags(),
+                trace.selector_value(40),
+                trace.event(import_trace::READING_STATUS_QUEUED),
+                lease.state().ui_status.message_text(),
+            );
             Ok(())
         })();
         // SAFETY: the test's callback is no longer active; retire its exact

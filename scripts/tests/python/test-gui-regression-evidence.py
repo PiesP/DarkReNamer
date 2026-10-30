@@ -32,8 +32,24 @@ from gui_regression_fixture import (
 
 class ReadinessBracketTests(unittest.TestCase):
     def test_only_verified_prechange_lineage_may_omit_contract(self):
-        self.assertFalse(evidence.requires_readiness_brackets(evidence.READINESS_LEGACY_TIP))
-        self.assertTrue(evidence.requires_readiness_brackets('a' * 40))
+        # Hosted diagnostic checks use shallow source checkouts. Exercise the
+        # actual ancestry policy in an independent history rather than assuming
+        # that a particular historical production object exists locally.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            def commit(message):
+                subprocess.run(['git', '-C', str(root), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+                    '-qm', message], check=True)
+                return subprocess.check_output(['git', '-C', str(root),
+                    'rev-parse', 'HEAD'], text=True).strip()
+            old = commit('old')
+            current = commit('current')
+            with mock.patch.object(evidence, 'READINESS_LEGACY_TIP', old):
+                self.assertFalse(evidence.requires_readiness_brackets(old, root))
+                self.assertTrue(evidence.requires_readiness_brackets(current, root))
+                self.assertTrue(evidence.requires_readiness_brackets('f' * 40, root))
         with mock.patch.object(evidence.subprocess, 'run',
                                return_value=SimpleNamespace(returncode=1)):
             self.assertTrue(evidence.requires_readiness_brackets('b' * 40))

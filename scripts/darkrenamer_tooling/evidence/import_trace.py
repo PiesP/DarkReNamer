@@ -84,8 +84,10 @@ def _frame(value: object, *, label: str, frequency: int, pid: int,
 
 
 def _must_order(events: dict, earlier: str, later: str) -> None:
-    require(events[earlier] and events[later] and events[earlier] < events[later],
-            f"Import trace {earlier} must precede {later}.")
+    # Source-bound event dependencies establish causal order even when two
+    # successive observations share one quantized QPC tick.
+    require(events[earlier] and events[later] and events[earlier] <= events[later],
+            f"Import trace {earlier} must not follow {later}.")
 
 
 def _milliseconds(ticks: int, frequency: int) -> float:
@@ -176,7 +178,7 @@ def validate_import_trace(value: object, *, opened: int, observed: int,
             "Import command was not ready before observer discovery.")
     if events["reading_status_committed"]:
         _must_order(events, "reading_status_attempt_started", "reading_status_committed")
-        require(events["reading_status_committed"] < events["import_command_ready"],
+        require(events["reading_status_committed"] <= events["import_command_ready"],
                 "Reading status committed after import completion.")
     if events["reading_status_attempt_started"]:
         _must_order(events, "reading_status_queued", "reading_status_attempt_started")
@@ -184,11 +186,11 @@ def validate_import_trace(value: object, *, opened: int, observed: int,
                 "A reading write attempt cannot be represented as unattempted coalescing.")
     if events["reading_status_visible"]:
         _must_order(events, "reading_status_committed", "reading_status_visible")
-        require(events["reading_status_visible"] < events["import_command_ready"],
+        require(events["reading_status_visible"] <= events["import_command_ready"],
                 "Visible reading status followed command readiness.")
     if events["cancel_ready"]:
         _must_order(events, "reading_status_queued", "cancel_ready")
-        require(events["cancel_ready"] < events["import_command_ready"],
+        require(events["cancel_ready"] <= events["import_command_ready"],
                 "Cancel became ready after the import finished.")
     if events["icons_settled"]:
         _must_order(events, "import_command_ready", "icons_settled")

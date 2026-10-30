@@ -418,7 +418,7 @@
       "bundle": "tooling-evidence-import-trace.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.import_trace",
-      "sha256": "2f7a4f6a594e701e616aa6be2c9bf87d28b7c84859750a61c3902d15e1b163af",
+      "sha256": "a02d54d3f972dbb44e187a7e5ca0f88be08e7810d847e4a5f570b264e1337b9c",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -614,7 +614,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "dae4f2cf66f19e29e73dc2437c7a145bfab8fa4afc043b14dfe383b6f3d09dd5",
+      "sha256": "77088ce895af6e1a315a242c32383b1f211c2ed3c2dd8bf7d96760f172a0b84a",
       "dependencies": []
     },
     {
@@ -813,7 +813,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "d3a36e8e7eb1ccee7b5cc11eef167f9bc10364d640349b261bb59d77358d0d4a",
+      "sha256": "e6864b598153259a9268ddb60078e0c757e67ac267d845c41ab35c3ed8bf1263",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

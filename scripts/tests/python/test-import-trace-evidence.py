@@ -130,6 +130,21 @@ class ImportTraceEvidenceTests(unittest.TestCase):
         result = validate(record)
         self.assertEqual(result["events"]["reading_status_committed"], 175)
 
+    def test_causal_events_can_share_a_quantized_tick_without_losing_order(self):
+        record = valid_trace()
+        for name in ('read_result_published', 'read_owner_accepted',
+                     'reading_status_queued', 'reading_status_attempt_started',
+                     'reading_status_committed', 'reading_status_visible'):
+            record['after']['events'][name] = 150
+        result = validate(record)
+        self.assertEqual(result['intervals_ms']['accepted_to_read_publication_ms'], 0)
+        self.assertGreater(result['duration_resolution_uncertainty_ms'], 0)
+        self.assertEqual(result['first_functional_feedback_interval'],
+                         {'lower_ticks': 150, 'upper_ticks': 150})
+        record['after']['events']['reading_status_queued'] = 149
+        with self.assertRaises(EvidenceError):
+            validate(record)
+
     def test_rejects_foreign_or_stale_trace_and_invalid_clock(self):
         mutations = (
             lambda r: r["after"].__setitem__("process_id", PID + 1),

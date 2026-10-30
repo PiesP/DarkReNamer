@@ -570,8 +570,10 @@ function Import-GuiRegressionPathList {
         if ($traceAfter.generation -ne $traceBefore.generation + 1 -or
             $traceBefore.query_end_ticks -ge $pickerRequestTicks -or
             $traceAfter.events.accepted_import_start -le $openTicks -or
+            $traceAfter.events.native_sync_completed -le 0 -or
+            $traceAfter.events.import_command_ready -le 0 -or
             $traceAfter.events.import_command_ready -gt $commandReadyTicks -or
-            $traceAfter.events.import_command_ready -le $traceAfter.events.native_sync_completed) {
+            $traceAfter.events.import_command_ready -lt $traceAfter.events.native_sync_completed) {
             throw 'Import product trace is stale, premature, or outside the observed operation.'
         }
         [ordered]@{ schema_version=1; before=$traceBefore; after=$traceAfter }
