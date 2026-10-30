@@ -80,6 +80,8 @@ REFRESH_PROFILE_PREFIX_SCENARIOS = (
     'ordinary-10000-unchanged', 'one-row-proposal-edit',
     'whole-list-proposal-edit', 'whole-list-proposal-reset',
 )
+REFRESH_PROFILE_DISTINCT_SCENARIO = 'ordinary-10000-distinct-dates-unchanged'
+REFRESH_PROFILE_RECORD_SCHEMA_VERSION = 4
 REFRESH_PROFILE_COUNTERS = (
     'rows', 'scenario_envelope_ns', 'issue_count_ns',
     'row_values_inclusive_ns', 'row_values_exclusive_ns',
@@ -106,6 +108,7 @@ REFRESH_PROFILE_V3_COUNTERS = REFRESH_PROFILE_V2_COUNTERS + (
 REFRESH_PROFILE_V1_KIND = 'refresh-stages-test-build'
 REFRESH_PROFILE_V2_KIND = 'refresh-stages-icon-async-test-build'
 REFRESH_PROFILE_V3_KIND = 'refresh-stages-icon-async-streaming-test-build'
+REFRESH_PROFILE_V4_KIND = 'refresh-stages-distinct-filetimes-test-build'
 CONTROLLER_SUITE_TIMEOUT_SECONDS = 2400
 CONTROLLER_CLEANUP_ALLOWANCE_SECONDS = 600
 
@@ -2542,6 +2545,7 @@ def build_bundle(repo, root, tooling=None, *, refresh_profile=False, focused_pro
         manifest['diagnostic'] = {
             'kind': 'profile-refresh-stages', 'test_profile': 'release',
             'test_name': REFRESH_PROFILE_TEST,
+            'record_schema_version': REFRESH_PROFILE_RECORD_SCHEMA_VERSION,
             'orders': list(REFRESH_PROFILE_ORDERS),
         }
     elif focused_profile:
@@ -2662,13 +2666,14 @@ def _verify_v2_result_owned_binding(result, transport):
         raise ValueError('V2 cleanup does not bind the result Job and observer lifetimes.')
 
 
-def verify_refresh_profile_records(output, order):
+def verify_refresh_profile_records(output, order, expected_version=None):
     records = []
     test_prefix = 'test ' + REFRESH_PROFILE_TEST + ' ... '
     formats = {
         REFRESH_PROFILE_V1_KIND: (None, REFRESH_PROFILE_COUNTERS),
         REFRESH_PROFILE_V2_KIND: (2, REFRESH_PROFILE_V2_COUNTERS),
         REFRESH_PROFILE_V3_KIND: (3, REFRESH_PROFILE_V3_COUNTERS),
+        REFRESH_PROFILE_V4_KIND: (4, REFRESH_PROFILE_V3_COUNTERS),
     }
 
     def unique_object(pairs):
@@ -2725,7 +2730,13 @@ def verify_refresh_profile_records(output, order):
                   'long-visible', 'long-visible-unchanged')
     if order == 'visible-hidden':
         long_paths = long_paths[2:] + long_paths[:2]
-    expected = REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths
+    if expected_version is not None and (
+            type(expected_version) is not int or
+            any(record.get('schema_version') != expected_version for record in records)):
+        raise ValueError('Refresh diagnostic record version differs from the bundle.')
+    current = records and records[0].get('schema_version') == 4
+    expected = REFRESH_PROFILE_PREFIX_SCENARIOS + (
+        (REFRESH_PROFILE_DISTINCT_SCENARIO,) if current else ()) + long_paths
     if tuple(record['scenario'] for record in records) != expected:
         raise ValueError('Refresh diagnostic scenario inventory or order is invalid.')
     for record in records:
@@ -2736,9 +2747,17 @@ def verify_refresh_profile_records(output, order):
             0 if 'proposal-' in scenario else expected_rows)
         if record['rows'] != expected_rows or record['rows_formatted'] != expected_formatted:
             raise ValueError('Refresh diagnostic workload cardinality is invalid.')
-        if record['kind'] == REFRESH_PROFILE_V3_KIND:
+        if scenario == REFRESH_PROFILE_DISTINCT_SCENARIO and (
+                record['timestamp_values'] != 20000 or
+                record['native_cell_updates'] != 0 or
+                record['native_row_insertions'] != 0 or
+                record['native_row_deletions'] != 0 or
+                record['full_rebuilds'] != 0):
+            raise ValueError('Distinct-date unchanged refresh counters are invalid.')
+        if record['kind'] in (REFRESH_PROFILE_V3_KIND, REFRESH_PROFILE_V4_KIND):
             has_formatted_rows = expected_formatted > 0
-            expected_repeats = (52996 if scenario == 'ordinary-10000' else
+            expected_repeats = (0 if scenario == REFRESH_PROFILE_DISTINCT_SCENARIO else
+                                52996 if scenario == 'ordinary-10000' else
                                 max(0, 2 * expected_formatted - 1))
             if (record['normal_staged_rows_peak'] != int(has_formatted_rows) or
                     (record['normal_logical_staged_payload_bytes_peak'] > 0) !=
@@ -2760,6 +2779,7 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
     if (manifest.get('diagnostic') != {
             'kind': 'profile-refresh-stages', 'test_profile': 'release',
             'test_name': REFRESH_PROFILE_TEST,
+            'record_schema_version': REFRESH_PROFILE_RECORD_SCHEMA_VERSION,
             'orders': list(REFRESH_PROFILE_ORDERS)} or
             len(manifest.get('test_binaries', [])) != 1 or
             manifest['test_binaries'][0].get('name') != 'darknamer_app'):
@@ -2769,7 +2789,8 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
                 ('source_sha', 'source_state', 'target')) or
             result.get('diagnostic') != {
                 'kind': 'profile-refresh-stages', 'order': order,
-                'test_name': REFRESH_PROFILE_TEST, 'test_profile': 'release'} or
+                'test_name': REFRESH_PROFILE_TEST, 'test_profile': 'release',
+                'record_schema_version': REFRESH_PROFILE_RECORD_SCHEMA_VERSION} or
             result.get('gui') is not None or result.get('status') != 'passed'):
         raise ValueError('Refresh result does not match the fixed diagnostic selection.')
     rows = result.get('tests')
@@ -2805,7 +2826,8 @@ def verify_refresh_profile_result(root, manifest, result, order, transport_kind,
             output.count('test ' + REFRESH_PROFILE_TEST + ' ... ') != 1 or
             re.search(r'(?m)^ok\r?$', output) is None):
         raise ValueError('Refresh diagnostic did not execute the exact ignored test.')
-    records = verify_refresh_profile_records(output, order)
+    records = verify_refresh_profile_records(
+        output, order, expected_version=manifest['diagnostic']['record_schema_version'])
     transport = result.get('transport')
     if (not isinstance(transport, dict) or transport.get('task_kind') != 'core' or
             transport.get('status') != 'collected' or
@@ -3324,6 +3346,7 @@ def run_refresh_profile(repo, args, tooling):
             'output_limit_bytes': REFRESH_PROFILE_OUTPUT_MAXIMUM_BYTES,
             'orders': list(REFRESH_PROFILE_ORDERS),
             'scenarios': list(REFRESH_PROFILE_PREFIX_SCENARIOS) + [
+                REFRESH_PROFILE_DISTINCT_SCENARIO,
                 'long-hidden', 'long-hidden-unchanged',
                 'long-visible', 'long-visible-unchanged'],
             'rust_toolchain_sha256': sha256(repo / 'rust-toolchain.toml'),

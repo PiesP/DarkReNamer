@@ -1827,6 +1827,7 @@ try {
             if ($manifest.diagnostic.kind -cne 'profile-refresh-stages' -or
                 $manifest.diagnostic.test_profile -cne 'release' -or
                 $manifest.diagnostic.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
+                $manifest.diagnostic.record_schema_version -ne 4 -or
                 (@($manifest.diagnostic.orders) -join ',') -cne 'hidden-visible,visible-hidden' -or
                 @($manifest.test_binaries).Count -ne 1 -or
                 $manifest.test_binaries[0].name -cne 'darknamer_app') {
@@ -6265,6 +6266,7 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
     }
     if ($refreshProfile -and ($result.diagnostic.kind -cne 'profile-refresh-stages' -or
         $result.diagnostic.order -cne $RefreshProfileOrder -or
+        $result.diagnostic.record_schema_version -ne 4 -or
         @($result.tests).Count -ne 1 -or $null -ne $result.gui)) {
         throw 'Refresh diagnostic result selection is invalid.'
     }

@@ -835,19 +835,25 @@ attempt's evidence. A passing diagnostic requires both passes and verified
 guest cleanup.
 
 Each pass emits stage timings and counts for ordinary 100/1,000/10,000-row
-refreshes, an unchanged 10,000-row refresh, proposal edits/resets, and long
-paths with auxiliary columns hidden and visible. The native test checks row
-counts, representative text in all eight ListView columns even when auxiliary
+refreshes, the existing unchanged 10,000-row refresh, a separate unchanged
+10,000-row control with 20,000 unique valid minute-spaced FILETIME values,
+proposal edits/resets, and long paths with auxiliary columns hidden and visible.
+The native test checks row counts, representative text in all eight ListView columns even when auxiliary
 columns are hidden, icons, and selection preservation. The current streaming
-test emits `refresh-stages-icon-async-streaming-test-build` schema 3 with
+test emits `refresh-stages-distinct-filetimes-test-build` schema 4 with
 `icon_worker_attached=false`: this is a detached UI staging measurement. Its
 `row_values_inclusive_ns` contains `timestamps_nested_ns` and
 `ui_shell_nested_ns`; `row_values_exclusive_ns` excludes both. The UI Shell
 timings and call count, plus icon submissions and drains, must be zero.
 `render_icon_cache_hits` and `render_icon_cache_misses` describe staging cache
-lookups, not worker Shell calls. Schema 3 adds separate peaks for one-row normal
-staging and full-vector fallback staging, retained rendered-vector capacity
-bytes and growth events, and repeated nonzero FILETIME inputs. For the fixed
+lookups, not worker Shell calls. Schemas 3 and 4 include separate peaks for
+one-row normal staging and full-vector fallback staging, retained rendered-vector
+capacity bytes and growth events, and repeated nonzero FILETIME inputs. The new control
+uses the same names, paths and sizes as the ordinary 10,000-row fixture, with
+setup outside its timed refresh. It requires 10,000 formatted rows, 20,000
+timestamp values, zero adjacent repeats and zero native cell writes. Historic
+schema 3 receipts remain readable as their original 11-scenario shape; current
+source-built bundles require schema 4 and all 12 scenarios. For the fixed
 eligible workloads, normal staging owns at most one transient row and fallback
 staging is zero. The repeated-input counter resets on each refresh and counts
 adjacent identical nonzero values; it is a test-only input count, not evidence
@@ -855,7 +861,7 @@ of date caching. Vector capacity bytes describe the backing allocation, not
 allocator or process peak memory. The native apply/rebuild clock excludes row
 formatting. Historical `refresh-stages-icon-async-test-build` schema 2 retains
 its original detached icon meaning, and `refresh-stages-test-build` schema 1
-retains its synchronous Shell/cache meaning. The validator keeps all three
+retains its synchronous Shell/cache meaning. The validator keeps all four
 schemas separate and rejects mixed records. Do not add inclusive and
 nested times. `scenario_envelope_ns` may include fixture changes and assertions
 outside the stage clocks; it is not a pure refresh duration.

@@ -684,23 +684,27 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
-    def refresh_profile_output(self, order='hidden-visible', *, v2=False, v3=False):
-        if v2 and v3:
+    def refresh_profile_output(self, order='hidden-visible', *, v2=False, v3=False, v4=False):
+        if sum((v2, v3, v4)) > 1:
             raise ValueError('A diagnostic fixture cannot mix two schemas.')
         long_paths = ('long-hidden', 'long-hidden-unchanged',
                       'long-visible', 'long-visible-unchanged')
         if order == 'visible-hidden':
             long_paths = long_paths[2:] + long_paths[:2]
         rows = []
-        for scenario in vm.REFRESH_PROFILE_PREFIX_SCENARIOS + long_paths:
-            row = {'kind': (vm.REFRESH_PROFILE_V3_KIND if v3 else
+        scenarios = vm.REFRESH_PROFILE_PREFIX_SCENARIOS + (
+            (vm.REFRESH_PROFILE_DISTINCT_SCENARIO,) if v4 else ()) + long_paths
+        for scenario in scenarios:
+            row = {'kind': (vm.REFRESH_PROFILE_V4_KIND if v4 else
+                            vm.REFRESH_PROFILE_V3_KIND if v3 else
                             vm.REFRESH_PROFILE_V2_KIND if v2 else vm.REFRESH_PROFILE_V1_KIND),
                    'scenario': scenario,
-                   **{name: 0 for name in (vm.REFRESH_PROFILE_V3_COUNTERS if v3 else
+                   **{name: 0 for name in (vm.REFRESH_PROFILE_V3_COUNTERS if v3 or v4 else
                                             vm.REFRESH_PROFILE_V2_COUNTERS if v2 else
                                             vm.REFRESH_PROFILE_COUNTERS)}}
-            if v2 or v3:
-                row.update(schema_version=3 if v3 else 2, icon_worker_attached=False)
+            if v2 or v3 or v4:
+                row.update(schema_version=4 if v4 else 3 if v3 else 2,
+                           icon_worker_attached=False)
             count = 100 if scenario == 'ordinary-100' else (
                 1000 if scenario == 'ordinary-1000' or scenario.startswith('long-') else 10000)
             formatted = 26500 if scenario == 'ordinary-10000' else (
@@ -708,17 +712,17 @@ class VmRunnerTests(unittest.TestCase):
             row.update(rows=count, rows_formatted=formatted, timestamp_values=2 * formatted,
                        row_values_inclusive_ns=20 if formatted else 0,
                        row_values_exclusive_ns=10 if formatted else 0,
-                       timestamps_nested_ns=(10 if v2 or v3 else 5) if formatted else 0)
-            if v3:
+                       timestamps_nested_ns=(10 if v2 or v3 or v4 else 5) if formatted else 0)
+            if v3 or v4:
                 row['native_row_insertions'] = (
                     100 if scenario == 'ordinary-100' else
                     900 if scenario == 'ordinary-1000' else
                     9000 if scenario == 'ordinary-10000' else
                     1000 if scenario.startswith('long-') and 'unchanged' not in scenario else 0)
-            if v2 or v3:
+            if v2 or v3 or v4:
                 row.update(render_icon_cache_hits=max(0, formatted - 1),
                            render_icon_cache_misses=int(formatted > 0))
-                if v3:
+                if v3 or v4:
                     row.update(normal_staged_rows_peak=int(formatted > 0),
                                normal_logical_staged_payload_bytes_peak=128 if formatted else 0,
                                fallback_staged_rows_peak=0,
@@ -726,6 +730,7 @@ class VmRunnerTests(unittest.TestCase):
                                rendered_vec_growth_events=int(row['native_row_insertions'] > 0),
                                rendered_vec_capacity_bytes_peak=count * 128 if formatted else 0,
                                repeated_nonzero_filetime_inputs=(
+                                   0 if scenario == vm.REFRESH_PROFILE_DISTINCT_SCENARIO else
                                    52996 if scenario == 'ordinary-10000' else
                                    max(0, 2 * formatted - 1)))
             else:
@@ -864,6 +869,33 @@ class VmRunnerTests(unittest.TestCase):
             injected = historical.replace('"rows": 100', extra + ', "rows": 100', 1)
             with self.assertRaisesRegex(ValueError, 'counters'):
                 vm.verify_refresh_profile_records(injected, 'hidden-visible')
+
+    def test_distinct_date_refresh_requires_current_version_and_exact_control(self):
+        for order in vm.REFRESH_PROFILE_ORDERS:
+            valid = self.refresh_profile_output(order, v4=True)
+            self.assertEqual(len(vm.verify_refresh_profile_records(
+                valid, order, expected_version=4)), 12)
+            with self.assertRaisesRegex(ValueError, 'version'):
+                vm.verify_refresh_profile_records(
+                    self.refresh_profile_output(order, v3=True), order,
+                    expected_version=4)
+            lines = valid.splitlines()
+            index = next(i for i, line in enumerate(lines)
+                         if vm.REFRESH_PROFILE_DISTINCT_SCENARIO in line)
+            with self.assertRaisesRegex(ValueError, 'inventory'):
+                vm.verify_refresh_profile_records(
+                    '\n'.join(lines[:index] + lines[index + 1:]), order,
+                    expected_version=4)
+            for field, value in (('rows_formatted', 9999), ('timestamp_values', 19999),
+                                 ('repeated_nonzero_filetime_inputs', 1),
+                                 ('native_cell_updates', 1)):
+                changed = lines.copy()
+                record = json.loads(changed[index])
+                record[field] = value
+                changed[index] = json.dumps(record)
+                with self.subTest(order=order, field=field), self.assertRaises(ValueError):
+                    vm.verify_refresh_profile_records(
+                        '\n'.join(changed), order, expected_version=4)
 
     def test_refresh_profile_cli_is_fixed_to_two_pass_core_bounds(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
@@ -1140,17 +1172,19 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_fixed_refresh_profile_result_requires_exact_selection_and_output(self):
         stdout = self.output_artifact('test-001.stdout.txt',
-                                      self.refresh_profile_output().encode())
+                                      self.refresh_profile_output(v4=True).encode())
         stderr = self.output_artifact('test-001.stderr.txt', b'')
         self.manifest['test_binaries'] = [dict(self.test, name='darknamer_app')]
         self.manifest['runner'] = self.artifact('windows-vm-guest.ps1', b'runner')
         self.manifest['diagnostic'] = {
             'kind': 'profile-refresh-stages', 'test_profile': 'release',
             'test_name': vm.REFRESH_PROFILE_TEST,
+            'record_schema_version': 4,
             'orders': list(vm.REFRESH_PROFILE_ORDERS)}
         self.result.update(diagnostic={
             'kind': 'profile-refresh-stages', 'order': 'hidden-visible',
-            'test_name': vm.REFRESH_PROFILE_TEST, 'test_profile': 'release'},
+            'test_name': vm.REFRESH_PROFILE_TEST, 'test_profile': 'release',
+            'record_schema_version': 4},
             gui=None, tests=[dict(self.test, status='passed', job_cleanup=True,
                                   exit_code=0, passed=1, failed=0, ignored=0,
                                   stdout=stdout, stderr=stderr)])
@@ -1162,6 +1196,20 @@ class VmRunnerTests(unittest.TestCase):
                 self.root, self.manifest, self.result, 'hidden-visible',
                 'ssh', None, 'a' * 64)
             self.assertEqual(observed['filtered_out'], 3)
+            self.assertEqual(observed['scenarios'], 12)
+            for wrong in (None, 3):
+                self.manifest['diagnostic']['record_schema_version'] = wrong
+                with self.assertRaisesRegex(ValueError, 'fixed optimized test bundle'):
+                    vm.verify_refresh_profile_result(
+                        self.root, self.manifest, self.result, 'hidden-visible',
+                        'ssh', None, 'a' * 64)
+            self.manifest['diagnostic']['record_schema_version'] = 4
+            self.result['diagnostic']['record_schema_version'] = 3
+            with self.assertRaisesRegex(ValueError, 'fixed diagnostic selection'):
+                vm.verify_refresh_profile_result(
+                    self.root, self.manifest, self.result, 'hidden-visible',
+                    'ssh', None, 'a' * 64)
+            self.result['diagnostic']['record_schema_version'] = 4
             self.result['tests'][0]['ignored'] = 1
             with self.assertRaisesRegex(ValueError, 'incomplete'):
                 vm.verify_refresh_profile_result(

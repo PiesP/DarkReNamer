@@ -303,9 +303,11 @@ function Resolve-VerifiedBundle {
         if ($null -ne $diagnostic) {
             if ($diagnostic.Value.kind -ceq 'profile-refresh-stages') {
                 Assert-ExactProperties -Value $diagnostic.Value -Names @(
-                    'kind', 'test_profile', 'test_name', 'orders') -Label 'bundle.json diagnostic'
+                    'kind', 'test_profile', 'test_name', 'orders', 'record_schema_version') -Label 'bundle.json diagnostic'
                 if ($diagnostic.Value.test_profile -cne 'release' -or
                     $diagnostic.Value.test_name -cne 'windows::list_view::native_tests::profile_refresh_stages' -or
+                    $diagnostic.Value.record_schema_version -isnot [long] -or
+                    $diagnostic.Value.record_schema_version -ne 4 -or
                     (@($diagnostic.Value.orders) -join ',') -cne 'hidden-visible,visible-hidden') {
                     throw 'bundle.json fixed refresh diagnostic is invalid.'
                 }

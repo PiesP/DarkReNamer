@@ -463,6 +463,32 @@ try {
     Assert-Fails {
         Invoke-TestGuest -EntryPointPath $focused.runner -BundleRoot $focused.root -ExpectedSessionId 1 -ValidateOnly
     } 'fixed focused native selection is invalid'
+    $refreshBundle = New-Fixture -Name 'refresh-profile-selection'
+    $refreshBundle.manifest.test_binaries[0].name = 'darknamer_app'
+    $refreshBundle.manifest.diagnostic = [ordered]@{
+        kind = 'profile-refresh-stages'
+        test_profile = 'release'
+        test_name = 'windows::list_view::native_tests::profile_refresh_stages'
+        record_schema_version = 4
+        orders = @('hidden-visible', 'visible-hidden')
+    }
+    Save-Manifest $refreshBundle
+    Invoke-TestGuest -EntryPointPath $refreshBundle.runner `
+        -BundleRoot $refreshBundle.root -ExpectedSessionId 1 -ValidateOnly
+    foreach ($version in @(3, $true)) {
+        $refreshBundle.manifest.diagnostic.record_schema_version = $version
+        Save-Manifest $refreshBundle
+        Assert-Fails {
+            Invoke-TestGuest -EntryPointPath $refreshBundle.runner `
+                -BundleRoot $refreshBundle.root -ExpectedSessionId 1 -ValidateOnly
+        } 'fixed refresh diagnostic is invalid'
+    }
+    [void]$refreshBundle.manifest.diagnostic.Remove('record_schema_version')
+    Save-Manifest $refreshBundle
+    Assert-Fails {
+        Invoke-TestGuest -EntryPointPath $refreshBundle.runner `
+            -BundleRoot $refreshBundle.root -ExpectedSessionId 1 -ValidateOnly
+    } 'unexpected fields'
     $runtimeModelBundle = New-Fixture -Name 'runtime-model-selection'
     $runtimeModelBundle.manifest.test_binaries[0].name = 'darknamer_app'
     $runtimeModelBundle.manifest.diagnostic = [ordered]@{

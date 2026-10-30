@@ -1492,6 +1492,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         let issue_cache = &state.preview_issue_cache;
         let icon_cache = &mut state.icon_cache;
         let icon_shared = state.icon_shared.as_deref();
+        let mut date_cache = RefreshDateCache::default();
         changed
             .iter()
             .map(|index| {
@@ -1503,6 +1504,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
                         state.rendered_rows.get(*index),
                         &model.items()[*index],
                         issue_cache.issue(*index),
+                        &mut date_cache,
                     ),
                 )
             })
@@ -1720,6 +1722,7 @@ fn rendered_row(
     previous: Option<&RenderedRow>,
     item: &LegacyListItem,
     issue: PreviewRowIssue,
+    date_cache: &mut RefreshDateCache,
 ) -> RenderedRow {
     #[cfg(test)]
     let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Rows);
@@ -1757,8 +1760,8 @@ fn rendered_row(
             item.root_path().clone(),
             item.source_path().clone(),
             LegacyText::from(format_iec_file_size(item.actual_size())),
-            format_filetime(item.modified()),
-            format_filetime(item.created()),
+            date_cache.format(item.modified()),
+            date_cache.format(item.created()),
             LegacyText::from(preview_status_label(issue, item.planned_change_kind())),
         ],
         icon,
@@ -2087,6 +2090,7 @@ fn apply_incremental_rows(state: &mut AppState) -> bool {
         refresh_profile::record(|counters| counters.native_deletions += 1);
     }
     state.rendered_rows.truncate(new_len);
+    let mut date_cache = RefreshDateCache::default();
     for row in 0..new_len {
         // These borrows end before native dispatch. The owned row is the only
         // transient full-row payload; prior identity still gates icon reuse.
@@ -2096,6 +2100,7 @@ fn apply_incremental_rows(state: &mut AppState) -> bool {
             state.rendered_rows.get(row),
             &state.model.items()[row],
             state.preview_issue_cache.issue(row),
+            &mut date_cache,
         );
         #[cfg(test)]
         refresh_profile::record(|counters| {
@@ -2143,6 +2148,7 @@ fn rebuild_rows_from_model(state: &mut AppState) -> bool {
     if rows.try_reserve_exact(state.model.len()).is_err() {
         return false;
     }
+    let mut date_cache = RefreshDateCache::default();
     for (row, item) in state.model.items().iter().enumerate() {
         rows.push(rendered_row(
             &mut state.icon_cache,
@@ -2150,6 +2156,7 @@ fn rebuild_rows_from_model(state: &mut AppState) -> bool {
             state.rendered_rows.get(row),
             item,
             state.preview_issue_cache.issue(row),
+            &mut date_cache,
         ));
     }
     #[cfg(test)]
@@ -2395,17 +2402,44 @@ fn query_shell_icon_index(key: &IconCacheKey, is_directory: bool) -> (usize, i32
     (result, info.iIcon)
 }
 
-fn format_filetime(value: u64) -> LegacyText {
-    #[cfg(test)]
-    let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Timestamps);
-    #[cfg(test)]
-    refresh_profile::record(|counters| {
-        counters.timestamp_values += 1;
-        if value != 0 && counters.last_filetime == Some(value) {
-            counters.repeated_nonzero_filetime_inputs += 1;
+#[derive(Default)]
+struct RefreshDateCache {
+    last: Option<(u64, LegacyText)>,
+}
+
+impl RefreshDateCache {
+    fn format(&mut self, value: u64) -> LegacyText {
+        #[cfg(test)]
+        let _clock = refresh_profile::Clock::begin(refresh_profile::Stage::Timestamps);
+        #[cfg(test)]
+        refresh_profile::record(|counters| {
+            counters.timestamp_values += 1;
+            if value != 0 && counters.last_filetime == Some(value) {
+                counters.repeated_nonzero_filetime_inputs += 1;
+            }
+            counters.last_filetime = (value != 0).then_some(value);
+        });
+        if value != 0
+            && let Some((cached_value, text)) = &self.last
+            && *cached_value == value
+        {
+            return text.clone();
         }
-        counters.last_filetime = (value != 0).then_some(value);
-    });
+        self.last = None;
+        let (text, localized) = format_filetime_with_cacheability(value);
+        if localized {
+            self.last = Some((value, text.clone()));
+        }
+        text
+    }
+}
+
+#[cfg(test)]
+fn format_filetime(value: u64) -> LegacyText {
+    format_filetime_with_cacheability(value).0
+}
+
+fn format_filetime_with_cacheability(value: u64) -> (LegacyText, bool) {
     #[cfg(test)]
     if let Some(formatted) = DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
         slot.borrow()
@@ -2415,15 +2449,18 @@ fn format_filetime(value: u64) -> LegacyText {
         return formatted;
     }
     let Some(system) = local_systemtime_from_filetime(value) else {
-        return LegacyText::default();
+        return (LegacyText::default(), false);
     };
     if let Some(localized) = format_local_systemtime(&system) {
-        return LegacyText::from(localized);
+        return (LegacyText::from(localized), true);
     }
-    LegacyText::from(format_timestamp_fallback(
-        [system.wYear, system.wMonth, system.wDay],
-        [system.wHour, system.wMinute, system.wSecond],
-    ))
+    (
+        LegacyText::from(format_timestamp_fallback(
+            [system.wYear, system.wMonth, system.wDay],
+            [system.wHour, system.wMinute, system.wSecond],
+        )),
+        false,
+    )
 }
 
 fn local_systemtime_from_filetime(value: u64) -> Option<SYSTEMTIME> {
@@ -2479,17 +2516,20 @@ fn format_filetime_with_environment(
     value: u64,
     locale: *const u16,
     zone: *const DYNAMIC_TIME_ZONE_INFORMATION,
-) -> LegacyText {
+) -> (LegacyText, bool) {
     let Some(system) = local_systemtime_from_filetime_in_zone(value, zone) else {
-        return LegacyText::default();
+        return (LegacyText::default(), false);
     };
     if let Some(localized) = format_local_systemtime_in_locale(&system, locale) {
-        return LegacyText::from(localized);
+        return (LegacyText::from(localized), true);
     }
-    LegacyText::from(format_timestamp_fallback(
-        [system.wYear, system.wMonth, system.wDay],
-        [system.wHour, system.wMinute, system.wSecond],
-    ))
+    (
+        LegacyText::from(format_timestamp_fallback(
+            [system.wYear, system.wMonth, system.wDay],
+            [system.wHour, system.wMinute, system.wSecond],
+        )),
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -2691,7 +2731,7 @@ mod refresh_profile {
             assert_eq!(counters.maximum_shell_ns, 0);
             assert_eq!(counters.ui_shell_calls, 0);
             println!(
-                "{{\"kind\":\"refresh-stages-icon-async-streaming-test-build\",\"schema_version\":3,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"normal_staged_rows_peak\":{},\"normal_logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{},\"rendered_vec_growth_events\":{},\"rendered_vec_capacity_bytes_peak\":{},\"repeated_nonzero_filetime_inputs\":{}}}",
+                "{{\"kind\":\"refresh-stages-distinct-filetimes-test-build\",\"schema_version\":4,\"icon_worker_attached\":false,\"scenario\":\"{scenario}\",\"rows\":{rows},\"scenario_envelope_ns\":{elapsed_ns},\"issue_count_ns\":{issues},\"row_values_inclusive_ns\":{inclusive_rows},\"row_values_exclusive_ns\":{exclusive_rows},\"timestamps_nested_ns\":{timestamps},\"ui_shell_nested_ns\":{shell},\"ui_shell_max_ns\":{},\"native_apply_rebuild_ns\":{native},\"selection_ns\":{selection},\"column_widths_ns\":{widths},\"issue_count_input_rows_visited\":{},\"native_rows_visited\":{},\"rows_formatted\":{},\"timestamp_values\":{},\"ui_shell_calls\":{},\"render_icon_cache_hits\":{},\"render_icon_cache_misses\":{},\"icon_request_submissions\":{},\"icon_results_drained\":{},\"native_cell_updates\":{},\"native_row_insertions\":{},\"native_row_deletions\":{},\"full_rebuilds\":{},\"extra_staged_rows_peak\":{},\"logical_staged_payload_bytes_peak\":{},\"normal_staged_rows_peak\":{},\"normal_logical_staged_payload_bytes_peak\":{},\"fallback_staged_rows_peak\":{},\"fallback_logical_staged_payload_bytes_peak\":{},\"rendered_vec_growth_events\":{},\"rendered_vec_capacity_bytes_peak\":{},\"repeated_nonzero_filetime_inputs\":{}}}",
                 counters.maximum_shell_ns,
                 counters.issue_count_input_rows_visited,
                 counters.native_rows_visited,
@@ -4804,6 +4844,26 @@ mod native_tests {
             .collect()
     }
 
+    fn refresh_fixture_rows_with_distinct_dates(parent: &str) -> Vec<LegacyListItem> {
+        const MINUTE_IN_FILETIME_TICKS: u64 = 600_000_000;
+        refresh_fixture_rows(parent, "ordinary", 0, 10_000)
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let created =
+                    133_497_936_000_000_000 + (index as u64 * 2) * MINUTE_IN_FILETIME_TICKS;
+                LegacyListItem::new_with_actual_size(
+                    item.source_path().clone(),
+                    false,
+                    24,
+                    24,
+                    created,
+                    created + MINUTE_IN_FILETIME_TICKS,
+                )
+            })
+            .collect()
+    }
+
     fn assert_native_refresh_values(state: &AppState) {
         assert_eq!(state.rendered_rows.len(), state.model.len());
         for row in [
@@ -6556,6 +6616,40 @@ mod native_tests {
             });
             assert_eq!(reset.rows_formatted, 0);
             assert_eq!(reset.native_cells, 20000);
+            // Set up the same 10k names, paths and sizes with 20k distinct,
+            // valid minute-spaced FILETIMEs before the unchanged refresh clock.
+            state.model = LegacyList::new();
+            refresh_all_rows(state);
+            let distinct_rows = refresh_fixture_rows_with_distinct_dates(ordinary);
+            assert_eq!(distinct_rows.len(), 10_000);
+            assert_eq!(
+                distinct_rows
+                    .iter()
+                    .flat_map(|item| [item.created(), item.modified()])
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                20_000
+            );
+            state
+                .model
+                .append_batch_by(distinct_rows, compare_windows)?;
+            refresh_all_rows(state);
+            select_rows(state.list_window, &[4999]);
+            let distinct = measure_refresh(
+                state,
+                "ordinary-10000-distinct-dates-unchanged",
+                refresh_all_rows,
+            );
+            assert_eq!(selected_indices(state.list_window), vec![4999]);
+            assert_eq!(distinct.rows_formatted, 10_000);
+            assert_eq!(distinct.timestamp_values, 20_000);
+            assert_eq!(distinct.repeated_nonzero_filetime_inputs, 0);
+            assert_eq!(distinct.native_cells, 0);
+            assert_eq!(distinct.native_insertions, 0);
+            assert_eq!(distinct.native_deletions, 0);
+            assert_eq!(distinct.full_rebuilds, 0);
+            assert_eq!(distinct.normal_staged_rows_peak, 1);
+            assert_eq!(distinct.fallback_staged_rows_peak, 0);
             let long = format!(
                 "C:\\refresh-fixture\\long\\{}\\{}\\{}",
                 "a".repeat(42),
@@ -8117,5 +8211,62 @@ mod native_tests {
             assert!(local.wHour < 24);
             assert!(!format_filetime(133_497_936_000_000_000).units().is_empty());
         }
+    }
+
+    #[test]
+    fn refresh_date_cache_reuses_only_localized_nonzero_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ResetDateEnvironment;
+        impl Drop for ResetDateEnvironment {
+            fn drop(&mut self) {
+                DATE_ENVIRONMENT_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetDateEnvironment;
+        let value = 133_497_936_000_000_000;
+        let utc = registered_test_zone("UTC")?;
+        DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some((wide("en-US"), utc));
+        });
+        let mut cache = RefreshDateCache::default();
+        let localized = cache.format(value);
+        assert_eq!(localized.units(), format_filetime(value).units());
+        assert_eq!(cache.last.as_ref().map(|(key, _)| *key), Some(value));
+
+        let tokyo = registered_test_zone("Tokyo Standard Time")?;
+        DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some((wide("en-US"), tokyo));
+        });
+        assert_eq!(cache.format(value).units(), localized.units());
+        let mut next_refresh = RefreshDateCache::default();
+        let changed_zone = next_refresh.format(value);
+        assert_ne!(changed_zone.units(), localized.units());
+
+        DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some((wide("en-US"), utc));
+        });
+        let next_minute = value + 600_000_000;
+        assert_ne!(cache.format(next_minute).units(), localized.units());
+        assert_eq!(cache.last.as_ref().map(|(key, _)| *key), Some(next_minute));
+        assert!(cache.format(0).is_empty());
+        assert!(cache.last.is_none());
+        assert!(cache.format(u64::MAX).is_empty());
+        assert!(cache.last.is_none());
+
+        // A well-formed unknown tag may be accepted by NLS; invalid syntax
+        // forces both locale format queries to fail without changing settings.
+        DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some((wide("@!/%"), utc));
+        });
+        let fallback = cache.format(value);
+        assert!(!fallback.is_empty());
+        assert!(cache.last.is_none());
+        DATE_ENVIRONMENT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some((wide("en-US"), utc));
+        });
+        assert_eq!(cache.format(value).units(), localized.units());
+        assert_ne!(fallback.units(), localized.units());
+        assert_eq!(cache.last.as_ref().map(|(key, _)| *key), Some(value));
+        Ok(())
     }
 }
