@@ -144,6 +144,27 @@ class BaselineSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "partial"):
             baseline.summarize(records, PLAN_SHA)
 
+    def test_separate_command_scopes_cannot_reuse_one_product_process_or_receipt(self):
+        original = fixture()
+        runtime = original["scopes"][0]["runs"][0]
+        cases = [
+            (lambda run: run["processes"].update(
+                product=copy.deepcopy(runtime["processes"]["fresh-system"])),
+             "process identity was reused"),
+            (lambda run: run.update(
+                validation_receipt_sha256=runtime["validation_receipt_sha256"]),
+             "validation_receipt_sha256 was reused"),
+            (lambda run: run.update(
+                observation_receipt_sha256=runtime["observation_receipt_sha256"]),
+             "observation_receipt_sha256 was reused"),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                records = copy.deepcopy(original)
+                mutate(records["scopes"][1]["runs"][0])
+                with self.assertRaisesRegex(ValueError, expected):
+                    baseline.summarize(records, PLAN_SHA)
+
     def test_cli_reads_frozen_plan_and_writes_new_private_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -171,7 +171,7 @@ def bracket(value):
                 "negative and positive queries are reversed or overlap")
 
 
-def scope_summary(scope, source, unavailable):
+def scope_summary(scope, source, unavailable, seen_processes, receipt_hashes):
     exact(scope, SCOPE_KEYS, "scope")
     sid = scope["id"]
     require(sid in SCOPES, "unknown scope")
@@ -197,9 +197,6 @@ def scope_summary(scope, source, unavailable):
             "scope metric inventory is incomplete or contradicts unavailable metrics")
     require(definitions, "an available scope needs at least one measured metric")
     run_rows = []
-    seen_processes = set()
-    receipt_hashes = {"validation_receipt_sha256": set(),
-                      "observation_receipt_sha256": set()}
     for expected_index, run in enumerate(scope["runs"], 1):
         exact(run, RUN_KEYS, "run")
         require(type(run["index"]) is int and run["index"] == expected_index,
@@ -289,8 +286,12 @@ def summarize(document, plan_hash):
         require(row["scope"] in scope_ids and row["id"] in SCOPES[row["scope"]] and
                 key not in missing_metrics, "unknown or duplicated unavailable metric")
         missing_metrics[key] = brief(row["reason"], "unavailable metric reason")
+    seen_processes = set()
+    receipt_hashes = {"validation_receipt_sha256": set(),
+                      "observation_receipt_sha256": set()}
     results = [scope_summary(scope, document,
-                             {mid for sid, mid in missing_metrics if sid == scope["id"]})
+                             {mid for sid, mid in missing_metrics if sid == scope["id"]},
+                             seen_processes, receipt_hashes)
                for scope in document["scopes"]]
     product = {row["id"]: row for row in document["scopes"]}
     if "runtime-baseline" in product and "performance-sample" in product:

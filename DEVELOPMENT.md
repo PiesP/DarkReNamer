@@ -1712,3 +1712,125 @@ wakeups, collect WPR traces, complete the unchanged fixed performance sample, or
 provide release acceptance. The fixed performance sample continues to cover
 100/1,000/10,000 rows, both long-path column orders, extension churn and reuse
 with its existing schema.
+
+### Repeated performance baselines
+
+Freeze a clean source/tree, executable and matching PDB per command scope before
+collecting an ordinary baseline. Keep the harness, prepared VM, desktop,
+preferences, fixtures and command order fixed. A fresh process and fixture do
+not establish cold guest, host or Shell caches. Retain actual start times and
+all failed or incomplete attempts. Do not repeat a campaign to improve a result.
+
+For six independent runtime or fixed-performance invocations, prepare one
+source-built bundle with `test-windows-vm.py --prepare-only` and
+`--private-symbol-output`, then reuse it through each diagnostic's
+`--prepared-bundle-root` and `--expected-prepared-application-sha256` options.
+Use a new output directory for every invocation. The runtime diagnostic's three
+startup cells remain separate: only its fresh-System process performs the idle
+and 1,000-file workload. Fix the performance column order prospectively; both
+long-path cells occur within each process. The 1,000-row fixed-performance cell
+adds 900 rows to 100 existing rows, whereas runtime-baseline imports 1,000 rows
+into an empty list. Report these endpoints separately.
+
+For the native model and detached refresh scopes, the maintained six-invocation
+route builds each optimized libtest binary and its matching PDB once:
+
+```bash
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host "$DARKRENAMER_VM_SSH_HOST" \
+  --expected-vm-id "$DARKRENAMER_VM_ID" \
+  --profile-runtime-model --baseline-repetitions 6 \
+  --private-symbol-output /absolute/private/new-model-baseline-symbols \
+  --output /absolute/private/new-model-baseline
+
+python3 -I scripts/test-windows-vm.py \
+  --ssh-host "$DARKRENAMER_VM_SSH_HOST" \
+  --expected-vm-id "$DARKRENAMER_VM_ID" \
+  --profile-refresh-stages --baseline-repetitions 6 \
+  --private-symbol-output /absolute/private/new-refresh-baseline-symbols \
+  --output /absolute/private/new-refresh-baseline
+```
+
+Each route freezes the complete bundle, checks source and artifact identity
+before each copy, runs each copied bundle in a new owned process, and applies
+the existing independent result and cleanup verifier. The refresh route runs
+both column orders per invocation and alternates which order goes first. Keep
+six values per order; its twelve processes are not twelve observations of one
+fixed-order scope. Internal model repetitions remain within-process data.
+The private `plan.json` and `attempts.json` preserve grouping and outcomes;
+collection stops on the first failed attempt. The six-invocation selector does
+not change the durable-execution runner's iteration or artifact contract.
+
+Predeclare one summary per process and metric. For example, take the median of
+the three full-preview unique/10,000-row model repetitions, or the three
+shuffled/10,000-row core-sort repetitions, before summarizing six independent
+processes. The detached unchanged-10,000-row `timestamps_nested_ns` phase remains
+distinct from the four-addition timestamp phase and whole-GUI import latency.
+Report all six process values, their median and range, and each provisional
+budget's accepted, exceeded, unavailable or pending-scope disposition. Sampled
+private bytes are not allocation totals or guaranteed instantaneous peaks.
+
+After the canonical native/GUI verifiers accept the raw receipts, transcribe
+path-free run records and use the maintained arithmetic reducer:
+
+```bash
+python3 -I scripts/summarize-performance-baseline.py \
+  --input /absolute/private/sanitized-baseline-records.json \
+  --plan /absolute/private/frozen-prospective-plan.json \
+  --output /absolute/private/new-baseline-summary.json
+```
+
+The reducer's module docstring defines `darkrenamer-baseline-records-v1`, and
+its `SCOPES` inventory owns metric IDs, units, process cells and provisional
+budgets. The input binds one frozen prospective plan digest, source/tree/harness,
+artifact/PDB pairs, profile, normalized fixture and environment definitions,
+actual UTC times, PID plus creation time, receipt digests, validity, unknown
+probe count and owned cleanup. Do not hash changing private root paths or PIDs
+into the stable fixture/environment definitions; preserve those raw facts in
+their original receipts. Every available scope needs six distinct processes
+per declared cell. Explicit unavailable reasons remain incomplete; exceeded
+budgets remain visible. The reducer validates declarations and arithmetic;
+it does not authenticate the original VM evidence.
+
+Use these raw selectors and within-process reductions when creating records:
+
+| Metric group | Raw observation and per-process reduction |
+| --- | --- |
+| Three startup cells | Each runtime cell's `startup.launch_request_to_ready_ms`, reported separately |
+| Empty / populated idle CPU | The corresponding exact owned-process CPU window, with its actual QPC duration of at least 30 seconds; do not substitute the shorter sampler span |
+| Empty / populated idle private bytes | Maximum `private_bytes` sample in that runtime idle phase, divided by 1,048,576 |
+| Fixed-workload peak / post memory | Maximum private bytes over the full fixed-performance sample / its final post-workload sample, divided by 1,048,576 |
+| Ordinary 100 / 1,000 / 10,000 rows | Fixed-performance `timings` entry's `elapsed_ms`; the 10k value is the unchanged sum of four additions |
+| Long-path hidden / visible | Each fixed-performance long-path timing's `elapsed_ms`, kept separate |
+| Full 10k model preview | Median `preview_cache_ns` of the three `preview_full`, `unique`, 10,000-row records, divided by 1,000,000 |
+| Shuffled 10k core sort | Median `sort_inclusive_ns` of the three `sort_model`, `shuffled`, 10,000-row records, divided by 1,000,000 |
+| Detached unchanged timestamps | `timestamps_nested_ns` of `ordinary-10000-unchanged`, divided by 1,000,000; keep the two process column orders separate |
+
+Retain readiness query begin/end ticks and actual query gaps. When a predicate
+was false, its uncertainty starts at the beginning of the last false query and
+ends at completion of the first true query. An immediately true predicate has
+no earlier negative observation and cannot establish when readiness first
+became true. A main-window discovery envelope is an observer discovery bound,
+not a fabricated negative probe. UIA observations and native paint completion
+do not establish screen-presentation latency. Exact idle CPU snapshots and
+200 ms sampled resources have different observation boundaries.
+
+For a later comparison, first freeze one primary endpoint, its practical
+benefit margin and a few relevant control regression allowances. After the
+six-run pilot, choose one fixed size of 8, 10 or 12 independent paired AB/BA
+blocks with balanced order, then record the randomized order before candidate
+timings. One planning rule selects the smallest allowed size whose two-sided
+95% Student-t half-width, estimated from `sqrt(2)` times the pilot process
+standard deviation, is at most half the smaller decision margin. If none fits,
+select 12 and disclose the expected precision limitation; this rule cannot
+guarantee power or independent residuals.
+
+Analyze one candidate-minus-baseline difference per pair using the prospectively
+selected estimator. For the paired mean, use Student-t intervals with `n - 1`
+degrees of freedom. Material benefit requires the one-sided 95% upper bound
+below the negative benefit margin; a control's noninferiority requires its
+upper bound below the fixed positive allowance. Equivalence requires a 90%
+two-sided interval wholly inside its prespecified bounds. Drift, dependence or
+insufficient precision means inconclusive. Make one decision at the fixed end;
+do not add samples after seeing a near-win. Retaining production behavior is an
+engineering disposition and does not establish equivalence or a p95/p99 SLA.
