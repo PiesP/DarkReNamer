@@ -1634,7 +1634,7 @@ function Convert-ObserverPopupDiagnostic {
 
 function Convert-ObserverPerformanceSampleRows {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Samples,
-          [switch] $Timeline, [switch] $Picker)
+          [switch] $Timeline, [switch] $Picker, [switch] $ClockIdentity)
     @($Samples | ForEach-Object {
         $row = [ordered]@{ phase=$_.Phase; elapsed_ms=$_.ElapsedMs; cpu_ms=$_.CpuMs;
             private_bytes=$_.PrivateBytes; working_set_bytes=$_.WorkingSetBytes;
@@ -1642,13 +1642,15 @@ function Convert-ObserverPerformanceSampleRows {
             ui_response_ms=$_.UiResponseMs; probe_status=$_.ProbeStatus;
             probe_error_code=$_.ProbeErrorCode;
             resource_collection_ms=$_.ResourceCollectionMs; sample_gap_ms=$_.SampleGapMs }
-        if ($Timeline) {
+        if ($Timeline -or $ClockIdentity) {
             $row['probe_begin_ticks'] = [long]$_.ProbeBeginTicks
             $row['probe_end_ticks'] = [long]$_.ProbeEndTicks
             $row['process_id'] = [long]$_.ProcessId
             $row['process_start_utc_ticks'] = [long]$_.ProcessStartUtcTicks
             $row['main_window_handle'] = [long]$_.BoundMainHandle
             $row['main_thread_id'] = [long]$_.MainThreadId
+        }
+        if ($Timeline) {
             $row['main_class'] = [string]$_.MainClass
             $row['main_enabled'] = [bool]$_.MainEnabled
             $row['main_enabled_before'] = [bool]$_.MainEnabledBefore
@@ -3625,6 +3627,7 @@ function Invoke-ObserverRuntimeBaselineScenario {
         idle_seconds=30; populated_rows=1000; sample_interval_ms=200
         icon_poll_interval_ms=100; maximum_seconds=600
         transform_cases=@('grow','shrink','no-op')
+        sample_clock_contract='qpc-identity-v2'
     }
     $ObservationSink['system_resolution'] = $systemLanguage
     $ObservationSink['executable_sha256'] = $Verified.application.sha256
@@ -3845,7 +3848,7 @@ function Invoke-ObserverRuntimeBaselineScenario {
                     $cell.transforms = $transforms.ToArray()
                     $sampler.SetPhase('post')
                     Start-Sleep -Milliseconds 400
-                    $cell.samples = @(Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()))
+                    $cell.samples = @(Convert-ObserverPerformanceSampleRows -Samples @($sampler.Stop()) -ClockIdentity)
                     $sampler = $null
                     $cell.phase_summary = @(Get-ObserverPerformancePhaseSummary `
                         -Samples $cell.samples -PhaseOrder @('empty-idle','import-1000',

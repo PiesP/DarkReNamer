@@ -749,11 +749,27 @@ $fullTransition = [DarkReNamerPerformanceSample]::new()
 $fullTransition.Phase = 'ordinary-100'
 $fullTransition.MainEnabled = $false
 $fullTransition.OwnedPopupHandle = 0
+$fullTransition.ProbeBeginTicks = 1000000
+$fullTransition.ProbeEndTicks = 1020000
+$fullTransition.ProcessId = 42
+$fullTransition.ProcessStartUtcTicks = 638965440000000000
+$fullTransition.BoundMainHandle = 1001
+$fullTransition.MainThreadId = 7
 $fullRows = @(Convert-ObserverPerformanceSampleRows -Samples @($fullTransition) -Timeline)
 Assert-Equal $fullRows.Count 1 'Full sampler transition row count'
 Assert-Equal $fullRows[0].owned_popup_handle 0 'Full sampler disabled/no-active-popup endpoint'
 if ($fullRows[0].Contains('popup_before') -or $fullRows[0].Contains('popup_after')) {
     throw 'Full sampler endpoint acquired focused raw-popup fields.'
+}
+$clockRows = @(Convert-ObserverPerformanceSampleRows -Samples @($fullTransition) -ClockIdentity)
+Assert-Equal $clockRows.Count 1 'Runtime sampler clock identity row count'
+foreach ($name in @('probe_begin_ticks','probe_end_ticks','process_id',
+        'process_start_utc_ticks','main_window_handle','main_thread_id')) {
+    Assert-Equal $clockRows[0][$name] $fullRows[0][$name] "Runtime sampler $name matches the existing timeline"
+}
+if ($clockRows[0].Contains('main_class') -or $clockRows[0].Contains('owned_popup_handle') -or
+    $clockRows[0].Contains('popup_before') -or $clockRows[0].Contains('popup_after')) {
+    throw 'Runtime sampler clock identity acquired popup timeline fields.'
 }
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($true, 0)) 'success' 'Successful probe classification'
 Assert-Equal ([DarkReNamerPerformanceSampler]::ClassifyProbe($false, 1460)) 'timeout' 'Identified timeout classification'

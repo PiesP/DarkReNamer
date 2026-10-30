@@ -84,12 +84,13 @@ PICKER_RUN_ID = "picker-identity-observation-v1-1366x768-96-text100"
 CUSTOM_MODE = "custom-input-identity-observation"
 CUSTOM_RUN_ID = "custom-input-identity-observation-v1-1366x768-96-text100"
 RUNTIME_BASELINE_MODE = "runtime-baseline"
-RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v1-1366x768-96-text100"
+RUNTIME_BASELINE_RUN_ID = "runtime-baseline-v2-1366x768-96-text100"
 RUNTIME_BASELINE_PLAN = {
     "startup_cells": ["fresh-system", "saved-system", "saved-english"],
     "idle_seconds": 30, "populated_rows": 1000, "sample_interval_ms": 200,
     "icon_poll_interval_ms": 100, "maximum_seconds": 600,
     "transform_cases": ["grow", "shrink", "no-op"],
+    "sample_clock_contract": "qpc-identity-v2",
 }
 PICKER_PLAN = {
     "ordinary_rows": [100], "idle_ms": 1000, "picker_settle_ms": 350,

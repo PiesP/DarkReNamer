@@ -145,6 +145,21 @@ function Write-DrControllerExclusiveJson {
     [IO.File]::Move($temporary,$Path)
 }
 
+function Assert-DrControllerExclusiveJsonPublished {
+    param([Parameter(Mandatory)][string] $Path,[Parameter(Mandatory)][object] $Value,
+        [Parameter(Mandatory)][int] $MaximumBytes)
+    $expected = [Text.UTF8Encoding]::new($false,$true).GetBytes(
+        ($Value | ConvertTo-Json -Depth 24 -Compress) + "`n")
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -ne $expected.Length -or $item.Length -gt $MaximumBytes -or
+        -not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals(
+            [IO.File]::ReadAllBytes($Path), $expected)) {
+        throw 'Exclusive evidence JSON publication differs from its frozen bytes.'
+    }
+}
+
 function Get-DrControllerPreservedFiles {
     param([Parameter(Mandatory)][string] $Root)
     $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
@@ -322,7 +337,7 @@ function Assert-DrControllerRuntimeBaselineProcesses {
     $ids = @('fresh-system','saved-system','saved-english')
     $expectedPlan = [ordered]@{ startup_cells=$ids; idle_seconds=30; populated_rows=1000;
         sample_interval_ms=200; icon_poll_interval_ms=100; maximum_seconds=600;
-        transform_cases=@('grow','shrink','no-op') }
+        transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' }
     if (($InputManifest.request.runtime_baseline_plan | ConvertTo-Json -Depth 5 -Compress) -cne
         ($expectedPlan | ConvertTo-Json -Depth 5 -Compress) -or
         $InputManifest.request.appearance -cne 'light' -or
@@ -335,7 +350,7 @@ function Assert-DrControllerRuntimeBaselineProcesses {
         $InputManifest.prepared_bundle.bundle_manifest_sha256 -cne $InputManifest.bundle_manifest.sha256 -or
         $InputManifest.prepared_bundle.application_sha256 -cne $InputManifest.artifacts.application.sha256 -or
         $Result.status -cne 'review_required' -or $Result.assertions.overall -cne 'passed' -or
-        $Result.assertions.scope -cne 'runtime-baseline-production-v1' -or
+        $Result.assertions.scope -cne 'runtime-baseline-production-v2' -or
         $Observations.scenario.mode -cne 'runtime-baseline' -or
         $Observations.scenario.executable_sha256 -cne $InputManifest.artifacts.application.sha256 -or
         ($Result.assertions.scenario | ConvertTo-Json -Depth 24 -Compress) -cne
@@ -495,7 +510,7 @@ function New-DrControllerOwnedPerformancePredelete {
     $runId = [string]$input.run_id
     $pickerRun = $runId -ceq 'picker-identity-observation-v1-1366x768-96-text100'
     $customRun = $runId -ceq 'custom-input-identity-observation-v1-1366x768-96-text100'
-    $runtimeRun = $runId -ceq 'runtime-baseline-v1-1366x768-96-text100'
+    $runtimeRun = $runId -ceq 'runtime-baseline-v2-1366x768-96-text100'
     $performanceRun = $runId -cmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$'
     $columnOrder = if ($performanceRun) { $Matches[1] } else { $null }
     if (-not $pickerRun -and -not $customRun -and -not $performanceRun -and -not $runtimeRun) {
@@ -746,7 +761,7 @@ function Invoke-DrControllerOwnedCleanupAfterFailure {
                     ($predelete.run_id -cnotmatch '^performance-sample-v2-owned-r3-1366x768-96-text100-(hidden-visible|visible-hidden)$' -and
                      $predelete.run_id -cne 'picker-identity-observation-v1-1366x768-96-text100' -and
                      $predelete.run_id -cne 'custom-input-identity-observation-v1-1366x768-96-text100' -and
-                     $predelete.run_id -cne 'runtime-baseline-v1-1366x768-96-text100') -or
+                     $predelete.run_id -cne 'runtime-baseline-v2-1366x768-96-text100') -or
                     $predelete.vm_id -cne $actualVmId -or
                     $predelete.nonce -cne $expectedNonce -or
                     $predelete.desktop_lease_id -cne $expectedLeaseId -or
@@ -5241,6 +5256,7 @@ public static class DrVmCommandLineNative {
         }
         $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
         [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
+        $rootCreatedUtc = (Get-Item -LiteralPath $path -Force -ErrorAction Stop).CreationTimeUtc.ToString('o')
         $global:DrVmOwnedRootRecords = @{
             guest = Get-DrVmOwnedRootRecord -Path $path
         }
@@ -5248,6 +5264,7 @@ public static class DrVmCommandLineNative {
             run_name = $name
             guest_root = $path
             trusted_task_root = Join-Path $base ($name + '-trusted')
+            root_created_utc = $rootCreatedUtc
             pre_name_snapshot = if ($useV2) { $preName } else { $null }
             protected_anchor = if ($useV2) {
                 Get-DrVmProtectedAnchorEvidence -Context $global:DrVmProtectedAnchorContext
@@ -5517,7 +5534,8 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
         }
         Copy-Item -LiteralPath (Join-Path $BundleRoot 'windows-vm-acceptance.ps1') -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'windows-vm-acceptance.ps1') -ToSession $session
         Copy-Item -LiteralPath $AcceptanceManifest -Destination (Join-GuestWindowsPath -Root $guestRoot -Leaf 'input-manifest.json') -ToSession $session
-        # The remote call can register and start the task before returning a record.
+        # The remote call can register and start the task before returning.
+        # Retain the uncertain-start cleanup path for either outcome.
         $candidateTaskMayHaveStarted = $true
         $acceptanceEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$observer.sha256,$AcceptanceMode,$AcceptanceAppearance,$AcceptanceTextScalePercent,([bool]$AcceptanceHighContrast),([bool]$AcceptanceClipboard),([bool]$AcceptanceCaptureNativeMenu),([bool]$AcceptanceCaptureAdvancedAppearance),$trustedBundleRecords,$inputManifestSha256,$ownedV2,$v2Engine -ScriptBlock {
             param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$observerHash,$mode,$appearance,$textScale,$highContrast,$clipboard,$captureNativeMenu,$captureAdvancedAppearance,$bundleRecords,$inputManifestHash,$v2,$preflightEngine)
@@ -5569,9 +5587,44 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 -TrustedResultLeaf 'acceptance-result.json' `
                 -ExecutionTimeLimitSeconds ($suiteTimeout + 60)
             $actualAction = if ($v2) { $registeredTask.Definition.Actions.Item(1) } else { $null }
+            $actualPrincipalSid = if ($v2) {
+                $principal = [string]$registeredTask.Definition.Principal.UserId
+                if ($principal -cmatch '^S-1-\d+(?:-\d+)+$') {
+                    [Security.Principal.SecurityIdentifier]::new($principal).Value
+                } else {
+                    [Security.Principal.NTAccount]::new($principal).Translate(
+                        [Security.Principal.SecurityIdentifier]).Value
+                }
+            } else { $sid }
             $registered = Get-ScheduledTaskInfo -TaskName $name
             $registeredTicks = [long]$registered.LastRunTime.Ticks
-            Start-ScheduledTask -TaskName $name
+            $trustedApplicationPath = $null
+            $trustedApplicationSha256 = $null
+            if ($v2 -and $mode -ceq 'runtime-baseline') {
+                $arguments = [string[]](Get-DrVmCommandLineArguments -CommandLine (
+                    'task.exe ' + [string]$actualAction.Arguments))
+                $bundlePositions = @(for ($index = 0; $index -lt $arguments.Count - 1; $index++) {
+                    if ($arguments[$index] -ceq '-BundleRoot') { $index }
+                })
+                $application = @($bundleRecords | Where-Object { $_.file -ceq 'DarkReNamer.exe' })
+                $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+                $trustedBundle = Join-Path $trustedRoot 'bundle'
+                if ($bundlePositions.Count -ne 1 -or $application.Count -ne 1 -or
+                    -not [string]::Equals([IO.Path]::GetFullPath($arguments[$bundlePositions[0] + 1]),
+                        [IO.Path]::GetFullPath($trustedBundle), [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Registered runtime task does not use its verified trusted bundle.'
+                }
+                $trustedApplicationPath = Join-Path $trustedBundle 'DarkReNamer.exe'
+                $trustedApplication = Get-Item -LiteralPath $trustedApplicationPath -Force -ErrorAction Stop
+                $trustedApplicationSha256 = (Get-FileHash -LiteralPath $trustedApplicationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($trustedApplication.PSIsContainer -or
+                    ($trustedApplication.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $trustedApplication.Length -ne [long]$application[0].bytes -or
+                    $trustedApplicationSha256 -cne [string]$application[0].sha256) {
+                    throw 'Registered runtime executable differs from the verified trusted copy.'
+                }
+            }
+            Start-ScheduledTask -TaskName $name -ErrorAction Stop
             [pscustomobject]@{
                 executable = 'pwsh.exe'
                 version = [string]$engine.version
@@ -5580,7 +5633,58 @@ is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
                 registered_last_run_time_ticks = $registeredTicks
                 action_executable = if ($v2) { [string]$actualAction.Path } else { $powerShell }
                 action_arguments = if ($v2) { [string]$actualAction.Arguments } else { $observerArguments }
+                action_working_directory = if ($v2) { [string]$actualAction.WorkingDirectory } else { $root }
+                task_principal_sid = $actualPrincipalSid
+                trusted_application_path = $trustedApplicationPath
+                trusted_application_sha256 = $trustedApplicationSha256
             }
+        }
+        if ($ownedV2 -and $AcceptanceMode -ceq 'runtime-baseline') {
+            $trustedApplicationPath = Join-GuestWindowsPath -Root (
+                Join-GuestWindowsPath -Root $trustedTaskRoot -Leaf 'bundle') -Leaf 'DarkReNamer.exe'
+            if ($acceptanceInput.run_id -cne 'runtime-baseline-v2-1366x768-96-text100' -or
+                $acceptanceInput.source_sha -cne $expectedAcceptanceSourceSha -or
+                $acceptanceInput.prepared_bundle.application_sha256 -cne $manifest.application.sha256 -or
+                $manifest.application.file -cne 'DarkReNamer.exe' -or
+                $acceptanceEngine.trusted_application_path -ine $trustedApplicationPath -or
+                $acceptanceEngine.trusted_application_sha256 -cne $manifest.application.sha256 -or
+                $acceptanceEngine.action_working_directory -ine $trustedTaskRoot -or
+                $acceptanceEngine.task_principal_sid -cne $desktop.sid -or
+                $workspaceRoots.protected_anchor.run_name -cne $taskName -or
+                $workspaceRoots.protected_anchor.vm_id -cne $transport.vm_id -or
+                $workspaceRoots.protected_anchor.source_sha -cne $anchorSourceSha -or
+                $workspaceRoots.protected_anchor.bundle_sha256 -cne $anchorBundleSha256 -or
+                $workspaceRoots.protected_anchor.anchor_nonce -cnotmatch '^[0-9a-f]{32}$' -or
+                $workspaceRoots.root_created_utc -isnot [string]) {
+                throw 'Runtime baseline early host identity differs from its registered owned task.'
+            }
+            $earlyReceipt = [ordered]@{
+                schema_version=1; kind='runtime_baseline_early_host_identity'
+                run_id=[string]$acceptanceInput.run_id; run_name=$taskName
+                host_output_root=$AcceptanceOutputRoot
+                input_manifest_sha256=$inputManifestSha256
+                source_sha=[string]$acceptanceInput.source_sha
+                tooling_source_sha=$anchorSourceSha
+                bundle_manifest_sha256=$anchorBundleSha256
+                application_sha256=[string]$manifest.application.sha256
+                vm_id=([guid]$transport.vm_id).ToString('D').ToLowerInvariant()
+                runner_sid=[string]$desktop.sid; runner_session_id=[int]$desktop.session_id
+                guest_root=$guestRoot; trusted_task_root=$trustedTaskRoot
+                trusted_application_path=$trustedApplicationPath
+                action_executable=[string]$acceptanceEngine.action_executable
+                action_arguments_sha256=Get-LowerTextSha256 ([string]$acceptanceEngine.action_arguments)
+                action_working_directory=[string]$acceptanceEngine.action_working_directory
+                task_principal_sid=[string]$acceptanceEngine.task_principal_sid
+                desktop_lease_id=[string]$desktopBinding.lease_id
+                desktop_nonce=[string]$desktopBinding.nonce
+                anchor_nonce=[string]$workspaceRoots.protected_anchor.anchor_nonce
+                root_created_utc=[string]$workspaceRoots.root_created_utc
+            }
+            $transport['runtime_early_desktop_nonce'] = [string]$desktopBinding.nonce
+            $earlyReceiptPath = Join-Path $AcceptanceOutputRoot 'runtime-baseline-early-host.json'
+            Write-DrControllerExclusiveJson -Path $earlyReceiptPath -Value $earlyReceipt -MaximumBytes 8192
+            Assert-DrControllerExclusiveJsonPublished -Path $earlyReceiptPath `
+                -Value $earlyReceipt -MaximumBytes 8192
         }
         $transport.acceptance_engine = [ordered]@{
             executable = [string]$acceptanceEngine.executable

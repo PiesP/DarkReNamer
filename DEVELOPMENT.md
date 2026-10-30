@@ -1641,7 +1641,7 @@ python3 -I scripts/run-gui-regression.py \
   --acceptance-profile-id vm-automated-v2-owned-resources
 ```
 
-The fixed `runtime-baseline-v1-1366x768-96-text100` run requires the prepared
+The fixed `runtime-baseline-v2-1366x768-96-text100` run requires the prepared
 1366×768, 96-DPI, text-100, light managed desktop and a System language that
 resolves to Korean. It starts three sequential fresh product processes with
 separate isolated `LOCALAPPDATA` roots: absent preference with System selected,
@@ -1649,6 +1649,16 @@ valid saved System, and valid saved English. Every cell records the process
 creation bracket, bound main window, empty list, enabled path-list import
 command, exact preference record hash, localized menu radio state, VM region,
 normal close, and owned process Job cleanup.
+For this run, the controller writes `runtime-baseline-early-host.json` into the
+protected host output immediately after the registered observer task starts. The receipt
+binds the generated run, managed desktop, source and manifest hashes to the
+verified executable under the trusted task root's `bundle` directory. The
+guest workspace's staged bundle is not the task's executable path. The host
+reads back the exclusive receipt bytes before collecting results. A collector
+must separately bind its captured PID, process start ticks, loaded image path,
+and image hash to the first canonical product lifecycle; a late receipt or
+different process is incomplete evidence. A failed publication retains the
+existing uncertain-start cleanup path.
 
 Startup retains raw QPC frequency and launch-request, process-creation begin/end,
 exact main-window binding, and command-ready ticks. Main-window binding is the
@@ -1683,7 +1693,10 @@ icon generation; 30 seconds populated idle with the same settled generation;
 then grow, shrink, and no-op manual-name proposals with reset verification and
 unchanged fixture bytes. The existing 200 ms sampler retains raw CPU time,
 private bytes, working set, thread, handle and GDI counts, responsiveness probes,
-resource-query duration and sample gaps. Summaries are derived from those raw
+resource-query duration and sample gaps. Version 2 also retains each probe's
+absolute QPC begin/end ticks and bound PID, process start, main HWND and thread
+identity, using the startup clock's QPC frequency. The verifier checks interval
+order, duration and identity across samples. Summaries are derived from those raw
 samples. The scenario has a 600-second ceiling and one original populated PNG
 within the existing 32 MiB evidence budget.
 

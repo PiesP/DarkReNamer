@@ -675,6 +675,56 @@ $script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
 $testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    # The runtime observer publishes its registered task identity as soon as
+    # the original remote registration and start call returns.
+    $receiptDefinitions = @($controllerAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -in @('Write-DrControllerExclusiveJson',
+                'Assert-DrControllerExclusiveJsonPublished')
+    }, $true))
+    if ($receiptDefinitions.Count -ne 2) {
+        throw 'Runtime early host publication functions are ambiguous.'
+    }
+    foreach ($definition in $receiptDefinitions) {
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $receiptRoot = Join-Path $temporaryRoot 'runtime-early-host'
+    $receiptOutput = Join-Path $receiptRoot 'output'
+    [void](New-Item -ItemType Directory -Path $receiptOutput -Force)
+    $receiptPath = Join-Path $receiptOutput 'runtime-baseline-early-host.json'
+    $receipt = [ordered]@{ schema_version=1; run_name='DarkReNamerTests-' + ('a' * 32) }
+    Write-DrControllerExclusiveJson -Path $receiptPath -Value $receipt -MaximumBytes 8192
+    Assert-DrControllerExclusiveJsonPublished -Path $receiptPath -Value $receipt -MaximumBytes 8192
+    Assert-Fails {
+        Write-DrControllerExclusiveJson -Path $receiptPath -Value $receipt -MaximumBytes 8192
+    } 'already exists'
+    [IO.File]::AppendAllText($receiptPath, 'tampered')
+    Assert-Fails {
+        Assert-DrControllerExclusiveJsonPublished -Path $receiptPath -Value $receipt -MaximumBytes 8192
+    } 'publication differs'
+    $runtimeFlow = @($controllerAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.Text.Contains("`$AcceptanceMode -ceq 'runtime-baseline'") -and
+            $node.Extent.Text.Contains('runtime-baseline-early-host.json')
+    }, $true) | Sort-Object { $_.Extent.Text.Length } | Select-Object -First 1)
+    if ($runtimeFlow.Count -ne 1) { throw 'Runtime baseline deferred start is ambiguous.' }
+    $flowText = $runtimeFlow[0].Extent.Text
+    $writeAt = $flowText.IndexOf('Write-DrControllerExclusiveJson -Path $earlyReceiptPath')
+    $readAt = $flowText.IndexOf('Assert-DrControllerExclusiveJsonPublished -Path $earlyReceiptPath')
+    $registerAt = $controllerAst.Extent.Text.IndexOf('$acceptanceEngine = Invoke-Command -Session $session')
+    $startAt = $controllerAst.Extent.Text.IndexOf('Start-ScheduledTask -TaskName $name', $registerAt)
+    $uncertainAt = $controllerAst.Extent.Text.LastIndexOf('$candidateTaskMayHaveStarted = $true', $registerAt)
+    $publishAt = $controllerAst.Extent.Text.IndexOf('Write-DrControllerExclusiveJson -Path $earlyReceiptPath')
+    if ($registerAt -lt 0 -or $uncertainAt -lt 0 -or $uncertainAt -ge $registerAt -or
+        $startAt -le $registerAt -or $publishAt -le $startAt -or
+        $writeAt -lt 0 -or $readAt -le $writeAt -or
+        $flowText.Contains('Start-ScheduledTask') -or
+        -not $controllerAst.Extent.Text.Contains(
+            'Start-ScheduledTask -TaskName $name -ErrorAction Stop') -or
+        -not $controllerAst.Extent.Text.Contains(
+            'Registered runtime executable differs from the verified trusted copy.')) {
+        throw 'Runtime baseline receipt no longer follows the original owned start.'
+    }
     $acceptanceSource = Get-DrTestCombinedPowerShellSource -Kind ui
     $controllerText = Get-DrTestCombinedPowerShellSource -Kind controller
     $runnerSource = Get-DrTestCombinedPowerShellSource -Kind guest
@@ -3463,7 +3513,7 @@ try {
     } 'fixed immutable plan'
     $candidateRuntimeInput = $candidateRegressionInput | ConvertTo-Json -Depth 16 | ConvertFrom-Json
     $candidateRuntimeInput | Add-Member -NotePropertyName run_id `
-        -NotePropertyValue 'runtime-baseline-v1-1366x768-96-text100'
+        -NotePropertyValue 'runtime-baseline-v2-1366x768-96-text100'
     $candidateRuntimeInput | Add-Member -NotePropertyName acceptance_profile_id `
         -NotePropertyValue 'vm-automated-v2-owned-resources'
     $runtimeProfileSha = '11ce058fdbb51614ac519fabe37fa587fde284fcba4e76ea5e423570243c494f'
@@ -3480,7 +3530,7 @@ try {
         -NotePropertyValue ([ordered]@{ startup_cells=@('fresh-system','saved-system','saved-english');
             idle_seconds=30; populated_rows=1000; sample_interval_ms=200;
             icon_poll_interval_ms=100; maximum_seconds=600;
-            transform_cases=@('grow','shrink','no-op') })
+            transform_cases=@('grow','shrink','no-op'); sample_clock_contract='qpc-identity-v2' })
     $savedRuntimeProfile = $script:VmAcceptanceProfileId
     try {
         $script:VmAcceptanceProfileId = 'vm-automated-v2-owned-resources'

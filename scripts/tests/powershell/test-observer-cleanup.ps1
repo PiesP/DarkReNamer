@@ -297,7 +297,7 @@ public static class DarkReNamerVmAcceptanceNative {
         Assert-Fails { New-DrControllerOwnedPerformancePredelete @arguments } `
             'not coherent 100 percent'
         # The runtime mode freezes three normal product lifetimes independently.
-        $runtimeId='runtime-baseline-v1-1366x768-96-text100'
+        $runtimeId='runtime-baseline-v2-1366x768-96-text100'
         $runtimeCells=@(); $runtimeLives=@(); $runtimeJobs=@(); $runtimeDeclared=@()
         foreach ($index in 0..2) {
             $cellId=@('fresh-system','saved-system','saved-english')[$index]
@@ -316,7 +316,8 @@ public static class DarkReNamerVmAcceptanceNative {
         }
         $runtimePlan=[ordered]@{startup_cells=@('fresh-system','saved-system','saved-english');
             idle_seconds=30;populated_rows=1000;sample_interval_ms=200;
-            icon_poll_interval_ms=100;maximum_seconds=600;transform_cases=@('grow','shrink','no-op')}
+            icon_poll_interval_ms=100;maximum_seconds=600;transform_cases=@('grow','shrink','no-op');
+            sample_clock_contract='qpc-identity-v2'}
         $runtimeInput=[ordered]@{run_id=$runtimeId;source_sha=$sourceSha;
             bundle_manifest=@{sha256=$bundleRef.sha256};
             acceptance_profile_id='vm-automated-v2-owned-resources';
@@ -330,7 +331,7 @@ public static class DarkReNamerVmAcceptanceNative {
             schema_version=1;baseline=$text;final=$text;snapshot_equal=$true};
             scenario=@{mode='runtime-baseline';executable_sha256=$appSha;cells=$runtimeCells}}
         $runtimeResult=[ordered]@{source_sha=$sourceSha;application=@{sha256=$appSha};
-            status='review_required';assertions=@{overall='passed';scope='runtime-baseline-production-v1';
+            status='review_required';assertions=@{overall='passed';scope='runtime-baseline-production-v2';
                 scenario=$runtimeObservations.scenario};acceptance_observations=$runtimeObservations;
             process_lifecycles=$runtimeLives;process_job_cleanup=$runtimeJobs}
         $runtimeObserver=@{pid=3003;session_id=7;start_time_utc_ticks='638965440000000003'}
