@@ -181,6 +181,8 @@ impl LanguageFailureRecord {
         failure: &LanguageWriteFailure,
     ) -> Self {
         let error_kind = match failure.error.kind() {
+            // Stable wire IDs for every stable std::io::ErrorKind in Rust 1.99.1.
+            // Keep 1..=8 intact; 255 remains the non-exhaustive fallback.
             io::ErrorKind::NotFound => 1,
             io::ErrorKind::PermissionDenied => 2,
             io::ErrorKind::AlreadyExists => 3,
@@ -189,6 +191,37 @@ impl LanguageFailureRecord {
             io::ErrorKind::WriteZero => 6,
             io::ErrorKind::Interrupted => 7,
             io::ErrorKind::Other => 8,
+            io::ErrorKind::ConnectionRefused => 9,
+            io::ErrorKind::ConnectionReset => 10,
+            io::ErrorKind::HostUnreachable => 11,
+            io::ErrorKind::NetworkUnreachable => 12,
+            io::ErrorKind::ConnectionAborted => 13,
+            io::ErrorKind::NotConnected => 14,
+            io::ErrorKind::AddrInUse => 15,
+            io::ErrorKind::AddrNotAvailable => 16,
+            io::ErrorKind::NetworkDown => 17,
+            io::ErrorKind::BrokenPipe => 18,
+            io::ErrorKind::WouldBlock => 19,
+            io::ErrorKind::NotADirectory => 20,
+            io::ErrorKind::IsADirectory => 21,
+            io::ErrorKind::DirectoryNotEmpty => 22,
+            io::ErrorKind::ReadOnlyFilesystem => 23,
+            io::ErrorKind::StaleNetworkFileHandle => 24,
+            io::ErrorKind::TimedOut => 25,
+            io::ErrorKind::StorageFull => 26,
+            io::ErrorKind::NotSeekable => 27,
+            io::ErrorKind::QuotaExceeded => 28,
+            io::ErrorKind::FileTooLarge => 29,
+            io::ErrorKind::ResourceBusy => 30,
+            io::ErrorKind::ExecutableFileBusy => 31,
+            io::ErrorKind::Deadlock => 32,
+            io::ErrorKind::CrossesDevices => 33,
+            io::ErrorKind::TooManyLinks => 34,
+            io::ErrorKind::InvalidFilename => 35,
+            io::ErrorKind::ArgumentListTooLong => 36,
+            io::ErrorKind::Unsupported => 37,
+            io::ErrorKind::UnexpectedEof => 38,
+            io::ErrorKind::OutOfMemory => 39,
             _ => 255,
         };
         Self {
@@ -1836,6 +1869,75 @@ mod language_tests {
         let record = LanguageFailureRecord::from_error(8, LanguagePreference::English, &failure);
         assert_eq!(record.raw_os_error, None);
         assert_eq!(record.error_kind, 4);
+
+        let failure = LanguageWriteFailure {
+            stage: LanguageWriteStage::ResolveParent,
+            error: io::Error::from_raw_os_error(0),
+        };
+        let record = LanguageFailureRecord::from_error(9, LanguagePreference::English, &failure);
+        assert_eq!(record.raw_os_error, Some(0));
+        assert_eq!(failure.error.raw_os_error(), Some(0));
+    }
+
+    #[test]
+    fn language_error_kind_wire_ids_cover_stable_rust_199_kinds() {
+        use io::ErrorKind as Kind;
+        let kinds = [
+            (Kind::NotFound, 1),
+            (Kind::PermissionDenied, 2),
+            (Kind::AlreadyExists, 3),
+            (Kind::InvalidInput, 4),
+            (Kind::InvalidData, 5),
+            (Kind::WriteZero, 6),
+            (Kind::Interrupted, 7),
+            (Kind::Other, 8),
+            (Kind::ConnectionRefused, 9),
+            (Kind::ConnectionReset, 10),
+            (Kind::HostUnreachable, 11),
+            (Kind::NetworkUnreachable, 12),
+            (Kind::ConnectionAborted, 13),
+            (Kind::NotConnected, 14),
+            (Kind::AddrInUse, 15),
+            (Kind::AddrNotAvailable, 16),
+            (Kind::NetworkDown, 17),
+            (Kind::BrokenPipe, 18),
+            (Kind::WouldBlock, 19),
+            (Kind::NotADirectory, 20),
+            (Kind::IsADirectory, 21),
+            (Kind::DirectoryNotEmpty, 22),
+            (Kind::ReadOnlyFilesystem, 23),
+            (Kind::StaleNetworkFileHandle, 24),
+            (Kind::TimedOut, 25),
+            (Kind::StorageFull, 26),
+            (Kind::NotSeekable, 27),
+            (Kind::QuotaExceeded, 28),
+            (Kind::FileTooLarge, 29),
+            (Kind::ResourceBusy, 30),
+            (Kind::ExecutableFileBusy, 31),
+            (Kind::Deadlock, 32),
+            (Kind::CrossesDevices, 33),
+            (Kind::TooManyLinks, 34),
+            (Kind::InvalidFilename, 35),
+            (Kind::ArgumentListTooLong, 36),
+            (Kind::Unsupported, 37),
+            (Kind::UnexpectedEof, 38),
+            (Kind::OutOfMemory, 39),
+        ];
+        let mut ids = Vec::new();
+        for (kind, expected_id) in kinds {
+            let failure = LanguageWriteFailure {
+                stage: LanguageWriteStage::WriteTemporary,
+                error: io::Error::from(kind),
+            };
+            let record =
+                LanguageFailureRecord::from_error(3, LanguagePreference::Japanese, &failure);
+            assert_eq!(record.error_kind, expected_id, "{kind:?}");
+            assert_eq!(record.raw_os_error, None);
+            assert_eq!(failure.error.kind(), kind);
+            ids.push(record.error_kind);
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=39).collect::<Vec<_>>());
     }
 
     #[test]
