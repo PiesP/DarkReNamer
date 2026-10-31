@@ -5157,5 +5157,85 @@ class GuiApplyCampaignTests(unittest.TestCase):
                         evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
 
 
+class InvocationTimingTests(unittest.TestCase):
+    def receipt(self, h3=112):
+        return {
+            'schema_version': 1, 'h1_ticks': 101, 'h2_ticks': 105,
+            'h3_ticks': h3, 'outcome': 'returned', 'qpc_frequency': 10_000_000,
+            'request_open_ticks': 100,
+            'process_id': 42, 'process_start_utc_ticks': 123456789,
+            'main_window_handle': 9876,
+        }
+
+    def validate(self, receipt):
+        return evidence.validate_gui_import_invocation_timing(
+            receipt, opened=100, accepted=110, observed=120,
+            frequency=10_000_000, pid=42, start=123456789, hwnd=9876)
+
+    def test_invoke_can_return_on_either_side_of_product_acceptance(self):
+        before = self.validate(self.receipt(h3=108))
+        after = self.validate(self.receipt(h3=112))
+        self.assertEqual(before['invoke_return_order'], 'before-or-at-acceptance')
+        self.assertEqual(after['invoke_return_order'], 'after-acceptance')
+        self.assertEqual(before['h0_to_h1_ms'] + before['h1_to_h2_ms'] +
+                         before['h2_to_product_acceptance_ms'], 0.001)
+        self.assertEqual(after['h2_to_h3_ms'], 0.0007)
+
+    def test_missing_failed_foreign_and_mixed_clock_receipts_rejected(self):
+        changes = (
+            lambda r: r.__setitem__('h3_ticks', 0),
+            lambda r: r.__setitem__('outcome', 'threw'),
+            lambda r: r.__setitem__('process_id', 43),
+            lambda r: r.__setitem__('process_start_utc_ticks', 123456790),
+            lambda r: r.__setitem__('main_window_handle', 9877),
+            lambda r: r.__setitem__('qpc_frequency', 9_999_999),
+            lambda r: r.__setitem__('request_open_ticks', 99),
+            lambda r: r.__setitem__('h1_ticks', 106),
+            lambda r: r.__setitem__('h2_ticks', 111),
+            lambda r: r.__setitem__('h3_ticks', 121),
+            lambda r: r.pop('h3_ticks'),
+        )
+        for change in changes:
+            receipt = self.receipt()
+            change(receipt)
+            with self.subTest(receipt=receipt), self.assertRaises(evidence.EvidenceError):
+                self.validate(receipt)
+
+    def test_prechange_source_may_omit_timing_but_unknown_source_may_not(self):
+        repo = Path(__file__).resolve().parents[3]
+        self.assertFalse(evidence.requires_invocation_timing(
+            evidence.INVOCATION_TIMING_LEGACY_TIP, repo))
+        self.assertTrue(evidence.requires_invocation_timing('f' * 40, repo))
+
+    def test_current_gui_apply_requires_every_invocation_receipt(self):
+        scenario, initial, final = GuiApplyEndpointTests.valid('success-1000')
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(
+                scenario, initial, final, require_product_trace=True,
+                require_invocation_timing=True)
+        row = scenario['imports'][0]
+        accepted = row['product_trace']['after']['events']['accepted_import_start']
+        row['invoke_timing'] = {
+            'schema_version': 1, 'h1_ticks': row['open_ticks'],
+            'h2_ticks': row['open_ticks'] + 1, 'h3_ticks': accepted + 1,
+            'outcome': 'returned', 'request_open_ticks': row['open_ticks'],
+            'qpc_frequency': scenario['qpc_frequency'],
+            'process_id': scenario['process_id'],
+            'process_start_utc_ticks': scenario['process_start_utc_ticks'],
+            'main_window_handle': scenario['main_window_handle'],
+        }
+        metrics = evidence.validate_gui_apply_metrics(
+            scenario, initial, final, require_product_trace=True,
+            require_invocation_timing=True)
+        self.assertEqual(len(metrics['import_invocation_timings']), 1)
+        self.assertEqual(metrics['import_invocation_timings'][0]['invoke_return_order'],
+                         'after-acceptance')
+        del row['invoke_timing']['h3_ticks']
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(
+                scenario, initial, final, require_product_trace=True,
+                require_invocation_timing=True)
+
+
 if __name__ == "__main__":
     unittest.main()
