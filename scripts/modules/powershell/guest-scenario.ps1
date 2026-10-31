@@ -1468,7 +1468,7 @@ public static class DarkReNamerLanguageDiagnosticReader {
                 frame[10] != 0 || frame[11] != 0 || frame[12] != 0)) ||
             (frame[14] == 1 && (Pair(frame[7], frame[8]) == 0 || frame[9] > 3 ||
                 frame[10] == 0 || frame[10] > 7 ||
-                !(frame[11] >= 1 && frame[11] <= 8 || frame[11] == 255))) ||
+                !(frame[11] >= 1 && frame[11] <= 39 || frame[11] == 255))) ||
             (frame[17] == 0 && (Pair(frame[3], frame[4]) != 0 ||
                 Pair(frame[5], frame[6]) != 0 || frame[14] != 0 || frame[16] != 0)) ||
             Pair(frame[7], frame[8]) > Pair(frame[3], frame[4]) ||

@@ -73,7 +73,9 @@ Language-save failures retain a bounded first-failure record independently of
 later acknowledgment and writer retirement. The executed generation, requested
 language, operation stage, original error kind and optional native error code
 remain attached to that failure. `windows/preferences.rs` defines the stage
-and error-kind identifiers; a Rust operation boundary does not identify an
+and error-kind identifiers. Stable kind IDs distinguish all known stable
+variants in the pinned Rust API, including directory, storage-full and quota
+failures; 255 remains an explicit unclassified fallback. A Rust operation boundary does not identify an
 underlying syscall. Windows parent sync is a no-op and cannot produce a denied
 Windows syscall record. Latest requested/saved generations remain separate;
 shutdown retires the language writer without submitting a new snapshot.
