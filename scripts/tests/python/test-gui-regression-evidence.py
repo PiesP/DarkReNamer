@@ -23,6 +23,9 @@ from controller_cleanup_fixture import (
 )
 from darkrenamer_tooling.evidence import gui as evidence
 from darkrenamer_tooling.evidence.import_trace import EVENTS as IMPORT_TRACE_EVENTS
+from darkrenamer_tooling.evidence.import_trace import (
+    completion_interval, summarize_four_addition_completion, validate_import_trace,
+)
 from darkrenamer_tooling.vm import gui as vm_gui
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
@@ -4735,6 +4738,70 @@ class GuiApplyEndpointTests(unittest.TestCase):
             mutate(changed)
             with self.assertRaises(evidence.EvidenceError):
                 evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def completion_traces(self):
+        scenario, _, _ = self.valid('success-10000')
+        return [validate_import_trace(row['product_trace'], opened=row['open_ticks'],
+            observed=row['rows_observed_ticks'], command=row['command_ready_ticks'],
+            frequency=scenario['qpc_frequency'], pid=scenario['process_id'],
+            start=scenario['process_start_utc_ticks'], hwnd=scenario['main_window_handle'],
+            expected_generation=index + 1) for index, row in enumerate(scenario['imports'])][1:]
+
+    def test_completion_resolution_radius_is_half_full_width_and_not_total_uncertainty(self):
+        interval = completion_interval(100, 200, 10_000_000)
+        self.assertEqual(interval['lower_ms'], 0.0098)
+        self.assertEqual(interval['upper_ms'], 0.0102)
+        self.assertEqual(interval['radius_ms'], 0.0002)
+        self.assertEqual(interval['full_width_ms'], 0.0004)
+        summary = summarize_four_addition_completion(self.completion_traces())
+        self.assertEqual(summary['aggregate_clock_full_width_ticks'], 16)
+        self.assertEqual(summary['aggregate_clock_full_width_ms'], 0.0016)
+        self.assertAlmostEqual(sum(i['upper_ms'] - i['lower_ms'] for i in summary['additions']),
+                               summary['aggregate_clock_full_width_ms'])
+        self.assertEqual(summary['clock_resolution_component_goal'], 'met')
+        self.assertEqual(summary['full_endpoint_precision_goal'],
+                         'not-evaluated-by-clock-resolution-alone')
+
+    def test_completion_same_tick_bounds_keep_symmetric_radius(self):
+        interval = completion_interval(100, 100, 10_000_000)
+        self.assertEqual(interval['estimate_ms'], 0)
+        self.assertEqual((interval['lower_ms'], interval['upper_ms']), (-0.0002, 0.0002))
+        scenario, initial, final = self.valid('success-1000')
+        events = scenario['imports'][0]['product_trace']['after']['events']
+        events['native_sync_completed'] = events['import_command_ready']
+        evidence.validate_gui_apply_metrics(scenario, initial, final)
+        events['import_command_ready'] = 0
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(scenario, initial, final)
+
+    def test_completion_aggregate_rejects_missing_mixed_or_radius_as_width_records(self):
+        traces = self.completion_traces()
+        mutations = (
+            lambda rows: rows.pop(),
+            lambda rows: rows[1].__setitem__('qpc_frequency', 1),
+            lambda rows: rows[1].__setitem__('process_id', 42),
+            lambda rows: rows[1].__setitem__('generation', rows[0]['generation']),
+            lambda rows: rows[1].__setitem__('source_command_confirmed_ticks', None),
+            lambda rows: rows[1]['product_completion_interval'].__setitem__('full_width_ms', 0.0002),
+            lambda rows: rows[1]['product_completion_interval'].__setitem__('method', 'full-width'),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                changed = deepcopy(traces)
+                mutate(changed)
+                with self.assertRaises(evidence.EvidenceError):
+                    summarize_four_addition_completion(changed)
+
+    def test_completion_goal_applies_to_sum_not_each_addition(self):
+        traces = self.completion_traces()
+        for trace in traces:
+            trace['qpc_frequency'] = 100
+            trace['product_completion_interval'] = completion_interval(
+                trace['opened_ticks'], trace['source_command_confirmed_ticks'], 100)
+        summary = summarize_four_addition_completion(traces)
+        self.assertEqual(summary['aggregate_clock_full_width_ms'], 160)
+        self.assertTrue(all(i['full_width_ms'] < 100 for i in summary['additions']))
+        self.assertEqual(summary['clock_resolution_component_goal'], 'exceeded')
 
     def test_import_trace_legacy_lineage_does_not_trust_missing_or_unrelated_commits(self):
         with tempfile.TemporaryDirectory() as temporary:

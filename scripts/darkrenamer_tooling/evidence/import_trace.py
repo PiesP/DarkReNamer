@@ -94,6 +94,93 @@ def _milliseconds(ticks: int, frequency: int) -> float:
     return ticks * 1000 / frequency
 
 
+def completion_interval(opened: int, confirmed: int, frequency: int) -> dict:
+    """Bound QPC quantization of the executed source-confirmation endpoint.
+
+    Two ticks is a radius, not a full width. These symmetric signed bounds
+    intentionally remain untrimmed at zero, including same-tick observations.
+    They are not bounds on first intrinsic readiness or instrumentation bias.
+    """
+    _integer(opened, 1, MAX_TICK, "completion Open")
+    _integer(confirmed, opened, MAX_TICK, "source command confirmation")
+    _integer(frequency, 1, 10**10, "completion frequency")
+    duration = confirmed - opened
+    return {
+        "endpoint": "open-invocation-to-source-confirmed-native-command-state",
+        "units": "ms",
+        "method": "symmetric-two-qpc-tick-radius-untrimmed",
+        "duration_ticks": duration,
+        "radius_ticks": 2,
+        "full_width_ticks": 4,
+        "estimate_ms": _milliseconds(duration, frequency),
+        "lower_ms": _milliseconds(duration - 2, frequency),
+        "upper_ms": _milliseconds(duration + 2, frequency),
+        "radius_ms": _milliseconds(2, frequency),
+        "full_width_ms": _milliseconds(4, frequency),
+        "scope": "clock-quantization-only-for-instrumented-endpoint",
+        "earliest_intrinsic_readiness": "not-measured",
+        "recording_bias": "not-measured-or-subtracted",
+        "pixel_presentation": "not-measured",
+    }
+
+
+def summarize_four_addition_completion(traces: list[dict]) -> dict:
+    """Summarize four already validated consecutive additions in one process.
+
+    Recompute bounds from integer timestamps; do not trust supplied radii,
+    widths, or derived fields. The clock-only check cannot qualify a cohort.
+    """
+    require(isinstance(traces, list) and len(traces) == 4,
+            "Product completion requires exactly four additions.")
+    identity = None
+    previous = None
+    intervals = []
+    for trace in traces:
+        require(isinstance(trace, dict), "Product completion trace is missing.")
+        binding = tuple(trace.get(key) for key in (
+            "qpc_frequency", "process_id", "process_start_utc_ticks",
+            "main_window_handle", "owner_thread_id"))
+        for key, number in zip(("frequency", "PID", "creation identity", "HWND", "owner"),
+                               binding, strict=True):
+            _integer(number, 1, MAX_TICK, f"completion {key}")
+        require(identity in (None, binding), "Product completion has mixed identities or clocks.")
+        identity = binding
+        for key in ("generation", "session_id", "initial_model_revision", "final_model_revision"):
+            _integer(trace.get(key), 0, MAX_U64, f"completion {key}")
+        require(trace["generation"] > 0 and trace["session_id"] > 0 and
+                trace["final_model_revision"] == trace["initial_model_revision"] + 1,
+                "Product completion has an invalid request or model revision.")
+        if previous is not None:
+            require(previous["generation"] + 1 == trace["generation"] and
+                    previous["session_id"] < trace["session_id"] and
+                    previous["final_model_revision"] == trace["initial_model_revision"] and
+                    previous["source_command_confirmed_ticks"] < trace.get("opened_ticks", 0),
+                    "Product completion additions are stale or discontinuous.")
+        interval = completion_interval(trace.get("opened_ticks"),
+                                       trace.get("source_command_confirmed_ticks"), binding[0])
+        require(trace.get("product_completion_interval") == interval,
+                "Product completion radius, full width, or derived interval differs.")
+        intervals.append(interval)
+        previous = trace
+    frequency = identity[0]
+    width_ticks = sum(interval["full_width_ticks"] for interval in intervals)
+    return {
+        "endpoint": intervals[0]["endpoint"],
+        "units": "ms",
+        "additions": intervals,
+        "estimate_sum_ms": _milliseconds(sum(i["duration_ticks"] for i in intervals), frequency),
+        "aggregate_clock_full_width_ticks": width_ticks,
+        "aggregate_clock_full_width_ms": _milliseconds(width_ticks, frequency),
+        "instrumentation_design_reference_ms": 400,
+        "aggregate_precision_goal_ms": 100,
+        "clock_resolution_component_goal": "met" if width_ticks * 1000 <= 100 * frequency else "exceeded",
+        "full_endpoint_precision_goal": "not-evaluated-by-clock-resolution-alone",
+        "observer_discovery": "separate-not-subtracted",
+        "recording_and_native_query_work": "included-in-instrumented-workload",
+        "cohort_qualification": "not-established-by-this-summary",
+    }
+
+
 def validate_import_trace(value: object, *, opened: int, observed: int,
                           command: int, frequency: int, pid: int, start: int,
                           hwnd: int, expected_generation: int,
@@ -265,6 +352,14 @@ def validate_import_trace(value: object, *, opened: int, observed: int,
             feedback_interval["upper_ticks"] - feedback_interval["lower_ticks"], frequency)
     return {
         "schema_version": 1,
+        "qpc_frequency": frequency,
+        "process_id": pid,
+        "process_start_utc_ticks": start,
+        "main_window_handle": hwnd,
+        "opened_ticks": opened,
+        "source_command_confirmed_ticks": events["import_command_ready"],
+        "product_completion_interval": completion_interval(
+            opened, events["import_command_ready"], frequency),
         "generation": after["generation"],
         "session_id": after["session_id"],
         "owner_thread_id": after["owner_thread_id"],
@@ -279,6 +374,7 @@ def validate_import_trace(value: object, *, opened: int, observed: int,
         "first_functional_feedback_gap": feedback_gap,
         "intervals_ms": intervals,
         "duration_resolution_uncertainty_ms": _milliseconds(2, frequency),
+        "duration_resolution_uncertainty_convention": "radius",
         "observer_query_duration_ms": {
             side: _milliseconds(frame["query_end_ticks"] - frame["query_begin_ticks"], frequency)
             for side, frame in (("before", before), ("after", after))

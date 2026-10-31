@@ -1224,8 +1224,25 @@ repeating the historical nine-case campaign or collecting every platform cell.
 Freeze an initial instrumentation design reference of 400 ms for the four-addition
 workload and an aggregate duration-uncertainty goal of 100 ms. Sum the four
 duration-interval widths, rather than allowing 100 ms per addition. Latched QPC
-boundaries have a two-tick duration-resolution allowance; this characterizes
-clock resolution, not scheduling or instrumentation bias. Retain actual observer
+boundaries use a symmetric two-QPC-tick **radius**, hence a four-tick full
+width. The verifier publishes each estimate's lower/upper bounds, units,
+construction method and exact source endpoint. At 10 MHz each radius is
+0.0002 ms, each full width is 0.0004 ms, and four full widths sum to
+**0.0016 ms**, not 0.0008 ms. Symmetric signed bounds are not trimmed at zero
+for a same-tick estimate. The retained legacy
+`duration_resolution_uncertainty_ms` field denotes the radius; its additive
+convention field makes this explicit. Original raw records are unchanged.
+
+The product-completion endpoint is Open invocation through the timestamp after
+actual native command-state confirmation. It is an instrumented-source
+endpoint, not the earliest intrinsic readiness instant or an uninstrumented
+executable measurement. The aggregate helper recomputes all four full widths
+from bound integer timestamps in one process and rejects missing events,
+mixed clocks/identities, discontinuous requests and inconsistent derived bounds.
+A clock-resolution component meeting 100 ms does not establish the full
+endpoint precision goal or a qualified six-process baseline. Scheduling,
+observer-discovery uncertainty, recording bias and unknown contributions keep
+their own dispositions. Retain actual observer
 query intervals and their discovery uncertainty alongside the product latches.
 The fixed recording work and post-discovery scalar queries are measured workload
 and observer work respectively; neither is assumed free or subtracted from the
