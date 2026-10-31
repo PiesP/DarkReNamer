@@ -5290,6 +5290,244 @@ function Test-DrLanguageFailureDiagnosticContract {
 
 Test-DrLanguageFailureDiagnosticContract
 
+function Test-DrProductionLanguageCycleCleanupDiagnostics {
+    foreach ($case in @(
+        @{ name = 'primary-job-throw'; primary_step = 2; cleanup = 'job-throw'; fault_step = 2 }
+        @{ name = 'primary-job-rejected'; primary_step = 2; cleanup = 'job-rejected'; fault_step = 2 }
+        @{ name = 'primary-job-and-dispose'; primary_step = 2; cleanup = 'job-and-dispose'; fault_step = 2 }
+        @{ name = 'primary-dispose'; primary_step = 2; cleanup = 'dispose'; fault_step = 2 }
+        @{ name = 'primary-fixture'; primary_step = 2; cleanup = 'fixture'; fault_step = 2 }
+        @{ name = 'primary-clean'; primary_step = 1; cleanup = 'none'; fault_step = 0 }
+        @{ name = 'cleanup-only'; primary_step = 0; cleanup = 'dispose'; fault_step = 1 }
+        @{ name = 'dispose-retains-fixture'; primary_step = 0; cleanup = 'dispose'; fault_step = 2 }
+        @{ name = 'success'; primary_step = 0; cleanup = 'none'; fault_step = 0 }
+    )) {
+        $primary = [InvalidOperationException]::new('language-primary-' + ('x' * 1500))
+        $diagnostic = [ordered]@{
+            schema_version = 1
+            stage = 'enter-or-post-enter-exception'
+            target_command = 0x9023
+            diagnostic_before = [ordered]@{
+                revision = 7; requested_generation = 3; saved_generation = 2
+                first_failure = [ordered]@{ file_kind = 'language'; stage = 7; error_kind = 26 }
+            }
+            diagnostic_after = [ordered]@{
+                revision = 8; requested_generation = 4; saved_generation = 2
+                first_failure = [ordered]@{ file_kind = 'language'; stage = 9; error_kind = 26 }
+            }
+            diagnostic_read_error = [ordered]@{
+                exception_type = 'System.InvalidOperationException'; message = 'observer-read-unavailable'
+            }
+        }
+        $primary.Data['DarkReNamerLanguageMenuFailure'] = $diagnostic
+        $state = [pscustomobject]@{
+            case = $case; primary = $primary; diagnostic = $diagnostic
+            preference = 0; started = 0; job_calls = [Collections.Generic.List[object]]::new()
+            dispose_calls = [Collections.Generic.List[int]]::new()
+            remove_calls = [Collections.Generic.List[string]]::new()
+            fixtures = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            cleanup_error = [InvalidOperationException]::new('mock-job-cleanup-error')
+            dispose_error = [InvalidOperationException]::new('mock-dispose-error')
+            fixture_error = [InvalidOperationException]::new('mock-fixture-error')
+        }
+
+        # These local definitions shadow only the external/native dependencies;
+        # the production cycle, cleanup branches, and receipt formatter execute.
+        function Get-ProductionPreferredLanguageTags { 'ko-KR' }
+        function Get-LowerSha256 { param($Path) 'mock-sha' }
+        function Get-LowerTextSha256 { param($Value) 'mock-text-sha' }
+        function Get-ProductionLanguagePendingFileIdentity { param($Path) 'mock-identity' }
+        function Invoke-ProductionBlockedRecoveryCheck { [ordered]@{ status = 'passed' } }
+        function New-PrivateDirectory {
+            param($Parent, $Leaf)
+            $path = Join-Path $Parent $Leaf
+            [void]$state.fixtures.Add($path)
+            $path
+        }
+        function Initialize-ProductionRenameFlowFixture { [ordered]@{ source = 'mock' } }
+        function Start-JobBoundProcess {
+            $state.started++
+            $process = [pscustomobject]@{
+                Id = 7000 + $state.started; ExitCode = 0
+                state = $state; step = $state.started
+            }
+            $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+                param($timeout) $true
+            }
+            $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+                $this.state.dispose_calls.Add([int]$this.step)
+                if ($this.step -eq $this.state.case.fault_step -and
+                    $this.state.case.cleanup -cin @('dispose', 'job-and-dispose')) {
+                    throw $this.state.dispose_error
+                }
+            }
+            [pscustomobject]@{
+                process = $process; job_closed = $false
+                process_start_time_utc_ticks = [string](638975000000000000L + $state.started)
+            }
+        }
+        function Wait-ExactApplicationMainWindow {
+            [ordered]@{ element = [pscustomobject]@{}; handle = [long]42 }
+        }
+        function Read-ProductionLanguagePreference {
+            [ordered]@{ value = [int]$state.preference; sha256 = 'mock-preference' }
+        }
+        function Read-ProductionLanguageMenu {
+            [ordered]@{ checked_command = [int](0x9020 + $state.preference); parent = 'Language' }
+        }
+        function Get-ProductionLanguageRail { [ordered]@{ name = 'mock-rail' } }
+        function Save-WindowScreenshot {
+            param($Window, $Process, $ExpectedSession, $Root, $Leaf, $Label, $ForegroundObservations)
+            $ForegroundObservations.Add([ordered]@{ hwnd = 42 })
+            [ordered]@{ path = $Leaf }
+        }
+        function Set-ProductionCaptureByteCount { param($Capture, $Root) }
+        function Invoke-ProductionRenameFlow {
+            [ordered]@{ status = 'passed'; checkpoints = @() }
+        }
+        function Set-ProductionPendingPrefix { [ordered]@{ prefix = 'mock' } }
+        function Get-FlowCheckpoint { [ordered]@{ phase = 'post_close' } }
+        function Assert-NoJournalResidue { param($LocalAppData) }
+        function Get-ProductionOwnedProcessLifecycle {
+            param($Owned)
+            [ordered]@{ pid = $Owned.process.Id; start_time_utc_ticks = $Owned.process_start_time_utc_ticks }
+        }
+        function Invoke-ProductionLanguageMenuChoice {
+            param($Process, $NextPreference)
+            if ($state.started -eq $state.case.primary_step) { throw $state.primary }
+            $state.preference = switch ($NextPreference) {
+                'en' { 2 }; 'ja' { 3 }; 'ko' { 1 }; 'system' { 0 }
+            }
+            [ordered]@{ target = $NextPreference }
+        }
+        function Close-ExactApplicationMainWindow { }
+        function Complete-AcceptanceOwnedProcessJob {
+            param($Owned, [switch]$StopActive)
+            $state.job_calls.Add([ordered]@{ step = $Owned.process.step; stop_active = [bool]$StopActive })
+            if ($StopActive -and $Owned.process.step -eq $state.case.fault_step) {
+                if ($state.case.cleanup -cin @('job-throw', 'job-and-dispose')) { throw $state.cleanup_error }
+                if ($state.case.cleanup -ceq 'job-rejected') {
+                    return [ordered]@{ status = 'incomplete'; job_empty = $false; job_closed = $false }
+                }
+            }
+            $Owned.job_closed = $true
+            [ordered]@{ status = 'clean'; job_empty = $true; job_closed = $true }
+        }
+        function Test-Path { param($LiteralPath) $state.fixtures.Contains($LiteralPath) }
+        function Assert-OrdinaryDirectoryTree { param($Path) }
+        function Remove-Item {
+            param($LiteralPath, [switch]$Recurse, [switch]$Force)
+            $state.remove_calls.Add([string]$LiteralPath)
+            if ($state.started -eq $state.case.fault_step -and
+                $state.case.cleanup -ceq 'fixture') { throw $state.fixture_error }
+            [void]$state.fixtures.Remove($LiteralPath)
+        }
+        function Invoke-ProductionValidActiveRecoveryCheck { [ordered]@{ status = 'passed' } }
+
+        $row = [ordered]@{ error_detail = $null }
+        $result = $null
+        $caught = $null
+        try {
+            $result = Invoke-ProductionLanguageCycle `
+                -Application ([pscustomobject]@{ file = 'mock.exe'; sha256 = 'mock-sha' }) `
+                -TestBinary ([pscustomobject]@{}) -Root '/mock-bundle' `
+                -CaseRoot '/mock-case' -OutputRoot '/mock-output' -Session 1 -TimeoutSeconds 1
+        }
+        catch {
+            $caught = $_
+            Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
+        }
+        $expectedFailure = $case.name -cne 'success'
+        if ($expectedFailure -eq ($null -eq $caught)) {
+            throw "$($case.name): language cycle failure status changed."
+        }
+        if ($case.primary_step -gt 0) {
+            if (-not [object]::ReferenceEquals($caught.Exception, $primary) -or
+                $row.error_detail.exception_type -cne 'System.InvalidOperationException' -or
+                $row.error_detail.message.Length -ne 1024 -or
+                ($row.error_detail.language_menu_failure | ConvertTo-Json -Depth 8 -Compress) -cne
+                ($diagnostic | ConvertTo-Json -Depth 8 -Compress) -or
+                $row.error_detail.fully_qualified_error_id -notlike 'language-primary-*' -or
+                $row.error_detail.category -cne 'OperationStopped') {
+                throw "$($case.name): primary language error identity or complete diagnostic was lost."
+            }
+        }
+        $expectedBoundary = switch ($case.cleanup) {
+            'job-throw' { 'job_cleanup' }; 'job-rejected' { 'job_cleanup' }
+            'dispose' { 'process_dispose' }; 'fixture' { 'fixture_cleanup' }
+            'job-and-dispose' { 'job_cleanup' }
+            default { $null }
+        }
+        if ($null -ne $expectedBoundary) {
+            $details = @($row.error_detail.language_cycle_cleanup_failures)
+            $expectedCount = if ($case.cleanup -ceq 'job-and-dispose') { 2 } else { 1 }
+            $expectedType = switch ($case.cleanup) {
+                'dispose' { 'System.Management.Automation.MethodInvocationException' }
+                'job-rejected' { 'System.Management.Automation.RuntimeException' }
+                default { 'System.InvalidOperationException' }
+            }
+            if ($details.Count -ne $expectedCount -or $details[0].boundary -cne $expectedBoundary -or
+                $details[0].exception_type -cne $expectedType -or
+                $details[0].fully_qualified_error_id.Length -eq 0 -or
+                $details[0].category.Length -eq 0) {
+                throw "$($case.name): cleanup boundary or error metadata was lost: $($details | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            if ($case.cleanup -ceq 'job-and-dispose' -and
+                ($details[1].boundary -cne 'process_dispose' -or
+                 $details[1].exception_type -cne 'System.Management.Automation.MethodInvocationException' -or
+                 $details[1].fully_qualified_error_id -cne 'ScriptMethodRuntimeException' -or
+                 $details[1].message -notlike '*mock-dispose-error*')) {
+                throw 'The second cleanup failure was lost or reordered.'
+            }
+            $expectedMessage = switch ($case.cleanup) {
+                'job-throw' { 'mock-job-cleanup-error' }
+                'job-and-dispose' { 'mock-job-cleanup-error' }
+                'job-rejected' { 'Language acceptance process job cleanup failed.' }
+                'dispose' { 'mock-dispose-error' }
+                'fixture' { 'mock-fixture-error' }
+            }
+            if ($details[0].message -notlike "*$expectedMessage*") {
+                throw "$($case.name): cleanup error message was lost."
+            }
+        }
+        elseif ($null -ne $caught -and $row.error_detail.Contains('language_cycle_cleanup_failures')) {
+            throw "$($case.name): clean teardown reported a cleanup error."
+        }
+        if ($state.job_calls.Count -ne $state.started -or
+            $state.dispose_calls.Count -ne $state.started) {
+            throw "$($case.name): process job or disposal was repeated or skipped."
+        }
+        for ($index = 0; $index -lt $state.started; $index++) {
+            if ($state.job_calls[$index].step -ne ($index + 1) -or
+                $state.dispose_calls[$index] -ne ($index + 1)) {
+                throw "$($case.name): process job or disposal order changed."
+            }
+        }
+        if ($case.cleanup -cin @('job-throw', 'job-rejected', 'job-and-dispose', 'dispose') -and
+            $case.fault_step -eq 2 -and $state.remove_calls.Count -ne 0 -or
+            $case.cleanup -ceq 'fixture' -and $state.remove_calls.Count -ne 1) {
+            throw "$($case.name): fixture deletion ignored job/disposal authority or retried failure."
+        }
+        if ($case.cleanup -ceq 'fixture' -and
+            -not $state.fixtures.Contains('/mock-case/language-en')) {
+            throw 'Failed authorized fixture cleanup did not retain the evidence root.'
+        }
+        if ($case.cleanup -cin @('job-throw', 'job-rejected', 'job-and-dispose', 'dispose') -and
+            $case.fault_step -eq 2 -and
+            -not $state.fixtures.Contains('/mock-case/language-en')) {
+            throw 'Rejected job or process disposal removed the fixture.'
+        }
+        if ($case.name -ceq 'success' -and
+            ($result.status -cne 'passed' -or $result.selections.Count -ne 5 -or
+             $result.flows.Count -ne 2 -or $state.fixtures.Count -ne 0 -or
+             $state.remove_calls.Count -ne 2)) {
+            throw 'A clean mocked language cycle did not retain the existing success behavior.'
+        }
+    }
+}
+
+Test-DrProductionLanguageCycleCleanupDiagnostics
+
 function Test-DrProductionLanguageJobLedgerBinding {
     $lifecycles = @(
         for ($index = 1; $index -le 33; $index++) {

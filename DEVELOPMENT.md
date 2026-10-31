@@ -93,6 +93,12 @@ file I/O; the ordinary scenario's existing file acknowledgment check is separate
 An operation record can identify a failing persistence step without identifying
 the actor or explaining an earlier failure.
 
+The language cycle retains the original error and its `language_menu_failure`
+through teardown. Its receipt lists later job, process disposal, or fixture
+cleanup errors under `language_cycle_cleanup_failures` with their boundaries and
+error metadata. The message prefix remains bounded to 1024 characters; the
+structured language diagnostic is retained separately.
+
 ### Embedded UI language maintenance
 
 `crates/darknamer-app/src/i18n.rs` owns the supported languages, immutable startup
