@@ -180,12 +180,29 @@ $started = [Threading.ManualResetEvent]::new($false)
 try {
     $owned = New-TestOwnedProcess -Release $release
     $state = Start-OwnedAutomationInvocation -Element ([pscustomobject]@{ started = $started; release = $release }) `
-        -Label 'blocked native-provider analogue' -OwnedProcess $owned -ScriptText @'
+        -Label 'blocked native-provider analogue' -OwnedProcess $owned -CaptureInvokeTiming -ScriptText @'
+$automationInvocationTiming['h2_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
 [void]$automationElement.started.Set()
 [void]$automationElement.release.WaitOne()
+$automationInvocationTiming['h3_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+$automationInvocationTiming['outcome'] = 'returned'
 '@
     if (-not $started.WaitOne(5000)) { throw 'Real runspace did not reach the blocked invocation.' }
-    Assert-Fails { Complete-AutomationControlInvoke -State $state -TimeoutSeconds 0 } 'bounded deadline'
+    Assert-Fails { Get-AutomationControlInvokeTiming -State $state } 'completed captured invocation'
+    if ($state.invoke_timing['h1_ticks'] -le 0 -or
+        $state.invoke_timing['h2_ticks'] -lt $state.invoke_timing['h1_ticks'] -or
+        $state.invoke_timing['h3_ticks'] -ne 0) {
+        throw 'A blocked provider must expose its entry but no return marker.'
+    }
+    try {
+        Complete-AutomationControlInvoke -State $state -TimeoutSeconds 0
+        throw 'Expected the blocked provider to remain incomplete.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*bounded deadline*Invoke timing h1=*h3=0 outcome=not-observed*') {
+            throw
+        }
+    }
     if ($state.powershell_dispose_attempted -or $state.runspace_dispose_attempted) {
         throw 'The blocked provider analogue was disposed before candidate termination.'
     }
@@ -193,6 +210,11 @@ try {
     if ($record.status -cne 'clean' -or $owned.owner.close_calls -ne 1 -or
         -not $state.completed -or (Get-AutomationInvocationLedger).Count -ne 0) {
         throw 'Job closure must release the provider before runspace cleanup.'
+    }
+    $timing = Get-AutomationControlInvokeTiming -State $state
+    if ($timing.outcome -cne 'returned' -or $timing.h1_ticks -le 0 -or
+        $timing.h1_ticks -gt $timing.h2_ticks -or $timing.h2_ticks -gt $timing.h3_ticks) {
+        throw 'Completed provider timing lost its ordered helper markers.'
     }
 }
 finally {
@@ -202,6 +224,42 @@ finally {
     }
     $release.Dispose()
     $started.Dispose()
+}
+
+$failed = Start-OwnedAutomationInvocation -Element 1 -Label 'throwing provider analogue' `
+    -OwnedProcess (New-TestOwnedProcess) -CaptureInvokeTiming -ScriptText @'
+$automationInvocationTiming['h2_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+try { throw 'provider denied' }
+catch {
+    $automationInvocationTiming['h3_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+    $automationInvocationTiming['outcome'] = 'threw'
+    throw
+}
+'@
+try {
+    Complete-AutomationControlInvoke -State $failed -TimeoutSeconds 5
+    throw 'Expected the throwing provider to fail.'
+}
+catch {
+    if ($_.Exception.Message -notlike '*provider denied*Invoke timing h1=*outcome=threw*') {
+        throw
+    }
+}
+$failedTiming = Get-AutomationControlInvokeTiming -State $failed
+if ($failedTiming.outcome -cne 'threw' -or $failedTiming.h2_ticks -le 0 -or
+    $failedTiming.h3_ticks -lt $failedTiming.h2_ticks -or
+    (Get-AutomationInvocationLedger).Count -ne 0) {
+    throw 'Throwing provider timing or exactly-once resource completion was lost.'
+}
+
+$missing = Start-OwnedAutomationInvocation -Element 1 -Label 'missing return analogue' `
+    -OwnedProcess (New-TestOwnedProcess) -CaptureInvokeTiming -ScriptText @'
+$automationInvocationTiming['h2_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+'@
+Complete-AutomationControlInvoke -State $missing -TimeoutSeconds 5
+$missingTiming = Get-AutomationControlInvokeTiming -State $missing
+if ($missingTiming.h3_ticks -ne 0 -or $missingTiming.outcome -cne 'not-observed') {
+    throw 'A missing Invoke return marker must remain explicitly unobserved.'
 }
 
 $moduleRoot = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell'

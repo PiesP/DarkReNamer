@@ -4193,7 +4193,8 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 open_ticks=[long]$import.open_ticks; rows_observed_ticks=[long]$import.row_observed_ticks;
                 dialog_closed_ticks=[long]$import.dialog_closed_ticks;
                 command_ready_ticks=[long]$import.command_ready_ticks;
-                first_feedback=$import.first_feedback; product_trace=$import.product_trace })
+                first_feedback=$import.first_feedback; product_trace=$import.product_trace;
+                invoke_timing=$import.invoke_timing })
         }
         $ObservationSink['imports'] = $imports.ToArray()
         if ($grid.pattern.Current.RowCount -ne $count) { throw 'GUI Apply import row count is incomplete.' }

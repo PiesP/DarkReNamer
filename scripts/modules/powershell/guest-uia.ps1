@@ -423,7 +423,8 @@ function Start-OwnedAutomationInvocation {
         [Parameter(Mandatory)][object] $Element,
         [Parameter(Mandatory)][string] $Label,
         [Parameter(Mandatory)][object] $OwnedProcess,
-        [Parameter(Mandatory)][string] $ScriptText
+        [Parameter(Mandatory)][string] $ScriptText,
+        [switch] $CaptureInvokeTiming
     )
 
     if ($OwnedProcess.job_closed) { throw 'UI Automation cannot start after its process job closes.' }
@@ -440,6 +441,12 @@ function Start-OwnedAutomationInvocation {
         runspace_disposed = $false
         completed = $false
         errors = [Collections.Generic.List[string]]::new()
+        invoke_timing = $(if ($CaptureInvokeTiming) {
+            [Collections.Hashtable]::Synchronized(@{
+                h1_ticks = [long]0; h2_ticks = [long]0; h3_ticks = [long]0;
+                outcome = 'not-observed'
+            })
+        } else { $null })
     }
     (Get-AutomationInvocationLedger).Add($state)
     try {
@@ -448,9 +455,16 @@ function Start-OwnedAutomationInvocation {
         $state.runspace.Open()
         $state.runspace.SessionStateProxy.SetVariable('automationElement', $Element)
         $state.runspace.SessionStateProxy.SetVariable('automationLabel', $Label)
+        if ($CaptureInvokeTiming) {
+            $state.runspace.SessionStateProxy.SetVariable('automationInvocationTiming', $state.invoke_timing)
+        }
         $state.powershell = New-AutomationControlPipeline
         $state.powershell.Runspace = $state.runspace
-        [void]$state.powershell.AddScript($ScriptText)
+        $invocationScript = if ($CaptureInvokeTiming) {
+            '$automationInvocationTiming[''h1_ticks''] = [Diagnostics.Stopwatch]::GetTimestamp()' +
+                [Environment]::NewLine + $ScriptText
+        } else { $ScriptText }
+        [void]$state.powershell.AddScript($invocationScript)
         $state.async_result = $state.powershell.BeginInvoke()
         $state
     }
@@ -467,7 +481,7 @@ function Start-AutomationControlInvoke {
         [Parameter(Mandatory)][object] $OwnedProcess
     )
 
-    Start-OwnedAutomationInvocation -Element $Element -Label $Label -OwnedProcess $OwnedProcess -ScriptText @'
+    Start-OwnedAutomationInvocation -Element $Element -Label $Label -OwnedProcess $OwnedProcess -CaptureInvokeTiming -ScriptText @'
 $invokePattern = $null
 if (-not $automationElement.TryGetCurrentPattern(
     [Windows.Automation.InvokePattern]::Pattern,
@@ -475,8 +489,42 @@ if (-not $automationElement.TryGetCurrentPattern(
 )) {
     throw "$automationLabel does not support UI Automation InvokePattern."
 }
-([Windows.Automation.InvokePattern]$invokePattern).Invoke()
+$automationInvocationTiming['h2_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+try {
+    ([Windows.Automation.InvokePattern]$invokePattern).Invoke()
+    $automationInvocationTiming['h3_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+    $automationInvocationTiming['outcome'] = 'returned'
+}
+catch {
+    $automationInvocationTiming['h3_ticks'] = [Diagnostics.Stopwatch]::GetTimestamp()
+    $automationInvocationTiming['outcome'] = 'threw'
+    throw
+}
 '@
+}
+function Get-AutomationControlInvokeTiming {
+    param([Parameter(Mandatory)][object] $State)
+
+    if ($null -eq $State.invoke_timing -or -not $State.completed) {
+        throw 'UI Automation invoke timing requires a completed captured invocation.'
+    }
+    $markers = $State.invoke_timing
+    [ordered]@{
+        schema_version = 1
+        h1_ticks = [long]$markers['h1_ticks']
+        h2_ticks = [long]$markers['h2_ticks']
+        h3_ticks = [long]$markers['h3_ticks']
+        outcome = [string]$markers['outcome']
+    }
+}
+function Get-AutomationControlInvokeTimingNote {
+    param([Parameter(Mandatory)][object] $State)
+
+    if ($null -eq $State.invoke_timing) { return '' }
+    $markers = $State.invoke_timing
+    return (' Invoke timing h1={0} h2={1} h3={2} outcome={3}.' -f
+        [long]$markers['h1_ticks'], [long]$markers['h2_ticks'],
+        [long]$markers['h3_ticks'], [string]$markers['outcome'])
 }
 function Receive-AutomationControlInvocation {
     param(
@@ -515,9 +563,11 @@ function Complete-AutomationControlInvoke {
 
     $waitMilliseconds = [Math]::Min(30, $TimeoutSeconds) * 1000
     if (-not (Receive-AutomationControlInvocation -State $State -WaitMilliseconds $waitMilliseconds)) {
-        throw "$($State.label) UI Automation invocation did not finish before the bounded deadline. $($State.errors -join '; ')"
+        throw "$($State.label) UI Automation invocation did not finish before the bounded deadline. $($State.errors -join '; ')$(Get-AutomationControlInvokeTimingNote -State $State)"
     }
-    if ($State.errors.Count -gt 0) { throw ($State.errors -join '; ') }
+    if ($State.errors.Count -gt 0) {
+        throw (($State.errors -join '; ') + (Get-AutomationControlInvokeTimingNote -State $State))
+    }
 }
 function Complete-OwnedAutomationControlInvocations {
     param(
