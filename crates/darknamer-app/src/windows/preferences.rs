@@ -149,19 +149,150 @@ fn decode_language(bytes: &[u8]) -> io::Result<LanguagePreference> {
 }
 
 pub(crate) fn save_language(path: &Path, preference: LanguagePreference) -> io::Result<()> {
-    persist_encoded(
-        path,
-        &encode_language(preference),
+    save_language_staged(path, preference).map_err(|failure| failure.error)
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LanguageWriteStage {
+    ResolveParent = 1,
+    PrepareParent = 2,
+    CreateTemporary = 3,
+    WriteTemporary = 4,
+    FlushTemporary = 5,
+    SyncTemporary = 6,
+    ReplaceDestination = 7,
+    SyncParent = 8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LanguageFailureRecord {
+    pub(crate) generation: u64,
+    pub(crate) preference: LanguagePreference,
+    pub(crate) stage: LanguageWriteStage,
+    pub(crate) error_kind: u32,
+    pub(crate) raw_os_error: Option<i32>,
+}
+
+impl LanguageFailureRecord {
+    fn from_error(
+        generation: u64,
+        preference: LanguagePreference,
+        failure: &LanguageWriteFailure,
+    ) -> Self {
+        let error_kind = match failure.error.kind() {
+            io::ErrorKind::NotFound => 1,
+            io::ErrorKind::PermissionDenied => 2,
+            io::ErrorKind::AlreadyExists => 3,
+            io::ErrorKind::InvalidInput => 4,
+            io::ErrorKind::InvalidData => 5,
+            io::ErrorKind::WriteZero => 6,
+            io::ErrorKind::Interrupted => 7,
+            io::ErrorKind::Other => 8,
+            _ => 255,
+        };
+        Self {
+            generation,
+            preference,
+            stage: failure.stage,
+            error_kind,
+            raw_os_error: failure.error.raw_os_error(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LanguageDiagnosticState {
+    pub(crate) revision: u64,
+    pub(crate) requested_generation: Option<u64>,
+    pub(crate) saved_generation: Option<u64>,
+    pub(crate) submission_failed: bool,
+    pub(crate) first_failure: Option<LanguageFailureRecord>,
+}
+
+impl LanguageDiagnosticState {
+    pub(crate) fn note_requested(&mut self, result: &io::Result<u64>) {
+        match result {
+            Ok(generation) => {
+                self.requested_generation = Some(*generation);
+                self.submission_failed = false;
+            }
+            Err(_) => self.submission_failed = true,
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+    pub(crate) fn note_saved(&mut self, generation: u64) {
+        self.saved_generation = Some(
+            self.saved_generation
+                .map_or(generation, |saved| saved.max(generation)),
+        );
+        self.revision = self.revision.saturating_add(1);
+    }
+    fn note_failure(&mut self, failure: LanguageFailureRecord) {
+        if self.first_failure.is_none() {
+            self.first_failure = Some(failure);
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+}
+
+struct LanguageWriteFailure {
+    stage: LanguageWriteStage,
+    error: io::Error,
+}
+
+impl LanguageWriteFailure {
+    fn at(stage: LanguageWriteStage) -> impl FnOnce(io::Error) -> Self {
+        move |error| Self { stage, error }
+    }
+}
+
+fn save_language_staged(
+    path: &Path,
+    preference: LanguagePreference,
+) -> Result<(), LanguageWriteFailure> {
+    use LanguageWriteStage as Stage;
+    let parent = path.parent().ok_or_else(|| LanguageWriteFailure {
+        stage: Stage::ResolveParent,
+        error: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "language preference path has no parent",
+        ),
+    })?;
+    fs::create_dir_all(parent).map_err(LanguageWriteFailure::at(Stage::PrepareParent))?;
+    let (temporary_path, mut temporary) = create_process_temp(
+        parent,
         LANGUAGE_SETTINGS_LEAF,
-        "language preference path has no parent",
         "could not allocate a unique language preference temporary file",
     )
+    .map_err(LanguageWriteFailure::at(Stage::CreateTemporary))?;
+    let mut cleanup = OwnedTemp::new(temporary_path.clone());
+    let bytes = encode_language(preference);
+    let write_result = (|| {
+        temporary
+            .write_all(&bytes)
+            .map_err(LanguageWriteFailure::at(Stage::WriteTemporary))?;
+        temporary
+            .flush()
+            .map_err(LanguageWriteFailure::at(Stage::FlushTemporary))?;
+        temporary
+            .sync_all()
+            .map_err(LanguageWriteFailure::at(Stage::SyncTemporary))
+    })();
+    drop(temporary);
+    write_result?;
+    atomic_replace(&temporary_path, path)
+        .map_err(LanguageWriteFailure::at(Stage::ReplaceDestination))?;
+    cleanup.disarm();
+    sync_parent(parent).map_err(LanguageWriteFailure::at(Stage::SyncParent))?;
+    Ok(())
 }
 
 /// Language has an independent queue and authority; closing never creates a new request.
 pub(crate) struct LanguagePreferencesWriter {
     saved: Receiver<LanguagePreference>,
     writer: CoalescingWriter<LanguagePreference>,
+    diagnostic: Arc<Mutex<LanguageDiagnosticState>>,
 }
 
 impl LanguagePreferencesWriter {
@@ -173,19 +304,33 @@ impl LanguagePreferencesWriter {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let (sender, saved) = channel();
+        let diagnostic = Arc::new(Mutex::new(LanguageDiagnosticState::default()));
+        let worker_diagnostic = Arc::clone(&diagnostic);
         Ok(Self {
             saved,
             writer: CoalescingWriter::spawn(
                 path,
                 "darkrenamer-language",
                 wake,
-                move |path, preference| {
-                    save_language(path, preference)?;
+                move |path, generation, preference| {
+                    if let Err(failure) = save_language_staged(path, preference) {
+                        worker_diagnostic
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .note_failure(LanguageFailureRecord::from_error(
+                                generation, preference, &failure,
+                            ));
+                        return Err(failure.error);
+                    }
                     let _sent = sender.send(preference);
                     Ok(())
                 },
             )?,
+            diagnostic,
         })
+    }
+    pub(crate) fn diagnostic(&self) -> Arc<Mutex<LanguageDiagnosticState>> {
+        Arc::clone(&self.diagnostic)
     }
     pub(crate) fn submit(&mut self, preference: LanguagePreference) -> io::Result<u64> {
         self.writer.submit(
@@ -252,7 +397,7 @@ impl<T: Send + 'static> CoalescingWriter<T> {
         path: PathBuf,
         thread_name: &'static str,
         wake: impl Fn() + Send + Sync + 'static,
-        save: impl Fn(&Path, T) -> io::Result<()> + Send + Sync + 'static,
+        save: impl Fn(&Path, u64, T) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let queue = Arc::new((Mutex::new(PreferenceQueue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
@@ -279,7 +424,7 @@ impl<T: Send + 'static> CoalescingWriter<T> {
                                 None => break,
                             }
                         };
-                        let event = match save(&path, request.snapshot) {
+                        let event = match save(&path, request.generation, request.snapshot) {
                             Ok(()) => PreferenceWriteEvent::Saved {
                                 generation: request.generation,
                             },
@@ -317,7 +462,10 @@ impl<T: Send + 'static> CoalescingWriter<T> {
         if self.is_finished() {
             return Err(io::Error::other(stopped));
         }
-        let generation = self.next_generation.saturating_add(1);
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("preference writer generation exhausted"))?;
         let (lock, available) = self.queue.as_ref();
         let mut state = lock
             .lock()
@@ -338,7 +486,10 @@ impl<T: Send + 'static> CoalescingWriter<T> {
         if self.is_finished() {
             return Err(io::Error::other(stopped));
         }
-        let generation = self.next_generation.saturating_add(1);
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("preference writer generation exhausted"))?;
         let (lock, available) = self.queue.as_ref();
         let mut state = lock
             .lock()
@@ -421,7 +572,7 @@ impl PreferencesWriter {
                 path,
                 "darkrenamer-preferences",
                 wake,
-                move |path, columns| save_preferences(path, &columns),
+                move |path, _, columns| save_preferences(path, &columns),
             )?,
         })
     }
@@ -480,7 +631,7 @@ impl AppearancePreferencesWriter {
                 path,
                 "darkrenamer-appearance",
                 wake,
-                move |path, appearance| save_preferences(path, appearance),
+                move |path, _, appearance| save_preferences(path, appearance),
             )?,
         })
     }
@@ -1650,6 +1801,95 @@ mod tests {
 mod language_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn language_stage_preserves_the_original_error_metadata() {
+        for (stage, code) in [
+            (LanguageWriteStage::CreateTemporary, 5),
+            (LanguageWriteStage::ReplaceDestination, 5),
+            (LanguageWriteStage::ReplaceDestination, 32),
+        ] {
+            let failure = LanguageWriteFailure {
+                stage,
+                error: io::Error::from_raw_os_error(code),
+            };
+            let record = LanguageFailureRecord::from_error(7, LanguagePreference::Korean, &failure);
+            assert_eq!(record.stage, stage);
+            assert_eq!(record.raw_os_error, Some(code));
+            assert_eq!(record.generation, 7);
+            assert_eq!(failure.error.raw_os_error(), Some(code));
+        }
+        let failure = LanguageWriteFailure {
+            stage: LanguageWriteStage::ResolveParent,
+            error: io::Error::new(io::ErrorKind::InvalidInput, "missing parent"),
+        };
+        let record = LanguageFailureRecord::from_error(8, LanguagePreference::English, &failure);
+        assert_eq!(record.raw_os_error, None);
+        assert_eq!(record.error_kind, 4);
+    }
+
+    #[test]
+    fn first_language_failure_survives_later_success_and_join() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("ui-language-v1");
+        fs::create_dir(&path)?;
+        let (wake_sender, wake_receiver) = channel();
+        let writer = LanguagePreferencesWriter::spawn(path.clone(), move || {
+            let _sent = wake_sender.send(());
+        })?;
+        let mut lifecycle = lifecycle::PreferencePersistence::new(None, None);
+        lifecycle.install_language_writer(writer);
+        lifecycle.submit_language(LanguagePreference::Korean)?;
+        wake_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        lifecycle.drain(false);
+        let first = lifecycle
+            .language_diagnostic()
+            .and_then(|frame| frame.first_failure)
+            .ok_or_else(|| io::Error::other("missing first language failure"))?;
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.preference, LanguagePreference::Korean);
+        assert_eq!(first.stage, LanguageWriteStage::ReplaceDestination);
+        fs::remove_dir(&path)?;
+        lifecycle.submit_language(LanguagePreference::Japanese)?;
+        lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
+        let frame = lifecycle
+            .language_diagnostic()
+            .ok_or_else(|| io::Error::other("missing frame"))?;
+        assert_eq!(frame.requested_generation, Some(2));
+        assert_eq!(frame.saved_generation, Some(2));
+        assert_eq!(frame.first_failure, Some(first));
+        assert_eq!(
+            load_language_or_default(&temp.path().join("journal")).preference,
+            LanguagePreference::Japanese
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn final_language_failure_is_retained_when_close_joins_before_a_wake() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("ui-language-v1");
+        fs::create_dir(&path)?;
+        let writer = LanguagePreferencesWriter::spawn(path, || {})?;
+        let mut lifecycle = lifecycle::PreferencePersistence::new(None, None);
+        lifecycle.install_language_writer(writer);
+        lifecycle.submit_language(LanguagePreference::English)?;
+        lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
+        let frame = lifecycle
+            .language_diagnostic()
+            .ok_or_else(|| io::Error::other("missing frame"))?;
+        let failure = frame
+            .first_failure
+            .ok_or_else(|| io::Error::other("missing final failure"))?;
+        assert_eq!(failure.generation, 1);
+        assert_eq!(failure.preference, LanguagePreference::English);
+        assert_eq!(failure.stage, LanguageWriteStage::ReplaceDestination);
+        assert_eq!(frame.saved_generation, None);
+        assert!(lifecycle.is_joined());
+        Ok(())
+    }
 
     #[test]
     fn new_defaults_and_valid_legacy_records_have_distinct_language_policies() -> io::Result<()> {
