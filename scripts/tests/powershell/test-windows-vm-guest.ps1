@@ -3109,6 +3109,9 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         throw 'The controller accepted a clean process-job row for a different candidate identity.'
     }
     $unstartedGuiResult = [pscustomobject]@{
+        schema_version = 2
+        lane = 'candidate-gui-only'
+        tests = @()
         process_job_cleanup = @()
         gui = [pscustomobject]@{
             status = 'failed'
@@ -3128,6 +3131,40 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     if (-not (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty)) {
         throw 'A GUI failure before process creation must allow an empty but complete process-job ledger.'
     }
+    $formattedPrelaunch = [ordered]@{ error_detail = $null }
+    try { throw [InvalidOperationException]::new('candidate GUI prelaunch failed') }
+    catch { Set-GuiSmokeFailureDetail -Row $formattedPrelaunch -ErrorRecord $_ }
+    $unstartedGuiResult.gui.error_detail =
+        ($formattedPrelaunch | ConvertTo-Json -Depth 5 | ConvertFrom-Json).error_detail
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty)) {
+        throw 'The controller rejected a formatted schema 2 candidate GUI prelaunch failure.'
+    }
+    $unstartedGuiResult.gui.error_detail.category = 7
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'The controller accepted a non-string error category.'
+    }
+    $unstartedGuiResult.gui.error_detail.category = 'UnrecognizedCategory'
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'The controller accepted an unknown error category.'
+    }
+    $unstartedGuiResult.gui.error_detail.category = 'OperationStopped'
+    $originalErrorId = $unstartedGuiResult.gui.error_detail.fully_qualified_error_id
+    $unstartedGuiResult.gui.error_detail.fully_qualified_error_id = 'x' * 257
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'The controller accepted an unbounded error ID.'
+    }
+    $unstartedGuiResult.gui.error_detail.fully_qualified_error_id = $originalErrorId
+    $unstartedGuiResult.gui.error_detail.PSObject.Properties.Remove('fully_qualified_error_id')
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'The controller accepted incomplete new error metadata.'
+    }
+    $unstartedGuiResult.gui.error_detail | Add-Member `
+        -NotePropertyName fully_qualified_error_id -NotePropertyValue $originalErrorId
+    $unstartedGuiResult.gui.error_detail | Add-Member -NotePropertyName unrelated -NotePropertyValue 'extra'
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'The controller accepted an unrelated prelaunch error detail key.'
+    }
+    $unstartedGuiResult.gui.error_detail.PSObject.Properties.Remove('unrelated')
     $unstartedGuiResult.gui.process_id = 1234
     if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
         throw 'An empty process-job ledger must not be accepted when a GUI process identity exists.'
