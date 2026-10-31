@@ -1241,7 +1241,13 @@ function Test-DrControllerProcessJobCleanupLedger {
         }
         $errorDetail = $errorDetailProperty.Value
         $errorFields = @($errorDetail.PSObject.Properties.Name | Sort-Object -CaseSensitive)
-        $expectedErrorFields = @('exception_type', 'message', 'native_error') | Sort-Object -CaseSensitive
+        $hasErrorMetadata = $errorFields -ccontains 'fully_qualified_error_id' -or
+            $errorFields -ccontains 'category'
+        $expectedErrorFields = @('exception_type', 'message', 'native_error')
+        if ($hasErrorMetadata) {
+            $expectedErrorFields += @('fully_qualified_error_id', 'category')
+        }
+        $expectedErrorFields = @($expectedErrorFields | Sort-Object -CaseSensitive)
         if (($errorFields -join "`n") -cne ($expectedErrorFields -join "`n") -or
             $errorDetail.exception_type -isnot [string] -or
             [string]::IsNullOrWhiteSpace($errorDetail.exception_type) -or
@@ -1249,6 +1255,15 @@ function Test-DrControllerProcessJobCleanupLedger {
             $errorDetail.message -isnot [string] -or $errorDetail.message.Length -gt 1024 -or
             ($null -ne $errorDetail.native_error -and
                 ($errorDetail.native_error -isnot [int] -and $errorDetail.native_error -isnot [long]))) {
+            return $false
+        }
+        if ($hasErrorMetadata -and
+            ($errorDetail.fully_qualified_error_id -isnot [string] -or
+             $errorDetail.fully_qualified_error_id.Length -gt 256 -or
+             $errorDetail.category -isnot [string] -or
+             $errorDetail.category.Length -gt 64 -or
+             [Enum]::GetNames([Management.Automation.ErrorCategory]) -cnotcontains
+                $errorDetail.category)) {
             return $false
         }
         return $true

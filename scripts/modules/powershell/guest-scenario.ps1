@@ -827,16 +827,26 @@ function Set-GuiSmokeFailureDetail {
         exception_type = [string]$exception.GetType().FullName
         message = $message
         native_error = $nativeError
+        fully_qualified_error_id = ([string]$ErrorRecord.FullyQualifiedErrorId).Substring(0,
+            [Math]::Min(256, ([string]$ErrorRecord.FullyQualifiedErrorId).Length))
+        category = [string]$ErrorRecord.CategoryInfo.Category
     }
     # Keep the bounded post-selection evidence separate from the message prefix.
     # Otherwise the menu input trace can consume the entire message allowance.
     $diagnosticException = $exception
     for ($depth = 0; $null -ne $diagnosticException -and $depth -lt 4; $depth++) {
-        if ($diagnosticException.Data.Contains('DarkReNamerLanguageMenuFailure')) {
+        if ($diagnosticException.Data.Contains('DarkReNamerLanguageMenuFailure') -and
+            -not $detail.Contains('language_menu_failure')) {
             $detail['language_menu_failure'] =
                 $diagnosticException.Data['DarkReNamerLanguageMenuFailure']
-            break
         }
+        if ($diagnosticException.Data.Contains('DarkReNamerLanguageCycleCleanupFailures') -and
+            -not $detail.Contains('language_cycle_cleanup_failures')) {
+            $detail['language_cycle_cleanup_failures'] =
+                $diagnosticException.Data['DarkReNamerLanguageCycleCleanupFailures']
+        }
+        if ($detail.Contains('language_menu_failure') -and
+            $detail.Contains('language_cycle_cleanup_failures')) { break }
         $diagnosticException = $diagnosticException.InnerException
     }
     if ($null -eq $Row['error_detail']) {
@@ -845,6 +855,26 @@ function Set-GuiSmokeFailureDetail {
     else {
         if (-not $Row.Contains('additional_error_details')) { $Row['additional_error_details'] = @() }
         $Row['additional_error_details'] += $detail
+    }
+}
+function Get-ProductionLanguageCleanupFailureDetail {
+    param(
+        [Parameter(Mandatory)][ValidateSet('job_cleanup', 'process_dispose', 'fixture_cleanup')]
+        [string] $Boundary,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+    $exception = $ErrorRecord.Exception
+    $message = [string]$exception.Message
+    [ordered]@{
+        boundary = $Boundary
+        exception_type = [string]$exception.GetType().FullName
+        message = $message.Substring(0, [Math]::Min(1024, $message.Length))
+        fully_qualified_error_id = ([string]$ErrorRecord.FullyQualifiedErrorId).Substring(0,
+            [Math]::Min(256, ([string]$ErrorRecord.FullyQualifiedErrorId).Length))
+        category = [string]$ErrorRecord.CategoryInfo.Category
+        native_error = if ($exception -is [ComponentModel.Win32Exception]) {
+            [int]$exception.NativeErrorCode
+        } else { $null }
     }
 }
 function Get-PickerModelSnapshot {
@@ -2834,6 +2864,16 @@ function Invoke-ProductionValidActiveRecoveryCheck {
     }
 }
 
+function Get-ProductionPreferredLanguageTags {
+    Initialize-ProductionLanguageMenuReader
+    @([DarkReNamerLanguageMenuReader]::PreferredLanguages())
+}
+
+function Get-ProductionLanguagePendingFileIdentity {
+    param([Parameter(Mandatory)][string] $Path)
+    [DarkReNamerVmNative]::GetFileIdentity($Path)
+}
+
 function Invoke-ProductionLanguageCycle {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -2845,9 +2885,8 @@ function Invoke-ProductionLanguageCycle {
         [Parameter(Mandatory)][int] $TimeoutSeconds
     )
     $applicationPath = Join-Path $Root $Application.file
-    Initialize-ProductionLanguageMenuReader
     $systemResolution = Resolve-ProductionSystemLanguage `
-        -Tags @([DarkReNamerLanguageMenuReader]::PreferredLanguages())
+        -Tags @(Get-ProductionPreferredLanguageTags)
     if ($systemResolution.language -cne 'ko') {
         throw 'The maintained Korean VM baseline differs from the first supported Windows UI language.'
     }
@@ -2867,6 +2906,9 @@ function Invoke-ProductionLanguageCycle {
         $ownedCleanupClean = $false
         $fixture = $null
         $blocked = $null
+        $primaryError = $null
+        $primaryLanguageFailure = $null
+        $cleanupFailures = [Collections.Generic.List[object]]::new()
         try {
             if ($step.preference -in @(0, 2, 3) -and $null -ne $step.next) {
                 $blocked = Invoke-ProductionBlockedRecoveryCheck -Application $Application `
@@ -2928,7 +2970,7 @@ function Invoke-ProductionLanguageCycle {
                 $pendingPath = Join-Path $fixture 'vm-confirmed-vm-flow-source.txt'
                 $pendingFileBefore = [ordered]@{
                     content_sha256 = Get-LowerSha256 -Path $pendingPath
-                    file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($pendingPath))
+                    file_identity_sha256 = Get-LowerTextSha256 -Value (Get-ProductionLanguagePendingFileIdentity -Path $pendingPath)
                 }
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
             }
@@ -2942,7 +2984,7 @@ function Invoke-ProductionLanguageCycle {
                 $choice['pending_file_before'] = $pendingFileBefore
                 $choice['pending_file_after'] = [ordered]@{
                     content_sha256 = Get-LowerSha256 -Path $pendingPath
-                    file_identity_sha256 = Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($pendingPath))
+                    file_identity_sha256 = Get-LowerTextSha256 -Value (Get-ProductionLanguagePendingFileIdentity -Path $pendingPath)
                 }
                 if (($choice.pending_file_before | ConvertTo-Json -Compress) -cne
                     ($choice.pending_file_after | ConvertTo-Json -Compress)) {
@@ -2978,7 +3020,22 @@ function Invoke-ProductionLanguageCycle {
             }
             Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         }
+        catch {
+            # Capture the original record and the already-read language frame
+            # before cleanup retires the process. Bare throw keeps its identity.
+            $primaryError = $_
+            $diagnosticException = $_.Exception
+            for ($depth = 0; $null -ne $diagnosticException -and $depth -lt 4; $depth++) {
+                if ($diagnosticException.Data.Contains('DarkReNamerLanguageMenuFailure')) {
+                    $primaryLanguageFailure = $diagnosticException.Data['DarkReNamerLanguageMenuFailure']
+                    break
+                }
+                $diagnosticException = $diagnosticException.InnerException
+            }
+            throw
+        }
         finally {
+            $processDisposeClean = $true
             if ($null -ne $owned) {
                 try {
                     if (-not $owned.job_closed) {
@@ -2989,12 +3046,46 @@ function Invoke-ProductionLanguageCycle {
                         $ownedCleanupClean = $true
                     }
                 }
-                finally { $owned.process.Dispose() }
+                catch {
+                    $ownedCleanupClean = $false
+                    $cleanupFailures.Add([ordered]@{ boundary = 'job_cleanup'; error_record = $_ })
+                }
+                try { $owned.process.Dispose() }
+                catch {
+                    $processDisposeClean = $false
+                    $cleanupFailures.Add([ordered]@{ boundary = 'process_dispose'; error_record = $_ })
+                }
             }
-            if ($ownedCleanupClean -and $null -ne $fixture -and (Test-Path -LiteralPath $fixture)) {
-                Assert-OrdinaryDirectoryTree -Path $fixture
-                Remove-Item -LiteralPath $fixture -Recurse -Force
-                if (Test-Path -LiteralPath $fixture) { throw 'Language fixture cleanup was incomplete.' }
+            if ($ownedCleanupClean -and $processDisposeClean -and $null -ne $fixture) {
+                try {
+                    if (Test-Path -LiteralPath $fixture) {
+                        Assert-OrdinaryDirectoryTree -Path $fixture
+                        Remove-Item -LiteralPath $fixture -Recurse -Force
+                        if (Test-Path -LiteralPath $fixture) {
+                            throw 'Language fixture cleanup was incomplete.'
+                        }
+                    }
+                }
+                catch {
+                    $cleanupFailures.Add([ordered]@{ boundary = 'fixture_cleanup'; error_record = $_ })
+                }
+            }
+            if ($cleanupFailures.Count -gt 0) {
+                $reportedError = if ($null -ne $primaryError) { $primaryError } else {
+                    $cleanupFailures[0].error_record
+                }
+                $details = [Collections.Generic.List[object]]::new()
+                foreach ($failure in $cleanupFailures) {
+                    $details.Add((Get-ProductionLanguageCleanupFailureDetail `
+                        -Boundary $failure.boundary -ErrorRecord $failure.error_record))
+                }
+                $reportedError.Exception.Data['DarkReNamerLanguageCycleCleanupFailures'] =
+                    $details.ToArray()
+                if ($null -ne $primaryLanguageFailure) {
+                    $reportedError.Exception.Data['DarkReNamerLanguageMenuFailure'] =
+                        $primaryLanguageFailure
+                }
+                if ($null -eq $primaryError) { throw $reportedError }
             }
         }
     }

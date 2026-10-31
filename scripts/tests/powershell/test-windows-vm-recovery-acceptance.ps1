@@ -2777,8 +2777,10 @@ $languageCycle = @($fromFile.FindAll({
         $node.Name -ceq 'Invoke-ProductionLanguageCycle'
 }, $true))
 if ($languageCycle.Count -ne 1 -or
-    $languageCycle[0].Extent.Text.IndexOf('if ($ownedCleanupClean -and $null -ne $fixture', [StringComparison]::Ordinal) -lt 0) {
-    throw 'Language fixture cleanup must require a verified clean owned process job.'
+    $languageCycle[0].Extent.Text.IndexOf(
+        'if ($ownedCleanupClean -and $processDisposeClean -and $null -ne $fixture',
+        [StringComparison]::Ordinal) -lt 0) {
+    throw 'Language fixture cleanup must require clean job and process disposal.'
 }
 foreach ($name in $auditedInputSites.Keys) {
     if ($observedInputSites[$name] -ne $auditedInputSites[$name]) {

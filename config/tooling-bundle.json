@@ -532,7 +532,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e7865cc5aaafe354307cf7c97d35d1a562ac15f59153f76ff06cfe1766881eda",
+      "sha256": "9a68e591f20fcb68343e8d827df61461d7eb24845dbb5178fb3ed0b85e7e4358",
       "dependencies": []
     },
     {
@@ -813,7 +813,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e6864b598153259a9268ddb60078e0c757e67ac267d845c41ab35c3ed8bf1263",
+      "sha256": "61f18ee82d3c75776e2bec4e9f03dc79ea0d4376268a290e9e48fe09b0e2efd9",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
