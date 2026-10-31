@@ -84,7 +84,7 @@ The read-only scalar observer uses the schema and selectors in
 before the native language-menu command and at its outcome. Its structured
 `language_menu_failure` receipt retains the diagnostic before throwing, while
 observer errors remain separate. Each frame is limited to three attempts,
-21 scalar queries per attempt and 50 ms per query. Unknown schemas/stages,
+22 scalar queries per attempt and 50 ms per query. Unknown schemas/stages,
 incoherent generations, exhausted revisions and unstable owners are unavailable
 diagnostics. The reader does not drain writer events, flush, retry or perform
 file I/O; the ordinary scenario's existing file acknowledgment check is separate.

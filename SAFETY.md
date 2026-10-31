@@ -589,7 +589,7 @@ discovery, pixel presentation, or click response.
 ### Import completion trace
 
 Language-persistence diagnostics use the same copied-scalar message boundary
-through selectors 90–106. Each query copies fixed, non-pointer state and does
+through selectors 90–107. Each query copies fixed, non-pointer state and does
 not flush, submit, drain events or alter write authority. The writer records
 original error metadata at the failing Rust operation before handing back the
 original error; its immutable first-failure record survives later success and
