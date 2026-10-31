@@ -259,6 +259,15 @@ try {
     }
     Assert-DrPublicPickerBinding
 
+    # The controller transfers this verified source to the guest before using
+    # either the original finalizer or the maintained read-only collector.
+    . (Join-Path $toolingScriptsRoot 'modules/powershell/controller-owned-root-guard.ps1')
+    Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
+    Assert-DrTestTrue `
+        -Condition ($null -ne ([DarkReNamerVmOwnedRootGuard].GetMethod(
+            'ContentIndex', [type[]]@([int], [long])))) `
+        -Message 'Verified owned root guard lacks bounded held content indexing.'
+
     Remove-Variable -Name DrToolingExecutionMarker -Scope Global -ErrorAction SilentlyContinue
     . $bootstrapPath
     Assert-DrTestTrue `

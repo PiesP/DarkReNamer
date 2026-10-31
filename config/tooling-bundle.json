@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "1bf2477cec1b0c4058a7654cacd68b682ef2a75a71c9a6dbe685097b480e90fa",
+      "sha256": "04c1cce942505262cbb45e69e6325de6f3df8ad136720a07e814a687717a6a5c",
       "dependencies": [
         "package-root"
       ]
@@ -200,7 +200,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "60434e7f3c069a0bd04d42daf52bf2d33b93074406c0c5e77038110121142717",
+      "sha256": "b08042647a92ab4e0c49ec0a4d0b4bea4f57eff74604c089b02bd848c650a51f",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -290,6 +290,21 @@
         "campaign-planning",
         "package-evidence",
         "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-retained-disposition",
+      "source": "scripts/darkrenamer_tooling/contracts/retained_disposition.py",
+      "bundle": "tooling-contracts-retained-disposition.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.retained_disposition",
+      "sha256": "02343d60f3eb08c9954475dcf31dffb48a4d01db94fc6affe2121624d4c67229",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-contracts",
+        "package-evidence",
+        "evidence-errors"
       ]
     },
     {
@@ -469,7 +484,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "3eb67e820f77103d2cf91e1662334bfe31886697c68230e00c55a976ffb56384",
+      "sha256": "ff71553e08f4f4f0af63f2ea24731dc1327a382b40afe8a0b8c23edb43992467",
       "dependencies": []
     },
     {
@@ -808,18 +823,38 @@
       "dependencies": []
     },
     {
+      "role": "powershell-controller-owned-root-guard",
+      "source": "scripts/modules/powershell/controller-owned-root-guard.ps1",
+      "bundle": "controller-owned-root-guard.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "32bc09b063941c26c65eeb67ce2c2dc7b5c96d1a218c5cf385798b2530c62b8b",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-controller-retained-disposition",
+      "source": "scripts/modules/powershell/controller-retained-disposition.ps1",
+      "bundle": "controller-retained-disposition.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "85e33b8a7a392d84c896ba41cda89958fe89f2d4fff47d3e793053228d7b27d8",
+      "dependencies": []
+    },
+    {
       "role": "powershell-controller-entry",
       "source": "scripts/modules/powershell/controller-entry.psm1",
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "61f18ee82d3c75776e2bec4e9f03dc79ea0d4376268a290e9e48fe09b0e2efd9",
+      "sha256": "dce0327249f34c8caf15d6b76dd0f1c7d91a7587630d29a63f656651c3c3807a",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
         "powershell-controller-transport",
         "powershell-controller-poll",
         "powershell-controller-rescue",
+        "powershell-controller-owned-root-guard",
+        "powershell-controller-retained-disposition",
         "powershell-guest-entry",
         "powershell-ui-entry",
         "powershell-recovery-entry"

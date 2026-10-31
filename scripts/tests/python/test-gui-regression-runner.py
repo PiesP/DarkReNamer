@@ -380,6 +380,10 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             runner.main(self.root, base + ["--acceptance-profile-id", runner.V2_PROFILE_ID])
         with self.assertRaisesRegex(ValueError, "requires a prepared bundle"):
             runner.main(self.root, selected)
+        held = selected + ["--prepared-bundle-root", str(self.root / "unused-bundle"),
+                           "--expected-prepared-application-sha256", "0" * 64]
+        with self.assertRaisesRegex(ValueError, "retained original roots have an accepted"):
+            runner.main(self.root, held)
         for case in runner.GUI_APPLY_CASES:
             run = runner.gui_apply_run(case)
             self.assertEqual(run["run_id"], runner.GUI_APPLY_RUN_PREFIX + case)

@@ -4,7 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Owned root guard runtime tests require Windows.' }
-$source = Join-Path $PSScriptRoot '../../modules/powershell/controller-entry.psm1'
+$source = Join-Path $PSScriptRoot '../../modules/powershell/controller-owned-root-guard.ps1'
 $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$parseErrors)
@@ -63,6 +63,68 @@ try {
     $guard.Dispose(); $guard = $null
     if (Test-Path -LiteralPath $nested) { throw 'Nested fixture remains.' }
 
+    $readOnly = New-Fixture
+    [IO.File]::WriteAllText((Join-Path $readOnly 'content.txt'), 'held')
+    $guard = [DarkReNamerVmOwnedRootGuard]::new($readOnly, $false)
+    Assert-Rejected { $guard.ContentIndex(0, [long]0) } 'oversized entry'
+    Assert-Rejected { $guard.ContentIndex(20, [long]2) } 'aggregate byte bound'
+    $index = @($guard.ContentIndex())
+    if ($index.Count -ne 1 -or $index[0].kind -cne 'file' -or
+        $index[0].sha256 -cne
+            (Get-FileHash -LiteralPath (Join-Path $readOnly 'content.txt') -Algorithm SHA256).Hash.ToLowerInvariant()) {
+        throw 'Read-only held content index differs from the file.'
+    }
+    Assert-Rejected { $guard.Delete() } 'Read-only'
+    $guard.Dispose(); $guard = $null
+
+    $flags = [Reflection.BindingFlags]'NonPublic,Instance,Static'
+    $openRelative = [DarkReNamerVmOwnedRootGuard].GetMethod('OpenRelative', $flags)
+    $writerShare = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+    foreach ($scenario in @(
+        @{ name = 'read-only'; delete_access = $false },
+        @{ name = 'delete-access'; delete_access = $true })) {
+        $heldStream = New-Fixture
+        $heldFile = Join-Path $heldStream 'content.txt'
+        [IO.File]::WriteAllText($heldFile, 'default')
+        $guard = [DarkReNamerVmOwnedRootGuard]::new($heldStream, $scenario.delete_access)
+        $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
+        $heldChild = $openRelative.Invoke($null, @(
+            $chain[$chain.Count - 1], 'content.txt', $scenario.delete_access))
+        $writerOutcome = 'created'
+        $writer = $null
+        try {
+            try {
+                $writer = [IO.FileStream]::new(($heldFile + ':while-held'),
+                    [IO.FileMode]::Create, [IO.FileAccess]::Write, $writerShare)
+            }
+            catch [IO.IOException] { $writerOutcome = 'io-rejected:' + $_.Exception.HResult.ToString('x8') }
+            catch [UnauthorizedAccessException] { $writerOutcome = 'access-rejected:' + $_.Exception.HResult.ToString('x8') }
+            if ($null -ne $writer) {
+                try { $writer.WriteByte(65); $writer.Flush() }
+                finally { $writer.Dispose() }
+            }
+        }
+        finally { $heldChild.Dispose() }
+        if ($writerOutcome -cne 'created') {
+            # Prove this fixture supports ADS after closing the held child handle.
+            $control = [IO.FileStream]::new(($heldFile + ':after-close'),
+                [IO.FileMode]::Create, [IO.FileAccess]::Write, $writerShare)
+            try { $control.WriteByte(66); $control.Flush() }
+            finally { $control.Dispose() }
+        }
+        Assert-Rejected { $guard.ContentIndex() } 'unindexed named stream'
+        Write-Output "Held $($scenario.name) ADS writer outcome: $writerOutcome (root/child DELETE=$($scenario.delete_access), child SHARE_READ, writer WRITE with share ReadWrite|Delete)"
+        $guard.Dispose(); $guard = $null
+    }
+
+    $streamed = New-Fixture
+    $streamedFile = Join-Path $streamed 'content.txt'
+    [IO.File]::WriteAllText($streamedFile, 'default')
+    [IO.File]::WriteAllText(($streamedFile + ':hidden'), 'named stream')
+    $guard = [DarkReNamerVmOwnedRootGuard]::new($streamed)
+    Assert-Rejected { $guard.ContentIndex() } 'unindexed named stream'
+    $guard.Dispose(); $guard = $null
+
     $replaced = New-Fixture
     $child = Join-Path $replaced 'child.txt'
     [IO.File]::WriteAllText($child, 'original')
@@ -89,6 +151,7 @@ try {
     $junction = Join-Path $linked 'junction'
     New-Item -ItemType Junction -Path $junction -Target $target | Out-Null
     $guard = [DarkReNamerVmOwnedRootGuard]::new($linked)
+    Assert-Rejected { $guard.ContentIndex() } 'reparse'
     Assert-Rejected { $guard.Delete() } 'reparse'
     if ([IO.File]::ReadAllText($sentinel) -cne 'outside') { throw 'Junction target changed.' }
     $guard.Dispose(); $guard = $null
@@ -110,6 +173,11 @@ try {
     $names = $enumerate.Invoke($null, @($chain[$chain.Count - 1], 20000))
     if ($names.Count -ne 1 -or $names[0].Name -cne $name -or [int]$names[0].Name[4] -ne 0xd800) {
         throw 'Enumeration changed raw UTF-16 code units.'
+    }
+    $rawIndex = @($guard.ContentIndex())
+    if ($rawIndex.Count -ne 1 -or
+        $rawIndex[0].components_utf16_hex[0] -cne '7200610077002d0000d82e00740078007400') {
+        throw 'Content index changed raw UTF-16 code units.'
     }
     $guard.Delete(); $guard.Dispose(); $guard = $null
 } finally {

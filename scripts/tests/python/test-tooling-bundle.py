@@ -30,6 +30,7 @@ ENTRYPOINTS = {
     "validate-gui-regression-evidence.py": "evidence-gui",
     "validate-vm-automated-evidence.py": "evidence-cli",
     "validate-vm-automated-authority.py": "contracts-authority",
+    "validate-retained-root-proof.py": "contracts-retained-disposition",
 }
 
 
@@ -320,7 +321,7 @@ with verified.importer() as imports:
 
     def test_generator_repairs_stale_powershell_bodies_without_check_writes(self) -> None:
         wrappers = (
-            "run-windows-vm-tests.ps1", "windows-vm-guest.ps1",
+            "run-windows-vm-tests.ps1", "collect-retained-root-proof.ps1", "windows-vm-guest.ps1",
             "windows-vm-acceptance.ps1", "windows-vm-recovery-acceptance.ps1",
         )
         with tempfile.TemporaryDirectory() as directory:
