@@ -29,6 +29,7 @@
         @('evidence-png', 'python', 'darkrenamer_tooling.evidence.png'),
         @('evidence-recovery', 'python', 'darkrenamer_tooling.evidence.recovery'),
         @('evidence-errors', 'python', 'darkrenamer_tooling.evidence.errors'),
+        @('evidence-import-trace', 'python', 'darkrenamer_tooling.evidence.import_trace'),
         @('evidence-gui', 'python', 'darkrenamer_tooling.evidence.gui'),
         @('evidence-cli', 'python', 'darkrenamer_tooling.evidence.cli'),
         @('powershell-loader', 'powershell', $null),

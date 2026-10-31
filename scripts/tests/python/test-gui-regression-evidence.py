@@ -22,6 +22,7 @@ from controller_cleanup_fixture import (
     clean_controller_cleanup_v3,
 )
 from darkrenamer_tooling.evidence import gui as evidence
+from darkrenamer_tooling.evidence.import_trace import EVENTS as IMPORT_TRACE_EVENTS
 from darkrenamer_tooling.vm import gui as vm_gui
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
@@ -31,8 +32,24 @@ from gui_regression_fixture import (
 
 class ReadinessBracketTests(unittest.TestCase):
     def test_only_verified_prechange_lineage_may_omit_contract(self):
-        self.assertFalse(evidence.requires_readiness_brackets(evidence.READINESS_LEGACY_TIP))
-        self.assertTrue(evidence.requires_readiness_brackets('a' * 40))
+        # Hosted diagnostic checks use shallow source checkouts. Exercise the
+        # actual ancestry policy in an independent history rather than assuming
+        # that a particular historical production object exists locally.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            def commit(message):
+                subprocess.run(['git', '-C', str(root), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+                    '-qm', message], check=True)
+                return subprocess.check_output(['git', '-C', str(root),
+                    'rev-parse', 'HEAD'], text=True).strip()
+            old = commit('old')
+            current = commit('current')
+            with mock.patch.object(evidence, 'READINESS_LEGACY_TIP', old):
+                self.assertFalse(evidence.requires_readiness_brackets(old, root))
+                self.assertTrue(evidence.requires_readiness_brackets(current, root))
+                self.assertTrue(evidence.requires_readiness_brackets('f' * 40, root))
         with mock.patch.object(evidence.subprocess, 'run',
                                return_value=SimpleNamespace(returncode=1)):
             self.assertTrue(evidence.requires_readiness_brackets('b' * 40))
@@ -4519,6 +4536,7 @@ class GuiApplyEndpointTests(unittest.TestCase):
             return row
 
         imports = []
+        previous_trace = None
         stages = [count] if count <= 1000 else [1000, 3250, 5500, 7750, 10000]
         def import_frame(revision, feedback=0):
             begin = tick()
@@ -4532,17 +4550,43 @@ class GuiApplyEndpointTests(unittest.TestCase):
             stage = 'initial' if index == 0 else f'remainder-{index - 1}'
             feedback_before = import_frame(0) if index == 0 and count >= 1000 else None
             opened = tick()
-            committed = opened + 1
+            committed = opened + 8
             observed = probe('gui-apply-' + stage, 'expected-row-count')
             command = probe('gui-apply-' + stage, 'import-command-enabled')
             feedback = {'definition':
                 'owner-thread-import-cancel-control-availability-committed',
                 'before': feedback_before, 'after': import_frame(1, committed)} \
                 if feedback_before is not None else None
+            trace_before = deepcopy(previous_trace) if previous_trace else {
+                'schema_version': 1, 'qpc_frequency': frequency, 'trace_revision': 0,
+                'generation': 0, 'session_id': 0, 'initial_model_revision': 0,
+                'final_model_revision': 0, 'flags': 0,
+                'events': {name: 0 for name in IMPORT_TRACE_EVENTS},
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd, 'owner_thread_id': 12,
+            }
+            trace_before.update(query_begin_ticks=opened - 20, query_end_ticks=opened - 19)
+            events = dict(zip(IMPORT_TRACE_EVENTS, (
+                opened + 2, opened + 4, opened + 5, opened + 3, 0, 0, committed,
+                opened + 6, opened + 7, opened + 9, opened + 10,
+                opened + 11, opened + 12, opened + 13, 0, 0), strict=True))
+            query_begin = tick()
+            trace_after = {
+                'schema_version': 1, 'qpc_frequency': frequency,
+                'trace_revision': (index + 1) * 20, 'generation': index + 1,
+                'session_id': index + 1, 'initial_model_revision': index,
+                'final_model_revision': index + 1, 'flags': 121, 'events': events,
+                'process_id': pid, 'process_start_utc_ticks': start,
+                'main_window_handle': hwnd, 'owner_thread_id': 12,
+                'query_begin_ticks': query_begin, 'query_end_ticks': query_begin + 1,
+            }
+            previous_trace = trace_after
             imports.append({'id': stage, 'expected_rows': rows, 'open_ticks': opened,
+                'picker_request_ticks': opened - 10, 'dialog_closed_ticks': opened + 20,
                 'rows_observed_ticks': observed['probes'][-1]['end_ticks'],
                 'command_ready_ticks': command['probes'][-1]['end_ticks'],
-                'first_feedback': feedback})
+                'first_feedback': feedback, 'product_trace': {
+                    'schema_version': 1, 'before': trace_before, 'after': trace_after}})
         def frame(revision, initial=0, confirmation=0, cancel_ticks=0):
             begin = tick()
             return {'query_begin_ticks': begin, 'query_end_ticks': begin + 1,
@@ -4656,6 +4700,59 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 else:
                     self.assertEqual(metrics['import_first_feedback_committed_ms'],
                                      'not-measured')
+
+    def test_import_trace_is_required_for_current_source_and_preserves_legacy_endpoint(self):
+        scenario, initial, final = self.valid('success-10000')
+        measured = evidence.validate_gui_apply_metrics(
+            scenario, initial, final, require_product_trace=True)
+        self.assertEqual(len(measured['import_product_traces']), 5)
+        self.assertEqual(measured['four_addition_observer_inclusive_ms'], sum(
+            (row['rows_observed_ticks'] - row['open_ticks']) * 1000 /
+            scenario['qpc_frequency'] for row in scenario['imports'][1:]))
+        for row in scenario['imports']:
+            row.pop('product_trace')
+            row.pop('picker_request_ticks')
+            row.pop('dialog_closed_ticks')
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(
+                scenario, initial, final, require_product_trace=True)
+        self.assertEqual(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['import_product_traces'], 'not-measured')
+
+    def test_import_trace_cannot_disagree_with_cancel_clock_or_switch_owner_thread(self):
+        scenario, initial, final = self.valid('success-10000')
+        for mutate in (
+            lambda s: s['imports'][0]['product_trace']['after']['events']
+                .__setitem__('cancel_ready', s['imports'][0]['open_ticks'] + 9),
+            lambda s: [s['imports'][1]['product_trace'][side]
+                .__setitem__('owner_thread_id', 99) for side in ('before', 'after')],
+            lambda s: s['imports'][0].__setitem__('dialog_closed_ticks',
+                s['imports'][0]['rows_observed_ticks'] + 1),
+            lambda s: s['imports'][0].__setitem__('picker_request_ticks',
+                s['imports'][0]['open_ticks']),
+        ):
+            changed = deepcopy(scenario)
+            mutate(changed)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def test_import_trace_legacy_lineage_does_not_trust_missing_or_unrelated_commits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            def commit(message):
+                subprocess.run(['git', '-C', str(root), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+                    '-qm', message], check=True)
+                return subprocess.check_output(['git', '-C', str(root),
+                    'rev-parse', 'HEAD'], text=True).strip()
+            old = commit('old')
+            current = commit('current')
+            with mock.patch.object(evidence, 'IMPORT_TRACE_LEGACY_TIP', old):
+                self.assertFalse(evidence.requires_import_trace(old, root))
+                self.assertTrue(evidence.requires_import_trace(current, root))
+                self.assertTrue(evidence.requires_import_trace('f' * 40, root))
+                self.assertTrue(evidence.requires_import_trace('invalid', root))
 
     def test_rejects_missing_stale_foreign_or_late_import_control_feedback(self):
         scenario, initial, final = self.valid('success-1000')

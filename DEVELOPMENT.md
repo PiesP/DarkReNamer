@@ -1184,6 +1184,63 @@ acknowledgment goal inconclusive when terminal feedback was first. Preserve its
 actual before-mutation, rolled-back or rollback-unproven outcome. No p95, full release
 acceptance, durability shortcut or performance improvement is implied.
 
+### Import completion and first functional feedback
+
+The `gui-apply-feedback` route also records a bounded product trace for every
+Paths import. The [native trace contract](SAFETY.md#import-completion-trace)
+defines its source boundaries and read-only queries. `product_trace` retains
+the pre/post operation frames alongside the existing Open, row-discovery,
+command-discovery and readiness-bracket records. Missing ticks remain
+unobserved. Historical evidence is accepted without this additive field only
+when its source is verified to precede the instrumentation.
+
+The first functional-feedback endpoint starts at the observer's asynchronous
+Open invocation, excluding picker opening and filename entry. It ends at the
+earliest same-operation geometry-qualified native `ImportReading` status or
+layout-qualified actionable Cancel control. The trace retains both component
+ticks, the status-write attempt bound and the qualifying kind. Queuing status
+text or starting a worker does not qualify. A demonstrably coalesced status
+permits Cancel to qualify first;
+an unexplained missing status leaves first feedback unmeasured. A status-write
+begin through native-text/geometry verification interval bounds that state's
+eligibility. If a reentrant layout records Cancel inside this interval, first
+state ordering remains unknown; retain the bounded first-feedback interval and
+both components. Use the interval's upper/lower median for met/exceeded goal
+decisions, and report overlap with the goal as inconclusive. Native state
+commitment and positive control geometry do not establish pixel presentation.
+
+For a descriptive baseline, freeze the source/tree, one EXE and matching PDB,
+harness, profile, prepared VM display/language, fixtures and cache policy before
+collecting timings. Run six fresh `success-1000` processes for the empty-list
+1,000-file feedback scope. Run six fresh `success-10000` processes for the
+separate 1,000-existing plus four 2,250-addition scope. Reuse the source-built
+bundle through the command above; give every attempt new fixture/result roots.
+The latter retains the sum of four Open-to-observed-row-count intervals and
+reports per-addition product/native/command timings separately. The maintained
+scenario's subsequent Apply, file/journal verification and normal-close checks
+are correctness controls, outside those import endpoints. This does not require
+repeating the historical nine-case campaign or collecting every platform cell.
+
+Freeze an initial instrumentation design reference of 400 ms for the four-addition
+workload and an aggregate duration-uncertainty goal of 100 ms. Sum the four
+duration-interval widths, rather than allowing 100 ms per addition. Latched QPC
+boundaries have a two-tick duration-resolution allowance; this characterizes
+clock resolution, not scheduling or instrumentation bias. Retain actual observer
+query intervals and their discovery uncertainty alongside the product latches.
+The fixed recording work and post-discovery scalar queries are measured workload
+and observer work respectively; neither is assumed free or subtracted from the
+historical endpoint. Nested native refresh and asynchronous icon intervals must
+not be added twice or treated as subtractable sequential costs.
+
+Publish all six values, range, median, uncertainty and individual exceedances.
+Assess the new first-feedback median and the separate Cancel-control median
+against 200 ms, retaining their distinct historical dispositions. Six processes
+do not establish p95, and crossing a goal on a new endpoint is not a speedup.
+Retain production behavior unless attribution supports a separately declared
+paired candidate comparison under the [repeated-baseline policy](#repeated-performance-baselines).
+Preserve every failed attempt and stop for diagnosis rather than extending a
+cohort until it passes.
+
 ### Paired appearance diagnostic
 
 On a clean, committed source checkout with the prepared VM available, run the

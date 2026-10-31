@@ -389,6 +389,34 @@ function Read-ObserverImportFeedbackClockFrame {
         main_window_handle=[long]$Application.main_handle }
 }
 
+function Read-ObserverImportTraceFrame {
+    param([Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][long] $ExpectedStartUtcTicks)
+    $begin = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $frame = [DarkReNamerIconStatusObserver]::ReadImportTraceBound(
+        $Application.process, [IntPtr]$Application.main_handle, $ExpectedStartUtcTicks)
+    $end = [long][Diagnostics.Stopwatch]::GetTimestamp()
+    $names = @('accepted_import_start','read_result_published','read_owner_accepted','reading_status_queued',
+        'reading_status_committed','reading_status_visible','cancel_ready','admission_started',
+        'admission_result_published','admission_owner_accepted','model_committed',
+        'native_sync_started','native_sync_completed','import_command_ready','icons_settled',
+        'reading_status_attempt_started')
+    $events = [ordered]@{}
+    for ($index = 0; $index -lt $names.Count; $index++) {
+        $events[$names[$index]] = [long]$frame.Events[$index]
+    }
+    return [ordered]@{
+        schema_version=[int]$frame.SchemaVersion;
+        query_begin_ticks=$begin; query_end_ticks=$end;
+        qpc_frequency=[long]$frame.Frequency; trace_revision=[long]$frame.Revision;
+        generation=[long]$frame.Generation; session_id=[long]$frame.Session;
+        initial_model_revision=[long]$frame.InitialModelRevision;
+        final_model_revision=[long]$frame.FinalModelRevision;
+        flags=[int]$frame.Flags; events=$events;
+        process_id=[int]$Application.process.Id; process_start_utc_ticks=$ExpectedStartUtcTicks;
+        main_window_handle=[long]$Application.main_handle; owner_thread_id=[long]$frame.OwnerThreadId }
+}
+
 function Import-GuiRegressionPathList {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -401,6 +429,7 @@ function Import-GuiRegressionPathList {
         [switch] $IncludeOpenTicks,
         [switch] $RecordReadinessBrackets,
         [switch] $MeasureFirstFeedback,
+        [switch] $MeasureProductTrace,
         [long] $ExpectedStartUtcTicks = 0,
         [ValidateRange(0, 500)][int] $PickerSettleMilliseconds = 0,
         [Collections.Generic.List[object]] $TimelineEvents,
@@ -426,6 +455,10 @@ function Import-GuiRegressionPathList {
         if ((Get-Date) -ge $readyDeadline) { throw 'Path-list import did not become available.' }
         Start-Sleep -Milliseconds 100
     }
+    $traceBefore = if ($MeasureProductTrace) {
+        if ($ExpectedStartUtcTicks -le 0) { throw 'Import trace requires the captured product start time.' }
+        Read-ObserverImportTraceFrame -Application $Application -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+    } else { $null }
     $importClockBefore = if ($MeasureFirstFeedback) {
         if ($ExpectedStartUtcTicks -le 0) {
             throw 'Import feedback requires the captured product start time.'
@@ -451,18 +484,18 @@ function Import-GuiRegressionPathList {
     }
     $openTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $openInvocation = if ($MeasureFirstFeedback) {
+    $openInvocation = if ($MeasureFirstFeedback -or $MeasureProductTrace) {
         Start-AutomationControlInvoke -OwnedProcess $Application.owned `
             -Element $nativeOpen.Element -Label 'path-list import Open'
     } else { $null }
-    if (-not $MeasureFirstFeedback) {
+    if (-not ($MeasureFirstFeedback -or $MeasureProductTrace)) {
         Invoke-AutomationControl -Element $nativeOpen.Element -Label 'path-list import Open'
     }
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label 'path-list import dialog'
+    $dialogClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     if ($null -ne $openInvocation) {
         Complete-AutomationControlInvoke -State $openInvocation -TimeoutSeconds $WaitSeconds
     }
-    $dialogClosedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     if ($RecordReadinessBrackets) {
         $operation = if ($TimelineOperation) { $TimelineOperation }
             else { 'runtime-import-1000' }
@@ -531,6 +564,20 @@ function Import-GuiRegressionPathList {
             definition='owner-thread-import-cancel-control-availability-committed';
             before=$importClockBefore; after=$after }
     } else { $null }
+    $productTrace = if ($MeasureProductTrace) {
+        $traceAfter = Read-ObserverImportTraceFrame -Application $Application `
+            -ExpectedStartUtcTicks $ExpectedStartUtcTicks
+        if ($traceAfter.generation -ne $traceBefore.generation + 1 -or
+            $traceBefore.query_end_ticks -ge $pickerRequestTicks -or
+            $traceAfter.events.accepted_import_start -le $openTicks -or
+            $traceAfter.events.native_sync_completed -le 0 -or
+            $traceAfter.events.import_command_ready -le 0 -or
+            $traceAfter.events.import_command_ready -gt $commandReadyTicks -or
+            $traceAfter.events.import_command_ready -lt $traceAfter.events.native_sync_completed) {
+            throw 'Import product trace is stale, premature, or outside the observed operation.'
+        }
+        [ordered]@{ schema_version=1; before=$traceBefore; after=$traceAfter }
+    } else { $null }
     if ($null -ne $TimelineEvents) {
         foreach ($boundary in @(
             @('picker_request', $pickerRequestTicks, 0),
@@ -544,6 +591,7 @@ function Import-GuiRegressionPathList {
         }
     }
     [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
+        product_trace=$productTrace;
         first_feedback = $(if ($MeasureFirstFeedback) { $feedback } else { $null });
         command_ready_after_rows_ms = $readinessMs;
         open_ticks = $(if ($IncludeOpenTicks) { $openTicks } else { $null });

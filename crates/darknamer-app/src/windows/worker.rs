@@ -1,14 +1,20 @@
+use super::import_trace::{
+    ADMISSION_OWNER_ACCEPTED, ADMISSION_RESULT_PUBLISHED, ADMISSION_STARTED, CANCEL_READY,
+    IMPORT_COMMAND_READY, MODEL_COMMITTED, READ_OWNER_ACCEPTED, READ_RESULT_PUBLISHED,
+    READING_STATUS_QUEUED,
+};
 use super::{
     ACTIVE_JOURNAL_LEAF, APPLY_POLL_TIMER_ID, AppState, CANCEL_WORKER_ID, CANDIDATE_JOURNAL_LEAF,
     GuiAcceptanceClock, ImportFeedbackPhase, PREFERENCES_POLL_TIMER_ID, PreparedTaskDialogButton,
     PreparedTaskDialogDisposition, PreparedTaskDialogPolicy, PreparedTaskDialogSession,
-    PreparedTaskDialogSpec, PreparedTextDetails, TEXT_DETAILS_BUTTON_ID, WM_APP_ADMISSION_COMPLETE,
-    WM_APP_APPLY_COMPLETE, WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE, WM_APP_IMPORT_COMPLETE,
-    WM_APP_PLAN_COMPLETE, WM_APP_PREFERENCES_WAKE, apply_cancel_control_state,
-    begin_prepared_task_dialog, cleanup_file_journal, clear_selection, compare_windows,
-    finish_import_worker_result, legacy_path, message, path_wide, proposal_mutation_error_message,
-    read_legacy_text_cancellable, refresh, schedule_focus_target, schedule_icon_poll, select_rows,
-    selected_indices, take_prepared_task_dialog, try_app_state, update_controls,
+    PreparedTaskDialogSpec, PreparedTextDetails, STATUS_MESSAGE_ID, TEXT_DETAILS_BUTTON_ID,
+    WM_APP_ADMISSION_COMPLETE, WM_APP_APPLY_COMPLETE, WM_APP_APPLY_PROGRESS, WM_APP_FINISH_CLOSE,
+    WM_APP_IMPORT_COMPLETE, WM_APP_PLAN_COMPLETE, WM_APP_PREFERENCES_WAKE,
+    apply_cancel_control_state, begin_prepared_task_dialog, cleanup_file_journal, clear_selection,
+    compare_windows, finish_import_worker_result, legacy_path, message, path_wide,
+    proposal_mutation_error_message, read_legacy_text_cancellable, refresh, schedule_focus_target,
+    schedule_icon_poll, select_rows, selected_indices, take_prepared_task_dialog, try_app_state,
+    update_controls,
 };
 use crate::APPLY_CONFIRM_BUTTON_ID;
 use crate::ActiveWorkerKind;
@@ -18,6 +24,7 @@ use crate::DIRECTORY_RECURSE_BUTTON_ID;
 use crate::DestructivePromptChoice;
 use crate::DirectoryPromptChoice;
 use crate::i18n::runtime::{self as rt, Text as RT};
+use crate::{APPLY, IMPORT_PATHS};
 
 use crate::active_worker_kind;
 use crate::admission::AdmissionAdapter;
@@ -71,6 +78,7 @@ use std::panic::catch_unwind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
@@ -84,10 +92,18 @@ use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetMenu;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetMenuItemCount;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetMenuState;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetParent;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetSubMenu;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW;
 use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
+use windows_sys::Win32::UI::WindowsAndMessaging::MF_BYCOMMAND;
+use windows_sys::Win32::UI::WindowsAndMessaging::MF_DISABLED;
+use windows_sys::Win32::UI::WindowsAndMessaging::MF_GRAYED;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
 
@@ -111,6 +127,8 @@ pub(super) struct AdmissionWorker {
     progress: Arc<AdmissionProgress>,
     last_rendered_progress: Option<usize>,
     receiver: Receiver<AdmissionWorkerResult>,
+    publication_tick: Arc<AtomicU64>,
+    origin_import: Option<(u64, u64)>,
     pub(super) handle: JoinHandle<()>,
 }
 
@@ -126,6 +144,7 @@ pub(super) struct ImportWorker {
     revision: ModelRevision,
     kind: ImportKind,
     receiver: Receiver<io::Result<LegacyText>>,
+    publication_tick: Arc<AtomicU64>,
     pub(super) handle: JoinHandle<()>,
 }
 
@@ -144,7 +163,84 @@ impl ImportWorker {
 }
 
 pub(super) fn import_cancel_control_ready(owner: HWND, cancel: HWND) -> bool {
-    if owner.is_null() || cancel.is_null() {
+    native_child_visible_positive(owner, cancel, usize::from(CANCEL_WORKER_ID), true)
+}
+
+pub(super) fn import_status_control_visible(owner: HWND, status: HWND) -> bool {
+    native_child_visible_positive(owner, status, STATUS_MESSAGE_ID, false)
+}
+
+pub(super) fn import_status_control_owned(owner: HWND, status: HWND) -> bool {
+    if owner.is_null() || status.is_null() {
+        return false;
+    }
+    // SAFETY: copied live owner and child HWNDs carry no pointers across the
+    // boundary; both scalar identity queries are synchronous.
+    unsafe { GetParent(status) == owner && GetDlgCtrlID(status) == STATUS_MESSAGE_ID as i32 }
+}
+
+pub(super) fn import_status_native_text_matches(owner: HWND, status: HWND, expected: &str) -> bool {
+    if !import_status_control_owned(owner, status) {
+        return false;
+    }
+    let mut actual = [0_u16; 256];
+    let expected_len = expected.encode_utf16().count();
+    if expected_len == 0 || expected_len >= actual.len() {
+        return false;
+    }
+    // SAFETY: the exact owned native STATIC copies at most 255 UTF-16 units
+    // into the live stack buffer and writes its terminator synchronously.
+    let copied = unsafe { GetWindowTextW(status, actual.as_mut_ptr(), actual.len() as i32) };
+    copied == expected_len as i32
+        && actual[..expected_len]
+            .iter()
+            .copied()
+            .eq(expected.encode_utf16())
+}
+
+pub(super) fn import_command_native_ready(
+    owner: HWND,
+    menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
+) -> bool {
+    if owner.is_null() || menu.is_null() {
+        return false;
+    }
+    // SAFETY: the exact live owner and menu are copied handles. GetMenu and
+    // GetMenuState read scalar identity/flags without invoking command logic.
+    unsafe {
+        if GetMenu(owner) != menu {
+            return false;
+        }
+        let mut flags = GetMenuState(menu, u32::from(IMPORT_PATHS), MF_BYCOMMAND);
+        if flags == u32::MAX {
+            // File commands are direct children of one top-level popup in
+            // the maintained menu. A bounded scan handles Win32 builds that
+            // do not search submenus from a root command query.
+            let count = GetMenuItemCount(menu);
+            if !(0..=16).contains(&count) {
+                return false;
+            }
+            for index in 0..count {
+                let popup = GetSubMenu(menu, index);
+                if !popup.is_null() {
+                    flags = GetMenuState(popup, u32::from(IMPORT_PATHS), MF_BYCOMMAND);
+                    if flags != u32::MAX {
+                        break;
+                    }
+                }
+            }
+        }
+        flags != u32::MAX && flags & (MF_DISABLED | MF_GRAYED) == 0
+    }
+}
+
+fn native_child_visible_positive(
+    owner: HWND,
+    child: HWND,
+    expected_id: usize,
+    require_enabled: bool,
+) -> bool {
+    if owner.is_null() || child.is_null() {
         return false;
     }
     let mut control = RECT::default();
@@ -154,14 +250,14 @@ pub(super) fn import_cancel_control_ready(owner: HWND, cancel: HWND) -> bool {
     // checks reject unrelated children; positive, intersecting geometry must
     // be committed by the existing layout before this can qualify feedback.
     unsafe {
-        if GetParent(cancel) != owner
-            || GetDlgCtrlID(cancel) != i32::from(CANCEL_WORKER_ID)
-            || IsWindowVisible(cancel) == 0
-            || IsWindowEnabled(cancel) == 0
-            || GetClientRect(cancel, &mut control) == 0
+        if GetParent(child) != owner
+            || GetDlgCtrlID(child) != expected_id as i32
+            || IsWindowVisible(child) == 0
+            || (require_enabled && IsWindowEnabled(child) == 0)
+            || GetClientRect(child, &mut control) == 0
             || control.right <= control.left
             || control.bottom <= control.top
-            || GetWindowRect(cancel, &mut control) == 0
+            || GetWindowRect(child, &mut control) == 0
             || GetClientRect(owner, &mut client) == 0
         {
             return false;
@@ -212,9 +308,13 @@ pub(super) fn record_import_feedback_after_layout(window: HWND, state: &mut AppS
         return;
     }
     if import_cancel_control_ready(window, state.cancel_worker) {
+        let tick = GuiAcceptanceClock::read_tick();
+        state.acceptance_clock.record_import_feedback_at(tick);
+        let session_id = state.import_trace.session_id();
+        let start_revision = state.import_trace.start_revision();
         state
-            .acceptance_clock
-            .record_import_feedback_at(GuiAcceptanceClock::read_tick());
+            .import_trace
+            .record(session_id, start_revision, CANCEL_READY, tick);
         state.import_feedback_phase = None;
     }
 }
@@ -260,6 +360,8 @@ pub(super) fn start_import_worker_from(
     }
     let window_value = window as usize;
     let worker_cancellation = Arc::clone(&cancellation);
+    let publication_tick = Arc::new(AtomicU64::new(0));
+    let worker_publication_tick = Arc::clone(&publication_tick);
     let handle = match thread::Builder::new()
         .name("darkrenamer-import".to_owned())
         .spawn(move || {
@@ -268,7 +370,12 @@ pub(super) fn start_import_worker_from(
                 message: WM_APP_IMPORT_COMPLETE,
             };
             let result = read(&worker_cancellation);
-            let _sent = sender.send(result);
+            if sender.send(result).is_ok() {
+                worker_publication_tick.store(
+                    GuiAcceptanceClock::read_tick().unwrap_or(0),
+                    Ordering::Release,
+                );
+            }
         }) {
         Ok(handle) => handle,
         Err(error) => {
@@ -283,10 +390,19 @@ pub(super) fn start_import_worker_from(
         revision,
         kind,
         receiver,
+        publication_tick,
         handle,
     });
     state.mutation_locked = true;
     state.set_progress_status(RT::ImportReading.get());
+    if matches!(kind, ImportKind::Paths) {
+        state.import_trace.record(
+            session_id,
+            state.model_revision,
+            READING_STATUS_QUEUED,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
     state.import_feedback_phase =
         matches!(kind, ImportKind::Paths).then_some(ImportFeedbackPhase::Reading {
             session_id,
@@ -314,6 +430,31 @@ pub(super) fn handle_import_completion(window: HWND, state: &mut AppState) {
     // SAFETY: this worker reached its terminal state and owns this timer.
     unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
     let joined = worker.handle.join();
+    if matches!(worker.kind, ImportKind::Paths)
+        && state
+            .import_trace
+            .matches(worker.session_id, state.model_revision)
+    {
+        // The owner is about to replace ImportReading. Without a successful
+        // native commit in the prior owner callbacks, that queued value can
+        // no longer be rendered for this import.
+        state
+            .import_trace
+            .mark_status_coalesced(worker.session_id, state.model_revision);
+    }
+    if matches!(worker.kind, ImportKind::Paths)
+        && state
+            .import_trace
+            .matches(worker.session_id, state.model_revision)
+    {
+        let publication_tick = worker.publication_tick.load(Ordering::Acquire);
+        state.import_trace.record(
+            worker.session_id,
+            state.model_revision,
+            READ_RESULT_PUBLISHED,
+            (publication_tick != 0).then_some(publication_tick),
+        );
+    }
     state.clear_progress_status();
     state.mutation_locked = state.close_pending
         || state.admission_worker.is_some()
@@ -1610,6 +1751,16 @@ pub(super) fn start_admission_worker(
         )));
     }
     let window_value = window as usize;
+    let origin_import = (mode.is_none()
+        && state.import_trace.event(READ_OWNER_ACCEPTED) != 0
+        && state.import_trace.event(ADMISSION_STARTED) == 0
+        && state
+            .import_trace
+            .matches(state.import_trace.session_id(), state.model_revision))
+    .then_some((state.import_trace.session_id(), state.model_revision));
+    let admission_started_at = GuiAcceptanceClock::read_tick();
+    let publication_tick = Arc::new(AtomicU64::new(0));
+    let worker_publication_tick = Arc::clone(&publication_tick);
     let handle = match thread::Builder::new()
         .name("darkrenamer-admission".to_owned())
         .spawn(move || {
@@ -1671,7 +1822,12 @@ pub(super) fn start_admission_worker(
                 }
             }))
             .unwrap_or(AdmissionWorkerResult::Panicked);
-            let _sent = sender.send(result);
+            if sender.send(result).is_ok() {
+                worker_publication_tick.store(
+                    GuiAcceptanceClock::read_tick().unwrap_or(0),
+                    Ordering::Release,
+                );
+            }
         }) {
         Ok(handle) => handle,
         Err(error) => {
@@ -1686,8 +1842,18 @@ pub(super) fn start_admission_worker(
         progress,
         last_rendered_progress: None,
         receiver,
+        publication_tick,
+        origin_import,
         handle,
     });
+    if let Some((session_id, model_revision)) = origin_import {
+        state.import_trace.record(
+            session_id,
+            model_revision,
+            ADMISSION_STARTED,
+            admission_started_at,
+        );
+    }
     Ok(())
 }
 
@@ -1768,6 +1934,8 @@ pub(super) fn install_controlled_admission_worker(
         progress,
         last_rendered_progress: None,
         receiver,
+        publication_tick: Arc::new(AtomicU64::new(0)),
+        origin_import: None,
         handle,
     });
     release_sender
@@ -1868,6 +2036,16 @@ pub(super) fn handle_admission_completion(
     }
     apply_cancel_control_state(state);
     let joined = worker.handle.join();
+    let origin_import = worker.origin_import;
+    if let Some((session_id, model_revision)) = origin_import {
+        let publication_tick = worker.publication_tick.load(Ordering::Acquire);
+        state.import_trace.record(
+            session_id,
+            model_revision,
+            ADMISSION_RESULT_PUBLISHED,
+            (publication_tick != 0).then_some(publication_tick),
+        );
+    }
     state.mutation_locked = false;
     state.clear_progress_status();
     if state.close_pending {
@@ -1946,6 +2124,17 @@ pub(super) fn handle_admission_completion(
                     RT::StaleResultTitle.get(),
                 );
             } else {
+                if let Some((session_id, model_revision)) = origin_import {
+                    state.import_trace.record(
+                        session_id,
+                        model_revision,
+                        ADMISSION_OWNER_ACCEPTED,
+                        GuiAcceptanceClock::read_tick(),
+                    );
+                    state
+                        .import_trace
+                        .mark_admission_accepted(session_id, model_revision);
+                }
                 let items = std::mem::take(&mut report.items);
                 match state
                     .model
@@ -1953,6 +2142,19 @@ pub(super) fn handle_admission_completion(
                 {
                     Ok(appended) => {
                         state.commit_known_model_change(appended > 0);
+                        if let Some((session_id, model_revision)) = origin_import {
+                            state.import_trace.record(
+                                session_id,
+                                model_revision,
+                                MODEL_COMMITTED,
+                                GuiAcceptanceClock::read_tick(),
+                            );
+                            state.import_trace.set_final_model_revision(
+                                session_id,
+                                model_revision,
+                                state.model_revision,
+                            );
+                        }
                         let status_summary = report.status_summary_korean(appended);
                         state.set_transient_status(status_summary);
                         if !report.issues.is_empty() {
@@ -1962,7 +2164,34 @@ pub(super) fn handle_admission_completion(
                                 RT::SomePathsSkippedTitle.get(),
                             );
                         }
+                        if let Some((session_id, model_revision)) = origin_import {
+                            state
+                                .import_trace
+                                .arm_native_sync(session_id, model_revision);
+                        }
                         refresh(state);
+                        state.import_trace.disarm_native_sync();
+                        if let Some((session_id, model_revision)) = origin_import
+                            && state.preview_synchronization.is_synchronized()
+                        {
+                            state
+                                .import_trace
+                                .mark_native_synchronized(session_id, model_revision);
+                            // The cached intent alone is not a native
+                            // command-ready observation; confirm the exact
+                            // attached menu's enabled command state.
+                            if state.command_states[usize::from(IMPORT_PATHS - APPLY)]
+                                && import_command_native_ready(window, state.menu)
+                            {
+                                state.import_trace.record(
+                                    session_id,
+                                    model_revision,
+                                    IMPORT_COMMAND_READY,
+                                    GuiAcceptanceClock::read_tick(),
+                                );
+                                state.record_icon_settlement_if_ready();
+                            }
+                        }
                         if appended > 0 {
                             schedule_focus_target(window, state.list_window);
                         }

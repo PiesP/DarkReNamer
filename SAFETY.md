@@ -586,6 +586,50 @@ has a zero tick before its first Paths Open. This timestamp bounds owner-thread
 laid-out Cancel control availability, not a transient status text write, UIA
 discovery, pixel presentation, or click response.
 
+### Import completion trace
+
+`windows/import_trace.rs` owns the fixed latest-Paths-operation frame and its
+event/flag/selector definitions. Selectors 40 through 83 expose copied bounded
+scalars; the observer brackets them with the trace revision and binds the main
+HWND to the captured process lifetime and owner thread. A generation, picker
+session and initial/final model revision distinguish successive imports. Invalid
+clocks, unsupported or incoherent frames remain unavailable diagnostics; they
+cannot change product authorization or recover a failed operation.
+Recorded dependency/revision order distinguishes causally successive events
+that share one quantized QPC tick. A backwards tick, missing predecessor or
+duplicate completion still invalidates the frame. A measured zero-tick interval
+retains its clock-resolution allowance and is distinct from a missing event.
+
+The accepted-import start is the UI owner's validated picker-result boundary,
+not a native Open-button callback. Worker publication ticks follow successful
+bounded-channel sends and are copied only after the matching worker is joined.
+The owner records separate accepted read/admission results, model commitment,
+native synchronization and actual import-command readiness. Native refresh lies
+inside the larger owner handoff; icon settlement is asynchronous. Their elapsed
+times are not additive fractions of a whole GUI total. A ready row count,
+synchronized list, enabled command and settled icons remain distinct states.
+
+Status rendering still coalesces through its existing timer. The native text
+write executes without an AppState lease; subsequent trace recording reacquires
+and revalidates the request, revision, control and text. `GetWindowTextW` reads
+the exact owned status child into a fixed 256-unit stack buffer and compares
+its complete UTF-16 value with the queued localized text. The semantic tick is
+the post-readback commitment bound, not a timestamp inside `SetWindowTextW`.
+Successful semantic commitment is distinct from effectively visible positive-area
+geometry. The pre-write attempt through geometry verification interval bounds
+status eligibility. A Cancel tick inside that interval leaves the first state
+ordering unknown; clock resolution alone cannot narrow this native-call interval.
+A later status committed before `ImportReading` ever reaches its control marks that
+transient as coalesced only when no pending or ambiguous earlier write attempt
+could have committed it. An unexplained missing eligible event remains unmeasured.
+Neither geometry, UI Automation discovery nor paint completion proves pixels.
+The existing Cancel-control clock in selectors 35/36 retains its own definition.
+
+Storage is fixed per latest operation. Two bounded worker-publication atomics,
+QPC latches and control-state queries add work to the instrumented workload;
+the observer retains its separate pre/post query durations. These observations
+do not establish that instrumentation is free or a product speedup.
+
 `windows/icon_worker.rs` is the reviewed Shell-icon boundary. Its single tracked
 worker initializes and balances COM on that same STA, pumps its own message
 queue between Shell calls, and never receives `AppState`, HWND, model pointers,

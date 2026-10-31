@@ -1,3 +1,10 @@
+use super::GuiAcceptanceClock;
+use super::import_trace::{
+    READING_STATUS_COMMITTED, READING_STATUS_QUEUED, READING_STATUS_VISIBLE,
+};
+use super::worker::{
+    import_status_control_owned, import_status_control_visible, import_status_native_text_matches,
+};
 use super::{
     APPLY_POLL_TIMER_ID, AcceleratorTable, AppState, AppStateSlot, AppearanceDialogPlatform,
     CANCEL_WORKER_ID, CallbackReclaimHold, CallbackState, CallbackStateLease, CommandRail,
@@ -1000,7 +1007,7 @@ pub(super) fn handle_empty_safety_copy(
 
 pub(super) fn handle_status_render_timer(
     window: HWND,
-    state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
+    mut state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
 ) -> LRESULT {
     // Stop the coalescing timer only after the caller acquired the state lease.
     // A busy nested WM_TIMER cannot call this helper and leaves it installed.
@@ -1012,10 +1019,83 @@ pub(super) fn handle_status_render_timer(
     let status_count = state.status_count;
     let message_text = state.ui_status.message_text().to_owned();
     let count_text = state.ui_status.count_text();
-    run_after_callback_state_release(state_lease, || {
-        set_status(status_message, &message_text);
-        set_status(status_count, &count_text);
-    });
+    let session_id = state.import_trace.session_id();
+    let start_revision = state.import_trace.start_revision();
+    let generation = state.import_trace.generation();
+    let is_reading = message_text == crate::i18n::runtime::Text::ImportReading.get();
+    let reading_trace_active = is_reading
+        && state.import_trace.matches(session_id, start_revision)
+        && state.import_trace.event(READING_STATUS_QUEUED) != 0;
+    let first_reading_attempt =
+        reading_trace_active && state.import_trace.event(READING_STATUS_COMMITTED) == 0;
+    if first_reading_attempt {
+        state_lease.state_mut().import_trace.begin_status_attempt(
+            session_id,
+            start_revision,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
+    let (status_set, status_owned, native_text_matches, committed_at, visible_at) =
+        run_after_callback_state_release(state_lease, || {
+            let status_set = set_status(status_message, &message_text);
+            let status_owned = status_set && import_status_control_owned(window, status_message);
+            let native_text_matches = status_owned
+                && is_reading
+                && import_status_native_text_matches(window, status_message, &message_text);
+            let committed_at = native_text_matches
+                .then(GuiAcceptanceClock::read_tick)
+                .flatten();
+            let visible_at = (is_reading
+                && native_text_matches
+                && import_status_control_visible(window, status_message))
+            .then(GuiAcceptanceClock::read_tick)
+            .flatten();
+            set_status(status_count, &count_text);
+            (
+                status_set,
+                status_owned,
+                native_text_matches,
+                committed_at,
+                visible_at,
+            )
+        });
+    if let Some(mut lease) = try_app_state(window) {
+        let state = lease.state_mut();
+        let same_operation = state.status_message == status_message
+            && state.import_trace.generation() == generation
+            && state.import_trace.matches(session_id, start_revision)
+            && state.ui_status.message_text() == message_text;
+        if first_reading_attempt && state.import_trace.generation() == generation {
+            state.import_trace.end_status_attempt(
+                session_id,
+                start_revision,
+                same_operation && native_text_matches,
+                status_set,
+            );
+        }
+        if same_operation && status_set && status_owned {
+            if reading_trace_active && native_text_matches {
+                state.import_trace.record(
+                    session_id,
+                    start_revision,
+                    READING_STATUS_COMMITTED,
+                    committed_at,
+                );
+                if visible_at.is_some() {
+                    state.import_trace.record(
+                        session_id,
+                        start_revision,
+                        READING_STATUS_VISIBLE,
+                        visible_at,
+                    );
+                }
+            } else if !is_reading {
+                state
+                    .import_trace
+                    .mark_status_coalesced(session_id, start_revision);
+            }
+        }
+    }
     0
 }
 

@@ -4185,12 +4185,15 @@ function Invoke-ObserverGuiApplyFeedbackScenario {
                 -ExpectedRows $stage.rows -SessionId $SessionId -WaitSeconds $WaitSeconds -Grid $grid `
                 -MeasureCommandReadiness -IncludeOpenTicks -RecordReadinessBrackets `
                 -MeasureFirstFeedback:($stage.id -ceq 'initial' -and $count -ge 1000) `
+                -MeasureProductTrace `
                 -ExpectedStartUtcTicks $ObservationSink.process_start_utc_ticks `
                 -TimelineOperation ('gui-apply-' + $stage.id)
             $imports.Add([ordered]@{ id=$stage.id; expected_rows=$stage.rows;
+                picker_request_ticks=[long]$import.picker_request_ticks;
                 open_ticks=[long]$import.open_ticks; rows_observed_ticks=[long]$import.row_observed_ticks;
+                dialog_closed_ticks=[long]$import.dialog_closed_ticks;
                 command_ready_ticks=[long]$import.command_ready_ticks;
-                first_feedback=$import.first_feedback })
+                first_feedback=$import.first_feedback; product_trace=$import.product_trace })
         }
         $ObservationSink['imports'] = $imports.ToArray()
         if ($grid.pattern.Current.RowCount -ne $count) { throw 'GUI Apply import row count is incomplete.' }

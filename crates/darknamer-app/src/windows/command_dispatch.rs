@@ -119,21 +119,23 @@ pub(super) mod runtime_sort_profile {
     }
 }
 
+use super::import_trace::READ_OWNER_ACCEPTED;
 use super::{
     AppState, AppearanceDialogPlatform, DISCARD_STAGED_JOURNAL, EXPORT_RECOVERY_JOURNAL,
-    ImportFeedbackPhase, ImportKind, PreparedAppearanceAction, PreparedDiscardTaskDialog,
-    PreparedFileDialogKind, PreparedFileDialogSelection, PreparedRecoveryExport,
-    PreparedTaskDialogSpec, PreparedTextDetails, PromptAppearance, PromptResult, PromptSpec,
-    SHOW_RECOVERY_STATUS, admit_paths, apply_changes, apply_native_appearance_nonblocking, arrange,
-    compare_windows, copy_clipboard_or_report, destination_parent_mutation_error_message,
-    finalize_admission_start, finalize_admission_start_failure, legacy_path, message,
-    prepare_appearance_dialog, prepare_discard_staged_journal, prepare_recovery_export,
-    prompt_input_or_report, proposal_mutation_error_message, refresh_all_rows,
-    refresh_changed_rows, refresh_proposal_rows, report_admission_start_error,
-    request_window_close, run_prepared_appearance_action, run_prepared_discard_task_dialog,
-    run_prepared_recovery_export, show_recovery_status, start_import_worker, text_details,
-    try_app_state, try_finish_window_close, update_column_visibility, update_controls,
-    update_primary_column_widths, write_legacy_text_to_target,
+    GuiAcceptanceClock, ImportFeedbackPhase, ImportKind, PreparedAppearanceAction,
+    PreparedDiscardTaskDialog, PreparedFileDialogKind, PreparedFileDialogSelection,
+    PreparedRecoveryExport, PreparedTaskDialogSpec, PreparedTextDetails, PromptAppearance,
+    PromptResult, PromptSpec, SHOW_RECOVERY_STATUS, admit_paths, apply_changes,
+    apply_native_appearance_nonblocking, arrange, compare_windows, copy_clipboard_or_report,
+    destination_parent_mutation_error_message, finalize_admission_start,
+    finalize_admission_start_failure, legacy_path, message, prepare_appearance_dialog,
+    prepare_discard_staged_journal, prepare_recovery_export, prompt_input_or_report,
+    proposal_mutation_error_message, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
+    report_admission_start_error, request_window_close, run_prepared_appearance_action,
+    run_prepared_discard_task_dialog, run_prepared_recovery_export, show_recovery_status,
+    start_import_worker, text_details, try_app_state, try_finish_window_close,
+    update_column_visibility, update_controls, update_primary_column_widths,
+    write_legacy_text_to_target,
 };
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Controls::LVIS_FOCUSED;
@@ -1577,6 +1579,15 @@ fn start_selected_import(
         try_finish_window_close(window, state);
         return;
     }
+    if matches!(kind, ImportKind::Paths) {
+        // The selected picker result has returned to the owning UI thread and
+        // passed its exact live-session and model-revision gates.
+        state.import_trace.begin(
+            session.session_id,
+            state.model_revision,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
     if let Err(error) = start_import_worker(
         window,
         state,
@@ -1585,6 +1596,9 @@ fn start_selected_import(
         path,
         kind,
     ) {
+        if matches!(kind, ImportKind::Paths) {
+            state.import_trace.invalidate();
+        }
         state.active_prompt = None;
         update_controls(state);
         message(
@@ -1648,6 +1662,14 @@ pub(super) fn finish_import_worker_result(
             return;
         }
     };
+    if matches!(kind, ImportKind::Paths) {
+        state.import_trace.record(
+            session_id,
+            state.model_revision,
+            READ_OWNER_ACCEPTED,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
     match kind {
         ImportKind::Names => match state.model.import_names_changed(&text) {
             Ok(changed) => {

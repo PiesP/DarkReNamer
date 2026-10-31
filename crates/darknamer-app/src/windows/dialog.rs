@@ -2840,12 +2840,14 @@ fn shell_dialog_error(error: ::windows::core::Error) -> io::Error {
     io::Error::other(error)
 }
 
-pub(super) fn set_status(status: HWND, text: &str) {
+pub(super) fn set_status(status: HWND, text: &str) -> bool {
     let text = wide(text);
     // SAFETY: status is a live UI-thread control and SetWindowTextW copies the
     // terminated buffer synchronously. Callers must release AppState before
     // entry because control/accessibility callbacks may also run synchronously.
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr()) };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr()) != 0
+    }
 }
 
 pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {

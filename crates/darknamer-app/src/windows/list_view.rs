@@ -1,7 +1,8 @@
+use super::import_trace::{MODEL_COMMITTED, NATIVE_SYNC_COMPLETED, NATIVE_SYNC_STARTED};
 use super::{
-    AppState, ICON_POLL_TIMER_ID, IconShared, ProgrammaticListUpdateGuard, WM_APP_ICON_CONTINUE,
-    focused_index, icon_worker, measure_text, programmatic_list_update_active, selected_indices,
-    try_app_state, update_controls,
+    AppState, GuiAcceptanceClock, ICON_POLL_TIMER_ID, IconShared, ProgrammaticListUpdateGuard,
+    WM_APP_ICON_CONTINUE, focused_index, icon_worker, measure_text,
+    programmatic_list_update_active, selected_indices, try_app_state, update_controls,
 };
 use crate::icon_cache::{IconCacheKey, cache_icon_index, icon_cache_key};
 use crate::preview::{PreviewRowInput, preview_status_labels};
@@ -1261,6 +1262,21 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
         state.icon_delivery_batch.clear();
         state.icon_delivery_ack_count = 0;
     }
+    let traced_import = (state.import_trace.native_sync_armed()
+        && state.import_trace.event(MODEL_COMMITTED) != 0
+        && state.import_trace.event(NATIVE_SYNC_STARTED) == 0)
+        .then_some((
+            state.import_trace.session_id(),
+            state.import_trace.start_revision(),
+        ));
+    if let Some((session_id, model_revision)) = traced_import {
+        state.import_trace.record(
+            session_id,
+            model_revision,
+            NATIVE_SYNC_STARTED,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
     let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
@@ -1323,6 +1339,18 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
         viewport.restore(state.list_window, state.model.len());
     }
     schedule_icon_poll(state);
+    drop(_redraw);
+    drop(_list_update);
+    // The redraw and programmatic-update guards have both restored the native
+    // ListView before this completion marker is published.
+    if let Some((session_id, model_revision)) = traced_import {
+        state.import_trace.record(
+            session_id,
+            model_revision,
+            NATIVE_SYNC_COMPLETED,
+            GuiAcceptanceClock::read_tick(),
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2001,6 +2029,7 @@ pub(super) fn poll_icon_work(state: &mut AppState) {
         }
     }
     schedule_icon_poll(state);
+    state.record_icon_settlement_if_ready();
 }
 
 fn set_native_icon(window: HWND, row: usize, icon: i32) -> bool {

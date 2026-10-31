@@ -40,7 +40,8 @@ PYTHON_INVENTORY = (
     ("evidence-png", "scripts/darkrenamer_tooling/evidence/png.py", "tooling-evidence-png.py", "python", "darkrenamer_tooling.evidence.png", ("package-root", "package-evidence", "evidence-errors", "package-formats", "formats-png")),
     ("evidence-recovery", "scripts/darkrenamer_tooling/evidence/recovery.py", "tooling-evidence-recovery.py", "python", "darkrenamer_tooling.evidence.recovery", ("package-root", "package-evidence", "evidence-archive", "evidence-journal", "package-contracts", "contracts-state")),
     ("evidence-errors", "scripts/darkrenamer_tooling/evidence/errors.py", "tooling-evidence-errors.py", "python", "darkrenamer_tooling.evidence.errors", ("package-root", "package-evidence")),
-    ("evidence-gui", "scripts/darkrenamer_tooling/evidence/gui.py", "tooling-evidence-gui.py", "python", "darkrenamer_tooling.evidence.gui", ("tooling-loader", "package-root", "package-evidence", "evidence-errors", "evidence-png", "contracts-platform", "contracts-tooling", "contracts-owned-cleanup")),
+    ("evidence-import-trace", "scripts/darkrenamer_tooling/evidence/import_trace.py", "tooling-evidence-import-trace.py", "python", "darkrenamer_tooling.evidence.import_trace", ("package-root", "package-evidence", "evidence-errors")),
+    ("evidence-gui", "scripts/darkrenamer_tooling/evidence/gui.py", "tooling-evidence-gui.py", "python", "darkrenamer_tooling.evidence.gui", ("tooling-loader", "package-root", "package-evidence", "evidence-errors", "evidence-import-trace", "evidence-png", "contracts-platform", "contracts-tooling", "contracts-owned-cleanup")),
     ("evidence-cli", "scripts/darkrenamer_tooling/evidence/cli.py", "tooling-evidence-cli.py", "python", "darkrenamer_tooling.evidence.cli", ("tooling-loader", "package-root", "package-evidence", "evidence-archive", "package-campaign", "campaign-verifier", "package-contracts", "contracts-binding", "contracts-tooling")),
 )
 

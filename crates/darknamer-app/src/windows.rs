@@ -47,6 +47,8 @@ use darknamer_core::{
     ProposalMutationError,
 };
 use icon_worker::{BorrowedSystemImageList, IconShared};
+use import_trace::ImportCompletionTrace;
+use import_trace::{ICONS_SETTLED, IMPORT_COMMAND_READY};
 
 mod appearance;
 mod appearance_dialog;
@@ -57,6 +59,7 @@ mod command_rail;
 mod dialog;
 mod drag_drop;
 mod icon_worker;
+mod import_trace;
 mod language;
 mod list_view;
 mod menu;
@@ -904,6 +907,7 @@ struct AppState {
     import_worker: Option<ImportWorker>,
     preference_persistence: PreferencePersistence,
     acceptance_clock: GuiAcceptanceClock,
+    import_trace: ImportCompletionTrace,
     import_feedback_phase: Option<ImportFeedbackPhase>,
     close_pending: bool,
     confirmation_pending: bool,
@@ -1017,6 +1021,7 @@ impl AppState {
         }
         let column_states = loaded_columns.columns;
         let appearance = loaded_appearance.appearance;
+        let acceptance_clock = GuiAcceptanceClock::new();
         Self {
             list_window: null_mut(),
             status_message: null_mut(),
@@ -1066,7 +1071,8 @@ impl AppState {
             admission_worker: None,
             import_worker: None,
             preference_persistence: PreferencePersistence::default(),
-            acceptance_clock: GuiAcceptanceClock::new(),
+            import_trace: ImportCompletionTrace::new(acceptance_clock.frequency),
+            acceptance_clock,
             import_feedback_phase: None,
             close_pending: false,
             confirmation_pending: false,
@@ -1105,6 +1111,36 @@ impl AppState {
 
     fn revision(&self) -> ModelRevision {
         ModelRevision::new(self.model_revision)
+    }
+
+    fn record_icon_settlement_if_ready(&mut self) {
+        if self.import_trace.event(IMPORT_COMMAND_READY) == 0
+            || self.import_trace.event(ICONS_SETTLED) != 0
+            || self.close_pending
+            || self.model_revision != self.import_trace.final_revision()
+            || !self.preview_synchronization.is_synchronized()
+        {
+            return;
+        }
+        let shared = self.icon_shared.as_deref();
+        let (queued, in_flight, completed) = shared.map_or((0, 0, 0), IconShared::status_counts);
+        let bootstrap_settled =
+            self.icon_image_list.is_some() || shared.is_none_or(IconShared::is_unavailable);
+        if bootstrap_settled
+            && self.icon_unresolved_rows == 0
+            && self.icon_reconcile_remaining == 0
+            && self.icon_delivery_ack_count == 0
+            && queued + in_flight + completed == 0
+        {
+            let session_id = self.import_trace.session_id();
+            let start_revision = self.import_trace.start_revision();
+            self.import_trace.record(
+                session_id,
+                start_revision,
+                ICONS_SETTLED,
+                GuiAcceptanceClock::read_tick(),
+            );
+        }
     }
 
     /// Pointer-free, O(1) observation on the UI thread. Selectors and version
@@ -1175,6 +1211,7 @@ impl AppState {
                     | (isize::from(u8::from(!self.close_pending)) << 4)
             }
             23..=33 | 35..=36 => self.acceptance_clock.selector_value(selector)?,
+            40..=83 => self.import_trace.selector_value(selector)?,
             // The final Apply result is not native-row-ready after a failed
             // incremental update and failed fallback rebuild.
             34 => isize::from(u8::from(self.preview_synchronization.is_synchronized())),
@@ -2728,6 +2765,234 @@ mod tests {
         }
         assert_eq!(actual_text, expected_text);
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
+    fn import_status_trace_distinguishes_native_commit_from_coalesced_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let class = wide("STATIC");
+        // SAFETY: the test owns the native parent and every child until cleanup.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                160,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let (status_message, status_count, _) = create_status_controls(owner)?;
+        state.status_message = status_message;
+        state.status_count = status_count;
+        let start_revision = state.model_revision;
+        state
+            .import_trace
+            .begin(7, start_revision, GuiAcceptanceClock::read_tick());
+        assert!(state.import_trace.record(
+            7,
+            start_revision,
+            import_trace::READING_STATUS_QUEUED,
+            GuiAcceptanceClock::read_tick(),
+        ));
+        state
+            .ui_status
+            .set_progress(crate::i18n::runtime::Text::ImportReading.get());
+        let slot = CallbackState::into_raw(state);
+        // SAFETY: this live test HWND publishes only this test's callback slot.
+        unsafe {
+            SetWindowLongPtrW(owner, GWLP_USERDATA, slot as isize);
+            ShowWindow(owner, SW_SHOW);
+            ShowWindow(status_message, SW_SHOW);
+            assert_ne!(
+                SetWindowPos(status_message, null_mut(), 10, 20, 200, 25, SWP_NOACTIVATE),
+                0,
+            );
+        }
+        let result = (|| -> io::Result<()> {
+            // SAFETY: this test owns the still-live published slot and holds
+            // no other lease across the call.
+            let lease = unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("import status lease unavailable"))?;
+            assert_eq!(application::handle_status_render_timer(owner, lease), 0);
+            // SAFETY: the render callback released its sole slot lease.
+            let mut lease = unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("import trace read lease unavailable"))?;
+            let trace = &lease.state().import_trace;
+            assert_ne!(trace.event(import_trace::READING_STATUS_ATTEMPT_STARTED), 0);
+            assert_ne!(trace.event(import_trace::READING_STATUS_COMMITTED), 0);
+            assert_ne!(trace.event(import_trace::READING_STATUS_VISIBLE), 0);
+            assert_eq!(trace.flags() & import_trace::STATUS_COALESCED, 0);
+            let state = lease.state_mut();
+            state
+                .import_trace
+                .begin(8, start_revision, GuiAcceptanceClock::read_tick());
+            let accepted_tick = state
+                .import_trace
+                .event(import_trace::ACCEPTED_IMPORT_START);
+            let queued_tick = GuiAcceptanceClock::read_tick();
+            assert!(
+                state.import_trace.record(
+                    8,
+                    start_revision,
+                    import_trace::READING_STATUS_QUEUED,
+                    queued_tick,
+                ),
+                "queued status rejected: accepted_tick={accepted_tick}, queued_tick={queued_tick:?}"
+            );
+            state.ui_status.clear_progress();
+            state.ui_status.set_transient("subsequent status");
+            drop(lease);
+            // SAFETY: the prior test lease was dropped before reacquisition.
+            let lease = unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("coalesced status lease unavailable"))?;
+            assert_eq!(application::handle_status_render_timer(owner, lease), 0);
+            // SAFETY: the render callback released its sole slot lease.
+            let lease = unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("coalesced trace read lease unavailable"))?;
+            let trace = &lease.state().import_trace;
+            assert_eq!(trace.event(import_trace::READING_STATUS_ATTEMPT_STARTED), 0);
+            assert_eq!(trace.event(import_trace::READING_STATUS_COMMITTED), 0);
+            assert_ne!(
+                trace.flags() & import_trace::STATUS_COALESCED,
+                0,
+                "coalescing missing: flags={:#x}, schema={:?}, queued={}, status_text={:?}",
+                trace.flags(),
+                trace.selector_value(40),
+                trace.event(import_trace::READING_STATUS_QUEUED),
+                lease.state().ui_status.message_text(),
+            );
+            Ok(())
+        })();
+        // SAFETY: the test's callback is no longer active; retire its exact
+        // slot before destroying the parent-owned controls.
+        unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, 0) };
+        // SAFETY: publication was cleared, and the only test lease ended.
+        let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        // SAFETY: the remaining HWNDs belong exclusively to this test.
+        unsafe { DestroyWindow(owner) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        result.map_err(Into::into)
+    }
+
+    #[test]
+    fn import_trace_requires_the_attached_enabled_native_menu_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let class = wide("STATIC");
+        let label = wide("Import Paths");
+        // SAFETY: every menu and HWND below is created, attached, detached and
+        // destroyed by this test on its sole UI thread.
+        unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                160,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let menu = windows_sys::Win32::UI::WindowsAndMessaging::CreateMenu();
+            let file_popup = windows_sys::Win32::UI::WindowsAndMessaging::CreatePopupMenu();
+            let foreign = windows_sys::Win32::UI::WindowsAndMessaging::CreateMenu();
+            if menu.is_null() || file_popup.is_null() || foreign.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            assert_ne!(SetMenu(owner, menu), 0);
+            assert!(!worker::import_command_native_ready(owner, menu));
+            assert!(!worker::import_command_native_ready(owner, foreign));
+            assert_ne!(
+                windows_sys::Win32::UI::WindowsAndMessaging::AppendMenuW(
+                    menu,
+                    windows_sys::Win32::UI::WindowsAndMessaging::MF_POPUP,
+                    file_popup as usize,
+                    label.as_ptr(),
+                ),
+                0,
+            );
+            assert_ne!(
+                windows_sys::Win32::UI::WindowsAndMessaging::AppendMenuW(
+                    file_popup,
+                    windows_sys::Win32::UI::WindowsAndMessaging::MF_STRING,
+                    usize::from(IMPORT_PATHS),
+                    label.as_ptr(),
+                ),
+                0,
+            );
+            assert!(worker::import_command_native_ready(owner, menu));
+            assert_ne!(
+                EnableMenuItem(
+                    file_popup,
+                    u32::from(IMPORT_PATHS),
+                    MF_BYCOMMAND | MF_GRAYED
+                ),
+                -1,
+            );
+            assert!(!worker::import_command_native_ready(owner, menu));
+            assert_ne!(SetMenu(owner, null_mut()), 0);
+            assert!(!worker::import_command_native_ready(owner, menu));
+            DestroyMenu(foreign);
+            DestroyMenu(menu);
+            DestroyWindow(owner);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn icon_settlement_trace_rejects_a_later_model_revision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let now = GuiAcceptanceClock::read_tick()
+            .and_then(|tick| tick.checked_sub(1_000))
+            .ok_or_else(|| io::Error::other("QPC clock unavailable for icon trace test"))?;
+        let trace = &mut state.import_trace;
+        trace.begin(7, 0, Some(now));
+        for (event, offset) in [
+            (import_trace::READ_RESULT_PUBLISHED, 1),
+            (import_trace::READ_OWNER_ACCEPTED, 2),
+            (import_trace::ADMISSION_STARTED, 3),
+            (import_trace::ADMISSION_RESULT_PUBLISHED, 4),
+            (import_trace::ADMISSION_OWNER_ACCEPTED, 5),
+            (import_trace::MODEL_COMMITTED, 6),
+            (import_trace::NATIVE_SYNC_STARTED, 7),
+            (import_trace::NATIVE_SYNC_COMPLETED, 8),
+            (import_trace::IMPORT_COMMAND_READY, 9),
+        ] {
+            assert!(trace.record(7, 0, event, Some(now + offset)));
+        }
+        trace.set_final_model_revision(7, 0, 1);
+        state.mark_preview_synchronized();
+        state.model_revision = 2;
+        state.record_icon_settlement_if_ready();
+        assert_eq!(state.import_trace.event(import_trace::ICONS_SETTLED), 0);
+        state.model_revision = 1;
+        state.mark_preview_sync_failed();
+        state.record_icon_settlement_if_ready();
+        assert_eq!(state.import_trace.event(import_trace::ICONS_SETTLED), 0);
+        state.mark_preview_synchronized();
+        state.record_icon_settlement_if_ready();
+        assert_ne!(state.import_trace.event(import_trace::ICONS_SETTLED), 0);
         Ok(())
     }
 
@@ -4655,14 +4920,38 @@ mod tests {
             // SAFETY: cancel remains live and the enabled query has no pointers.
             assert_eq!(unsafe { IsWindowEnabled(cancel) }, 0);
             assert!(!worker::import_cancel_control_ready(parent, cancel));
+            assert!(worker::import_status_control_owned(parent, status_message));
+            assert!(!worker::import_status_control_owned(parent, status_count));
+            assert!(!worker::import_status_control_visible(
+                parent,
+                status_message
+            ));
             // SAFETY: these test-owned HWNDs remain live until the enclosing
             // scope destroys their parent; a visible parent is needed for the
             // same effective visibility query used by the production latch.
             unsafe {
                 ShowWindow(parent, SW_SHOW);
+                ShowWindow(status_message, SW_SHOW);
                 EnableWindow(cancel, 1);
                 ShowWindow(cancel, SW_SHOW);
             }
+            assert!(!worker::import_status_control_visible(
+                parent,
+                status_message
+            ));
+            // SAFETY: this owned status child is placed inside the visible
+            // client before it can qualify native text feedback.
+            assert_ne!(
+                // SAFETY: status_message is a live child owned by this test.
+                unsafe {
+                    SetWindowPos(status_message, null_mut(), 10, 50, 200, 25, SWP_NOACTIVATE)
+                },
+                0
+            );
+            assert!(worker::import_status_control_visible(
+                parent,
+                status_message
+            ));
             assert!(!worker::import_cancel_control_ready(parent, cancel));
             // SAFETY: the test-owned child gets its first actionable rectangle,
             // as the production layout does after its posted callback.
