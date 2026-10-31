@@ -78,6 +78,12 @@ class ImportTraceEvidenceTests(unittest.TestCase):
         self.assertEqual(result["events"]["read_result_published"], 180)
         self.assertAlmostEqual(result["intervals_ms"]["native_sync_ms"], 0.002)
         self.assertEqual(result["duration_resolution_uncertainty_ms"], 0.0002)
+        self.assertEqual(result["duration_resolution_uncertainty_convention"], "radius")
+        bounds = result["product_completion_interval"]
+        self.assertEqual((bounds["lower_ms"], bounds["estimate_ms"], bounds["upper_ms"]),
+                         (0.0208, 0.021, 0.0212))
+        self.assertEqual(bounds["full_width_ms"], 2 * bounds["radius_ms"])
+        self.assertEqual(bounds["scope"], "clock-quantization-only-for-instrumented-endpoint")
         self.assertEqual(result["pixel_presentation"], "not-measured")
 
     def test_cancel_wins_when_status_was_proven_coalesced(self):
