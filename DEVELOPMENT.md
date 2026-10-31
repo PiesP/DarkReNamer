@@ -69,6 +69,28 @@ unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
 writers.
 
+Language-save failures retain a bounded first-failure record independently of
+later acknowledgment and writer retirement. The executed generation, requested
+language, operation stage, original error kind and optional native error code
+remain attached to that failure. `windows/preferences.rs` defines the stage
+and error-kind identifiers; a Rust operation boundary does not identify an
+underlying syscall. Windows parent sync is a no-op and cannot produce a denied
+Windows syscall record. Latest requested/saved generations remain separate;
+shutdown retires the language writer without submitting a new snapshot.
+
+The read-only scalar observer uses the schema and selectors in
+`PreferencePersistence::language_diagnostic_selector`. The maintained
+`guest-scenario.ps1` loader reads a revision-bracketed process/HWND-bound frame
+before the native language-menu command and at its outcome. Its structured
+`language_menu_failure` receipt retains the diagnostic before throwing, while
+observer errors remain separate. Each frame is limited to three attempts,
+21 scalar queries per attempt and 50 ms per query. Unknown schemas/stages,
+incoherent generations, exhausted revisions and unstable owners are unavailable
+diagnostics. The reader does not drain writer events, flush, retry or perform
+file I/O; the ordinary scenario's existing file acknowledgment check is separate.
+An operation record can identify a failing persistence step without identifying
+the actor or explaining an earlier failure.
+
 ### Embedded UI language maintenance
 
 `crates/darknamer-app/src/i18n.rs` owns the supported languages, immutable startup

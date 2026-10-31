@@ -588,6 +588,18 @@ discovery, pixel presentation, or click response.
 
 ### Import completion trace
 
+Language-persistence diagnostics use the same copied-scalar message boundary
+through selectors 90–106. Each query copies fixed, non-pointer state and does
+not flush, submit, drain events or alter write authority. The writer records
+original error metadata at the failing Rust operation before handing back the
+original error; its immutable first-failure record survives later success and
+join. Snapshot revision, executed/requested/saved generations and the observer's
+process-creation/HWND checks keep a prior failure distinct from a later command.
+Revision exhaustion or an incoherent/foreign frame fails observation closed.
+The existing independent writer queues, owned temporary cleanup and retirement
+remain authoritative. These diagnostic scalars grant no filesystem, Apply,
+journal or recovery capabilities.
+
 `windows/import_trace.rs` owns the fixed latest-Paths-operation frame and its
 event/flag/selector definitions. Selectors 40 through 83 expose copied bounded
 scalars; the observer brackets them with the trace revision and binds the main
