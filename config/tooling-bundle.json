@@ -418,7 +418,7 @@
       "bundle": "tooling-evidence-import-trace.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.import_trace",
-      "sha256": "a02d54d3f972dbb44e187a7e5ca0f88be08e7810d847e4a5f570b264e1337b9c",
+      "sha256": "3bb2d5524be128813d982bdfbae1b5feae245b4ab034bb49c4c79eaab80b7fe4",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -431,7 +431,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "e0095aad9566c50bf81693232604b4e0bb50cb84c0ec19ef339010c78613164b",
+      "sha256": "8fe72a49926d781760467c0ee8aa382f1c0e269b58a3ade3f50403cbedb20669",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -514,7 +514,7 @@
       "bundle": "guest-uia.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9ee30fd41f8b0d52a100ac9facf8b531bacfb4f8dd5fede02cb16c4d51515208",
+      "sha256": "e911b4995039669c1b91834dc5c04a9d8b056019887415a2ddee2fbc616cff5c",
       "dependencies": []
     },
     {
@@ -532,7 +532,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "3492affa4ebf8b0abefa6ff73d8b58f51d3b43e2acd6d00a91d08ba8b520a9c4",
+      "sha256": "35eb551b8215efeb51aef09177efce577d8fd06c977e4cbee14eb85aab058e35",
       "dependencies": []
     },
     {
@@ -614,7 +614,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "77088ce895af6e1a315a242c32383b1f211c2ed3c2dd8bf7d96760f172a0b84a",
+      "sha256": "923f5e92702e2043b9be7422b6ca1d335b87c442232efb369ed457e1e1123796",
       "dependencies": []
     },
     {
@@ -632,7 +632,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "902ab300dc18e5c83f459a715b9afe34eaefbd8533ee84befaf015b5405f9464",
+      "sha256": "13009353861ecddc07c187d9aa8a795e6aacc55ebf1507edf5ffd7368db87595",
       "dependencies": []
     },
     {

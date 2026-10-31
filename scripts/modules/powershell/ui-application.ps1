@@ -496,6 +496,21 @@ function Import-GuiRegressionPathList {
     if ($null -ne $openInvocation) {
         Complete-AutomationControlInvoke -State $openInvocation -TimeoutSeconds $WaitSeconds
     }
+    $invokeTiming = if ($null -ne $openInvocation) {
+        $markers = Get-AutomationControlInvokeTiming -State $openInvocation
+        [ordered]@{
+            schema_version = $markers.schema_version
+            h1_ticks = $markers.h1_ticks
+            h2_ticks = $markers.h2_ticks
+            h3_ticks = $markers.h3_ticks
+            outcome = $markers.outcome
+            request_open_ticks = [long]$openTicks
+            qpc_frequency = [long][Diagnostics.Stopwatch]::Frequency
+            process_id = [int]$Application.process.Id
+            process_start_utc_ticks = [long]$ExpectedStartUtcTicks
+            main_window_handle = [long]$Application.main_handle
+        }
+    } else { $null }
     if ($RecordReadinessBrackets) {
         $operation = if ($TimelineOperation) { $TimelineOperation }
             else { 'runtime-import-1000' }
@@ -592,6 +607,7 @@ function Import-GuiRegressionPathList {
     }
     [pscustomobject]@{ grid = $Grid; elapsed_ms = $rowObservedMs;
         product_trace=$productTrace;
+        invoke_timing=$invokeTiming;
         first_feedback = $(if ($MeasureFirstFeedback) { $feedback } else { $null });
         command_ready_after_rows_ms = $readinessMs;
         open_ticks = $(if ($IncludeOpenTicks) { $openTicks } else { $null });

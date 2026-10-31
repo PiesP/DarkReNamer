@@ -1432,6 +1432,165 @@ public static class DarkReNamerLanguageMenuReader {
     [DarkReNamerLanguageMenuReader]::AssertInputLayout()
 }
 
+function Initialize-ProductionLanguageDiagnosticReader {
+    if ('DarkReNamerLanguageDiagnosticReader' -as [type]) { return }
+    Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerLanguageDiagnosticReader {
+    private const uint StatusMessage = 0x8056; // WM_APP + 0x56.
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
+
+    private static uint Scalar(IntPtr window, int selector) {
+        IntPtr result;
+        if (SendMessageTimeoutW(window, StatusMessage, new IntPtr(selector), IntPtr.Zero,
+                                3, 50, out result) == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Language diagnostic query failed.");
+        long value = result.ToInt64();
+        if (value < 0 || value > uint.MaxValue)
+            throw new InvalidOperationException("Language diagnostic is unpublished or non-scalar.");
+        return checked((uint)value);
+    }
+    private static ulong Pair(uint low, uint high) { return ((ulong)high << 32) | low; }
+    public static void ValidateFrame(uint[] frame, ulong revision) {
+        if (frame == null || frame.Length != 18 || frame[0] != 1 ||
+            revision != Pair(frame[1], frame[2]) ||
+            frame[12] > 1 || frame[14] > 1 || frame[15] > 1 || frame[16] > 1 || frame[17] > 1 ||
+            (frame[12] == 0 && frame[13] != 0) ||
+            (frame[14] == 0 && (Pair(frame[7], frame[8]) != 0 || frame[9] != 0 ||
+                frame[10] != 0 || frame[11] != 0 || frame[12] != 0)) ||
+            (frame[14] == 1 && (Pair(frame[7], frame[8]) == 0 || frame[9] > 3 ||
+                frame[10] == 0 || frame[10] > 7 ||
+                !(frame[11] >= 1 && frame[11] <= 8 || frame[11] == 255))) ||
+            (frame[17] == 0 && (Pair(frame[3], frame[4]) != 0 ||
+                Pair(frame[5], frame[6]) != 0 || frame[14] != 0 || frame[16] != 0)) ||
+            Pair(frame[7], frame[8]) > Pair(frame[3], frame[4]) ||
+            Pair(frame[5], frame[6]) > Pair(frame[3], frame[4]))
+            throw new InvalidOperationException("Language diagnostic schema, revision, or generation is invalid.");
+    }
+    public static uint[] ReadBound(Process process, IntPtr window, long startUtcTicks) {
+        if (process == null || window == IntPtr.Zero || process.HasExited ||
+            process.StartTime.ToUniversalTime().Ticks != startUtcTicks)
+            throw new InvalidOperationException("Language diagnostic process identity changed.");
+        uint pid;
+        uint thread = GetWindowThreadProcessId(window, out pid);
+        if (thread == 0 || pid != (uint)process.Id)
+            throw new InvalidOperationException("Language diagnostic HWND is not owned by the process.");
+        for (int attempt = 0; attempt < 3; attempt++) {
+            ulong before = Pair(Scalar(window, 91), Scalar(window, 92));
+            uint[] frame = new uint[18];
+            for (int index = 0; index < frame.Length; index++) frame[index] = Scalar(window, 90 + index);
+            ulong after = Pair(Scalar(window, 91), Scalar(window, 92));
+            if (before != after || after != Pair(frame[1], frame[2])) continue;
+            ValidateFrame(frame, after);
+            if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != startUtcTicks ||
+                GetWindowThreadProcessId(window, out pid) != thread || pid != (uint)process.Id)
+                throw new InvalidOperationException("Language diagnostic schema, request, or owner changed.");
+            return frame;
+        }
+        throw new InvalidOperationException("Language diagnostic changed during bounded read.");
+    }
+}
+'@
+}
+
+function Get-ProductionLanguageDiagnostic {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $Session
+    )
+    Initialize-ProductionLanguageDiagnosticReader
+    $handle = [IntPtr]$MainWindow.Current.NativeWindowHandle
+    Assert-ExactApplicationMainWindowBinding -Process $Process -ExpectedSession $Session `
+        -MainWindowHandle $handle -MainWindow $MainWindow -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' -Label 'language diagnostic owner'
+    $start = [long]$Process.StartTime.ToUniversalTime().Ticks
+    $frame = [DarkReNamerLanguageDiagnosticReader]::ReadBound($Process, $handle, $start)
+    $combine = { param([int]$Low) ([uint64]$frame[$Low + 1] -shl 32) -bor [uint64]$frame[$Low] }
+    $failure = if ($frame[14] -eq 1) { [ordered]@{
+        file_kind = 'language'
+        sequence = 1
+        executed_generation = (& $combine 7)
+        requested_preference = [int]$frame[9]
+        stage = [int]$frame[10]
+        error_kind = [int]$frame[11]
+        raw_os_error = if ($frame[12] -eq 1) {
+            [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$frame[13]), 0)
+        } else { $null }
+    } } else { $null }
+    [ordered]@{
+        schema_version = [int]$frame[0]
+        revision = (& $combine 1)
+        pid = [int]$Process.Id
+        process_start_time_utc_ticks = $start.ToString([Globalization.CultureInfo]::InvariantCulture)
+        hwnd = [long]$handle
+        session_id = [int]$Session
+        requested_generation = (& $combine 3)
+        saved_generation = (& $combine 5)
+        submission_failed = [bool]$frame[15]
+        writer_terminal = [bool]$frame[16]
+        writer_present = [bool]$frame[17]
+        first_failure = $failure
+    }
+}
+
+function Add-ProductionLanguageFailureDiagnostic {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord,
+        [Parameter(Mandatory)][scriptblock] $ReadDiagnostic,
+        [Parameter(Mandatory)][int] $TargetCommand,
+        [object] $DiagnosticBefore
+    )
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
+        if ($exception.Data.Contains('DarkReNamerLanguageMenuFailure')) { return }
+        $exception = $exception.InnerException
+    }
+    $after = $null
+    $readError = $null
+    try { $after = & $ReadDiagnostic }
+    catch {
+        $message = [string]$_.Exception.Message
+        $readError = [ordered]@{
+            exception_type = [string]$_.Exception.GetType().FullName
+            message = $message.Substring(0, [Math]::Min(512, $message.Length))
+        }
+    }
+    $ErrorRecord.Exception.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{
+        schema_version = 1
+        stage = 'enter-or-post-enter-exception'
+        target_command = $TargetCommand
+        expected_preference = [int]($TargetCommand - 0x9020)
+        diagnostic_before = $DiagnosticBefore
+        diagnostic_after = $after
+        diagnostic_read_error = $readError
+    }
+}
+
+function Invoke-ProductionLanguageObserved {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Observe,
+        [Parameter(Mandatory)][scriptblock] $ReadDiagnostic,
+        [Parameter(Mandatory)][int] $TargetCommand,
+        [object] $DiagnosticBefore
+    )
+    try { & $Observe }
+    catch {
+        Add-ProductionLanguageFailureDiagnostic -ErrorRecord $_ `
+            -ReadDiagnostic $ReadDiagnostic -TargetCommand $TargetCommand `
+            -DiagnosticBefore $DiagnosticBefore
+        throw
+    }
+}
+
 function Resolve-ProductionSystemLanguage {
     param([Parameter(Mandatory)][AllowEmptyCollection()][string[]] $Tags)
     foreach ($tag in $Tags) {
@@ -1922,13 +2081,20 @@ function Invoke-ProductionLanguageMenuChoice {
         -Session $Session -Phase 'pre-enter' -ExpectedHighlight ($target - 0x9020)
     Assert-ProductionLanguagePopupContinuity -Open $languageOpen -Stage $preEnter
     $trace.Add($preEnter)
+    $diagnosticBefore = Get-ProductionLanguageDiagnostic -Process $Process `
+        -MainWindow $MainWindow -Session $Session
+    try {
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
         -Session $Session -Action 'enter'
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $observation = Get-ProductionLanguageChoiceObservation -Process $Process `
-            -MainWindow $MainWindow -Status $status -Session $Session `
-            -CurrentLanguage $CurrentLanguage
+        $observation = Invoke-ProductionLanguageObserved `
+            -Observe { Get-ProductionLanguageChoiceObservation -Process $Process `
+                -MainWindow $MainWindow -Status $status -Session $Session `
+                -CurrentLanguage $CurrentLanguage } `
+            -ReadDiagnostic { Get-ProductionLanguageDiagnostic -Process $Process `
+                -MainWindow $MainWindow -Session $Session } `
+            -TargetCommand $target -DiagnosticBefore $diagnosticBefore
         if ($postEnter.Count -eq 0 -or
             ($postEnter[$postEnter.Count - 1] | ConvertTo-Json -Depth 5 -Compress) -cne
             ($observation | ConvertTo-Json -Depth 5 -Compress)) {
@@ -1940,6 +2106,19 @@ function Invoke-ProductionLanguageMenuChoice {
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     if ($null -eq $saved -or $saved.value -ne ($target - 0x9020)) {
+        $diagnosticAfter = $null
+        $diagnosticReadError = $null
+        try {
+            $diagnosticAfter = Get-ProductionLanguageDiagnostic -Process $Process `
+                -MainWindow $MainWindow -Session $Session
+        }
+        catch {
+            $diagnosticReadError = [ordered]@{
+                exception_type = [string]$_.Exception.GetType().FullName
+                message = ([string]$_.Exception.Message).Substring(0,
+                    [Math]::Min(512, ([string]$_.Exception.Message).Length))
+            }
+        }
         $diagnostic = [ordered]@{
             target = [int]$target; input_trace = $trace.ToArray()
             status_before = $statusBefore; post_enter = $postEnter.ToArray()
@@ -1952,6 +2131,9 @@ function Invoke-ProductionLanguageMenuChoice {
             stage = 'durable-preference-acknowledgement'
             target_command = [int]$target
             expected_preference = [int]($target - 0x9020)
+            diagnostic_before = $diagnosticBefore
+            diagnostic_after = $diagnosticAfter
+            diagnostic_read_error = $diagnosticReadError
             status_before = $statusBefore
             input_trace_count = $trace.Count
             pre_enter = if ($trace.Count -gt 0) { $trace[$trace.Count - 1] } else { $null }
@@ -1987,6 +2169,8 @@ function Invoke-ProductionLanguageMenuChoice {
         ($cellsBefore | ConvertTo-Json -Depth 4 -Compress)) {
         throw 'Language choice restarted the application, reset the model, or changed the current UI.'
     }
+    $diagnosticAfter = Get-ProductionLanguageDiagnostic -Process $Process `
+        -MainWindow $MainWindow -Session $Session
     [ordered]@{
         input = 'native-menu-keyboard'; pid = [int]$Process.Id; session_id = [int]$Session
         hwnd = [long]$handle; before = $before; after = $after
@@ -1996,6 +2180,17 @@ function Invoke-ProductionLanguageMenuChoice {
         preference = $saved
         input_trace = $trace.ToArray(); status_before = $statusBefore
         post_enter = $postEnter.ToArray()
+        diagnostic_before = $diagnosticBefore; diagnostic_after = $diagnosticAfter
+    }
+    }
+    catch {
+        # This catch executes before the enclosing scenario's finally retires
+        # the owned process. Preserve both the original error and its details.
+        Add-ProductionLanguageFailureDiagnostic -ErrorRecord $_ `
+            -ReadDiagnostic { Get-ProductionLanguageDiagnostic -Process $Process `
+                -MainWindow $MainWindow -Session $Session } `
+            -TargetCommand $target -DiagnosticBefore $diagnosticBefore
+        throw
     }
 }
 

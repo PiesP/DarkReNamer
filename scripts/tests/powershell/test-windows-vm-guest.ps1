@@ -5180,6 +5180,107 @@ function Test-DrValidActiveLanguageCrashContract {
 
 Test-DrValidActiveLanguageCrashContract
 
+function Test-DrLanguageFailureDiagnosticContract {
+    # guest-scenario is in the guest loader; ui-native is not. Compile the
+    # pointer-free observer here so a missing type or invalid C# fails locally.
+    Initialize-ProductionLanguageDiagnosticReader
+    if (-not ('DarkReNamerLanguageDiagnosticReader' -as [type])) {
+        throw 'The guest language diagnostic reader is unavailable.'
+    }
+    $frame = [uint32[]]::new(18)
+    $frame[0] = 1; $frame[1] = 3; $frame[3] = 1
+    $frame[7] = 1; $frame[9] = 1; $frame[10] = 7
+    $frame[11] = 2; $frame[12] = 1; $frame[13] = 5; $frame[14] = 1; $frame[17] = 1
+    [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]4) } 'revision'
+    $frame[10] = 0
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
+    $frame[10] = 7; $frame[3] = 0
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
+    $frame[3] = 1; $frame[0] = 2
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'schema'
+    $frame[0] = 1; $frame[12] = 0; $frame[13] = 0; $frame[17] = 1
+    [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
+    $frame[17] = 0
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
+    $frame[17] = 1
+    $prior = [ordered]@{ revision = 1; requested_generation = 1 }
+    $observerError = [InvalidOperationException]::new('observer-path-failed')
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $observerError } `
+            -ReadDiagnostic { [ordered]@{ revision = 2; first_failure = [ordered]@{
+                file_kind = 'language'; stage = 7 } } } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The observer failure was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'observer-path-failed' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_before.revision -ne 1 -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_after.first_failure.file_kind -cne 'language') {
+            throw 'Thrown observer path replaced the original error or lost diagnostic identity.'
+        }
+    }
+    $readerError = [InvalidOperationException]::new('observer-unavailable')
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $readerError } `
+            -ReadDiagnostic { throw 'diagnostic-query-failed' } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The observer failure was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'observer-unavailable' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_read_error.message -cne 'diagnostic-query-failed') {
+            throw 'Observer query failure replaced the original error.'
+        }
+    }
+    $timeout = [InvalidOperationException]::new('durable-timeout')
+    $timeout.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{ stage = 'durable-preference-acknowledgement' }
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $timeout } `
+            -ReadDiagnostic { throw 'must-not-read' } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The timeout was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'durable-timeout' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].stage -cne 'durable-preference-acknowledgement') {
+            throw 'Existing timeout diagnostics were replaced.'
+        }
+    }
+    $source = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-scenario.ps1') -Raw
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'The guest language diagnostic source must parse.' }
+    $choice = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-ProductionLanguageMenuChoice'
+    }, $true))
+    if ($choice.Count -ne 1) { throw 'The maintained language menu selection is missing.' }
+    $body = $choice[0].Extent.Text
+    $before = $body.IndexOf('$diagnosticBefore = Get-ProductionLanguageDiagnostic', [StringComparison]::Ordinal)
+    $enter = $body.IndexOf("-Action 'enter'", [StringComparison]::Ordinal)
+    $after = $body.IndexOf('$diagnosticAfter = Get-ProductionLanguageDiagnostic', [StringComparison]::Ordinal)
+    $throw = $body.IndexOf('throw $failure', [StringComparison]::Ordinal)
+    if ($before -lt 0 -or $enter -le $before -or $after -le $enter -or $throw -le $after) {
+        throw 'Language diagnostic must be read before Enter and before failure retirement.'
+    }
+    $row = [ordered]@{}
+    $original = [InvalidOperationException]::new('x' * 1500)
+    $original.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{
+        schema_version = 1
+        diagnostic_before = [ordered]@{ revision = 1 }
+        diagnostic_after = [ordered]@{ revision = 2; first_failure = [ordered]@{ stage = 7 } }
+    }
+    try { throw $original } catch { Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_ }
+    if ($row.error_detail.message.Length -ne 1024 -or
+        $row.error_detail.language_menu_failure.diagnostic_after.first_failure.stage -ne 7) {
+        throw 'Truncated exception text lost the structured language diagnostic.'
+    }
+}
+
+Test-DrLanguageFailureDiagnosticContract
+
 function Test-DrProductionLanguageJobLedgerBinding {
     $lifecycles = @(
         for ($index = 1; $index -le 33; $index++) {

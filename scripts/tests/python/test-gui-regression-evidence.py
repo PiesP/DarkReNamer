@@ -23,6 +23,9 @@ from controller_cleanup_fixture import (
 )
 from darkrenamer_tooling.evidence import gui as evidence
 from darkrenamer_tooling.evidence.import_trace import EVENTS as IMPORT_TRACE_EVENTS
+from darkrenamer_tooling.evidence.import_trace import (
+    completion_interval, summarize_four_addition_completion, validate_import_trace,
+)
 from darkrenamer_tooling.vm import gui as vm_gui
 from gui_regression_fixture import (
     SCRIPT, SOURCE, TREE, digest, json_bytes, write_json, pair_png,
@@ -4706,6 +4709,11 @@ class GuiApplyEndpointTests(unittest.TestCase):
         measured = evidence.validate_gui_apply_metrics(
             scenario, initial, final, require_product_trace=True)
         self.assertEqual(len(measured['import_product_traces']), 5)
+        completion = measured['four_addition_product_completion']
+        self.assertEqual(len(completion['additions']), 4)
+        self.assertEqual(completion['aggregate_clock_full_width_ms'], 0.0016)
+        self.assertEqual(completion['full_endpoint_precision_goal'],
+                         'not-evaluated-by-clock-resolution-alone')
         self.assertEqual(measured['four_addition_observer_inclusive_ms'], sum(
             (row['rows_observed_ticks'] - row['open_ticks']) * 1000 /
             scenario['qpc_frequency'] for row in scenario['imports'][1:]))
@@ -4718,6 +4726,8 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 scenario, initial, final, require_product_trace=True)
         self.assertEqual(evidence.validate_gui_apply_metrics(
             scenario, initial, final)['import_product_traces'], 'not-measured')
+        self.assertEqual(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['four_addition_product_completion'], 'not-measured')
 
     def test_import_trace_cannot_disagree_with_cancel_clock_or_switch_owner_thread(self):
         scenario, initial, final = self.valid('success-10000')
@@ -4735,6 +4745,70 @@ class GuiApplyEndpointTests(unittest.TestCase):
             mutate(changed)
             with self.assertRaises(evidence.EvidenceError):
                 evidence.validate_gui_apply_metrics(changed, initial, final)
+
+    def completion_traces(self):
+        scenario, _, _ = self.valid('success-10000')
+        return [validate_import_trace(row['product_trace'], opened=row['open_ticks'],
+            observed=row['rows_observed_ticks'], command=row['command_ready_ticks'],
+            frequency=scenario['qpc_frequency'], pid=scenario['process_id'],
+            start=scenario['process_start_utc_ticks'], hwnd=scenario['main_window_handle'],
+            expected_generation=index + 1) for index, row in enumerate(scenario['imports'])][1:]
+
+    def test_completion_resolution_radius_is_half_full_width_and_not_total_uncertainty(self):
+        interval = completion_interval(100, 200, 10_000_000)
+        self.assertEqual(interval['lower_ms'], 0.0098)
+        self.assertEqual(interval['upper_ms'], 0.0102)
+        self.assertEqual(interval['radius_ms'], 0.0002)
+        self.assertEqual(interval['full_width_ms'], 0.0004)
+        summary = summarize_four_addition_completion(self.completion_traces())
+        self.assertEqual(summary['aggregate_clock_full_width_ticks'], 16)
+        self.assertEqual(summary['aggregate_clock_full_width_ms'], 0.0016)
+        self.assertAlmostEqual(sum(i['upper_ms'] - i['lower_ms'] for i in summary['additions']),
+                               summary['aggregate_clock_full_width_ms'])
+        self.assertEqual(summary['clock_resolution_component_goal'], 'met')
+        self.assertEqual(summary['full_endpoint_precision_goal'],
+                         'not-evaluated-by-clock-resolution-alone')
+
+    def test_completion_same_tick_bounds_keep_symmetric_radius(self):
+        interval = completion_interval(100, 100, 10_000_000)
+        self.assertEqual(interval['estimate_ms'], 0)
+        self.assertEqual((interval['lower_ms'], interval['upper_ms']), (-0.0002, 0.0002))
+        scenario, initial, final = self.valid('success-1000')
+        events = scenario['imports'][0]['product_trace']['after']['events']
+        events['native_sync_completed'] = events['import_command_ready']
+        evidence.validate_gui_apply_metrics(scenario, initial, final)
+        events['import_command_ready'] = 0
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(scenario, initial, final)
+
+    def test_completion_aggregate_rejects_missing_mixed_or_radius_as_width_records(self):
+        traces = self.completion_traces()
+        mutations = (
+            lambda rows: rows.pop(),
+            lambda rows: rows[1].__setitem__('qpc_frequency', 1),
+            lambda rows: rows[1].__setitem__('process_id', 42),
+            lambda rows: rows[1].__setitem__('generation', rows[0]['generation']),
+            lambda rows: rows[1].__setitem__('source_command_confirmed_ticks', None),
+            lambda rows: rows[1]['product_completion_interval'].__setitem__('full_width_ms', 0.0002),
+            lambda rows: rows[1]['product_completion_interval'].__setitem__('method', 'full-width'),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                changed = deepcopy(traces)
+                mutate(changed)
+                with self.assertRaises(evidence.EvidenceError):
+                    summarize_four_addition_completion(changed)
+
+    def test_completion_goal_applies_to_sum_not_each_addition(self):
+        traces = self.completion_traces()
+        for trace in traces:
+            trace['qpc_frequency'] = 100
+            trace['product_completion_interval'] = completion_interval(
+                trace['opened_ticks'], trace['source_command_confirmed_ticks'], 100)
+        summary = summarize_four_addition_completion(traces)
+        self.assertEqual(summary['aggregate_clock_full_width_ms'], 160)
+        self.assertTrue(all(i['full_width_ms'] < 100 for i in summary['additions']))
+        self.assertEqual(summary['clock_resolution_component_goal'], 'exceeded')
 
     def test_import_trace_legacy_lineage_does_not_trust_missing_or_unrelated_commits(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -5088,6 +5162,106 @@ class GuiApplyCampaignTests(unittest.TestCase):
                                        side_effect=bad_measured):
                     with self.assertRaises(evidence.EvidenceError):
                         evidence.validate_gui_apply_campaign_index(path, 'a' * 40)
+
+
+class InvocationTimingTests(unittest.TestCase):
+    def receipt(self, h3=112):
+        return {
+            'schema_version': 1, 'h1_ticks': 101, 'h2_ticks': 105,
+            'h3_ticks': h3, 'outcome': 'returned', 'qpc_frequency': 10_000_000,
+            'request_open_ticks': 100,
+            'process_id': 42, 'process_start_utc_ticks': 123456789,
+            'main_window_handle': 9876,
+        }
+
+    def validate(self, receipt):
+        return evidence.validate_gui_import_invocation_timing(
+            receipt, opened=100, accepted=110, observed=120,
+            frequency=10_000_000, pid=42, start=123456789, hwnd=9876)
+
+    def test_invoke_can_return_on_either_side_of_product_acceptance(self):
+        before = self.validate(self.receipt(h3=108))
+        after = self.validate(self.receipt(h3=112))
+        self.assertEqual(before['invoke_return_order'], 'before-or-at-acceptance')
+        self.assertEqual(after['invoke_return_order'], 'after-acceptance')
+        self.assertEqual(before['h0_to_h1_ms'] + before['h1_to_h2_ms'] +
+                         before['h2_to_product_acceptance_ms'], 0.001)
+        self.assertEqual(after['h2_to_h3_ms'], 0.0007)
+
+    def test_missing_failed_foreign_and_mixed_clock_receipts_rejected(self):
+        changes = (
+            lambda r: r.__setitem__('h3_ticks', 0),
+            lambda r: r.__setitem__('outcome', 'threw'),
+            lambda r: r.__setitem__('process_id', 43),
+            lambda r: r.__setitem__('process_start_utc_ticks', 123456790),
+            lambda r: r.__setitem__('main_window_handle', 9877),
+            lambda r: r.__setitem__('qpc_frequency', 9_999_999),
+            lambda r: r.__setitem__('request_open_ticks', 99),
+            lambda r: r.__setitem__('h1_ticks', 106),
+            lambda r: r.__setitem__('h2_ticks', 111),
+            lambda r: r.__setitem__('h3_ticks', 121),
+            lambda r: r.pop('h3_ticks'),
+        )
+        for change in changes:
+            receipt = self.receipt()
+            change(receipt)
+            with self.subTest(receipt=receipt), self.assertRaises(evidence.EvidenceError):
+                self.validate(receipt)
+
+    def test_prechange_source_may_omit_timing_but_unknown_source_may_not(self):
+        # Hosted source checkouts may be shallow; establish an independent
+        # history rather than assume the historical production tip is present.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            def commit(message):
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+                    '-qm', message], check=True)
+                return subprocess.check_output(['git', '-C', str(repo),
+                    'rev-parse', 'HEAD'], text=True).strip()
+            legacy = commit('legacy')
+            current = commit('instrumented')
+            with mock.patch.object(evidence, 'INVOCATION_TIMING_LEGACY_TIP', legacy):
+                self.assertFalse(evidence.requires_invocation_timing(legacy, repo))
+                self.assertTrue(evidence.requires_invocation_timing(current, repo))
+                self.assertTrue(evidence.requires_invocation_timing('f' * 40, repo))
+                self.assertTrue(evidence.requires_invocation_timing('invalid', repo))
+
+    def test_current_gui_apply_requires_every_invocation_receipt(self):
+        scenario, initial, final = GuiApplyEndpointTests.valid('success-1000')
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(
+                scenario, initial, final, require_product_trace=True,
+                require_invocation_timing=True)
+        row = scenario['imports'][0]
+        accepted = row['product_trace']['after']['events']['accepted_import_start']
+        row['invoke_timing'] = {
+            'schema_version': 1, 'h1_ticks': row['open_ticks'],
+            'h2_ticks': row['open_ticks'] + 1, 'h3_ticks': accepted + 1,
+            'outcome': 'returned', 'request_open_ticks': row['open_ticks'],
+            'qpc_frequency': scenario['qpc_frequency'],
+            'process_id': scenario['process_id'],
+            'process_start_utc_ticks': scenario['process_start_utc_ticks'],
+            'main_window_handle': scenario['main_window_handle'],
+        }
+        metrics = evidence.validate_gui_apply_metrics(
+            scenario, initial, final, require_product_trace=True,
+            require_invocation_timing=True)
+        self.assertEqual(len(metrics['import_invocation_timings']), 1)
+        validated = metrics['import_invocation_timings'][0]
+        for key, value in row['invoke_timing'].items():
+            self.assertEqual(validated[key], value)
+        self.assertEqual(validated['accepted_import_start_ticks'], accepted)
+        self.assertEqual(validated['first_functional_feedback_interval_ticks'],
+                         metrics['import_product_traces'][0]['first_functional_feedback_interval'])
+        self.assertEqual(metrics['import_invocation_timings'][0]['invoke_return_order'],
+                         'after-acceptance')
+        del row['invoke_timing']['h3_ticks']
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.validate_gui_apply_metrics(
+                scenario, initial, final, require_product_trace=True,
+                require_invocation_timing=True)
 
 
 if __name__ == "__main__":

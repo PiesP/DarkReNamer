@@ -69,6 +69,28 @@ unread bytes across every save path while keeping existing bounded coalescing,
 latest final snapshots, atomic replacement and failure reporting for authorized
 writers.
 
+Language-save failures retain a bounded first-failure record independently of
+later acknowledgment and writer retirement. The executed generation, requested
+language, operation stage, original error kind and optional native error code
+remain attached to that failure. `windows/preferences.rs` defines the stage
+and error-kind identifiers; a Rust operation boundary does not identify an
+underlying syscall. Windows parent sync is a no-op and cannot produce a denied
+Windows syscall record. Latest requested/saved generations remain separate;
+shutdown retires the language writer without submitting a new snapshot.
+
+The read-only scalar observer uses the schema and selectors in
+`PreferencePersistence::language_diagnostic_selector`. The maintained
+`guest-scenario.ps1` loader reads a revision-bracketed process/HWND-bound frame
+before the native language-menu command and at its outcome. Its structured
+`language_menu_failure` receipt retains the diagnostic before throwing, while
+observer errors remain separate. Each frame is limited to three attempts,
+22 scalar queries per attempt and 50 ms per query. Unknown schemas/stages,
+incoherent generations, exhausted revisions and unstable owners are unavailable
+diagnostics. The reader does not drain writer events, flush, retry or perform
+file I/O; the ordinary scenario's existing file acknowledgment check is separate.
+An operation record can identify a failing persistence step without identifying
+the actor or explaining an earlier failure.
+
 ### Embedded UI language maintenance
 
 `crates/darknamer-app/src/i18n.rs` owns the supported languages, immutable startup
@@ -1186,6 +1208,19 @@ acceptance, durability shortcut or performance improvement is implied.
 
 ### Import completion and first functional feedback
 
+The owned MTA Invoke receipt also records three harness QPC boundaries: H1 is
+the helper script's first statement, H2 immediately precedes Invoke after
+pattern acquisition, and H3 records its return or exception, with outcome.
+The existing Open anchor H0 is unchanged. The validated summary retains raw
+ticks, frequency and process/request bindings plus H0-to-H1 (initialization
+and scheduling), H1-to-H2, H2-to-product acceptance A, and A-to-functional
+feedback F. Invoke entry-to-return H2-to-H3 is separate and can overlap
+acceptance; H3 need not precede A. Missing/failed markers cannot qualify a
+successful attribution record. Historical sources verified at or before the
+uninstrumented source tip keep their original evidence interpretation.
+This diagnostic adds no prewarming, pooling, input replacement or forced wait,
+and does not change the H0-to-F or separate Cancel-control goals.
+
 The `gui-apply-feedback` route also records a bounded product trace for every
 Paths import. The [native trace contract](SAFETY.md#import-completion-trace)
 defines its source boundaries and read-only queries. `product_trace` retains
@@ -1224,8 +1259,25 @@ repeating the historical nine-case campaign or collecting every platform cell.
 Freeze an initial instrumentation design reference of 400 ms for the four-addition
 workload and an aggregate duration-uncertainty goal of 100 ms. Sum the four
 duration-interval widths, rather than allowing 100 ms per addition. Latched QPC
-boundaries have a two-tick duration-resolution allowance; this characterizes
-clock resolution, not scheduling or instrumentation bias. Retain actual observer
+boundaries use a symmetric two-QPC-tick **radius**, hence a four-tick full
+width. The verifier publishes each estimate's lower/upper bounds, units,
+construction method and exact source endpoint. At 10 MHz each radius is
+0.0002 ms, each full width is 0.0004 ms, and four full widths sum to
+**0.0016 ms**, not 0.0008 ms. Symmetric signed bounds are not trimmed at zero
+for a same-tick estimate. The retained legacy
+`duration_resolution_uncertainty_ms` field denotes the radius; its additive
+convention field makes this explicit. Original raw records are unchanged.
+
+The product-completion endpoint is Open invocation through the timestamp after
+actual native command-state confirmation. It is an instrumented-source
+endpoint, not the earliest intrinsic readiness instant or an uninstrumented
+executable measurement. The aggregate helper recomputes all four full widths
+from bound integer timestamps in one process and rejects missing events,
+mixed clocks/identities, discontinuous requests and inconsistent derived bounds.
+A clock-resolution component meeting 100 ms does not establish the full
+endpoint precision goal or a qualified six-process baseline. Scheduling,
+observer-discovery uncertainty, recording bias and unknown contributions keep
+their own dispositions. Retain actual observer
 query intervals and their discovery uncertainty alongside the product latches.
 The fixed recording work and post-discovery scalar queries are measured workload
 and observer work respectively; neither is assumed free or subtracted from the

@@ -16,7 +16,9 @@ import sys
 import uuid
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
-from darkrenamer_tooling.evidence.import_trace import validate_import_trace
+from darkrenamer_tooling.evidence.import_trace import (
+    summarize_four_addition_completion, validate_import_trace,
+)
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
@@ -44,6 +46,7 @@ PERFORMANCE_MODE = "performance-sample"
 READINESS_BRACKET_CONTRACT = "qpc-polled-readiness-v1"
 READINESS_LEGACY_TIP = "d5b1df1c2ca95d258b2839a995753b1c043af265"
 IMPORT_TRACE_LEGACY_TIP = "9ea27a73c6c8a03944c4f3a243fefe570e423d79"
+INVOCATION_TIMING_LEGACY_TIP = "37544c85168950e20c6310925cc76e4b81d0ef8b"
 FOCUSED_CLEAR_MODE = "focused-10k-clear"
 FOCUSED_CLEAR_RUN_ID = "focused-10k-clear-v1-1366x768-96-text100"
 FOCUSED_CLEAR_SCOPE = "focused-10k-clear-v1"
@@ -906,6 +909,17 @@ def requires_import_trace(source_sha: str, source_repo: Path | None = None) -> b
     result = subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", source_sha,
          IMPORT_TRACE_LEGACY_TIP], capture_output=True, check=False)
+    return result.returncode != 0
+
+
+def requires_invocation_timing(source_sha: str, source_repo: Path | None = None) -> bool:
+    """Require H1/H2/H3 except for sources verified at or before the uninstrumented tip."""
+    if SHA1.fullmatch(source_sha) is None:
+        return True
+    repo = Path(source_repo) if source_repo is not None else Path.cwd()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", source_sha,
+         INVOCATION_TIMING_LEGACY_TIP], capture_output=True, check=False)
     return result.returncode != 0
 
 
@@ -6419,8 +6433,43 @@ def validate_gui_apply_owner_clock(value: object, *, event: str, request_ticks: 
     return after[key], after
 
 
+def validate_gui_import_invocation_timing(value: object, *, opened: int,
+                                          accepted: int, observed: int,
+                                          frequency: int, pid: int,
+                                          start: int, hwnd: int) -> dict:
+    """Validate one owned MTA Invoke receipt without assuming Invoke returns before acceptance."""
+    timing = exact_keys(value, {
+        "schema_version", "h1_ticks", "h2_ticks", "h3_ticks", "outcome",
+        "request_open_ticks",
+        "qpc_frequency", "process_id", "process_start_utc_ticks",
+        "main_window_handle",
+    }, "GUI import Invoke timing")
+    h1 = checked_int(timing["h1_ticks"], 1, 2**63 - 1, "Invoke MTA entry")
+    h2 = checked_int(timing["h2_ticks"], 1, 2**63 - 1, "Invoke call entry")
+    h3 = checked_int(timing["h3_ticks"], 1, 2**63 - 1, "Invoke return or exception")
+    require(int_equals(timing["schema_version"], 1) and
+            timing["outcome"] == "returned" and
+            int_equals(timing["request_open_ticks"], opened) and
+            all(int_equals(timing[key], expected) for key, expected in (
+                ("qpc_frequency", frequency), ("process_id", pid),
+                ("process_start_utc_ticks", start), ("main_window_handle", hwnd))) and
+            opened <= h1 <= h2 <= accepted <= observed and h2 <= h3 <= observed,
+            "GUI import Invoke timing is missing, foreign, or unordered.")
+    return {
+        **timing,
+        "accepted_import_start_ticks": accepted,
+        "h0_to_h1_ms": (h1 - opened) * 1000 / frequency,
+        "h1_to_h2_ms": (h2 - h1) * 1000 / frequency,
+        "h2_to_product_acceptance_ms": (accepted - h2) * 1000 / frequency,
+        "h2_to_h3_ms": (h3 - h2) * 1000 / frequency,
+        "invoke_return_order": "before-or-at-acceptance" if h3 <= accepted else
+                               "after-acceptance",
+    }
+
+
 def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
-                               *, require_product_trace: bool = False) -> dict:
+                               *, require_product_trace: bool = False,
+                               require_invocation_timing: bool = False) -> dict:
     scenario = exact_keys(scenario, {
         "mode", "case", "count", "qpc_frequency", "executable_sha256",
         "fixture_initial", "fixture_final", "native_process_lifetime", "process_id",
@@ -6473,13 +6522,16 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
     import_feedback_tick = None
     import_feedback_discovered = None
     product_traces = []
+    invocation_timings = []
     product_revision = 0
     product_thread = None
     for index, (item, expected_rows) in enumerate(zip(imports, rows, strict=True)):
         item = exact_keys(item, {"id", "expected_rows", "open_ticks",
                                  "rows_observed_ticks", "command_ready_ticks", "first_feedback"} |
                           ({"product_trace", "picker_request_ticks", "dialog_closed_ticks"} if require_product_trace or
-                           isinstance(item, dict) and "product_trace" in item else set()),
+                           isinstance(item, dict) and "product_trace" in item else set()) |
+                          ({"invoke_timing"} if require_invocation_timing or
+                           isinstance(item, dict) and "invoke_timing" in item else set()),
                           f"GUI Apply import {index}")
         stage = "initial" if index == 0 else f"remainder-{index - 1}"
         opened = checked_int(item["open_ticks"], 1, 2**63 - 1, "import Open")
@@ -6511,6 +6563,26 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
                 frequency=frequency, pid=pid, start=start, hwnd=hwnd,
                 expected_generation=index + 1, expected_initial_revision=product_revision)
             frame = item["product_trace"]["after"]
+            if "invoke_timing" in item:
+                invocation = {"id": stage, "request_open_ticks": opened,
+                              "generation": frame["generation"],
+                              "session_id": frame["session_id"],
+                              **validate_gui_import_invocation_timing(
+                    item["invoke_timing"], opened=opened,
+                    accepted=frame["events"]["accepted_import_start"],
+                    observed=observed, frequency=frequency, pid=pid,
+                    start=start, hwnd=hwnd)}
+                feedback_interval = trace["first_functional_feedback_interval"]
+                invocation["first_functional_feedback_interval_ticks"] = feedback_interval
+                invocation["first_functional_feedback_tick"] = trace["first_functional_feedback_tick"]
+                invocation["first_functional_feedback_gap"] = trace["first_functional_feedback_gap"]
+                invocation["accepted_to_first_feedback_interval_ms"] = (
+                    {"lower_ms": (feedback_interval["lower_ticks"] -
+                                  frame["events"]["accepted_import_start"]) * 1000 / frequency,
+                     "upper_ms": (feedback_interval["upper_ticks"] -
+                                  frame["events"]["accepted_import_start"]) * 1000 / frequency}
+                    if feedback_interval is not None else "not-observed")
+                invocation_timings.append(invocation)
             require(product_thread in (None, frame["owner_thread_id"]),
                     "GUI import trace changed the owner thread across operations.")
             product_thread = frame["owner_thread_id"]
@@ -6524,6 +6596,8 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
                 "dialog_closed_discovery_minus_product_acceptance_ms":
                     (dialog_closed - frame["events"]["accepted_import_start"]) * 1000 / frequency,
                 **trace})
+        elif "invoke_timing" in item:
+            raise EvidenceError("GUI import Invoke timing has no product acceptance boundary.")
         operations.extend(((f"gui-apply-{stage}", "expected-row-count", observed),
                            (f"gui-apply-{stage}", "import-command-enabled", command)))
         previous_command = command
@@ -6744,6 +6818,10 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
             "GUI Apply resource samples are missing or changed process identity.")
     return {"case": case, "count": count, "outcome": execution["outcome"],
             "import_product_traces": product_traces or "not-measured",
+            "import_invocation_timings": invocation_timings or "not-measured",
+            "four_addition_product_completion":
+                summarize_four_addition_completion(product_traces[1:])
+                if len(product_traces) == 5 else "not-measured",
             "four_addition_observer_inclusive_ms":
                 sum((item["rows_observed_ticks"] - item["open_ticks"]) * 1000 / frequency
                     for item in imports[1:]) if count == 10000 else "not-measured",
@@ -6871,7 +6949,8 @@ def validate_gui_apply_run(root: Path, run_id: str, source_sha: str,
                 "GUI Apply full inventory bytes differ from their reference.")
         inventories.append(inventory)
     metrics = validate_gui_apply_metrics(
-        scenario, *inventories, require_product_trace=requires_import_trace(source_sha, source_repo))
+        scenario, *inventories, require_product_trace=requires_import_trace(source_sha, source_repo),
+        require_invocation_timing=requires_invocation_timing(source_sha, source_repo))
     transport = validate_transport_exit(run_root, files, 0)
     owned = validate_owned_performance_transport(run_root, files, manifest, raw, scenario,
                                                  postlaunch, gui_apply=True)
