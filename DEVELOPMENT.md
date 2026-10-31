@@ -1186,6 +1186,19 @@ acceptance, durability shortcut or performance improvement is implied.
 
 ### Import completion and first functional feedback
 
+The owned MTA Invoke receipt also records three harness QPC boundaries: H1 is
+the helper script's first statement, H2 immediately precedes Invoke after
+pattern acquisition, and H3 records its return or exception, with outcome.
+The existing Open anchor H0 is unchanged. The validated summary retains raw
+ticks, frequency and process/request bindings plus H0-to-H1 (initialization
+and scheduling), H1-to-H2, H2-to-product acceptance A, and A-to-functional
+feedback F. Invoke entry-to-return H2-to-H3 is separate and can overlap
+acceptance; H3 need not precede A. Missing/failed markers cannot qualify a
+successful attribution record. Historical sources verified at or before the
+uninstrumented source tip keep their original evidence interpretation.
+This diagnostic adds no prewarming, pooling, input replacement or forced wait,
+and does not change the H0-to-F or separate Cancel-control goals.
+
 The `gui-apply-feedback` route also records a bounded product trace for every
 Paths import. The [native trace contract](SAFETY.md#import-completion-trace)
 defines its source boundaries and read-only queries. `product_trace` retains

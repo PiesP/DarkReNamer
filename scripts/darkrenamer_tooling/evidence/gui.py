@@ -16,7 +16,9 @@ import sys
 import uuid
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
-from darkrenamer_tooling.evidence.import_trace import validate_import_trace
+from darkrenamer_tooling.evidence.import_trace import (
+    summarize_four_addition_completion, validate_import_trace,
+)
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
 from darkrenamer_tooling.contracts.platform import (
     V1_PROFILE_ID, V2_PROFILE_ID, verify_controller_cleanup,
@@ -6454,6 +6456,8 @@ def validate_gui_import_invocation_timing(value: object, *, opened: int,
             opened <= h1 <= h2 <= accepted <= observed and h2 <= h3 <= observed,
             "GUI import Invoke timing is missing, foreign, or unordered.")
     return {
+        **timing,
+        "accepted_import_start_ticks": accepted,
         "h0_to_h1_ms": (h1 - opened) * 1000 / frequency,
         "h1_to_h2_ms": (h2 - h1) * 1000 / frequency,
         "h2_to_product_acceptance_ms": (accepted - h2) * 1000 / frequency,
@@ -6569,6 +6573,9 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
                     observed=observed, frequency=frequency, pid=pid,
                     start=start, hwnd=hwnd)}
                 feedback_interval = trace["first_functional_feedback_interval"]
+                invocation["first_functional_feedback_interval_ticks"] = feedback_interval
+                invocation["first_functional_feedback_tick"] = trace["first_functional_feedback_tick"]
+                invocation["first_functional_feedback_gap"] = trace["first_functional_feedback_gap"]
                 invocation["accepted_to_first_feedback_interval_ms"] = (
                     {"lower_ms": (feedback_interval["lower_ticks"] -
                                   frame["events"]["accepted_import_start"]) * 1000 / frequency,
@@ -6812,6 +6819,9 @@ def validate_gui_apply_metrics(scenario: object, initial: object, final: object,
     return {"case": case, "count": count, "outcome": execution["outcome"],
             "import_product_traces": product_traces or "not-measured",
             "import_invocation_timings": invocation_timings or "not-measured",
+            "four_addition_product_completion":
+                summarize_four_addition_completion(product_traces[1:])
+                if len(product_traces) == 5 else "not-measured",
             "four_addition_observer_inclusive_ms":
                 sum((item["rows_observed_ticks"] - item["open_ticks"]) * 1000 / frequency
                     for item in imports[1:]) if count == 10000 else "not-measured",

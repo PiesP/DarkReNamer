@@ -4709,6 +4709,11 @@ class GuiApplyEndpointTests(unittest.TestCase):
         measured = evidence.validate_gui_apply_metrics(
             scenario, initial, final, require_product_trace=True)
         self.assertEqual(len(measured['import_product_traces']), 5)
+        completion = measured['four_addition_product_completion']
+        self.assertEqual(len(completion['additions']), 4)
+        self.assertEqual(completion['aggregate_clock_full_width_ms'], 0.0016)
+        self.assertEqual(completion['full_endpoint_precision_goal'],
+                         'not-evaluated-by-clock-resolution-alone')
         self.assertEqual(measured['four_addition_observer_inclusive_ms'], sum(
             (row['rows_observed_ticks'] - row['open_ticks']) * 1000 /
             scenario['qpc_frequency'] for row in scenario['imports'][1:]))
@@ -4721,6 +4726,8 @@ class GuiApplyEndpointTests(unittest.TestCase):
                 scenario, initial, final, require_product_trace=True)
         self.assertEqual(evidence.validate_gui_apply_metrics(
             scenario, initial, final)['import_product_traces'], 'not-measured')
+        self.assertEqual(evidence.validate_gui_apply_metrics(
+            scenario, initial, final)['four_addition_product_completion'], 'not-measured')
 
     def test_import_trace_cannot_disagree_with_cancel_clock_or_switch_owner_thread(self):
         scenario, initial, final = self.valid('success-10000')
@@ -5202,10 +5209,24 @@ class InvocationTimingTests(unittest.TestCase):
                 self.validate(receipt)
 
     def test_prechange_source_may_omit_timing_but_unknown_source_may_not(self):
-        repo = Path(__file__).resolve().parents[3]
-        self.assertFalse(evidence.requires_invocation_timing(
-            evidence.INVOCATION_TIMING_LEGACY_TIP, repo))
-        self.assertTrue(evidence.requires_invocation_timing('f' * 40, repo))
+        # Hosted source checkouts may be shallow; establish an independent
+        # history rather than assume the historical production tip is present.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            def commit(message):
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+                    '-qm', message], check=True)
+                return subprocess.check_output(['git', '-C', str(repo),
+                    'rev-parse', 'HEAD'], text=True).strip()
+            legacy = commit('legacy')
+            current = commit('instrumented')
+            with mock.patch.object(evidence, 'INVOCATION_TIMING_LEGACY_TIP', legacy):
+                self.assertFalse(evidence.requires_invocation_timing(legacy, repo))
+                self.assertTrue(evidence.requires_invocation_timing(current, repo))
+                self.assertTrue(evidence.requires_invocation_timing('f' * 40, repo))
+                self.assertTrue(evidence.requires_invocation_timing('invalid', repo))
 
     def test_current_gui_apply_requires_every_invocation_receipt(self):
         scenario, initial, final = GuiApplyEndpointTests.valid('success-1000')
@@ -5228,6 +5249,12 @@ class InvocationTimingTests(unittest.TestCase):
             scenario, initial, final, require_product_trace=True,
             require_invocation_timing=True)
         self.assertEqual(len(metrics['import_invocation_timings']), 1)
+        validated = metrics['import_invocation_timings'][0]
+        for key, value in row['invoke_timing'].items():
+            self.assertEqual(validated[key], value)
+        self.assertEqual(validated['accepted_import_start_ticks'], accepted)
+        self.assertEqual(validated['first_functional_feedback_interval_ticks'],
+                         metrics['import_product_traces'][0]['first_functional_feedback_interval'])
         self.assertEqual(metrics['import_invocation_timings'][0]['invoke_return_order'],
                          'after-acceptance')
         del row['invoke_timing']['h3_ticks']
