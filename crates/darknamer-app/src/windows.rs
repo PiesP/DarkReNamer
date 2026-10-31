@@ -1212,7 +1212,7 @@ impl AppState {
             }
             23..=33 | 35..=36 => self.acceptance_clock.selector_value(selector)?,
             40..=83 => self.import_trace.selector_value(selector)?,
-            90..=106 => self
+            90..=107 => self
                 .preference_persistence
                 .language_diagnostic_selector(selector)?,
             // The final Apply result is not native-row-ready after a failed

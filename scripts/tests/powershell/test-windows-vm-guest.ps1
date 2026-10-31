@@ -5187,10 +5187,10 @@ function Test-DrLanguageFailureDiagnosticContract {
     if (-not ('DarkReNamerLanguageDiagnosticReader' -as [type])) {
         throw 'The guest language diagnostic reader is unavailable.'
     }
-    $frame = [uint32[]]::new(17)
+    $frame = [uint32[]]::new(18)
     $frame[0] = 1; $frame[1] = 3; $frame[3] = 1
     $frame[7] = 1; $frame[9] = 1; $frame[10] = 7
-    $frame[11] = 2; $frame[12] = 1; $frame[13] = 5; $frame[14] = 1
+    $frame[11] = 2; $frame[12] = 1; $frame[13] = 5; $frame[14] = 1; $frame[17] = 1
     [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
     Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]4) } 'revision'
     $frame[10] = 0
@@ -5199,8 +5199,54 @@ function Test-DrLanguageFailureDiagnosticContract {
     Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
     $frame[3] = 1; $frame[0] = 2
     Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'schema'
-    $frame[0] = 1; $frame[12] = 0; $frame[13] = 0
+    $frame[0] = 1; $frame[12] = 0; $frame[13] = 0; $frame[17] = 1
     [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
+    $frame[17] = 0
+    Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
+    $frame[17] = 1
+    $prior = [ordered]@{ revision = 1; requested_generation = 1 }
+    $observerError = [InvalidOperationException]::new('observer-path-failed')
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $observerError } `
+            -ReadDiagnostic { [ordered]@{ revision = 2; first_failure = [ordered]@{
+                file_kind = 'language'; stage = 7 } } } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The observer failure was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'observer-path-failed' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_before.revision -ne 1 -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_after.first_failure.file_kind -cne 'language') {
+            throw 'Thrown observer path replaced the original error or lost diagnostic identity.'
+        }
+    }
+    $readerError = [InvalidOperationException]::new('observer-unavailable')
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $readerError } `
+            -ReadDiagnostic { throw 'diagnostic-query-failed' } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The observer failure was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'observer-unavailable' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].diagnostic_read_error.message -cne 'diagnostic-query-failed') {
+            throw 'Observer query failure replaced the original error.'
+        }
+    }
+    $timeout = [InvalidOperationException]::new('durable-timeout')
+    $timeout.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{ stage = 'durable-preference-acknowledgement' }
+    try {
+        Invoke-ProductionLanguageObserved -Observe { throw $timeout } `
+            -ReadDiagnostic { throw 'must-not-read' } `
+            -TargetCommand 0x9021 -DiagnosticBefore $prior
+        throw 'The timeout was swallowed.'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'durable-timeout' -or
+            $_.Exception.Data['DarkReNamerLanguageMenuFailure'].stage -cne 'durable-preference-acknowledgement') {
+            throw 'Existing timeout diagnostics were replaced.'
+        }
+    }
     $source = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-scenario.ps1') -Raw
     $tokens = $null
     $errors = $null

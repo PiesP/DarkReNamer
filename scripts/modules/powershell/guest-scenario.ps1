@@ -1460,15 +1460,17 @@ public static class DarkReNamerLanguageDiagnosticReader {
     }
     private static ulong Pair(uint low, uint high) { return ((ulong)high << 32) | low; }
     public static void ValidateFrame(uint[] frame, ulong revision) {
-        if (frame == null || frame.Length != 17 || frame[0] != 1 ||
+        if (frame == null || frame.Length != 18 || frame[0] != 1 ||
             revision != Pair(frame[1], frame[2]) ||
-            frame[12] > 1 || frame[14] > 1 || frame[15] > 1 || frame[16] > 1 ||
+            frame[12] > 1 || frame[14] > 1 || frame[15] > 1 || frame[16] > 1 || frame[17] > 1 ||
             (frame[12] == 0 && frame[13] != 0) ||
             (frame[14] == 0 && (Pair(frame[7], frame[8]) != 0 || frame[9] != 0 ||
                 frame[10] != 0 || frame[11] != 0 || frame[12] != 0)) ||
             (frame[14] == 1 && (Pair(frame[7], frame[8]) == 0 || frame[9] > 3 ||
                 frame[10] == 0 || frame[10] > 7 ||
                 !(frame[11] >= 1 && frame[11] <= 8 || frame[11] == 255))) ||
+            (frame[17] == 0 && (Pair(frame[3], frame[4]) != 0 ||
+                Pair(frame[5], frame[6]) != 0 || frame[14] != 0 || frame[16] != 0)) ||
             Pair(frame[7], frame[8]) > Pair(frame[3], frame[4]) ||
             Pair(frame[5], frame[6]) > Pair(frame[3], frame[4]))
             throw new InvalidOperationException("Language diagnostic schema, revision, or generation is invalid.");
@@ -1483,7 +1485,7 @@ public static class DarkReNamerLanguageDiagnosticReader {
             throw new InvalidOperationException("Language diagnostic HWND is not owned by the process.");
         for (int attempt = 0; attempt < 3; attempt++) {
             ulong before = Pair(Scalar(window, 91), Scalar(window, 92));
-            uint[] frame = new uint[17];
+            uint[] frame = new uint[18];
             for (int index = 0; index < frame.Length; index++) frame[index] = Scalar(window, 90 + index);
             ulong after = Pair(Scalar(window, 91), Scalar(window, 92));
             if (before != after || after != Pair(frame[1], frame[2])) continue;
@@ -1514,6 +1516,7 @@ function Get-ProductionLanguageDiagnostic {
     $frame = [DarkReNamerLanguageDiagnosticReader]::ReadBound($Process, $handle, $start)
     $combine = { param([int]$Low) ([uint64]$frame[$Low + 1] -shl 32) -bor [uint64]$frame[$Low] }
     $failure = if ($frame[14] -eq 1) { [ordered]@{
+        file_kind = 'language'
         sequence = 1
         executed_generation = (& $combine 7)
         requested_preference = [int]$frame[9]
@@ -1534,7 +1537,57 @@ function Get-ProductionLanguageDiagnostic {
         saved_generation = (& $combine 5)
         submission_failed = [bool]$frame[15]
         writer_terminal = [bool]$frame[16]
+        writer_present = [bool]$frame[17]
         first_failure = $failure
+    }
+}
+
+function Add-ProductionLanguageFailureDiagnostic {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord,
+        [Parameter(Mandatory)][scriptblock] $ReadDiagnostic,
+        [Parameter(Mandatory)][int] $TargetCommand,
+        [object] $DiagnosticBefore
+    )
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
+        if ($exception.Data.Contains('DarkReNamerLanguageMenuFailure')) { return }
+        $exception = $exception.InnerException
+    }
+    $after = $null
+    $readError = $null
+    try { $after = & $ReadDiagnostic }
+    catch {
+        $message = [string]$_.Exception.Message
+        $readError = [ordered]@{
+            exception_type = [string]$_.Exception.GetType().FullName
+            message = $message.Substring(0, [Math]::Min(512, $message.Length))
+        }
+    }
+    $ErrorRecord.Exception.Data['DarkReNamerLanguageMenuFailure'] = [ordered]@{
+        schema_version = 1
+        stage = 'enter-or-post-enter-exception'
+        target_command = $TargetCommand
+        expected_preference = [int]($TargetCommand - 0x9020)
+        diagnostic_before = $DiagnosticBefore
+        diagnostic_after = $after
+        diagnostic_read_error = $readError
+    }
+}
+
+function Invoke-ProductionLanguageObserved {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Observe,
+        [Parameter(Mandatory)][scriptblock] $ReadDiagnostic,
+        [Parameter(Mandatory)][int] $TargetCommand,
+        [object] $DiagnosticBefore
+    )
+    try { & $Observe }
+    catch {
+        Add-ProductionLanguageFailureDiagnostic -ErrorRecord $_ `
+            -ReadDiagnostic $ReadDiagnostic -TargetCommand $TargetCommand `
+            -DiagnosticBefore $DiagnosticBefore
+        throw
     }
 }
 
@@ -2030,13 +2083,18 @@ function Invoke-ProductionLanguageMenuChoice {
     $trace.Add($preEnter)
     $diagnosticBefore = Get-ProductionLanguageDiagnostic -Process $Process `
         -MainWindow $MainWindow -Session $Session
+    try {
     Send-ProductionLanguageNativeInput -Process $Process -MainWindow $MainWindow `
         -Session $Session -Action 'enter'
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $observation = Get-ProductionLanguageChoiceObservation -Process $Process `
-            -MainWindow $MainWindow -Status $status -Session $Session `
-            -CurrentLanguage $CurrentLanguage
+        $observation = Invoke-ProductionLanguageObserved `
+            -Observe { Get-ProductionLanguageChoiceObservation -Process $Process `
+                -MainWindow $MainWindow -Status $status -Session $Session `
+                -CurrentLanguage $CurrentLanguage } `
+            -ReadDiagnostic { Get-ProductionLanguageDiagnostic -Process $Process `
+                -MainWindow $MainWindow -Session $Session } `
+            -TargetCommand $target -DiagnosticBefore $diagnosticBefore
         if ($postEnter.Count -eq 0 -or
             ($postEnter[$postEnter.Count - 1] | ConvertTo-Json -Depth 5 -Compress) -cne
             ($observation | ConvertTo-Json -Depth 5 -Compress)) {
@@ -2123,6 +2181,16 @@ function Invoke-ProductionLanguageMenuChoice {
         input_trace = $trace.ToArray(); status_before = $statusBefore
         post_enter = $postEnter.ToArray()
         diagnostic_before = $diagnosticBefore; diagnostic_after = $diagnosticAfter
+    }
+    }
+    catch {
+        # This catch executes before the enclosing scenario's finally retires
+        # the owned process. Preserve both the original error and its details.
+        Add-ProductionLanguageFailureDiagnostic -ErrorRecord $_ `
+            -ReadDiagnostic { Get-ProductionLanguageDiagnostic -Process $Process `
+                -MainWindow $MainWindow -Session $Session } `
+            -TargetCommand $target -DiagnosticBefore $diagnosticBefore
+        throw
     }
 }
 

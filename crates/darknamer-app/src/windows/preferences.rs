@@ -204,6 +204,8 @@ impl LanguageFailureRecord {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct LanguageDiagnosticState {
     pub(crate) revision: u64,
+    pub(crate) writer_present: bool,
+    pub(crate) terminal_observed: bool,
     pub(crate) requested_generation: Option<u64>,
     pub(crate) saved_generation: Option<u64>,
     pub(crate) submission_failed: bool,
@@ -211,6 +213,10 @@ pub(crate) struct LanguageDiagnosticState {
 }
 
 impl LanguageDiagnosticState {
+    pub(crate) fn note_terminal(&mut self) {
+        self.terminal_observed = true;
+        self.revision = self.revision.saturating_add(1);
+    }
     pub(crate) fn note_requested(&mut self, result: &io::Result<u64>) {
         match result {
             Ok(generation) => {
@@ -304,7 +310,11 @@ impl LanguagePreferencesWriter {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let (sender, saved) = channel();
-        let diagnostic = Arc::new(Mutex::new(LanguageDiagnosticState::default()));
+        let diagnostic = Arc::new(Mutex::new(LanguageDiagnosticState {
+            writer_present: true,
+            revision: 1,
+            ..LanguageDiagnosticState::default()
+        }));
         let worker_diagnostic = Arc::clone(&diagnostic);
         Ok(Self {
             saved,
@@ -1846,7 +1856,7 @@ mod language_tests {
         lifecycle.drain(false);
         let first = lifecycle
             .language_diagnostic()
-            .and_then(|frame| frame.first_failure)
+            .first_failure
             .ok_or_else(|| io::Error::other("missing first language failure"))?;
         assert_eq!(first.generation, 1);
         assert_eq!(first.preference, LanguagePreference::Korean);
@@ -1854,9 +1864,7 @@ mod language_tests {
         fs::remove_dir(&path)?;
         lifecycle.submit_language(LanguagePreference::Japanese)?;
         lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
-        let frame = lifecycle
-            .language_diagnostic()
-            .ok_or_else(|| io::Error::other("missing frame"))?;
+        let frame = lifecycle.language_diagnostic();
         assert_eq!(frame.requested_generation, Some(2));
         assert_eq!(frame.saved_generation, Some(2));
         assert_eq!(frame.first_failure, Some(first));
@@ -1876,10 +1884,9 @@ mod language_tests {
         let mut lifecycle = lifecycle::PreferencePersistence::new(None, None);
         lifecycle.install_language_writer(writer);
         lifecycle.submit_language(LanguagePreference::English)?;
+        let revision_before_join = lifecycle.language_diagnostic().revision;
         lifecycle.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
-        let frame = lifecycle
-            .language_diagnostic()
-            .ok_or_else(|| io::Error::other("missing frame"))?;
+        let frame = lifecycle.language_diagnostic();
         let failure = frame
             .first_failure
             .ok_or_else(|| io::Error::other("missing final failure"))?;
@@ -1887,7 +1894,49 @@ mod language_tests {
         assert_eq!(failure.preference, LanguagePreference::English);
         assert_eq!(failure.stage, LanguageWriteStage::ReplaceDestination);
         assert_eq!(frame.saved_generation, None);
+        assert!(frame.terminal_observed);
+        assert!(frame.revision > revision_before_join);
+        assert_eq!(lifecycle.language_diagnostic_selector(106), Some(1));
         assert!(lifecycle.is_joined());
+        Ok(())
+    }
+
+    #[test]
+    fn language_diagnostic_reports_unavailable_and_exhausted_writer() -> io::Result<()> {
+        let mut unavailable = lifecycle::PreferencePersistence::new(None, None);
+        assert_eq!(unavailable.language_diagnostic_selector(90), Some(1));
+        assert_eq!(unavailable.language_diagnostic_selector(107), Some(0));
+        assert!(
+            unavailable
+                .submit_language(LanguagePreference::Korean)
+                .is_err()
+        );
+        assert_eq!(unavailable.language_diagnostic_selector(105), Some(1));
+        assert_eq!(unavailable.language_diagnostic().requested_generation, None);
+
+        let temp = tempfile::tempdir()?;
+        let mut writer =
+            LanguagePreferencesWriter::spawn(temp.path().join("ui-language-v1"), || {})?;
+        writer.writer.next_generation = u64::MAX;
+        let diagnostic = writer.diagnostic();
+        let mut exhausted = lifecycle::PreferencePersistence::new(None, None);
+        exhausted.install_language_writer(writer);
+        assert_eq!(exhausted.language_diagnostic_selector(107), Some(1));
+        assert!(
+            exhausted
+                .submit_language(LanguagePreference::English)
+                .is_err()
+        );
+        assert_eq!(exhausted.language_diagnostic_selector(105), Some(1));
+        assert_eq!(exhausted.language_diagnostic().requested_generation, None);
+        {
+            let mut frame = diagnostic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            frame.revision = u64::MAX;
+        }
+        assert_eq!(exhausted.language_diagnostic_selector(90), None);
+        exhausted.shutdown_and_join(crate::default_column_states(), UiAppearance::default());
         Ok(())
     }
 
