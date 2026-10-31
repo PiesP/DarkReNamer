@@ -5546,12 +5546,12 @@ function Test-DrProductionLanguageCycleCleanupDiagnostics {
             throw "$($case.name): fixture deletion ignored job/disposal authority or retried failure."
         }
         if ($case.cleanup -ceq 'fixture' -and
-            -not $state.fixtures.Contains('/mock-case/language-en')) {
+            -not $state.fixtures.Contains((Join-Path '/mock-case' 'language-en'))) {
             throw 'Failed authorized fixture cleanup did not retain the evidence root.'
         }
         if ($case.cleanup -cin @('job-throw', 'job-rejected', 'job-and-dispose', 'dispose') -and
             $case.fault_step -eq 2 -and
-            -not $state.fixtures.Contains('/mock-case/language-en')) {
+            -not $state.fixtures.Contains((Join-Path '/mock-case' 'language-en'))) {
             throw 'Rejected job or process disposal removed the fixture.'
         }
         if ($case.name -ceq 'success' -and
