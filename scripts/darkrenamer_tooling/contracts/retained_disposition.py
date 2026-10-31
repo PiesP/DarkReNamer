@@ -41,6 +41,15 @@ RUN_NAME = re.compile(r"DarkReNamerTests-[0-9a-f]{32}\Z")
 # Deliberately unset until the complete current index has been reviewed and a
 # concrete exact-run classification has been bound by a source change.
 REVIEWED_CLASSIFICATION_SHA256: str | None = None
+FORBIDDEN_RAW_UNITS = frozenset({"2f00", "5c00", "3a00", "0000"})
+
+
+def _valid_raw_utf16_component(part: object) -> bool:
+    if (type(part) is not str or not 4 <= len(part) <= 1020 or len(part) % 4 != 0 or
+            re.fullmatch(r"[0-9a-f]+", part) is None or part in {"2e00", "2e002e00"}):
+        return False
+    return all(part[offset:offset + 4] not in FORBIDDEN_RAW_UNITS
+               for offset in range(0, len(part), 4))
 
 
 def _require(value: bool, message: str) -> None:
@@ -323,8 +332,7 @@ def verify_current_collection(original_root: Path | str, collection_path: Path |
                      "Current content entry has invalid identity or kind.")
             components = entry.get("components_utf16_hex")
             _require(type(components) is list and 1 <= len(components) <= 64 and
-                     all(type(part) is str and 0 < len(part) <= 510 and len(part) % 4 == 0 and
-                         re.fullmatch(r"[0-9a-f]+", part) is not None for part in components),
+                     all(_valid_raw_utf16_component(part) for part in components),
                      "Current content index has an invalid raw UTF-16 path.")
             path = tuple(components)
             _require(path not in seen,

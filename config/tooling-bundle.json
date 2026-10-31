@@ -298,7 +298,7 @@
       "bundle": "tooling-contracts-retained-disposition.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.retained_disposition",
-      "sha256": "02343d60f3eb08c9954475dcf31dffb48a4d01db94fc6affe2121624d4c67229",
+      "sha256": "a2d6e97b0f8ecbb3def6fc969a09edb0bf42b7b8aa07f65264d77ccf94825e66",
       "dependencies": [
         "tooling-loader",
         "package-root",

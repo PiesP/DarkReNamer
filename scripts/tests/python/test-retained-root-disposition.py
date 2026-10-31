@@ -156,6 +156,103 @@ class RetainedCollectionTests(unittest.TestCase):
         with self.assertRaises(EvidenceError):
             self.verify(oversized)
 
+    def test_raw_utf16_component_boundaries_and_units(self) -> None:
+        accepted = (
+            "6100" * 127, "6100" * 128, "6100" * 255,
+            "61002e006200", "00d8", "00dc", "3dd800de",
+        )
+        for part in accepted:
+            with self.subTest(accepted=part[:20], units=len(part) // 4):
+                collection = copy.deepcopy(self.collection)
+                collection["current"]["roots"]["guest"]["index"][0]["components_utf16_hex"] = [part]
+                result = self.verify(collection)
+                self.assertEqual(result["root_entries"], 2)
+                self.assertFalse(result["deletion_authorized"])
+                self.assertFalse(result["admission_authorized"])
+                self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))
+                                 ["current"]["roots"]["guest"]["index"][0]
+                                 ["components_utf16_hex"], [part])
+        self.assertEqual(len("3dd800de") // 4, 2)
+
+        rejected = (
+            "", "6100" * 256, "610", "61001", "610g", "610G", "610A",
+            "2e00", "2e002e00", "2f00", "5c00", "3a00", "0000",
+            "61002f006200", "61005c006200", "61003a006200", "610000006200",
+        )
+        for part in rejected:
+            with self.subTest(rejected=part[:20], units=len(part) // 4):
+                collection = copy.deepcopy(self.collection)
+                collection["current"]["roots"]["guest"]["index"][0]["components_utf16_hex"] = [part]
+                with self.assertRaisesRegex(EvidenceError, "invalid raw UTF-16 path"):
+                    self.verify(collection)
+
+    @unittest.skipUnless(os.name == "nt", "actual native ContentIndex requires Windows")
+    def test_native_content_index_boundary_names_feed_python_reader(self) -> None:
+        powershell = shutil.which("pwsh")
+        self.assertIsNotNone(powershell, "Windows fixture construction requires PowerShell")
+        source = Path(__file__).resolve().parents[2] / "modules/powershell/controller-owned-root-guard.ps1"
+        script = r'''
+$ErrorActionPreference = 'Stop'
+. $env:DR_OWNED_GUARD_SOURCE
+Add-Type -TypeDefinition $script:DrOwnedRootGuardSource
+$base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
+$baseCreated = -not (Test-Path -LiteralPath $base -PathType Container)
+if ($baseCreated) { [IO.Directory]::CreateDirectory($base) | Out-Null }
+$root = Join-Path $base ('DarkReNamerTests-' + [guid]::NewGuid().ToString('N'))
+$guard = $null
+try {
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    foreach ($length in @(127, 128, 255)) {
+        $name = 'a' * $length
+        $path = '\\?\' + (Join-Path $root $name)
+        [IO.File]::WriteAllBytes($path, [byte[]]@(65))
+        if (-not [IO.File]::Exists($path)) { throw "Fixture construction failed at $length units." }
+    }
+    $guard = [DarkReNamerVmOwnedRootGuard]::new($root)
+    $index = @($guard.ContentIndex())
+    if ($index.Count -ne 3) { throw 'Fixture construction produced an incomplete native index.' }
+    ConvertTo-Json -InputObject $index -Depth 8 -Compress
+}
+finally {
+    if ($null -ne $guard) {
+        try { $guard.Delete() } finally { $guard.Dispose() }
+    }
+    elseif (Test-Path -LiteralPath $root) {
+        $cleanup = [DarkReNamerVmOwnedRootGuard]::new($root)
+        try { $cleanup.Delete() } finally { $cleanup.Dispose() }
+    }
+    if ($baseCreated) { [IO.Directory]::Delete($base, $false) }
+}
+'''
+        result = subprocess.run([powershell, "-NoLogo", "-NoProfile", "-Command", script],
+                                capture_output=True, text=True, timeout=120,
+                                env={**os.environ, "DR_OWNED_GUARD_SOURCE": str(source)},
+                                check=False)
+        self.assertEqual(result.returncode, 0, "Native fixture construction failed: " + result.stderr)
+        try:
+            index = json.loads(result.stdout)
+        except ValueError as error:
+            self.fail(f"Native fixture construction returned invalid JSON: {error}: {result.stdout}")
+        self.assertIsInstance(index, list, "Native producer did not emit an index array")
+        self.assertEqual(len(index), 3)
+        parts = [entry["components_utf16_hex"][0] for entry in index]
+        self.assertEqual(sorted(map(len, parts)), [508, 512, 1020])
+        self.assertEqual(set(parts), {"6100" * count for count in (127, 128, 255)})
+        collection = copy.deepcopy(self.collection)
+        for role in contract.ROOT_KEYS:
+            collection["current"]["roots"][role]["index"] = copy.deepcopy(index)
+        verified = self.verify(collection)
+        self.assertEqual(verified["root_entries"], 6)
+        self.assertFalse(verified["deletion_authorized"])
+        self.assertFalse(verified["admission_authorized"])
+        for invalid in ("6100" * 256, "2e00", "2e002e00", "61002f00", "61005c00",
+                        "61003a00", "61000000"):
+            with self.subTest(injected=invalid[:16], units=len(invalid) // 4):
+                injected = copy.deepcopy(collection)
+                injected["current"]["roots"]["guest"]["index"][0]["components_utf16_hex"] = [invalid]
+                with self.assertRaisesRegex(EvidenceError, "invalid raw UTF-16 path"):
+                    self.verify(injected)
+
     def test_classification_requires_source_pin_and_every_indexed_entry(self) -> None:
         self.verify(self.collection)
         collection_hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
