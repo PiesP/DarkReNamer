@@ -5201,6 +5201,15 @@ function Test-DrLanguageFailureDiagnosticContract {
     Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'schema'
     $frame[0] = 1; $frame[12] = 0; $frame[13] = 0; $frame[17] = 1
     [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
+    foreach ($kind in @(9, 20, 26, 28, 39, 255)) {
+        $frame[11] = [uint32]$kind
+        [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3)
+    }
+    foreach ($kind in @(0, 40, 254, 256)) {
+        $frame[11] = [uint32]$kind
+        Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
+    }
+    $frame[11] = 2
     $frame[17] = 0
     Assert-Fails { [DarkReNamerLanguageDiagnosticReader]::ValidateFrame($frame, [uint64]3) } 'generation'
     $frame[17] = 1
