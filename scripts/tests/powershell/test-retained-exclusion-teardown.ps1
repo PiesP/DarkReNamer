@@ -48,7 +48,12 @@ function New-Scenario([string[]] $Faults, [bool] $RollbackFault = $false,
         if ($TerminalFault) { throw 'terminal fault' }
         $records.Add([pscustomobject]@{
             case='fixture-preserved'
-            fields=@{ gate='BLOCKED'; settlement=$(if ($state.settlementUnknown) { 'unknown' } else { 'closed-after-rollback' }) }
+            fields=@{
+                gate='BLOCKED'
+                settlement=$(if ($state.settlementUnknown) { 'unknown' } else { 'closed-after-rollback' })
+                verification_complete=($state.failures.Count -eq 0)
+                handle_status=$state.outcomes
+            }
         })
     }.GetNewClosure()
     return [pscustomobject]@{ state=$state; events=$events; records=$records; handles=$handles; terminal=$terminal }
@@ -59,6 +64,79 @@ function Run-Failing($Scenario) {
     catch { return $_.Exception.Message }
     throw 'Expected candidate fixture failure.'
 }
+
+function Invoke-MockAfterReleaseChildControl($Scenario, [string] $Mode) {
+    $identity = {
+        param($child)
+        if ($Mode -eq 'identity') { throw 'identity fault' }
+        if ($Mode -eq 'mismatch') { return 'different' }
+        return 'expected'
+    }.GetNewClosure()
+    $record = {
+        param($sameChild)
+        $Scenario.events.Add('child-observation')
+        if ($Mode -eq 'observation') { throw 'observation fault' }
+        $Scenario.records.Add([pscustomobject]@{ case='child-control'; same_child=$sameChild })
+    }.GetNewClosure()
+    try {
+        Invoke-CandidateAfterReleaseChildControl $Scenario.state $Scenario.handles.child 'expected' $identity $record
+        return $false
+    } catch {
+        if (-not $_.Exception.Data['candidate-teardown-abort']) { throw }
+        return $true
+    }
+}
+
+foreach ($case in @(
+    @{ mode='identity'; primary='identity fault' },
+    @{ mode='observation'; primary='observation fault' },
+    @{ mode='mismatch'; primary='After-release production child identity changed.' }
+)) {
+    $scenario = New-Scenario @('child')
+    Assert-Equal (Invoke-MockAfterReleaseChildControl $scenario $case.mode) $true "$($case.mode) abort"
+    $message = Run-Failing $scenario
+    foreach ($part in @("primary: $($case.primary)", 'child-dispose:', 'child fault')) {
+        if (-not $message.Contains($part)) { throw "Missing $part in $message" }
+    }
+    Assert-Equal @($scenario.state.failures | Where-Object phase -eq 'primary').Count 1 "$($case.mode) primary once"
+    Assert-Equal $scenario.handles.child.Count 1 "$($case.mode) child close once"
+    Assert-Equal $scenario.handles.guard.Count 1 "$($case.mode) guard close attempted"
+    Assert-Equal $scenario.events[-1] 'terminal' "$($case.mode) terminal attempted"
+    Assert-Equal $scenario.records[-1].fields.verification_complete $false "$($case.mode) incomplete verification"
+    Assert-Equal $scenario.records[-1].fields.handle_status['child'] 'unknown' "$($case.mode) unknown child close"
+}
+
+$scenario = New-Scenario @()
+Assert-Equal (Invoke-MockAfterReleaseChildControl $scenario 'identity') $true 'primary-only abort'
+$message = Run-Failing $scenario
+if (-not $message.Contains('primary: identity fault') -or $message.Contains('child-dispose:')) {
+    throw "Primary-only outcome changed: $message"
+}
+Assert-Equal $scenario.handles.child.Count 1 'primary-only child close once'
+Assert-Equal $scenario.records[-1].fields.handle_status['child'] 'closed' 'primary-only child closed'
+
+$scenario = New-Scenario @('child')
+Assert-Equal (Invoke-MockAfterReleaseChildControl $scenario 'normal') $true 'cleanup-only abort'
+$message = Run-Failing $scenario
+if (-not $message.Contains('child-dispose:') -or -not $message.Contains('child fault') -or
+    $message.Contains('primary:')) {
+    throw "Cleanup-only outcome changed: $message"
+}
+Assert-Equal $scenario.records[-1].fields.handle_status['child'] 'unknown' 'cleanup-only child unknown'
+
+$scenario = New-Scenario @()
+Assert-Equal (Invoke-MockAfterReleaseChildControl $scenario 'normal') $false 'normal child control'
+Complete-CandidateTeardown $scenario.state $scenario.terminal
+Assert-Equal $scenario.handles.child.Count 1 'normal child close once'
+Assert-Equal $scenario.records[-1].fields.verification_complete $true 'normal verification'
+
+$scenario = New-Scenario @('child') $false $true
+Assert-Equal (Invoke-MockAfterReleaseChildControl $scenario 'identity') $true 'terminal-fault control abort'
+$message = Run-Failing $scenario
+foreach ($part in @('primary: identity fault', 'child-dispose:', 'child fault', 'terminal-record: terminal fault')) {
+    if (-not $message.Contains($part)) { throw "Missing $part in terminal-fault result: $message" }
+}
+Assert-Equal $scenario.events[-1] 'terminal' 'terminal-fault attempt'
 
 $scenario = New-Scenario @() $true
 Add-CandidateFailure $scenario.state 'primary' 'primary fault'

@@ -253,20 +253,18 @@ try {
         }
         throw
     }
-    try {
-        $observedChildId = [DarkReNamerVmOwnedRootGuard].GetMethod('Identity', $flags).Invoke(
-            $null, @($heldChild))
-        $sameChild = $observedChildId -ceq $baselineRows[0].file_id
+    Invoke-CandidateAfterReleaseChildControl $teardown $heldChild $baselineRows[0].file_id {
+        param($child)
+        [DarkReNamerVmOwnedRootGuard].GetMethod('Identity', $flags).Invoke($null, @($child))
+    } {
+        param($sameChild)
         Write-Observation 'production-delete-child-after-tx-release-control' @{
             accepted=$true; ntstatus='00000000'; order='TxF-file-read-closed-then-production-child'
             access='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE'
             share='SHARE_READ(0x1)'; root_identity_unchanged=$true; child_identity_unchanged=$sameChild
         }
-        Assert-True $sameChild 'After-release production child identity changed.'
     }
-    finally {
-        if ($null -ne $heldChild) { Close-CandidateResource $teardown 'child'; $heldChild = $null }
-    }
+    $heldChild = $null
     $guard.Assert($fixture.base_id, $fixture.root_id)
     if ($adsOpen) {
         $rejected = $false

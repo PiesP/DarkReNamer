@@ -52,6 +52,26 @@ function Close-CandidateResource($State, [string] $Kind, [switch] $DeferError) {
     }
 }
 
+function Invoke-CandidateAfterReleaseChildControl($State, $Child, $BaselineChildId,
+    [scriptblock] $Identity, [scriptblock] $Record) {
+    $initialFailures = $State.failures.Count
+    try {
+        $observedChildId = & $Identity $Child
+        $sameChild = $observedChildId -ceq $BaselineChildId
+        & $Record $sameChild
+        if (-not $sameChild) { throw 'After-release production child identity changed.' }
+    } catch {
+        # Capture the check failure before child disposal can throw its own abort.
+        Add-CandidateFailure $State 'primary' $_.Exception
+    }
+    Close-CandidateResource $State 'child' -DeferError
+    if ($State.failures.Count -gt $initialFailures) {
+        $abort = [InvalidOperationException]::new('Candidate fixture after-release child control failed.')
+        $abort.Data['candidate-teardown-abort'] = $true
+        throw $abort
+    }
+}
+
 function Close-CandidateTransaction($State) {
     $initialFailures = $State.failures.Count
     Close-CandidateResource $State 'read' -DeferError
