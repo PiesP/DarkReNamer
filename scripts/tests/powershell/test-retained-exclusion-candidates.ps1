@@ -201,7 +201,7 @@ try {
     [IO.File]::WriteAllBytes($file, $original)
     $expected.Add([pscustomobject]@{path=$file; bytes=$original})
     $guard = New-Guard $fixture
-    $null = Assert-Index $guard 1
+    $baselineRows = Assert-Index $guard 1
     $tx = [DrTxCandidateNative]::Begin()
     Write-Observation 'create-transaction' @{ accepted=$tx.Accepted; native_error=$tx.Error; options='0'; isolation='0'; timeout='0' }
     Assert-True $tx.Accepted "CreateTransaction unavailable: $($tx.Error); Gate 1 inconclusive."
@@ -209,24 +209,68 @@ try {
     Write-Observation 'quiescent-transacted-read' @{ accepted=$read.Accepted; native_error=$read.Error; access='FILE_READ_DATA(0x1)'; share='READ|WRITE|DELETE(0x7)'; disposition='OPEN_EXISTING'; flags='FILE_ATTRIBUTE_NORMAL(0x80)' }
     Assert-True $read.Accepted "Quiescent CreateFileTransactedW failed: $($read.Error); Gate 1 inconclusive."
     $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
-    $heldChild = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $true))
+    $childStatus = '00000000'
+    try { $heldChild = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $true)) }
+    catch {
+        $native = $_.Exception
+        while ($null -ne $native.InnerException) { $native = $native.InnerException }
+        if ($native -isnot [InvalidOperationException] -or
+            $native.Message -cne 'Relative owned cleanup open failed: NTSTATUS c0000043') { throw }
+        $childStatus = 'c0000043'
+        $limits.Add('tx-first-production-delete-child-sharing-rejected')
+    }
+    Write-Observation 'tx-first-production-delete-child-open' @{
+        accepted=($null -ne $heldChild); ntstatus=$childStatus; order='TxF-file-read-before-production-child'
+        access='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE'
+        share='SHARE_READ(0x1)'; child_held=($null -ne $heldChild)
+    }
     $ads = $file + ':while-held'
     $writer = [DrTxCandidateNative]::Writer($ads, [DrTxCandidateNative]::CREATE_NEW)
     $adsOpen = $writer.Accepted
     $adsWrite = $null
     if ($adsOpen) { $adsWrite = [DrTxCandidateNative]::Write($writer.Handle, 65) }
-    Write-Observation 'new-ads-while-held' @{ open_accepted=$adsOpen; open_win32_error=$writer.Error; write_accepted=($adsWrite -eq 0); write_hresult=$adsWrite; access='FILE_WRITE_DATA(0x2)'; share='READ|WRITE|DELETE(0x7)'; disposition='CREATE_NEW'; guard_child='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE;SHARE_READ' }
+    Write-Observation 'new-ads-root-tx-held' @{ open_accepted=$adsOpen; open_win32_error=$writer.Error; write_accepted=($adsWrite -eq 0); write_hresult=$adsWrite; access='FILE_WRITE_DATA(0x2)'; share='READ|WRITE|DELETE(0x7)'; disposition='CREATE_NEW'; production_child_held=($null -ne $heldChild) }
     if ($adsOpen) { $limits.Add('named-stream-created') }
     $writer.Handle.Dispose(); $writer = $null
     $writer = [DrTxCandidateNative]::Writer($file, [DrTxCandidateNative]::OPEN_EXISTING)
     $defaultOpen = $writer.Accepted
     $defaultWrite = $null
     if ($defaultOpen) { $defaultWrite = [DrTxCandidateNative]::Write($writer.Handle, 88) }
-    Write-Observation 'default-stream-while-held' @{ open_accepted=$defaultOpen; open_win32_error=$writer.Error; write_accepted=($defaultWrite -eq 0); write_hresult=$defaultWrite; access='FILE_WRITE_DATA(0x2)'; share='READ|WRITE|DELETE(0x7)'; disposition='OPEN_EXISTING' }
+    Write-Observation 'default-stream-root-tx-held' @{ open_accepted=$defaultOpen; open_win32_error=$writer.Error; write_accepted=($defaultWrite -eq 0); write_hresult=$defaultWrite; access='FILE_WRITE_DATA(0x2)'; share='READ|WRITE|DELETE(0x7)'; disposition='OPEN_EXISTING'; production_child_held=($null -ne $heldChild) }
     if ($defaultWrite -eq 0) { $limits.Add('default-content-written') }
     $writer.Handle.Dispose(); $writer = $null
-    $heldChild.Dispose(); $heldChild = $null
+    if ($null -ne $heldChild) { $heldChild.Dispose(); $heldChild = $null }
     Close-Transaction $read $tx; $read = $null; $tx = $null
+    $guard.Assert($fixture.base_id, $fixture.root_id)
+    try {
+        $heldChild = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $true))
+    }
+    catch {
+        $native = $_.Exception
+        while ($null -ne $native.InnerException) { $native = $native.InnerException }
+        $controlStatus = 'unclassified'
+        if ($native.Message -match 'NTSTATUS ([0-9a-f]{8})') { $controlStatus = $Matches[1] }
+        Write-Observation 'production-delete-child-after-tx-release-control' @{
+            accepted=$false; ntstatus=$controlStatus; order='TxF-file-read-closed-then-production-child'
+            access='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE'
+            share='SHARE_READ(0x1)'
+        }
+        throw
+    }
+    try {
+        $observedChildId = [DarkReNamerVmOwnedRootGuard].GetMethod('Identity', $flags).Invoke(
+            $null, @($heldChild))
+        $sameChild = $observedChildId -ceq $baselineRows[0].file_id
+        Write-Observation 'production-delete-child-after-tx-release-control' @{
+            accepted=$true; ntstatus='00000000'; order='TxF-file-read-closed-then-production-child'
+            access='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE'
+            share='SHARE_READ(0x1)'; root_identity_unchanged=$true; child_identity_unchanged=$sameChild
+        }
+        Assert-True $sameChild 'After-release production child identity changed.'
+    }
+    finally {
+        if ($null -ne $heldChild) { $heldChild.Dispose(); $heldChild = $null }
+    }
     $guard.Assert($fixture.base_id, $fixture.root_id)
     if ($adsOpen) {
         $rejected = $false
@@ -250,6 +294,61 @@ try {
     Assert-True ($writeError -eq 0) 'ADS after-release control write failed.'
     $expected.Add([pscustomobject]@{path=$control; bytes=[byte[]](66)})
     $writer.Handle.Dispose(); $writer = $null
+    $guard.Dispose(); $guard = $null
+
+    # Reverse the acquisition order without changing the maintained child
+    # access/share. A failed TxF read here is a separate candidate limitation.
+    $fixture = New-Fixture 'child-first'
+    $file = Join-Path $fixture.path 'content.txt'
+    [IO.File]::WriteAllBytes($file, $original)
+    $expected.Add([pscustomobject]@{path=$file; bytes=$original})
+    $guard = New-Guard $fixture
+    $null = Assert-Index $guard 1
+    $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
+    $heldChild = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $true))
+    Write-Observation 'child-first-production-delete-child-open' @{
+        accepted=$true; ntstatus='00000000'; order='production-child-before-TxF-file-read'
+        access='READ_ATTRIBUTES|LIST_DIRECTORY|READ_CONTROL|DELETE|SYNCHRONIZE'
+        share='SHARE_READ(0x1)'
+    }
+    $tx = [DrTxCandidateNative]::Begin()
+    Assert-True $tx.Accepted "Child-first transaction creation failed: $($tx.Error)"
+    $read = [DrTxCandidateNative]::TxRead($file, $tx.Handle)
+    Write-Observation 'tx-read-after-production-delete-child' @{
+        accepted=$read.Accepted; native_error=$read.Error; order='production-child-before-TxF-file-read'
+        access='FILE_READ_DATA(0x1)'; share='READ|WRITE|DELETE(0x7)'
+        flags='FILE_ATTRIBUTE_NORMAL(0x80)'; production_child_held=$true
+    }
+    if (-not $read.Accepted) { $limits.Add('child-first-tx-file-read-rejected') }
+    $childFirstAdsOpen = $false
+    $childFirstAdsWrite = $null
+    if ($read.Accepted) {
+        $childFirstAds = $file + ':child-first-held'
+        $writer = [DrTxCandidateNative]::Writer($childFirstAds, [DrTxCandidateNative]::CREATE_NEW)
+        $childFirstAdsOpen = $writer.Accepted
+        if ($childFirstAdsOpen) { $childFirstAdsWrite = [DrTxCandidateNative]::Write($writer.Handle, 69) }
+        Write-Observation 'child-first-new-ads-while-both-held' @{
+            open_accepted=$childFirstAdsOpen; open_win32_error=$writer.Error
+            write_accepted=($childFirstAdsWrite -eq 0); write_hresult=$childFirstAdsWrite
+            access='FILE_WRITE_DATA(0x2)'; share='READ|WRITE|DELETE(0x7)'
+            disposition='CREATE_NEW'; production_child_held=$true; tx_read_accepted=$true
+        }
+        if ($childFirstAdsOpen) { $limits.Add('child-first-named-stream-created') }
+        $writer.Handle.Dispose(); $writer = $null
+    }
+    Close-Transaction $read $tx; $read = $null; $tx = $null
+    $heldChild.Dispose(); $heldChild = $null
+    $guard.Assert($fixture.base_id, $fixture.root_id)
+    if ($childFirstAdsOpen) {
+        $rejected = $false
+        try { $null = $guard.ContentIndex() } catch { $rejected = $_.Exception.ToString().Contains('unindexed named stream') }
+        Assert-True $rejected 'Production content index accepted child-first ADS.'
+        $adsExpected = [byte[]]@()
+        if ($childFirstAdsWrite -eq 0) { $adsExpected = [byte[]](69) }
+        Assert-FileBytes $childFirstAds $adsExpected
+        $expected.Add([pscustomobject]@{path=$childFirstAds; bytes=$adsExpected})
+    } else { $null = Assert-Index $guard 1 }
+    Assert-FileBytes $file $original
     $guard.Dispose(); $guard = $null
 
     # A writer already open before TxF is a separate acquisition/real-write case.
@@ -385,7 +484,7 @@ try {
         $guard.Assert($item.base_id, $item.root_id)
         $guard.Dispose(); $guard = $null
     }
-    Write-Observation 'gate1-result' @{ gate='BLOCKED'; mechanism='TxF read plus production owned root guard'; observed_candidate_limits=@($limits.ToArray()); target_collection=0; disposition=0; product=0; verified_fixture_streams=$expected.Count; fixture_disposition='retained'; delete_attempts=0; helper_processes=0; timeout_observation='not-run'; collector_death_observation='not-run'; safe_disposition_sequence='not-tested' }
+    Write-Observation 'gate1-result' @{ gate='BLOCKED'; mechanism='TxF reads with production root and attempted child guard'; observed_candidate_limits=@($limits.ToArray()); target_collection=0; disposition=0; product=0; verified_fixture_streams=$expected.Count; fixture_disposition='retained'; delete_attempts=0; helper_processes=0; timeout_observation='not-run'; collector_death_observation='not-run'; safe_disposition_sequence='not-tested' }
     $complete = $true
 }
 finally {
