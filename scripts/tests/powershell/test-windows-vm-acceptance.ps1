@@ -250,7 +250,7 @@ function Invoke-TestAcceptance {
     }
     $runnerSid='S-1-5-21-1-2-3-1001';$runnerSession=2
     $profileSha256='1'*64;$sourceSha='2'*40;$bundleSha256='3'*64
-    $vmId='18338a47-f647-45c4-98b8-6107331e2602';$name=$null
+    $vmId='11111111-2222-3333-4444-555555555555';$name=$null
     try {
         $rejected=$false
         try { & $gate }

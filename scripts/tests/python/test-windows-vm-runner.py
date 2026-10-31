@@ -916,7 +916,7 @@ class VmRunnerTests(unittest.TestCase):
                 vm.parse_arguments(invalid)
 
     def test_six_native_baseline_invocations_require_fixed_diagnostic_and_vm_identity(self):
-        identity = '18338a47-f647-45c4-98b8-6107331e2602'
+        identity = '11111111-2222-3333-4444-555555555555'
         base = ['--ssh-host', 'prepared-vm', '--expected-vm-id', identity,
                 '--private-symbol-output', str(self.root / 'symbols')]
         for selector, timeout in (('--profile-runtime-model', 1200),
@@ -1013,7 +1013,7 @@ class VmRunnerTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 output = self.root / ('runtime-six-' + str(failure))
                 args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
-                                           '--expected-vm-id', '18338a47-f647-45c4-98b8-6107331e2602',
+                                           '--expected-vm-id', '11111111-2222-3333-4444-555555555555',
                                            '--profile-runtime-model', '--baseline-repetitions', '6',
                                            '--private-symbol-output', str(self.root / ('symbols-' + str(failure))),
                                            '--output', str(output)])
@@ -1096,7 +1096,7 @@ class VmRunnerTests(unittest.TestCase):
     def test_refresh_six_invocations_reuse_one_binary_for_both_orders(self):
         output = self.root / 'refresh-six'
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm',
-                                   '--expected-vm-id', '18338a47-f647-45c4-98b8-6107331e2602',
+                                   '--expected-vm-id', '11111111-2222-3333-4444-555555555555',
                                    '--profile-refresh-stages', '--baseline-repetitions', '6',
                                    '--private-symbol-output', str(self.root / 'refresh-six-symbols'),
                                    '--output', str(output)])
@@ -1147,7 +1147,7 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_virtual_execution_cli_is_bound_to_source_vm_and_one_workload(self):
         base = ['--ssh-host', 'prepared-vm', '--expected-vm-id',
-                '18338a47-f647-45c4-98b8-6107331e2602']
+                '11111111-2222-3333-4444-555555555555']
         selected = vm.parse_arguments(base + [
             '--virtual-execution-count', '1000', '--virtual-execution-iteration', '0'])
         self.assertEqual(selected.test_timeout_seconds, 1200)
@@ -2832,7 +2832,7 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_runtime_model_cli_and_source_bundle_are_fixed_and_separate(self):
         args = vm.parse_arguments(['--ssh-host', 'prepared-vm', '--expected-vm-id',
-                                   '18338a47-f647-45c4-98b8-6107331e2602',
+                                   '11111111-2222-3333-4444-555555555555',
                                    '--profile-runtime-model'])
         self.assertEqual((args.test_timeout_seconds, args.desktop_scale,
                           args.desktop_width, args.desktop_height), (1200, 100, 1366, 768))
@@ -2845,7 +2845,7 @@ class VmRunnerTests(unittest.TestCase):
             with self.subTest(extra=extra), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     vm.parse_arguments(['--ssh-host', 'prepared-vm', '--expected-vm-id',
-                                        '18338a47-f647-45c4-98b8-6107331e2602',
+                                        '11111111-2222-3333-4444-555555555555',
                                         '--profile-runtime-model', *extra])
         repo, target, _, _, _ = self.source_build_inputs('-runtime-model')
         commands = []

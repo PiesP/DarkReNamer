@@ -31,6 +31,7 @@ PYTHON_INVENTORY = (
     ("contracts-menu-layout", "scripts/darkrenamer_tooling/contracts/menu_layout.py", "tooling-contracts-menu-layout.py", "python", "darkrenamer_tooling.contracts.menu_layout", ("package-root", "package-contracts", "contracts-platform", "contracts-state", "package-evidence", "evidence-archive")),
     ("contracts-platform", "scripts/darkrenamer_tooling/contracts/platform.py", "tooling-contracts-platform.py", "python", "darkrenamer_tooling.contracts.platform", ("package-root", "package-contracts", "package-campaign", "campaign-planning", "contracts-state", "package-evidence", "evidence-archive")),
     ("contracts-owned-cleanup", "scripts/darkrenamer_tooling/contracts/owned_cleanup.py", "tooling-contracts-owned-cleanup.py", "python", "darkrenamer_tooling.contracts.owned_cleanup", ("package-root", "package-contracts", "contracts-platform", "package-campaign", "campaign-planning", "package-evidence", "evidence-archive")),
+    ("contracts-retained-disposition", "scripts/darkrenamer_tooling/contracts/retained_disposition.py", "tooling-contracts-retained-disposition.py", "python", "darkrenamer_tooling.contracts.retained_disposition", ("tooling-loader", "package-root", "package-contracts", "package-evidence", "evidence-errors")),
     ("contracts-state", "scripts/darkrenamer_tooling/contracts/state.py", "tooling-contracts-state.py", "python", "darkrenamer_tooling.contracts.state", ("package-root", "package-contracts", "package-evidence", "evidence-archive")),
     ("contracts-authority", "scripts/darkrenamer_tooling/contracts/authority.py", "tooling-contracts-authority.py", "python", "darkrenamer_tooling.contracts.authority", ("tooling-loader", "package-root", "package-contracts")),
     ("contracts-tooling", "scripts/darkrenamer_tooling/contracts/tooling.py", "tooling-contracts-tooling.py", "python", "darkrenamer_tooling.contracts.tooling", ("package-root", "package-contracts", "package-evidence", "evidence-errors")),
@@ -65,6 +66,8 @@ RECOVERY_PRIVATE_ROLES = (
 CONTROLLER_PRIVATE_ROLES = (
     "powershell-controller-contracts", "powershell-controller-transport",
     "powershell-controller-poll", "powershell-controller-rescue",
+    "powershell-controller-owned-root-guard",
+    "powershell-controller-retained-disposition",
 )
 
 
@@ -117,6 +120,8 @@ POWERSHELL_INVENTORY = (
     powershell_entry("powershell-controller-transport", "controller-transport.ps1"),
     powershell_entry("powershell-controller-poll", "controller-poll.ps1"),
     powershell_entry("powershell-controller-rescue", "controller-rescue.ps1"),
+    powershell_entry("powershell-controller-owned-root-guard", "controller-owned-root-guard.ps1"),
+    powershell_entry("powershell-controller-retained-disposition", "controller-retained-disposition.ps1"),
     powershell_entry("powershell-controller-entry", "controller-entry.psm1", (
         "powershell-loader", *CONTROLLER_PRIVATE_ROLES, "powershell-guest-entry",
         "powershell-ui-entry", "powershell-recovery-entry",
@@ -144,9 +149,13 @@ PUBLIC_BOOTSTRAPS = (
     ("scripts/validate-vm-automated-authority.py",
      "Check GitHub metadata bindings after authenticated downloads and gh verification.",
      "contracts-authority", "str(error)"),
+    ("scripts/validate-retained-root-proof.py",
+     "Verify the immutable issue 236 target and a current read-only root collection.",
+     "contracts-retained-disposition", "str(error)"),
 )
 POWERSHELL_BOOTSTRAPS = (
     "scripts/run-windows-vm-tests.ps1",
+    "scripts/collect-retained-root-proof.ps1",
     "scripts/windows-vm-guest.ps1",
     "scripts/windows-vm-acceptance.ps1",
     "scripts/windows-vm-recovery-acceptance.ps1",
@@ -242,7 +251,8 @@ def generated_powershell_bootstrap(
     for placeholder, fragment in POWERSHELL_FRAGMENTS.items():
         count = text.count(placeholder)
         required = (placeholder == "@BOOTSTRAP_HELPERS@" or
-                    relative != "scripts/run-windows-vm-tests.ps1")
+                    relative not in {"scripts/run-windows-vm-tests.ps1",
+                                     "scripts/collect-retained-root-proof.ps1"})
         if count != int(required):
             raise ValueError(f"{relative} must contain {placeholder} at its expected location.")
         if count:

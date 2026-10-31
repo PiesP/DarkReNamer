@@ -20,6 +20,7 @@
         @('contracts-menu-layout', 'python', 'darkrenamer_tooling.contracts.menu_layout'),
         @('contracts-platform', 'python', 'darkrenamer_tooling.contracts.platform'),
         @('contracts-owned-cleanup', 'python', 'darkrenamer_tooling.contracts.owned_cleanup'),
+        @('contracts-retained-disposition', 'python', 'darkrenamer_tooling.contracts.retained_disposition'),
         @('contracts-state', 'python', 'darkrenamer_tooling.contracts.state'),
         @('contracts-authority', 'python', 'darkrenamer_tooling.contracts.authority'),
         @('contracts-tooling', 'python', 'darkrenamer_tooling.contracts.tooling'),
@@ -65,6 +66,8 @@
         @('powershell-controller-transport', 'powershell', $null),
         @('powershell-controller-poll', 'powershell', $null),
         @('powershell-controller-rescue', 'powershell', $null),
+        @('powershell-controller-owned-root-guard', 'powershell', $null),
+        @('powershell-controller-retained-disposition', 'powershell', $null),
         @('powershell-controller-entry', 'powershell', $null)
     )
     foreach ($definition in $definitions) {

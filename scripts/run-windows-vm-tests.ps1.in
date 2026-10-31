@@ -204,6 +204,8 @@ $definitionRoles = @(
     'powershell-controller-transport'
     'powershell-controller-poll'
     'powershell-controller-rescue'
+    'powershell-controller-owned-root-guard'
+    'powershell-controller-retained-disposition'
 )
 $libraries = @{}
 foreach ($role in $definitionRoles) {

@@ -643,8 +643,8 @@ try {
         if ($facadeResult.bundle_root -cne $controllerFixture.root -or
             $facadeResult.ssh_host -cne 'fixture' -or
             $facadeResult.entrypoint_path -cne $controllerFixture.entrypoint -or
-            $facadeResult.library_count -ne 4 -or
-            $facadeResult.record_count -ne 6) {
+            $facadeResult.library_count -ne 6 -or
+            $facadeResult.record_count -ne 8) {
             throw "The public controller facade did not execute its verified $layout fixture."
         }
         if ($null -ne (Get-Command Get-DrToolingVerifiedBundle -ErrorAction SilentlyContinue) -or

@@ -1520,6 +1520,9 @@ def main(repo: Path, argv: list[str] | None = None, tooling=None) -> int:
     require(args.diagnostic not in {RUNTIME_BASELINE_MODE, GUI_APPLY_MODE} or
             (args.desktop_width, args.desktop_height, args.desktop_dpi) == (1366, 768, 96),
             "Fixed owned diagnostic does not accept desktop overrides.")
+    require(args.diagnostic != GUI_APPLY_MODE,
+            "GUI Apply feedback is held until the retained original roots have an accepted "
+            "maintained disposition and a separate current execution admission.")
     selected_runs = ((performance_run(args.performance_column_order or "hidden-visible",
                                      owned=args.acceptance_profile_id == V2_PROFILE_ID),)
                      if args.diagnostic == "performance-sample" else

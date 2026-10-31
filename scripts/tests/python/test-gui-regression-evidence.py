@@ -3396,7 +3396,7 @@ class FirstClearObservationEvidenceTests(FocusedClearEvidenceTests):
         manifest["acceptance_profile_id"] = evidence.V1_PROFILE_ID
         manifest["acceptance_profile_sha256"] = digest(
             (SCRIPT_ROOT.parent / "config/vm-automated-v1.json").read_bytes())
-        vm_id = "18338a47-f647-45c4-98b8-6107331e2602"
+        vm_id = "11111111-2222-3333-4444-555555555555"
         manifest["guest_preflight"]["vm_identity_kind"] = "hyper-v-guest-parameters-virtual-machine-id-v1"
         manifest["guest_preflight"]["vm_identity_sha256"] = digest(vm_id.encode("ascii"))
         write_json(manifest_path, manifest)

@@ -754,6 +754,37 @@ retaining `strict-failed` and `rejected`; the original failure remains immutable
 This handshake does not run for a controller without a matching managed lease,
 and it does not authorize a subsequent campaign workload.
 
+The separate issue-236 maintained-root reader starts at
+`scripts/validate-retained-root-proof.py --original-output <private-original-output>`.
+It pins the exact failed transport and preservation receipts from the retained
+GUI Apply run, verifies indexed output bytes, original root identities and
+descriptors, and checks desktop and text-scale closure. The authenticated
+`scripts/collect-retained-root-proof.ps1` entry point then accepts that exact
+private original output and a new empty private evidence directory, an exact VM
+ID, and the existing Direct or SSH controller connection. It collects a new
+nonce, held root and ancestor identities, owner/ACL, bounded raw UTF-16 content
+index, and complete process/task inventories without launching a product. Its
+receipt is `maintained-root-collection.json`; the Python reader checks it with
+`--collection <receipt>`. The native guard bounds the index to 20,000 entries,
+64 levels, and 512 MiB of file bytes. An incomplete original or current proof
+retains both roots. The reader and collector never delete a root or admit a new
+workload; disposition requires separately reviewed content classification,
+exclusive pre-delete evidence, identity-checked removal and post-proof.
+The current index is a snapshot: the held handles have not been shown to exclude
+creation of a named stream by another writer between indexing and deletion.
+The disposable Windows filesystem fixture reports whether such a writer can
+create a stream while the guard's handles are held; Linux compilation cannot
+settle that behavior. Until classification and write exclusion are independently
+established, no maintained-root deletion entry point exists.
+
+The fixed `gui-apply-feedback-v1-owned-r3-` launch remains refused at both the
+GUI runner and the authenticated controller. Its existing run IDs, V2 profile,
+prepared bundle and VM identity checks still define the intended next product
+scope, but a fresh run ID or manual root absence cannot satisfy the missing
+disposition and separate current admission. Collection above remains available
+without launching the product. The original failed run and its strict task-map
+rejection are unchanged; no issue-236 product or disposition attempt is spent.
+
 This lane proves actual Windows execution of cross-built test artifacts, not
 native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,

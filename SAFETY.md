@@ -1084,6 +1084,23 @@ guarantee whole-session OS process stasis, complete causality of ambient OS
 activity, all broker-mediated escape paths or remote VM hardware attestation.
 The trusted VM producer and private raw-evidence boundary remain in force.
 
+The issue-236 original-root reader is a distinct read-only operation. It pins
+the failed source, transport, preservation, indexed output and restoration
+records before any current VM collection. Its new nonce and content index do not
+reopen the closed original protected anchor or change the original task-map
+failure. Current held root identities and descriptors, complete ownership and
+task inventories, independent content classification, a pre-delete receipt,
+guarded removal and post-proof are separate gates. Until those gates are
+accepted, both retained roots and the next execution slot remain blocked.
+The current content index is a snapshot; held root handles and child identity
+checks alone do not establish exclusion of a new named stream before
+disposition. A disposable Windows filesystem fixture tests that sharing
+boundary, without authorizing removal. There is no maintained-root deletion
+entry point or positive next-slot admission. The fixed GUI Apply launch is
+refused at the GUI runner and authenticated controller while these proofs are
+missing; collection does not alter the original failed result or task-map
+rejection.
+
 ### Owned-resource fixed-performance diagnostic
 
 The explicit `performance-sample-v2-owned-r3-` route applies the reviewed

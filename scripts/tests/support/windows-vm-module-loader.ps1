@@ -48,6 +48,8 @@ function Get-DrTestPowerShellModuleSpec {
                 'controller-transport.ps1'
                 'controller-poll.ps1'
                 'controller-rescue.ps1'
+                'controller-owned-root-guard.ps1'
+                'controller-retained-disposition.ps1'
             )
         }
     }
@@ -223,6 +225,8 @@ function New-DrTestControllerFacadeFixture {
         'powershell-controller-transport'
         'powershell-controller-poll'
         'powershell-controller-rescue'
+        'powershell-controller-owned-root-guard'
+        'powershell-controller-retained-disposition'
     )
     foreach ($role in $definitionRoles) {
         $leaf = $role.Substring('powershell-'.Length) + '.ps1'
