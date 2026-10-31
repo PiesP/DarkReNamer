@@ -16,7 +16,7 @@ pub(crate) struct PreferencePersistence {
     column_status: WriterStatus,
     appearance_status: WriterStatus,
     language: Option<LanguagePreferencesWriter>,
-    language_diagnostic: Option<Arc<Mutex<LanguageDiagnosticState>>>,
+    language_diagnostic: Arc<Mutex<LanguageDiagnosticState>>,
     language_status: WriterStatus,
     language_notify_saved: bool,
     language_saved: Option<LanguagePreference>,
@@ -126,22 +126,21 @@ impl PreferencePersistence {
         self.language_saved.take()
     }
     pub(crate) fn install_language_writer(&mut self, writer: LanguagePreferencesWriter) {
-        self.language_diagnostic = Some(writer.diagnostic());
+        self.language_diagnostic = writer.diagnostic();
         self.language = Some(writer);
     }
 
     /// Read-only bounded snapshot; independent of event draining and writer retirement.
-    pub(crate) fn language_diagnostic(&self) -> Option<LanguageDiagnosticState> {
-        self.language_diagnostic.as_ref().map(|state| {
-            *state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        })
+    pub(crate) fn language_diagnostic(&self) -> LanguageDiagnosticState {
+        *self
+            .language_diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn language_diagnostic_selector(&self, selector: usize) -> Option<isize> {
-        let state = self.language_diagnostic()?;
+        let state = self.language_diagnostic();
         if state.revision == u64::MAX {
             return None;
         }
@@ -172,7 +171,8 @@ impl PreferencePersistence {
                 .map_or(0, |code| (code as u32) as isize),
             104 => isize::from(failure.is_some()),
             105 => isize::from(state.submission_failed),
-            106 => isize::from(self.language_status.terminal_observed),
+            106 => isize::from(state.terminal_observed),
+            107 => isize::from(state.writer_present),
             _ => return None,
         })
     }
@@ -184,12 +184,10 @@ impl PreferencePersistence {
             .ok_or_else(|| io::Error::other("language preference writer is unavailable"))
             .and_then(|writer| writer.submit(preference));
         self.language_status.note_submission(&result);
-        if let Some(state) = &self.language_diagnostic {
-            state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .note_requested(&result);
-        }
+        self.language_diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_requested(&result);
         result?;
         self.language_notify_saved = true;
         Ok(())
@@ -269,12 +267,10 @@ impl PreferencePersistence {
             for event in events {
                 match &event {
                     PreferenceWriteEvent::Saved { generation } => {
-                        if let Some(state) = &self.language_diagnostic {
-                            state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .note_saved(*generation);
-                        }
+                        self.language_diagnostic
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .note_saved(*generation);
                         self.language_status.saved_generation = Some(
                             self.language_status
                                 .saved_generation
@@ -293,6 +289,10 @@ impl PreferencePersistence {
                     }
                     PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
                         self.language_status.terminal_observed = true;
+                        self.language_diagnostic
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .note_terminal();
                     }
                 }
                 match event {
@@ -392,12 +392,10 @@ impl PreferencePersistence {
             for event in events {
                 match event {
                     PreferenceWriteEvent::Saved { generation } => {
-                        if let Some(state) = &self.language_diagnostic {
-                            state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .note_saved(generation);
-                        }
+                        self.language_diagnostic
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .note_saved(generation);
                         self.language_status.saved_generation = Some(
                             self.language_status
                                 .saved_generation
@@ -416,6 +414,10 @@ impl PreferencePersistence {
                     }
                     PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
                         self.language_status.terminal_observed = true;
+                        self.language_diagnostic
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .note_terminal();
                     }
                 }
             }
