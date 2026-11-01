@@ -50,7 +50,7 @@
       },
       "lock": {
         "path": "config/cargo-audit-0.22.2-patched.lock",
-        "sha256": "24d33894f135dc8c9ef8f824c71a163f2a66d5604febfe9b09b817dc0936fa9a"
+        "sha256": "3b0b43dc03a5d31392115c55813a8935ec92c14df8e4018b088c6436ada5368a"
       }
     },
     {
