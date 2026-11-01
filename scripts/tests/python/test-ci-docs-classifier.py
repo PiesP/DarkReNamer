@@ -21,8 +21,9 @@ CLASSIFY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLASSIFY)
 
 
-def workflow_run_block(step_name: str) -> str:
-    source = WORKFLOW.read_text(encoding="utf-8")
+def workflow_run_block(step_name: str, source: str | None = None) -> str:
+    if source is None:
+        source = WORKFLOW.read_text(encoding="utf-8")
     match = re.search(
         rf"(?m)^      - name: {re.escape(step_name)}\n"
         r"(?:(?!^      - name:|^  [a-z]+:).)*?^        run: \|\n"
@@ -89,6 +90,16 @@ class GitHistoryTests(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "docs").mkdir()
         (self.root / "scripts" / CLASSIFIER.name).write_bytes(CLASSIFIER.read_bytes())
+        # The fixture checks bootstrap ordering/identity, not the host's patch
+        # version. Hosted jobs execute the actual protected runtime verifier.
+        (self.root / "scripts" / "check-python-runtime.py").write_text(
+            "import os, sys\n"
+            "assert sys.flags.isolated\n"
+            "assert os.path.samefile(sys.executable, os.environ['DARKRENAMER_PYTHON'])\n"
+            "assert os.environ['PYTHON_JIT'] == '0'\n"
+            "assert sys.argv[1:] == ['--exact', '3.14.10']\n"
+        )
+        (self.root / ".python-version").write_text("3.14.10\n")
         (self.root / "docs" / "USER-GUIDE.md").write_text("initial\n")
         (self.root / "README.md").write_text("initial\n")
         self.base = self.commit()
@@ -136,16 +147,65 @@ class GitHistoryTests(unittest.TestCase):
         target.write_text(content, encoding="utf-8")
         return self.commit()
 
-    def decide(self, event: str, head: str, before: str = "") -> str:
+    def decide(self, event: str, head: str, before: str = "",
+               python: str = sys.executable) -> str:
         output = Path(self.temporary.name) / "output"
         output.write_text("")
+        environment = Path(self.temporary.name) / "environment"
+        environment.write_text("")
         env = dict(self.git_env, EVENT_NAME=event, EVENT_SHA=head,
                    EVENT_BEFORE=before, RUNNER_TEMP=self.temporary.name,
-                   GITHUB_OUTPUT=str(output))
-        subprocess.run(("bash", "-e"), input=workflow_run_block("Classify with protected policy"),
-                       text=True, cwd=self.root, env=env, check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                   GITHUB_OUTPUT=str(output), GITHUB_ENV=str(environment),
+                   DARKRENAMER_PYTHON=python, PYTHON_JIT="0")
+        source = WORKFLOW.read_text(encoding="utf-8")
+        classifier = source.split("  classify:\n", 1)[1].split("\n  quality:", 1)[0]
+        # Run every shell step, including any bootstrap before classification.
+        # setup-python itself is hosted; its selected path is supplied above.
+        for step in re.split(r"(?m)(?=^      - name: )", classifier):
+            if "\n        run: |\n" not in step:
+                continue
+            name = re.search(r"(?m)^      - name: (.+)$", step)
+            assert name is not None
+            subprocess.run(("bash", "-e"),
+                           input=workflow_run_block(name.group(1), step),
+                           text=True, cwd=self.root, env=env, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for line in environment.read_text().splitlines():
+                key, value = line.split("=", 1)
+                env[key] = value
         return output.read_text().strip()
+
+    def test_proposed_runtime_helper_never_executes_before_decision(self) -> None:
+        sentinel = self.root / "proposed-runtime-executed"
+        self.edit("scripts/check-python-runtime.py",
+                  "from pathlib import Path\n"
+                  "Path('proposed-runtime-executed').write_text('executed')\n")
+        head = self.edit("docs/USER-GUIDE.md", "allowed later commit\n")
+        for event in ("pull_request", "merge_group", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.decide(event, head, self.base), "docs_only=false")
+                self.assertFalse(sentinel.exists(), "proposed bootstrap helper ran")
+
+    def test_missing_or_failing_trusted_runtime_never_selects_docs(self) -> None:
+        for source in (None, "raise RuntimeError('fixture bootstrap failure')\n"):
+            with self.subTest(source=source):
+                self.reset_to_base()
+                runtime = self.root / "scripts" / "check-python-runtime.py"
+                if source is None:
+                    runtime.unlink()
+                else:
+                    runtime.write_text(source)
+                base = self.commit()
+                self.git("push", "origin", "master")
+                head = self.edit("docs/USER-GUIDE.md", "changed\n")
+                self.assertEqual(self.decide("pull_request", head), "docs_only=false")
+                self.git("push", "--force", "origin", f"{self.base}:master")
+
+    def test_unavailable_interpreter_never_selects_docs(self) -> None:
+        head = self.edit("docs/USER-GUIDE.md", "changed\n")
+        self.assertEqual(self.decide("pull_request", head,
+                                    python=str(self.root / "missing-python")),
+                         "docs_only=false")
 
     def test_allowed_document_multicommit_and_trusted_merge_group(self) -> None:
         head = self.edit("docs/USER-GUIDE.md", "first\n")

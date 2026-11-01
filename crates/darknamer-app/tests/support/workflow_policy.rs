@@ -242,6 +242,35 @@ fn step_condition(path: &str, step: &Step, expected: Option<&str>) -> Result<(),
 
 pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String> {
     const PATH: &str = ".github/workflows/ci.yaml";
+    // Extra commands inside this step can execute proposed code before the
+    // trusted decision, even when all expected policy fragments remain present.
+    const CLASSIFIER_BOOTSTRAP: &str = r#"set -euo pipefail
+docs_only=false
+base=''
+if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
+  if git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master; then
+    base="$(git rev-parse --verify 'refs/remotes/origin/master^{commit}')"
+  fi
+elif [[ "$EVENT_NAME" == push ]]; then
+  base="$EVENT_BEFORE"
+fi
+head="$(git rev-parse HEAD)"
+if [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" == "$EVENT_SHA" ]] &&
+   git merge-base --is-ancestor "$base" "$head"; then
+  policy="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-policy.XXXXXXXX.py")"
+  runtime="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-runtime.XXXXXXXX.py")"
+  decision="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-decision.XXXXXXXX")"
+  trap 'rm -f "$policy" "$runtime" "$decision"' EXIT
+  if git show "$base:scripts/classify-ci-docs.py" > "$policy" &&
+     git show "$base:scripts/check-python-runtime.py" > "$runtime"; then
+    if "$DARKRENAMER_PYTHON" -I "$runtime" --exact 3.14.10 &&
+       "$DARKRENAMER_PYTHON" -I "$policy" "$base" "$head" > "$decision" &&
+       cmp -s "$decision" <(printf true); then
+      docs_only=true
+    fi
+  fi
+fi
+printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT""#;
     const TOOLING_SCOPE: &str =
         "${{ github.event_name == 'workflow_dispatch' && 'All' || 'Current' }}";
     const FULL: &str = "${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}";
@@ -285,7 +314,18 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
             && classifier.condition.is_none()
             && classifier.outputs.get("docs_only").map(String::as_str)
                 == Some("${{ steps.classify.outputs.docs_only }}")
-            && classifier.steps.len() == 4,
+            && classifier.steps.len() == 3
+            && classifier
+                .steps
+                .iter()
+                .filter_map(|step| step.name.as_deref())
+                .collect::<Vec<_>>()
+                == [
+                    "Checkout source and history",
+                    "Select patched CPython",
+                    "Classify with protected policy",
+                ]
+            && classifier.env.is_empty(),
         format!("{PATH} classifier must run independently and emit one decision"),
     )?;
     action_policy(
@@ -296,27 +336,65 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
     checkout_is_read_only(PATH, classifier)?;
     let classifier_checkout = named_step(PATH, classifier, "Checkout source and history")?;
     require(
-        with_is(classifier_checkout, "fetch-depth", "0"),
+        with_is(classifier_checkout, "fetch-depth", "0")
+            && classifier_checkout.run.is_none()
+            && classifier_checkout.env.is_empty(),
         format!("{PATH} classifier must fetch complete history"),
     )?;
     step_condition(PATH, classifier_checkout, None)?;
+    let classifier_python = named_step(PATH, classifier, "Select patched CPython")?;
+    step_condition(PATH, classifier_python, None)?;
+    require(
+        classifier_python.id.as_deref() == Some("python")
+            && classifier_python
+                .uses
+                .as_deref()
+                .is_some_and(|action| action.starts_with("actions/setup-python@"))
+            && classifier_python.run.is_none()
+            && classifier_python.env.is_empty()
+            && classifier_python.with.len() == 3
+            && with_is(
+                classifier_python,
+                "python-version",
+                include_str!("../../../../.python-version").trim(),
+            )
+            && with_is(classifier_python, "architecture", "x64")
+            && with_is(classifier_python, "freethreaded", "false"),
+        format!("{PATH} classifier must select patched CPython without proposed-tree inputs"),
+    )?;
     let classifier_script = named_step(PATH, classifier, "Classify with protected policy")?;
     step_condition(PATH, classifier_script, None)?;
     require(
         classifier_script.id.as_deref() == Some("classify")
-            && classifier_script.run.as_deref().is_some_and(|run| {
-                [
-                    "git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master",
-                    "git merge-base --is-ancestor \"$base\" \"$head\"",
-                    "git show \"$base:scripts/classify-ci-docs.py\"",
-                    "\"$DARKRENAMER_PYTHON\" -I \"$policy\" \"$base\" \"$head\"",
-                    "cmp -s \"$decision\" <(printf true)",
-                    "printf 'docs_only=%s\\n' \"$docs_only\" >> \"$GITHUB_OUTPUT\"",
-                ]
-                .iter()
-                .all(|fragment| run.contains(fragment))
-                    && !run.contains("merge_group.base_sha")
-            }),
+            && classifier_script.shell.as_deref() == Some("bash")
+            && classifier_script.env.len() == 5
+            && [
+                ("EVENT_NAME", "${{ github.event_name }}"),
+                ("EVENT_SHA", "${{ github.sha }}"),
+                ("EVENT_BEFORE", "${{ github.event.before }}"),
+            ]
+            .iter()
+            .all(|(name, expected)| {
+                classifier_script
+                    .env
+                    .get(*name)
+                    .map(Scalar::text)
+                    .as_deref()
+                    == Some(*expected)
+            })
+            && classifier_script
+                .env
+                .get("DARKRENAMER_PYTHON")
+                .map(Scalar::text)
+                .as_deref()
+                == Some("${{ steps.python.outputs.python-path }}")
+            && classifier_script
+                .env
+                .get("PYTHON_JIT")
+                .map(Scalar::text)
+                .as_deref()
+                == Some("0")
+            && classifier_script.run.as_deref().map(str::trim) == Some(CLASSIFIER_BOOTSTRAP),
         format!("{PATH} must classify complete trees with protected policy"),
     )?;
 

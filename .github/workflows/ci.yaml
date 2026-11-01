@@ -37,17 +37,10 @@ jobs:
         id: python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version-file: .python-version
+          # Classification must not bootstrap from proposed-tree inputs.
+          python-version: '3.14.10'
           architecture: x64
           freethreaded: false
-
-      - name: Verify selected Python
-        env:
-          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
-          PYTHON_JIT: '0'
-        run: |
-          "$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact "$(cat .python-version)"
-          printf 'DARKRENAMER_PYTHON=%s\nPYTHON_JIT=0\n' "$DARKRENAMER_PYTHON" >> "$GITHUB_ENV"
 
       - name: Classify with protected policy
         id: classify
@@ -56,6 +49,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.sha }}
           EVENT_BEFORE: ${{ github.event.before }}
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
         run: |
           set -euo pipefail
           docs_only=false
@@ -71,10 +66,13 @@ jobs:
           if [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" == "$EVENT_SHA" ]] &&
              git merge-base --is-ancestor "$base" "$head"; then
             policy="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-policy.XXXXXXXX.py")"
+            runtime="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-runtime.XXXXXXXX.py")"
             decision="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-decision.XXXXXXXX")"
-            trap 'rm -f "$policy" "$decision"' EXIT
-            if git show "$base:scripts/classify-ci-docs.py" > "$policy"; then
-              if "$DARKRENAMER_PYTHON" -I "$policy" "$base" "$head" > "$decision" &&
+            trap 'rm -f "$policy" "$runtime" "$decision"' EXIT
+            if git show "$base:scripts/classify-ci-docs.py" > "$policy" &&
+               git show "$base:scripts/check-python-runtime.py" > "$runtime"; then
+              if "$DARKRENAMER_PYTHON" -I "$runtime" --exact 3.14.10 &&
+                 "$DARKRENAMER_PYTHON" -I "$policy" "$base" "$head" > "$decision" &&
                  cmp -s "$decision" <(printf true); then
                 docs_only=true
               fi
