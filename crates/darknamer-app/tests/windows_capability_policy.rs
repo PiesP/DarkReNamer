@@ -121,6 +121,32 @@ fn ci_document_routing_preserves_required_gates_and_fails_closed() -> Result<(),
     workflow_policy::validate_ci_docs_routing()?;
     let original = include_str!("../../../.github/workflows/ci.yaml");
     for changed in [
+        original.replacen("python-version: '3.14.10'", "python-version-file: .python-version", 1),
+        original.replacen(
+            "      - name: Classify with protected policy\n",
+            "      - name: Verify proposed runtime\n        run: python scripts/check-python-runtime.py\n\n      - name: Classify with protected policy\n",
+            1,
+        ),
+        original.replacen(
+            "git show \"$base:scripts/check-python-runtime.py\" > \"$runtime\"",
+            "cp scripts/check-python-runtime.py \"$runtime\"",
+            1,
+        ),
+        original.replacen(
+            "\"$DARKRENAMER_PYTHON\" -I \"$runtime\" --exact 3.14.10 &&",
+            "true &&",
+            1,
+        ),
+        original.replacen(
+            "          set -euo pipefail\n",
+            "          python3 scripts/check-python-runtime.py\n          set -euo pipefail\n",
+            1,
+        ),
+        original.replacen(
+            "          set -euo pipefail\n",
+            "          bash scripts/other-helper.sh\n          set -euo pipefail\n",
+            1,
+        ),
         original.replace("if: ${{ !cancelled() }}", "if: ${{ success() }}"),
         original.replace("needs: [classify]", "needs: []"),
         original.replace(

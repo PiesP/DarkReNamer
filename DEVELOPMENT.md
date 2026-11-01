@@ -263,6 +263,10 @@ does not raise the local minimum; it also does not prove that an independently
 prepared VM or host uses the same interpreter.
 
 Each hosted Python job runs `scripts/check-python-runtime.py` before its tools.
+The documentation classifier selects its explicit patched version without
+reading the proposed tree's version file, then extracts both the runtime check
+and classification policy from the protected base. Its runtime identity stays
+step-local; missing trusted inputs or failed verification select full checks.
 The JSON log records the executable, full version, build/compiler and OpenSSL,
 GIL and JIT state, and verifies the exact selected executable and patch. The
 selected absolute path is then carried as `DARKRENAMER_PYTHON`; the tooling
