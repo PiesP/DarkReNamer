@@ -37,6 +37,7 @@ SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_LEAF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_JSON_DEPTH = 64
 MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
 MAX_COLLECTION_BYTES = 512 * 1024 * 1024
 REFERENCE_SCOPE = ["full-context-semantics-v1"]
@@ -718,6 +719,25 @@ def read_bytes(root: Path, relative: Path, maximum: int, label: str) -> bytes:
 def parse_json_bytes(data: bytes, label: str) -> object:
     try:
         text = data.decode("utf-8-sig")
+        depth = 0
+        quoted = False
+        escaped = False
+        for character in text:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    quoted = False
+            elif character == '"':
+                quoted = True
+            elif character in "[{":
+                depth += 1
+                require(depth <= MAX_JSON_DEPTH,
+                        f"{label} is not strict UTF-8 JSON: nesting is too deep.")
+            elif character in "]}":
+                depth -= 1
         return json.loads(
             text,
             object_pairs_hook=strict_object,

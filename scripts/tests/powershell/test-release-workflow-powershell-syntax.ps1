@@ -217,7 +217,12 @@ function Test-CommandContract {
         [switch] $RequireDelimiter
     )
 
-    if ($Record.ast.GetCommandName() -cne $Name) {
+    $actualName = $Record.ast.GetCommandName()
+    if ($null -eq $actualName -and
+        $Record.ast.InvocationOperator -eq [Management.Automation.Language.TokenKind]::Ampersand) {
+        $actualName = $Record.ast.CommandElements[0].Extent.Text
+    }
+    if ($actualName -cne $Name) {
         return $false
     }
     $arguments = @($Record.ast.CommandElements | Select-Object -Skip 1 | ForEach-Object {
@@ -1221,7 +1226,7 @@ $promotionAttestation = Assert-OneCommand `
     }) `
     -Message 'Promotion must verify the original candidate attestation.'
 $promotionAllSubjects = @($promotionCommands | Where-Object {
-    Test-CommandContract -Record $_ -Name 'python' `
+    Test-CommandContract -Record $_ -Name '$env:DARKRENAMER_PYTHON' `
         -BeforeDelimiter @('-I', './scripts/validate-release-publication.py', 'verify-candidate')
 })
 if ($promotionAllSubjects.Count -ne 2 -or
@@ -1244,11 +1249,12 @@ $promotionVmStatement = Assert-OneCommand `
         '-ValidationRunId' = '${{ inputs.validation_run_id }}'
         '-ValidationRunAttempt' = '${{ inputs.validation_run_attempt }}'
         '-ProfileId' = '${{ inputs.profile_id }}'
+        '-PythonExecutable' = '$env:DARKRENAMER_PYTHON'
     }) `
     -Message 'Promotion must independently recompute the canonical automated VM statement.'
 $promotionVmAuthority = Assert-OneCommand `
     -Commands $promotionCommands `
-    -Name 'python' `
+    -Name '$env:DARKRENAMER_PYTHON' `
     -BeforeDelimiter @('-I', './scripts/validate-vm-automated-authority.py', 'validation-run') `
     -RequiredOptions ([ordered]@{
         '--run-id' = '$env:VALIDATION_RUN_ID'
@@ -1335,6 +1341,7 @@ $validationWrapper = Assert-OneCommand `
         '-ValidationRunId' = '${{ github.run_id }}'
         '-ValidationRunAttempt' = '${{ github.run_attempt }}'
         '-ProfileId' = '${{ inputs.profile_id }}'
+        '-PythonExecutable' = '$env:DARKRENAMER_PYTHON'
     }) `
     -Message 'Hosted validation must derive its statement from exact candidate and ingress pins.'
 $validationCandidateAttestation = Assert-OneCommand `
@@ -1492,6 +1499,7 @@ function Invoke-PromotionChannelFixture {
 
     $fixtureEnvironment = @{
         RELEASE_CHANNEL = $Channel; MAKE_LATEST = $Latest; PROFILE_ID = $Profile
+        DARKRENAMER_PYTHON = 'python'
         RELEASE_TAG = 'v0.2.0'; CANDIDATE_SOURCE_SHA = ('a' * 40)
         EXPECTED_EXE_SHA256 = ('b' * 64); CANDIDATE_RUN_ID = '11'
         EXPECTED_ARTIFACT_SHA256 = ('c' * 64)

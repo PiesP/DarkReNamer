@@ -33,6 +33,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Select patched CPython
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact "$(cat .python-version)"
+          printf 'DARKRENAMER_PYTHON=%s\nPYTHON_JIT=0\n' "$DARKRENAMER_PYTHON" >> "$GITHUB_ENV"
+
       - name: Classify with protected policy
         id: classify
         shell: bash
@@ -58,7 +74,7 @@ jobs:
             decision="$(mktemp "$RUNNER_TEMP/darkrenamer-doc-decision.XXXXXXXX")"
             trap 'rm -f "$policy" "$decision"' EXIT
             if git show "$base:scripts/classify-ci-docs.py" > "$policy"; then
-              if python3 -I "$policy" "$base" "$head" > "$decision" &&
+              if "$DARKRENAMER_PYTHON" -I "$policy" "$base" "$head" > "$decision" &&
                  cmp -s "$decision" <(printf true); then
                 docs_only=true
               fi
@@ -79,6 +95,25 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Select patched CPython
+        id: python
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        id: verify-python
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact "$(cat .python-version)"
+          printf 'DARKRENAMER_PYTHON=%s\nPYTHON_JIT=0\n' "$DARKRENAMER_PYTHON" >> "$GITHUB_ENV"
 
       - name: Install pinned Rust toolchain
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
@@ -107,7 +142,7 @@ jobs:
           fi
 
       - name: Test tooling
-        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && steps.verify-python.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Ubuntu -Scope $env:TOOLING_TEST_SCOPE
 
@@ -157,12 +192,29 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select patched CPython
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact "$(cat .python-version)"
+          printf 'DARKRENAMER_PYTHON=%s\nPYTHON_JIT=0\n' "$DARKRENAMER_PYTHON" >> "$GITHUB_ENV"
+
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
 
       - name: Read reviewed Rust scanner pins
         id: scanner-pins
-        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/run-scheduled-rust-audit.py --emit-pins
 
       - name: Restore pinned Rust security tools
         id: security-tools-cache
@@ -177,13 +229,14 @@ jobs:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
           DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}
         run: |
-          python3 scripts/build-patched-cargo-audit.py --destination "$SECURITY_TOOLS_ROOT/bin" --work "$RUNNER_TEMP/darkrenamer-cargo-audit-build"
+          "$DARKRENAMER_PYTHON" -I scripts/build-patched-cargo-audit.py --destination "$SECURITY_TOOLS_ROOT/bin" --work "$RUNNER_TEMP/darkrenamer-cargo-audit-build"
           cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version "$DENY_VERSION"
 
       - name: Refresh and audit Rust dependencies
         env:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
-        run: python3 scripts/run-scheduled-rust-audit.py
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/run-scheduled-rust-audit.py
 
   windows:
     name: pr-gate/windows
@@ -199,8 +252,30 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test tooling
+      - name: Select patched CPython
+        id: python
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        id: verify-python
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        shell: pwsh
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          & $env:DARKRENAMER_PYTHON -I scripts/check-python-runtime.py --exact (Get-Content .python-version -Raw).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Selected Python runtime verification failed.' }
+          "DARKRENAMER_PYTHON=$env:DARKRENAMER_PYTHON" >> $env:GITHUB_ENV
+          'PYTHON_JIT=0' >> $env:GITHUB_ENV
+
+      - name: Test tooling
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.verify-python.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Windows -Scope $env:TOOLING_TEST_SCOPE
 

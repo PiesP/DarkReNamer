@@ -1058,6 +1058,20 @@ class GuiEvidenceTests(SyntheticFixtureTestCase):
     def test_deep_json_reports_a_validation_error(self):
         with self.assertRaisesRegex(evidence.EvidenceError, "not strict UTF-8 JSON"):
             evidence.parse_json_bytes(b"[" * 20000 + b"0" + b"]" * 20000, "deep")
+        value = evidence.parse_json_bytes(
+            b"[" * evidence.MAX_JSON_DEPTH + b"0" + b"]" * evidence.MAX_JSON_DEPTH,
+            "maximum depth")
+        for _ in range(evidence.MAX_JSON_DEPTH):
+            self.assertIsInstance(value, list)
+            value = value[0]
+        self.assertEqual(value, 0)
+        with self.assertRaisesRegex(evidence.EvidenceError, "nesting is too deep"):
+            evidence.parse_json_bytes(
+                b"[" * (evidence.MAX_JSON_DEPTH + 1) + b"0" +
+                b"]" * (evidence.MAX_JSON_DEPTH + 1), "over depth")
+        quoted = json.dumps('"' + "[" * 100 + "\\" + "]" * 100).encode()
+        self.assertEqual(evidence.parse_json_bytes(quoted, "quoted brackets"),
+                         '"' + "[" * 100 + "\\" + "]" * 100)
 
     def test_vm_identity_kind_and_independent_postlaunch_receipt_are_enforced(self):
         manifest = json.loads((self.standard / "input-manifest.json").read_text())

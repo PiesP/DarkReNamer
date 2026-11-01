@@ -261,11 +261,24 @@ function Invoke-ToolingTest {
             Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
         }
         else {
-            $pythonCommand = if ($Platform -eq 'Windows') { 'python' } else { 'python3' }
-            Get-Command $pythonCommand -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            if (-not [string]::IsNullOrEmpty($env:DARKRENAMER_PYTHON)) {
+                if (-not [IO.Path]::IsPathFullyQualified($env:DARKRENAMER_PYTHON)) {
+                    throw 'DARKRENAMER_PYTHON must be an absolute executable path.'
+                }
+                Get-Command $env:DARKRENAMER_PYTHON -CommandType Application -ErrorAction Stop |
+                    Select-Object -First 1
+            }
+            else {
+                $pythonCommand = if ($Platform -eq 'Windows') { 'python' } else { 'python3' }
+                Get-Command $pythonCommand -CommandType Application -ErrorAction Stop |
+                    Select-Object -First 1
+            }
         }
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $command.Source
+        if ($Test.runner -ceq 'Python') {
+            Write-Host "Selected Python test executable: $($command.Source)"
+        }
         $startInfo.WorkingDirectory = $repositoryRoot
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true

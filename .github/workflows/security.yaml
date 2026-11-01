@@ -27,12 +27,29 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select patched CPython
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact "$(cat .python-version)"
+          printf 'DARKRENAMER_PYTHON=%s\nPYTHON_JIT=0\n' "$DARKRENAMER_PYTHON" >> "$GITHUB_ENV"
+
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
 
       - name: Read reviewed Rust scanner pins
         id: scanner-pins
-        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/run-scheduled-rust-audit.py --emit-pins
 
       - name: Restore pinned Rust security tools
         id: security-tools-cache
@@ -47,14 +64,15 @@ jobs:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
           DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}
         run: |
-          python3 scripts/build-patched-cargo-audit.py --destination "$SECURITY_TOOLS_ROOT/bin" --work "$RUNNER_TEMP/darkrenamer-cargo-audit-build"
+          "$DARKRENAMER_PYTHON" -I scripts/build-patched-cargo-audit.py --destination "$SECURITY_TOOLS_ROOT/bin" --work "$RUNNER_TEMP/darkrenamer-cargo-audit-build"
           cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version "$DENY_VERSION"
 
       - name: Refresh and audit Rust dependencies
         id: audit
         env:
           SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
-        run: python3 scripts/run-scheduled-rust-audit.py
+        run: |
+          "$DARKRENAMER_PYTHON" -I scripts/run-scheduled-rust-audit.py
 
       - name: Summarize setup failure
         if: failure() && steps.audit.outcome == 'skipped'
