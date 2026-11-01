@@ -377,6 +377,23 @@ class ScannerPinMetadataTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "patched lockfile"):
                     BUILDER.build(root / "bin", root / "tampered-lock", archive, True)
 
+    def test_patched_source_rejects_old_h2_even_with_matching_lock_digest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="darkrenamer-patched-audit-h2-") as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            lock = root / "config/cargo-audit-0.22.2-patched.lock"
+            original = (REPOSITORY_ROOT / "config/cargo-audit-0.22.2-patched.lock").read_text(encoding="utf-8")
+            selected = 'name = "h2"\nversion = "0.4.20"'
+            self.assertIn(selected, original)
+            lock.write_text(original.replace(selected, 'name = "h2"\nversion = "0.4.16"'), encoding="utf-8")
+            record = json.loads(AUDIT.SCANNER_RECORD.read_text(encoding="utf-8"))
+            record["tools"][0]["lock"]["sha256"] = hashlib.sha256(lock.read_bytes()).hexdigest()
+            metadata = root / "config/release-tool-integrity.json"
+            metadata.write_text(json.dumps(record), encoding="utf-8")
+            with mock.patch.object(BUILDER, "ROOT", root), mock.patch.object(BUILDER, "RECORD", metadata):
+                with self.assertRaisesRegex(ValueError, "Unsupported cargo-audit TLS lockfile closure"):
+                    BUILDER.reviewed_source()
+
     def test_reviewed_record_selects_versions_for_workflow_and_runner(self) -> None:
         pins = AUDIT.scanner_pins()
         self.assertEqual(pins, {"cargo-audit": "0.22.2", "cargo-deny": "0.20.2"})

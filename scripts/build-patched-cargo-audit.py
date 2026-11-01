@@ -46,7 +46,7 @@ def reviewed_source() -> tuple[dict, Path]:
         raise ValueError("SHA-256 mismatch for cargo-audit patched lockfile")
     packages = {package["name"]: package["version"] for package in tomllib.loads(lock_path.read_text(encoding="utf-8"))["package"]}
     if (packages.get("cargo-audit") != version or packages.get("rustls") != "0.23.46" or
-            packages.get("rustls-webpki") != "0.103.16" or packages.get("h2") != "0.4.16"):
+            packages.get("rustls-webpki") != "0.103.16" or packages.get("h2") != "0.4.20"):
         raise ValueError("Unsupported cargo-audit TLS lockfile closure")
     return tool, lock_path
 
