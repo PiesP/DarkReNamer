@@ -73,13 +73,13 @@ fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(
     let original = include_str!("../../../.github/workflows/ci.yaml");
     for mutation in [
         original.replace(
-            "run: python3 scripts/run-scheduled-rust-audit.py --emit-pins",
-            "run: python3 scripts/run-scheduled-rust-audit.py --emit-pins || true",
+            "\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins",
+            "\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins || true",
         ),
         original.replace("id: scanner-pins", "id: unchecked-pins"),
         original.replace(
             "      - name: Restore pinned Rust security tools\n",
-            "      - name: Duplicate scanner selection\n        run: python3 scripts/run-scheduled-rust-audit.py --emit-pins\n\n      - name: Restore pinned Rust security tools\n",
+            "      - name: Duplicate scanner selection\n        run: \"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins\n\n      - name: Restore pinned Rust security tools\n",
         ),
         original.replace(
             "hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py')",
@@ -91,8 +91,8 @@ fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(
             "DENY_VERSION: ${{ github.event.inputs.deny_version }}",
         ),
         original.replace(
-            "python3 scripts/build-patched-cargo-audit.py --destination",
-            "python3 scripts/build-patched-cargo-audit.py --verify-only --destination",
+            "\"$DARKRENAMER_PYTHON\" -I scripts/build-patched-cargo-audit.py --destination",
+            "\"$DARKRENAMER_PYTHON\" -I scripts/build-patched-cargo-audit.py --verify-only --destination",
         ),
         original.replace(
             "--destination \"$SECURITY_TOOLS_ROOT/bin\"",
@@ -132,7 +132,7 @@ fn ci_document_routing_preserves_required_gates_and_fails_closed() -> Result<(),
             "      - name: Enforce the Rust-only source tree\n        id: inventory\n        if: false",
         ),
         original.replace(
-            "python3 scripts/run-scheduled-rust-audit.py",
+            "\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py",
             "echo skipped-advisory-check",
         ),
     ] {

@@ -34,7 +34,13 @@ $release = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
 if ($release.tag_name -cne $ReleaseTag -or $release.draft -isnot [bool] -or $release.draft) {
     throw 'Public release tag or state differs from the selected release.'
 }
-$names = @(python -I (Join-Path $PSScriptRoot 'validate-release-publication.py') list `
+$python = if (-not [string]::IsNullOrEmpty($env:DARKRENAMER_PYTHON)) {
+    $env:DARKRENAMER_PYTHON
+}
+else {
+    (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+$names = @(& $python -I (Join-Path $PSScriptRoot 'validate-release-publication.py') list `
     --candidate-root $CandidateRoot)
 if ($LASTEXITCODE -ne 0 -or $names.Count -eq 0) {
     throw 'Candidate publication list could not be loaded.'
@@ -88,7 +94,7 @@ foreach ($asset in $assets) {
         -Token $env:GH_TOKEN `
         -Accept 'application/octet-stream'
 }
-python -I (Join-Path $PSScriptRoot 'validate-release-publication.py') verify-public-readback `
+& $python -I (Join-Path $PSScriptRoot 'validate-release-publication.py') verify-public-readback `
     --candidate-root $CandidateRoot `
     --statement $StatementPath `
     --release-metadata $releasePath `

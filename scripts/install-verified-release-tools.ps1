@@ -393,12 +393,15 @@ $alias = 'darkrenamer-release'
 if ($LASTEXITCODE -ne 0) { throw 'rustup could not link the verified Rust toolchain.' }
 $env:RUSTUP_TOOLCHAIN = $alias
 $env:PATH = "$toolsRoot;$env:PATH"
-if ($null -eq (Get-Command python -CommandType Application -ErrorAction SilentlyContinue)) {
-    throw 'Hosted Python 3.11 or newer is required to build the reviewed cargo-audit source.'
+$python = if (-not [string]::IsNullOrEmpty($env:DARKRENAMER_PYTHON)) {
+    $env:DARKRENAMER_PYTHON
 }
-& python -I -c 'import sys; assert sys.version_info >= (3, 11)'
+else {
+    (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+& $python -I -c 'import sys; assert sys.version_info >= (3, 11)'
 if ($LASTEXITCODE -ne 0) { throw 'Hosted Python 3.11 or newer is required to build the reviewed cargo-audit source.' }
-& python -I (Join-Path $repoRoot 'scripts/build-patched-cargo-audit.py') `
+& $python -I (Join-Path $repoRoot 'scripts/build-patched-cargo-audit.py') `
     --destination $toolsRoot --work (Join-Path $destination 'cargo-audit-build') `
     --archive (Join-Path $downloads 'cargo-audit.crate')
 if ($LASTEXITCODE -ne 0) { throw 'Reviewed cargo-audit source build failed.' }

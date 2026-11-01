@@ -105,6 +105,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Select patched CPython
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          architecture: x64
+          freethreaded: false
+
+      - name: Verify selected Python
+        shell: pwsh
+        env:
+          DARKRENAMER_PYTHON: ${{ steps.python.outputs.python-path }}
+          PYTHON_JIT: '0'
+        run: |
+          & $env:DARKRENAMER_PYTHON -I scripts/check-python-runtime.py --exact (Get-Content .python-version -Raw).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Selected Python runtime verification failed.' }
+          "DARKRENAMER_PYTHON=$env:DARKRENAMER_PYTHON" >> $env:GITHUB_ENV
+          'PYTHON_JIT=0' >> $env:GITHUB_ENV
+
       - name: Validate release channel policy
         shell: pwsh
         env:
@@ -304,7 +323,7 @@ jobs:
           CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
         run: |
           New-Item -ItemType Directory -Path verified-candidate | Out-Null
-          $files = @(python -I ./scripts/validate-release-publication.py list-provenance --candidate-root dist)
+          $files = @(& $env:DARKRENAMER_PYTHON -I ./scripts/validate-release-publication.py list-provenance --candidate-root dist)
           if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
             throw 'Candidate publication list could not be loaded.'
           }
@@ -322,7 +341,7 @@ jobs:
               throw "Original candidate attestation verification failed: $($files[$index])"
             }
           }
-          python -I ./scripts/validate-release-publication.py verify-candidate `
+          & $env:DARKRENAMER_PYTHON -I ./scripts/validate-release-publication.py verify-candidate `
             --candidate-root dist `
             --verified-root verified-candidate `
             --repository $env:GITHUB_REPOSITORY `
@@ -354,6 +373,7 @@ jobs:
           -TrustedSourceRoot $PWD
           -OutputPath (Join-Path $PWD 'validation-statement.json')
           -RunnerTemp $env:RUNNER_TEMP
+          -PythonExecutable $env:DARKRENAMER_PYTHON
 
       - name: Verify exact hosted validation attestation and successful attempt
         shell: pwsh
@@ -392,7 +412,7 @@ jobs:
             gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATION_RUN_ID/attempts/$env:VALIDATION_RUN_ATTEMPT" |
               Out-File -LiteralPath $run -Encoding utf8
             if ($LASTEXITCODE -ne 0) { throw 'Validation attempt metadata retrieval failed.' }
-            python -I ./scripts/validate-vm-automated-authority.py validation-run `
+            & $env:DARKRENAMER_PYTHON -I ./scripts/validate-vm-automated-authority.py validation-run `
               --repository-metadata $repository `
               --repository $env:GITHUB_REPOSITORY `
               --source-sha $env:CANDIDATE_SOURCE_SHA `
@@ -506,11 +526,11 @@ jobs:
 
           $channelFlags = @(if ($env:RELEASE_CHANNEL -ceq 'prerelease') { '--prerelease' })
           $latestFlag = "--latest=$env:MAKE_LATEST"
-          $candidateFiles = @(python -I ./scripts/validate-release-publication.py list --candidate-root dist)
+          $candidateFiles = @(& $env:DARKRENAMER_PYTHON -I ./scripts/validate-release-publication.py list --candidate-root dist)
           if ($LASTEXITCODE -ne 0 -or $candidateFiles.Count -eq 0) {
             throw 'Candidate publication list could not be loaded.'
           }
-          python -I ./scripts/validate-release-publication.py verify-candidate `
+          & $env:DARKRENAMER_PYTHON -I ./scripts/validate-release-publication.py verify-candidate `
             --candidate-root dist `
             --verified-root verified-candidate `
             --repository $env:GITHUB_REPOSITORY `

@@ -285,10 +285,14 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
             && classifier.condition.is_none()
             && classifier.outputs.get("docs_only").map(String::as_str)
                 == Some("${{ steps.classify.outputs.docs_only }}")
-            && classifier.steps.len() == 2,
+            && classifier.steps.len() == 4,
         format!("{PATH} classifier must run independently and emit one decision"),
     )?;
-    action_policy(PATH, classifier, &["actions/checkout"])?;
+    action_policy(
+        PATH,
+        classifier,
+        &["actions/checkout", "actions/setup-python"],
+    )?;
     checkout_is_read_only(PATH, classifier)?;
     let classifier_checkout = named_step(PATH, classifier, "Checkout source and history")?;
     require(
@@ -305,7 +309,7 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
                     "git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master",
                     "git merge-base --is-ancestor \"$base\" \"$head\"",
                     "git show \"$base:scripts/classify-ci-docs.py\"",
-                    "python3 -I \"$policy\" \"$base\" \"$head\"",
+                    "\"$DARKRENAMER_PYTHON\" -I \"$policy\" \"$base\" \"$head\"",
                     "cmp -s \"$decision\" <(printf true)",
                     "printf 'docs_only=%s\\n' \"$docs_only\" >> \"$GITHUB_OUTPUT\"",
                 ]
@@ -337,7 +341,7 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
                 "Check formatting and lints",
             ][..],
             "Rust and tooling verification not required for this change",
-            6,
+            8,
         ),
         (
             "unit",
@@ -357,7 +361,7 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
                 "Build the compatibility executable",
             ][..],
             "Windows verification not required for this change",
-            7,
+            9,
         ),
     ] {
         let job = workflow.jobs.get(job_name).ok_or("missing required gate")?;
@@ -368,7 +372,7 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
                 && job.steps.len() == expected_count,
             format!("{PATH} {gate_name} must run after classification failure or success"),
         )?;
-        action_policy(PATH, job, &["actions/checkout"])?;
+        action_policy(PATH, job, &["actions/checkout", "actions/setup-python"])?;
         checkout_is_read_only(PATH, job)?;
         let checkout = named_step(PATH, job, "Checkout source")?;
         require(
@@ -381,6 +385,15 @@ pub(super) fn validate_ci_docs_routing_source(source: &str) -> Result<(), String
                 FULL_AFTER_INVENTORY
             } else {
                 FULL
+            };
+            let condition = if *name == "Test tooling" {
+                if job_name == "quality" {
+                    "${{ !cancelled() && steps.inventory.outcome == 'success' && steps.verify-python.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}"
+                } else {
+                    "${{ !cancelled() && steps.checkout.outcome == 'success' && steps.verify-python.outcome == 'success' && (needs.classify.result != 'success' || needs.classify.outputs.docs_only != 'true') }}"
+                }
+            } else {
+                condition
             };
             step_condition(PATH, named_step(PATH, job, name)?, Some(condition))?;
         }
@@ -771,7 +784,8 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
     const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
-    const PIN_COMMAND: &str = "python3 scripts/run-scheduled-rust-audit.py --emit-pins";
+    const PIN_COMMAND: &str =
+        "\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins";
 
     let workflow = parse(PATH, source)?;
     let security = workflow
@@ -780,7 +794,11 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
         .ok_or_else(|| format!("{PATH} must retain its security job"))?;
 
     checkout_is_read_only(PATH, security)?;
-    action_policy(PATH, security, &["actions/checkout", "actions/cache"])?;
+    action_policy(
+        PATH,
+        security,
+        &["actions/checkout", "actions/setup-python", "actions/cache"],
+    )?;
 
     for (name, job) in &workflow.jobs {
         let caches = actions(job, "actions/cache");
@@ -815,7 +833,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
     )?;
     let (pin_index, pins) = pin_steps[0];
     require(
-        pins.run.as_deref() == Some(PIN_COMMAND)
+        pins.run.as_deref().map(str::trim) == Some(PIN_COMMAND)
             && pins.condition.is_none()
             && pins.continue_on_error.is_none()
             && pins.env.is_empty(),
@@ -857,7 +875,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
                 == [
-                    "python3 scripts/build-patched-cargo-audit.py --destination \"$SECURITY_TOOLS_ROOT/bin\" --work \"$RUNNER_TEMP/darkrenamer-cargo-audit-build\"",
+                    "\"$DARKRENAMER_PYTHON\" -I scripts/build-patched-cargo-audit.py --destination \"$SECURITY_TOOLS_ROOT/bin\" --work \"$RUNNER_TEMP/darkrenamer-cargo-audit-build\"",
                     "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny --version \"$DENY_VERSION\"",
                 ],
         format!(
@@ -900,7 +918,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
                 .map(Scalar::text)
                 .as_deref()
                 == Some(TOOLS_ROOT)
-            && audit_commands == ["python3 scripts/run-scheduled-rust-audit.py"],
+            && audit_commands == ["\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py"],
         format!("{PATH} must always run the shared version, freshness and completion validator"),
     )?;
 
@@ -935,7 +953,7 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
                 .get("quality")
                 .ok_or_else(|| format!("{path} must retain its Ubuntu quality job"))?;
             validate_ci_docs_routing_source(source)?;
-            action_policy(path, quality, &["actions/checkout"])?;
+            action_policy(path, quality, &["actions/checkout", "actions/setup-python"])?;
             require(
                 quality.runs_on.starts_with("ubuntu-"),
                 format!("{path} must retain its hosted Ubuntu tooling lane"),
@@ -953,9 +971,13 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
             steps_are_mandatory(path, job)?;
         }
         let allowed_actions = if path.ends_with("release.yaml") {
-            &["actions/checkout", "actions/upload-artifact"][..]
+            &[
+                "actions/checkout",
+                "actions/setup-python",
+                "actions/upload-artifact",
+            ][..]
         } else {
-            &["actions/checkout"][..]
+            &["actions/checkout", "actions/setup-python"][..]
         };
         action_policy(path, job, allowed_actions)?;
     }
@@ -1172,7 +1194,11 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     action_policy(
         candidate_path,
         candidate_job,
-        &["actions/checkout", "actions/upload-artifact"],
+        &[
+            "actions/checkout",
+            "actions/setup-python",
+            "actions/upload-artifact",
+        ],
     )?;
     candidate_source_policy(candidate_path, candidate_job)?;
     let signing_job = candidate
@@ -1209,6 +1235,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             && action_sequence(candidate_job)
                 == [
                     "actions/checkout",
+                    "actions/setup-python",
                     "actions/upload-artifact",
                     "actions/upload-artifact",
                 ],
@@ -1266,9 +1293,13 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     )?;
     checkout_is_read_only(promotion_path, job)?;
     steps_are_mandatory(promotion_path, job)?;
-    action_policy(promotion_path, job, &["actions/checkout"])?;
+    action_policy(
+        promotion_path,
+        job,
+        &["actions/checkout", "actions/setup-python"],
+    )?;
     require(
-        action_sequence(job) == ["actions/checkout"],
+        action_sequence(job) == ["actions/checkout", "actions/setup-python"],
         "promotion must download approved original ZIP bytes through the bounded digest verifier",
     )?;
     require(
@@ -1392,6 +1423,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         validation_job,
         &[
             "actions/checkout",
+            "actions/setup-python",
             "actions/download-artifact",
             "actions/attest",
         ],
@@ -1430,6 +1462,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             && action_sequence(validation_job)
                 == [
                     "actions/checkout",
+                    "actions/setup-python",
                     "actions/download-artifact",
                     "actions/attest",
                 ],

@@ -251,6 +251,27 @@ RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-feat
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 ```
 
+## Python tooling runtime
+
+The repository supports ordinary CPython 3.11 or newer for local tooling. Hosted
+Ubuntu and Windows Python consumers select the exact `.python-version` release
+with `actions/setup-python` before execution. The current CI selection is
+CPython 3.14.10, the [October 2026 security release](https://blog.python.org/2026/10/python-3152-31410-31318-31216-31118/).
+The [Actions runtime release](https://github.com/actions/python-versions/releases/tag/3.14.10-40336797752)
+has ordinary GIL-enabled Ubuntu 24.04 x64 and Windows x64 artifacts. This pin
+does not raise the local minimum; it also does not prove that an independently
+prepared VM or host uses the same interpreter.
+
+Each hosted Python job runs `scripts/check-python-runtime.py` before its tools.
+The JSON log records the executable, full version, build/compiler and OpenSSL,
+GIL and JIT state, and verifies the exact selected executable and patch. The
+selected absolute path is then carried as `DARKRENAMER_PYTHON`; the tooling
+runner and release/scanner builders use it without falling back to a PATH
+interpreter. Local `scripts/test-tooling.ps1` retains its platform default and
+accepts `DARKRENAMER_PYTHON` as an absolute executable path when explicitly set.
+VM orchestration must be checked in its own host environment; use the selected
+interpreter explicitly with the documented `-I` commands and record its identity.
+
 ## Routine maintenance workflow
 
 1. During edits, run focused Cargo tests or existing tooling selections with

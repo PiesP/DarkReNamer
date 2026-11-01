@@ -77,7 +77,8 @@ function New-RegistryFixture {
 function Invoke-RegistryFixture {
     param(
         [Parameter(Mandatory)][string] $Root,
-        [string[]] $Arguments = @()
+        [string[]] $Arguments = @(),
+        [hashtable] $Environment = @{}
     )
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -88,6 +89,9 @@ function Invoke-RegistryFixture {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $startInfo.Environment[$entry.Key] = $entry.Value
+    }
     foreach ($argument in @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
         (Join-Path $Root 'scripts/test-tooling.ps1'), '-Platform', $actualPlatform
@@ -308,20 +312,42 @@ try {
         -Entries @((New-TestEntry -Id 'python' -Path 'scripts/test-python.py' -Runner 'Python')) `
         -Files @{
             'scripts/test-python.py' = @'
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
-Path(__file__).with_suffix('.marker').write_text('ran', encoding='utf-8')
-print('Python subprocess ran')
+child = subprocess.check_output([sys.executable, '-I', '-c', 'import sys; print(sys.executable)'], text=True).strip()
+Path(__file__).with_suffix('.marker').write_text(json.dumps([
+    sys.executable, child,
+    os.path.samefile(sys.executable, os.environ['DARKRENAMER_PYTHON']),
+    os.path.samefile(child, os.environ['DARKRENAMER_PYTHON']),
+]), encoding='utf-8')
+print(f'Python subprocess ran: parent={sys.executable} child={child}')
 '@
         }
     $roots.Add($pythonRoot)
     $pythonReportPath = Join-Path $pythonRoot 'python-results.json'
-    $python = Invoke-RegistryFixture -Root $pythonRoot -Arguments @('-Runner', 'Python', '-ResultPath', $pythonReportPath)
+    $selectedPython = (Get-Command $(if ($IsWindows) { 'python' } else { 'python3' }) `
+        -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $python = Invoke-RegistryFixture -Root $pythonRoot -Arguments @('-Runner', 'Python', '-ResultPath', $pythonReportPath) `
+        -Environment @{ DARKRENAMER_PYTHON = $selectedPython }
     Assert-True ($python.exitCode -eq 0) "Actual platform Python invocation failed: $($python.stderr)"
     Assert-True (Test-Path (Join-Path $pythonRoot 'scripts/test-python.marker')) 'Python selection must execute a real interpreter on each supported platform.'
     Assert-True ($python.stdout.Contains('Python subprocess ran')) 'Python runner must propagate child output.'
+    $executables = Get-Content (Join-Path $pythonRoot 'scripts/test-python.marker') -Raw | ConvertFrom-Json
+    Assert-True ($executables.Count -eq 4 -and $executables[2] -eq $true -and
+        $executables[3] -eq $true) `
+        'Selected Python must reach both the tooling test and its child.'
     $pythonReport = Get-Content -LiteralPath $pythonReportPath -Raw | ConvertFrom-Json
     Assert-True ($pythonReport.status -eq 'passed' -and $pythonReport.results.Count -eq 1 -and
         $pythonReport.results[0].runner -eq 'Python' -and $pythonReport.results[0].exitCode -eq 0) 'Python report must preserve successful child execution.'
+    Remove-Item -LiteralPath (Join-Path $pythonRoot 'scripts/test-python.marker')
+    $missingPython = Invoke-RegistryFixture -Root $pythonRoot -Arguments @('-Runner', 'Python') `
+        -Environment @{ DARKRENAMER_PYTHON = (Join-Path $pythonRoot 'missing-python') }
+    Assert-FailsWith -Result $missingPython -Fragment 'missing-python'
+    Assert-True (-not (Test-Path (Join-Path $pythonRoot 'scripts/test-python.marker'))) `
+        'An unavailable selected Python must fail without using PATH.'
 
     $cancelledRoot = New-RegistryFixture `
         -Entries @(
