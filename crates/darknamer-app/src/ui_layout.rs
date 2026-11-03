@@ -1872,9 +1872,9 @@ impl ColumnState {
 #[cfg(any(windows, test))]
 pub(crate) const fn default_column_states() -> [ColumnState; 7] {
     [
-        ColumnState::visible(150),
-        ColumnState::visible(150),
-        ColumnState::visible(100),
+        ColumnState::visible(COLUMNS[0].default_width),
+        ColumnState::visible(COLUMNS[1].default_width),
+        ColumnState::visible(COLUMNS[2].default_width),
         ColumnState::hidden(120),
         ColumnState::hidden(80),
         ColumnState::hidden(120),
