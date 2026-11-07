@@ -53,6 +53,46 @@ These are authoring defaults; the [safety model](SAFETY.md),
   comparable [performance samples](#fixed-performance-sample). Reviewed
   allocation removal alone does not establish an application-level speedup.
 
+### Composition and capability boundaries
+
+Follow the [composition and behavioral-contract policy](https://github.com/PiesP/.github/blob/master/MAINTENANCE_POLICY.md#composition-and-behavioral-contracts).
+Product behavior and state reuse use explicitly composed owners and narrow
+capabilities, not project-defined implementation inheritance. Ordinary structs,
+enums, pure functions, Rust traits, supertrait bounds such as `Send + Sync`,
+derived standard traits and generic constraints conform. Keep each existing
+generic or `dyn` choice appropriate to its caller; do not add a trait/factory for
+every helper or a general ownership/DI framework.
+
+Paths below are relative to `crates/darknamer-app/src/`:
+
+| Capability | Current owner and separation |
+| --- | --- |
+| `RenameBackend` in `rename/ports.rs` | Planning/execution borrow the filesystem boundary; retain no-replace mutation and typed mutation certainty. |
+| `JournalStore` in `rename/ports.rs` | Records one transaction's durable transitions; it does not grant retained recovery authority. |
+| `AuthorizedJournal` in `rename/ports.rs`; `RenameRecovery` in `rename/recovery.rs` | Recovery composes separate backend and exclusively retained journal references, keeping snapshot and authorized append on the same identity. |
+| `ExecutionControl: Send + Sync` in `rename/executor.rs`; `WorkerExecutionControl` in `windows/worker.rs` | Explicit cancellation/progress capability; requesting cancellation does not retire or join its worker. |
+| `AdmissionAdapter` in `admission.rs` | Concrete environment adapters supply admission operations. |
+| `AppearanceDialogPlatform` in `windows/appearance_dialog.rs` | A small generic platform seam; interface-oriented design does not require dynamic dispatch. |
+
+The [foreground worker contract](#foreground-worker-ownership) owns admission,
+stale-result checks, terminal-result consumption and actual retirement. Its
+supported retain decision remains local to those worker transitions; a newly
+selected architecture objective can justify a bounded change without a prior
+bug. No worker-enum, callback-state or `AppState` rewrite is required here.
+Preserve field destruction order, including `_runtime_lock` after worker and
+journal owners.
+
+Generated COM interfaces and Win32 `SetWindowSubclass` are required native
+adapter mechanisms, not Rust class-implementation inheritance. The
+[native safety authority](SAFETY.md#unsafe-boundary-policy) retains exact COM
+identity, registration/revocation and apartment constraints, exact subclass
+identity, `RemoveWindowSubclass`, `DefSubclassProc` chaining and `WM_NCDESTROY`
+teardown. Its existing group-box and modal-prompt state protocols own callback
+reentrancy and resource lifetimes; composition policy does not replace them.
+Developer Python/PowerShell and test-framework inheritance are outside this
+product-policy adoption. Runtime, dependency, native-safety and release contracts
+remain unchanged.
+
 ### Preference read authority
 
 Column, appearance and language files have independent write authority. A successful read
