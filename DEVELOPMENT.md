@@ -288,8 +288,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-features \
   --target x86_64-pc-windows-msvc --locked
-pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
+DARKRENAMER_PYTHON="$(command -v python3)" pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 ```
+
+Select Python explicitly for the tooling subprocesses as well: the public
+release readback adapter otherwise resolves the Windows-style `python` command,
+which need not exist on Linux even when `python3` is available.
 
 ## Python tooling runtime
 
