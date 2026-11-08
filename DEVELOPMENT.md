@@ -288,8 +288,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-features \
   --target x86_64-pc-windows-msvc --locked
-pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
+DARKRENAMER_PYTHON="$(command -v python3)" pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 ```
+
+Select Python explicitly for the tooling subprocesses as well: the public
+release readback adapter otherwise resolves the Windows-style `python` command,
+which need not exist on Linux even when `python3` is available.
 
 ## Python tooling runtime
 
@@ -422,6 +426,145 @@ failure source. Fixed scanner/source/layout allowlists, Windows archive digests,
 executable probes and independent parser-semantic fixtures therefore remain
 required. Changing a version does not establish compatibility with the runner's
 supported report formats or registry-failure detection.
+
+## On-demand unsafe reviews
+
+Safety analysis and unsafe reduction are independent manual tracks. Run either
+without opening the other; a reduction needs a separate safety assessment of
+its final affected boundary. The [native safety policy](SAFETY.md#unsafe-boundary-policy)
+owns contracts and retained design decisions; [foreground worker ownership](#foreground-worker-ownership)
+owns safe worker transitions. These procedures add no scanner, count quota,
+calendar schedule, or permanent open tracker.
+
+The safety track established in [#262](https://github.com/PiesP/DarkReNamer/issues/262)
+owns the shared fields below. Detailed revision-bound records may live in issue
+comments. Latest recorded cycles: [safety analysis](https://github.com/PiesP/DarkReNamer/issues/262#issuecomment-6723644078)
+and [unsafe reduction](https://github.com/PiesP/DarkReNamer/issues/263#issuecomment-6723644277).
+When a later cycle completes, update only its pointer and retain the earlier
+record through a link. Closing a setup/cycle issue does not certify unreviewed
+boundaries or authorize a release.
+
+### Shared review record
+
+Copy these fields once into either track's completion record, then append its
+track-specific table. Use immutable source/API links and preserve historical
+results against their original revisions.
+
+```text
+Track / request / explicit trigger / review date:
+Current full source SHA / previous assessment link and SHA / compared range:
+Toolchain / lockfile identity / target and features / execution environment:
+Boundary inventory and method (production/tests, cfg, macros, dependencies):
+Scope: newly reviewed / retained with specific prior assessment / not reviewed:
+Evidence: source/API references; actual commands and outcomes; CI/VM identities:
+Evidence limits: static reasoning / historical reuse / fresh execution / not run:
+Item decisions / remaining work or linked follow-ups / limitations:
+Next review: concrete change or observation required to reopen each decision:
+Delivery: procedure link / reviewed and tested SHA / landed SHA or tree binding:
+```
+
+### Safety-analysis invocation and checklist
+
+```text
+Run only the on-demand unsafe safety-analysis procedure in DEVELOPMENT.md.
+Trigger: <request, change, failure, or applicable candidate review>.
+Source: <full SHA>; previous assessment: <link and SHA, or none>.
+Scope: <boundaries and adjacent safe constructors/callers/teardown>.
+Complete the shared record and safety table; distinguish static and native evidence.
+```
+
+1. Refresh the default branch, open issues/PRs and completed related work. Pin
+   source, toolchain, lockfile, target/features and trigger. Compare the scope
+   with the previous assessment; an unchanged unsafe block does not exempt
+   changed safe callers, lifetime signatures, field/drop order, publication,
+   cancellation/join, modal behavior, macros/bindings or dependency/ABI contracts.
+   Concrete failures and applicable release-candidate review also trigger this
+   track; an explicit assessment request is sufficient.
+2. Reconcile all groups with `ALLOWED_BOUNDARIES` and
+   `unsafe_source_inventory_stays_within_reviewed_native_boundaries` in
+   `crates/darknamer-app/tests/unsafe_policy.rs`. Assign each a scope status from
+   the shared record. Its package-source lexical scan includes inline tests and
+   cfg-disabled, unexpanded syntax, skips its own policy file, and does not
+   establish macro-generated or dependency coverage. Counts are diagnostic.
+3. Trace each scoped invariant through safe construction, dispatch, state
+   transitions and destruction. Check pointer extent/initialization, alignment,
+   aliasing, ownership transfer, ABI/thread/apartment restrictions and failure
+   cleanup as applicable. Include callback publication, lease/run hold,
+   `WM_NCDESTROY`, prompt/subclass and COM teardown, actual worker join and field
+   order when connected to the scope. Link contracts at their existing owners.
+4. Map material conclusions to source/API reasoning and existing regressions.
+   Classify hypotheses separately from confirmed defects. Use `supported within
+   scope`, `confirmed defect`, `targeted verification required`, or `blocked`
+   with a named prerequisite. A deliberate fail-stop or bounded lifetime-preserving
+   retention is assessed against its contract; an unresolved defect or missing
+   required verification cannot be labelled safe or passed.
+5. Correct an established bounded defect and review the final affected safe and
+   unsafe paths again. Give genuinely independent larger work a focused linked
+   issue with acceptance criteria and an incomplete verdict. Run the existing
+   [maintenance gates](#routine-maintenance-workflow) and required native checks
+   under the [prepared-VM procedure](#native-tests-in-a-local-hyper-v-vm).
+   Procedure-only work does not require an unrelated release campaign.
+6. Complete the record, including actual commands, evidence limits, linked work
+   and next triggers. Close the bounded review issue only when its deliverables
+   are complete, with any unresolved safety verdict explicitly incomplete.
+
+Append this safety-specific completion table to the shared record:
+
+| Boundary and scope status | Invariant | Enforcing safe caller, state or owner | Failure/reentrancy path | Source/API and regression evidence | Verdict, remaining work and next trigger |
+| --- | --- | --- | --- | --- | --- |
+| `<group>` | `<obligation>` | `<constructor/caller/drop order>` | `<path>` | `<immutable links; execution scope>` | `<supported/defect/verification required/blocked>` |
+
+### Unsafe-reduction invocation and checklist
+
+```text
+Run only the on-demand unsafe-reduction procedure in DEVELOPMENT.md.
+Trigger: <available API, simplification, new evidence, or explicit request>.
+Source: <full SHA>; previous assessment: <link and SHA, or none>.
+Candidates: <bounded native responsibilities>.
+Complete the shared record and candidate table; a supported retain result is valid.
+```
+
+1. Pin the shared fields and compare current source and prior retained decisions.
+   An actually published API, compiler/binding change, obsolete responsibility,
+   concrete simplification, new maintenance evidence or explicit request can
+   trigger review. Preserve the native policy's toolchain/binding-upgrade and
+   release-candidate reassessment requirement. Unchanged assumptions may retain
+   their earlier disposition with a scope comparison.
+2. For each candidate, inspect published versions and an immutable upstream
+   implementation. Compare behavior and proof obligations before selecting a
+   change: exact operational UTF-16, cancellation/errors, allocation timing and
+   aggregate limits, filters/default extensions, native defaults, live modal
+   owner restoration and apartment/lifetime constraints as applicable. Reconcile
+   retained-handle/no-replace and selection-time authority at their existing
+   safety owners. A returned path or a fully allocated result later truncated
+   does not establish those contracts.
+3. Choose `remove`, `narrow`, `retain`, or `defer` with evidence and a concrete
+   reconsideration trigger. Distinguish eliminated obligations, a narrower
+   first-party boundary, and responsibility transferred into a wrapper, macro,
+   generated binding or dependency. Fewer tokens alone establish no benefit.
+4. Implement only a small candidate with demonstrated equivalence and concrete
+   value. Assess its final boundary separately using the safety checklist,
+   including adjacent safe callers and teardown; another read-only reviewer may
+   help but a second person is not required. Run applicable maintenance/native
+   gates. Add tests only for a concrete uncovered behavior or changed tooling.
+5. Record actual before/after effect using the same inventory scope/method,
+   remaining obligations, checks and limitations. A supported zero-reduction
+   result completes a cycle; do not leave it open waiting for an upstream release.
+   Reopen through a bounded linked review when its recorded trigger occurs.
+
+Append this reduction-specific completion table to the shared record:
+
+| Current boundary | Alternative, published version and pinned source | Preserved contracts | First-party and total trust-boundary change | Disposition and actual benefit/evidence | Remaining obligations and precise next trigger |
+| --- | --- | --- | --- | --- | --- |
+| `<candidate>` | `<API/version/revision, or unavailable>` | `<comparison>` | `<eliminated/narrowed/transferred/unchanged>` | `<remove/narrow/retain/defer; result>` | `<conditions>` |
+
+Both tracks preserve the existing full CI routing for `SAFETY.md` and
+`DEVELOPMENT.md`. Keep static reasoning, historical CI, fresh checks, prepared-VM
+observations and unexecuted acceptance separate. A skipped green step is not
+execution evidence. Resume an unchanged blocked workload only after a corrective
+change or relevant new evidence; record the missing prerequisite and next
+runnable step. [Release and publication authority](DISTRIBUTION.md#release-channels-and-approval)
+remains separate.
 
 ## Tooling tests
 
