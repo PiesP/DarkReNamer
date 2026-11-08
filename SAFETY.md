@@ -365,6 +365,10 @@ current directory, executable location, or runtime-selected checkout.
 
 ### Unsafe boundary policy
 
+Use the independent [on-demand safety-analysis and unsafe-reduction procedures](DEVELOPMENT.md#on-demand-unsafe-reviews)
+for revision-bound assessments and completion records. The contracts and retained
+design dispositions below remain the safety authority.
+
 `darknamer-app` denies unsafe code by default, and the non-Windows library raises
 that policy to `forbid`. Narrow exceptions are attached only to the native UI
 module declaration in `src/lib.rs`, the `private_state`, `windows_backend`, and
