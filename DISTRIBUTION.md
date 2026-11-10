@@ -53,7 +53,54 @@ latest designation are distinct; neither changes the supported environment.
 Regular-release status does not require a 1.0.0 version number; the tag must
 still match the chosen Cargo workspace version exactly.
 
-## Prepared 0.1.9 release notes
+## Prepared 0.1.10 release notes
+
+The single executable now embeds Korean, English and Japanese for app-owned UI.
+Choose **View > Language · next startup** to save System or a manual language;
+the change takes effect after a normal restart. System follows the first
+supported Windows UI language and falls back to English. Windows-owned dialog
+controls and technical OS/provider diagnostics may retain their own language.
+
+Existing readable appearance or column preferences retain the legacy Korean
+language when no language record exists; fresh installations use System.
+When no readable legacy record establishes prior preferences, unreadable legacy
+settings defer automatic migration. An unreadable or corrupt language record is
+not overwritten during that run. Settings files
+retain independent write authority. A failed language save leaves the last
+acknowledged choice checked and reports that the new choice may not persist.
+Language selection preserves the current proposals and recovery state and does
+not add session restoration or change regional formatting or rename authority.
+
+File/folder pickers preserve exact native UTF-16 results and distinguish failure
+from cancellation. Drop admission reports excluded paths instead of silently
+discarding them. Existing no-replacement rename, same-volume regular-file move,
+journal and recovery boundaries remain unchanged.
+
+The recommended user ZIP contains the executable and required notices and
+instructions; the separate support ZIP contains symbols and audit materials.
+Verify the finalized ZIPs with `SHA256SUMS.txt`. The canonical validation
+statement is a separate fourth asset produced only after candidate qualification.
+Published v0.1.9 and its eleven uploaded assets remain unchanged.
+
+Supported use remains non-elevated Windows 11 or later on x64 and the documented
+local NTFS paths. The executable remains intentionally unsigned (`NotSigned`).
+Bundled languages and tooling changes do not establish smaller binaries,
+faster startup, lower memory use or broader hardware/browser coverage. Human
+Explorer/IME, comprehensive visual/accessibility, physical-storage performance
+and power-loss guarantees remain outside the automated release claim.
+
+Before upgrading, finish active work, close normally and retain a copy of the
+previous executable and per-user settings. Replace the executable independently
+of `%LOCALAPPDATA%\DarkReNamer`; no settings reset is required. To roll back,
+close normally and restore the earlier verified executable. Preserve unfamiliar
+settings and recovery journals; do not delete or edit them to bypass recovery.
+
+Version 0.1.10 is a maintenance release within the existing v0.1 support and
+filesystem contract. Preparation requires a new immutable candidate, the complete
+same-source VM-Automated v2 campaign and independent hosted verification.
+These notes do not assert completion of those gates or authorize publication.
+
+## Historical 0.1.9 release notes
 
 Native prompts retain their callback state until window destruction completes,
 and failed prompt destruction no longer frees state that the window can still
