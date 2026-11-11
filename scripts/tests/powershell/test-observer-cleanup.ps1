@@ -1835,6 +1835,84 @@ try {
             $row.error_detail.message -notlike '*DPI restoration failed*') {
             throw 'A failed observer DPI restoration was not recorded as a GUI failure.'
         }
+
+        function Stop-JobBoundProcess {
+            param($State, [switch] $RequireSolePrimary)
+            $State.stop_calls++
+            if (-not $RequireSolePrimary) { throw 'GUI failure cleanup used generic Job termination.' }
+            if ($State.reject_verified_stop) { throw 'Verified primary termination refused.' }
+            $State.process.HasExited = $true
+            $State.process.ExitCode = 5678
+        }
+        function Complete-AcceptanceOwnedProcessJob {
+            param($Owned, [switch] $StopActive)
+            $Owned.complete_calls++
+            if ($StopActive) { throw 'GUI failure cleanup used generic active Job cleanup.' }
+            $Owned.job_closed = $true
+            $Owned.job_cleanup_recorded = $true
+            $Owned.job_cleanup_record = [pscustomobject]@{ status = 'clean' }
+            [pscustomobject]@{
+                status = 'clean'; job_empty = $true; job_closed = $true
+                forced_termination = $Owned.stop_calls -eq 1
+            }
+        }
+        foreach ($mode in @('live-sole', 'exited-empty', 'live-empty', 'live-descendant',
+                'exited-descendant', 'unknown-count', 'verified-stop-refused')) {
+            $hasExited = $mode -in @('exited-empty', 'exited-descendant')
+            $activeCount = switch ($mode) {
+                'live-empty' { 0 }
+                'live-descendant' { 2 }
+                'exited-empty' { 0 }
+                'exited-descendant' { 1 }
+                'unknown-count' { $null }
+                default { 1 }
+            }
+            $process = [pscustomobject]@{ HasExited = $hasExited; ExitCode = 0; disposed = 0 }
+            $process | Add-Member ScriptMethod Refresh {}
+            $process | Add-Member ScriptMethod Dispose { $this.disposed++ }
+            $owned = [pscustomobject]@{
+                process = $process; owner = [pscustomobject]@{ ActiveProcessCount = $activeCount }
+                job_closed = $false; job_cleanup_recorded = $false; job_cleanup_record = $null
+                stop_calls = 0; complete_calls = 0
+                reject_verified_stop = $mode -ceq 'verified-stop-refused'
+            }
+            $dpiScope = $null
+            $captureState = [pscustomobject]@{ graphics = $null; bitmap = $null }
+            $processState = [pscustomobject]@{ process = $owned }
+            $flowFixtureRoot = $null
+            $RawEvidence = $mode -ceq 'live-sole'
+            $row = [ordered]@{
+                status = 'failed'; job_cleanup = $false
+                failure_reason = 'window_not_foreground'; error_detail = $null
+                process_lifecycle = [ordered]@{
+                    exit_observed = $false; exit_method = $null; exit_code = $null
+                }
+            }
+            & $cleanup
+            if ($process.disposed -ne 1 -or $row.failure_reason -cne 'window_not_foreground') {
+                throw "GUI $mode cleanup lost the original failure or process disposal."
+            }
+            if ($mode -in @('live-sole', 'exited-empty')) {
+                $expectedStops = [int]($mode -ceq 'live-sole')
+                if (-not $row.job_cleanup -or $owned.stop_calls -ne $expectedStops -or
+                    $owned.complete_calls -ne 1 -or -not $owned.job_closed -or
+                    $row.Contains('cleanup_failure_reason')) {
+                    throw "GUI $mode cleanup did not use the verified live or empty exited path."
+                }
+                if ($mode -ceq 'live-sole' -and
+                    (-not $row.process_lifecycle.exit_observed -or
+                        $row.process_lifecycle.exit_method -cne 'forced-termination' -or
+                        $row.process_lifecycle.exit_code -ne 5678)) {
+                    throw 'Verified GUI failure cleanup lost its process exit observation.'
+                }
+            }
+            elseif ($row.job_cleanup -or $owned.complete_calls -ne 0 -or
+                $owned.job_closed -or $row.cleanup_failure_reason -cne 'process_cleanup_failed' -or
+                $null -eq $row.error_detail -or
+                $owned.stop_calls -ne [int]($mode -ceq 'verified-stop-refused')) {
+                throw "GUI $mode cleanup did not fail closed before generic Job cleanup."
+            }
+        }
     }
     $details = [ordered]@{ error_detail = $null }
     foreach ($message in @('original GUI failure', 'process cleanup failed', 'fixture retained')) {
