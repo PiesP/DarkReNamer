@@ -81,6 +81,44 @@ function Wait-ActorBarrier([string]$Path,[int]$Milliseconds) {
     }
     return $true
 }
+function Get-PhaseBExceptionChain([Exception]$Failure) {
+    $queue=[Collections.Generic.Queue[Exception]]::new()
+    $seen=[Collections.Generic.HashSet[Exception]]::new()
+    $rows=[Collections.Generic.List[object]]::new()
+    $queue.Enqueue($Failure)
+    while ($queue.Count -gt 0) {
+        $item=$queue.Dequeue()
+        if ($null -eq $item -or -not $seen.Add($item)) { continue }
+        if ($rows.Count -ge 8) { throw 'Phase B exception chain exceeded eight nodes.' }
+        $methods=[Collections.Generic.List[string]]::new()
+        $frames=([Diagnostics.StackTrace]::new($item,$false)).GetFrames()
+        if ($null -ne $frames) {
+            foreach ($frame in @($frames | Select-Object -First 32)) {
+                $method=$frame.GetMethod()
+                if ($null -ne $method -and $null -ne $method.DeclaringType) {
+                    $methods.Add($method.DeclaringType.FullName + '::' + $method.Name)
+                }
+            }
+        }
+        $nativeCode=$null
+        if ($item -is [ComponentModel.Win32Exception]) { $nativeCode=$item.NativeErrorCode }
+        $rows.Add([ordered]@{type=$item.GetType().FullName;message=$item.Message;
+            hresult=$item.HResult;native_error=$nativeCode;method_frames=@($methods)})
+        if ($null -ne $item.InnerException) { $queue.Enqueue($item.InnerException) }
+        if ($item -is [AggregateException]) {
+            foreach ($inner in $item.InnerExceptions) { $queue.Enqueue($inner) }
+        }
+    }
+    return $rows.ToArray()
+}
+function Test-ExactOpenWriterMappedRefusal($Chain) {
+    if ($null -eq $Chain -or @($Chain).Count -eq 0 -or @($Chain).Count -gt 8) { return $false }
+    $native=@($Chain | Where-Object { $null -ne $_.native_error })
+    if ($native.Count -ne 1 -or $native[0].type -cne 'System.ComponentModel.Win32Exception' -or
+        $native[0].native_error -ne 1224) { return $false }
+    return @($native[0].method_frames) -ccontains
+        'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter'
+}
 function Read-KnownBytes([string]$Path,[bool]$AllowAbsent) {
     try {
         $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,
@@ -248,6 +286,7 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                 $actorResource=[DarkPhaseBFixtureActors]::OpenHeldMapping($Scope,$target)
                 $events.Add([ordered]@{phase='writable-mapping-held-after-file-close'})
             }
+            $b4EarlyCancel=$false
             if ($Trial -eq 'B2') {
                 $lateCapability=[DarkPhaseBFixtureActors]::PrepareLateChild($Scope,$target)
             }
@@ -275,7 +314,10 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                         written=$mappingWritten;error=$mappingError})
                     Write-Marker (Join-Path $Scope 'actor-done.json') ([ordered]@{
                         written=$mappingWritten;byte=82;error=$mappingError})
-                } else { $events.Add([ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'}) }
+                } else {
+                    $b4EarlyCancel=$true
+                    $events.Add([ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'})
+                }
             } elseif ($Trial -eq 'B6') {
                 if (Wait-ActorBarrier (Join-Path $Scope 'actor-go.json') 12000) {
                     $change=[DarkPhaseBFixtureActors]::AddAuthenticatedUsersReadAttributes($actorResource)
@@ -286,7 +328,19 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                         native_error=$change.NativeError;changed=$change.Changed})
                 } else { $events.Add([ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'}) }
             }
-            $null=Wait-Marker (Join-Path $Scope 'candidate-done.json') 12000
+            $candidateDone=Wait-Marker (Join-Path $Scope 'candidate-done.json') 12000
+            if ($b4EarlyCancel) {
+                if ($candidateDone.trial -cne 'B4' -or -not $candidateDone.worker_exit_observed -or
+                    $candidateDone.death_at_barrier) {
+                    throw 'B4 mapping support control lacks a confirmed candidate exit.'
+                }
+                $mappingWritten=$false;$mappingError=$null
+                try { $actorResource.WriteOne(82);$mappingWritten=$true }
+                catch { $mappingError=[ordered]@{type=$_.Exception.GetType().FullName;
+                    message=$_.Exception.Message} }
+                $events.Add([ordered]@{phase='held-mapping-after-candidate-exit-support-control';
+                    candidate_exit_confirmed=$true;byte=82;written=$mappingWritten;error=$mappingError})
+            }
             if ($null -ne $actorResource) { $actorResource.Dispose();$actorResource=$null }
             if ($Trial -eq 'B2' -and $null -ne $result -and -not $result.Admitted) {
                 $released=$lateCapability.Attempt()
@@ -372,7 +426,8 @@ public sealed class DarkPhaseBDeadline : IDisposable {
             } catch {
                 $status='rejected-or-unknown'
                 $workerError=[ordered]@{type=$_.Exception.GetType().FullName;message=$_.Exception.Message;
-                    error_id=$_.FullyQualifiedErrorId}
+                    error_id=$_.FullyQualifiedErrorId;
+                    exception_chain=@(Get-PhaseBExceptionChain $_.Exception)}
             } finally {
                 if ($null -ne $lease) {
                     try { $lease.Dispose() }
@@ -579,10 +634,14 @@ function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) 
         throw 'Phase B B2 intentional rollback lacks the exact last-close barrier.'
     }
     $expectedApproved=if ($ExpectedTrial -eq 'B4' -and
-        @($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'held-mapping-write-attempt' -and $_.written }).Count -eq 1) {
+        @($Row.actor_receipt.events | Where-Object {
+            $_.phase -in @('held-mapping-write-attempt',
+                'held-mapping-after-candidate-exit-support-control') -and $_.written }).Count -eq 1) {
         [byte[]](82,18,27,36,45,54)
     } else { $approvedBytes }
-    if ($post.approved.base64 -cne [Convert]::ToBase64String($expectedApproved)) {
+    if ($post.approved.base64 -cne [Convert]::ToBase64String($expectedApproved) -or
+        $post.approved.sha256 -cne ([Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($expectedApproved)).ToLowerInvariant())) {
         throw "Phase B $ExpectedTrial unapproved approved-file bytes changed."
     }
     if ($ExpectedTrial -eq 'B4') {
@@ -636,6 +695,20 @@ function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) 
     }
     if ($ExpectedTrial -eq 'B4' -and
         @($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'required-barrier-unverified' }).Count -eq 1) {
+        $held=@($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'writable-mapping-held-after-file-close' })
+        $normalWrite=@($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'held-mapping-write-attempt' })
+        $support=@($Row.actor_receipt.events | Where-Object {
+            $_.phase -ceq 'held-mapping-after-candidate-exit-support-control' })
+        if ($held.Count -eq 1 -and $normalWrite.Count -eq 0 -and $support.Count -eq 1 -and
+            $support[0].candidate_exit_confirmed -and $support[0].written -and
+            $support[0].byte -eq 82 -and $null -eq $support[0].error -and
+            $candidate.stage_calls -eq 0 -and $candidate.commit_calls -eq 0 -and
+            $candidate.rollback_calls -eq 1 -and
+            $candidate.lease_state -ceq 'rollback-succeeded' -and
+            -not $candidate.closure_unknown -and
+            (Test-ExactOpenWriterMappedRefusal $candidate.error.exception_chain)) {
+            return 'safe-prestage-refusal-with-writable-mapping-control'
+        }
         return 'mapping-write-barrier-unverified-acquisition-rejected-preserved'
     }
     return 'candidate-rejected-preserved-gate1-unverified'
