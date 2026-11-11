@@ -142,7 +142,8 @@ def git_route_pin(backend: str, origin: str) -> dict:
     return {"backend": backend, "origin": origin}
 
 
-def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict, git_route: dict) -> bytes:
+def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict, git_route: dict,
+             batch_guid: str | None = None) -> bytes:
     guid = vm_guid.lower()
     if not GUID.fullmatch(guid) or uuid.UUID(guid).int == 0:
         raise ValueError("Expected VM GUID must be a nonzero canonical GUID")
@@ -150,6 +151,10 @@ def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict, git_route: dict) 
         raise ValueError("Git route pin differs")
     pinned = {"schema": "dark240-win11-headless-bootstrap-pin-v1", "vm_guid": guid,
               "guest": guest, "git_route": git_route, **pin}
+    if batch_guid is not None:
+        if not re.fullmatch(r"[0-9a-f]{32}", batch_guid):
+            raise ValueError("Fixture batch GUID is invalid")
+        pinned["fixture_batch"] = {"mode": "run-scoped-v1", "guid": batch_guid}
     literal = base64.b64encode(json.dumps(pinned, sort_keys=True, separators=(",", ":")).encode()).decode()
     helper = (repo / HELPER).read_bytes()
     wrapper = (repo / WRAPPER).read_bytes()
@@ -162,7 +167,8 @@ def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict, git_route: dict) 
 
 
 def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
-            trusted_git: Path, guest: dict, git_route: dict) -> Path:
+            trusted_git: Path, guest: dict, git_route: dict,
+            fixture_layout: str = "legacy", fixture_batch_guid: str | None = None) -> Path:
     global GIT_EXECUTABLE
     GIT_EXECUTABLE = trusted_local_path(trusted_git)
     repo = repo.resolve(strict=True)
@@ -171,7 +177,15 @@ def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
     if repo == output_parent or repo in output_parent.parents or output_parent in repo.parents:
         raise ValueError("Prepared output must be outside the source checkout")
     pin = source_pin(repo, expected_head)
-    script = assemble(repo, pin, vm_guid, guest, git_route)
+    if fixture_layout not in ("legacy", "run-scoped-v1"):
+        raise ValueError("Fixture layout is unsupported")
+    if fixture_layout == "legacy" and fixture_batch_guid is not None:
+        raise ValueError("A fixture batch GUID requires the run-scoped layout")
+    if fixture_layout == "run-scoped-v1" and fixture_batch_guid is None:
+        fixture_batch_guid = uuid.uuid4().hex
+    fixture_batch = ({"mode": "run-scoped-v1", "guid": fixture_batch_guid}
+                     if fixture_layout == "run-scoped-v1" else None)
+    script = assemble(repo, pin, vm_guid, guest, git_route, fixture_batch_guid)
     name = f"dark240-win11-headless-{uuid.uuid4().hex}"
     destination = output_parent / name
     destination.mkdir(mode=0o700)
@@ -192,6 +206,10 @@ def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
                 "guest_exec_outer_timeout_floor_seconds": 780,
             }, sort_keys=True, indent=2) + "\n").encode(),
         }
+        if fixture_batch is not None:
+            receipt = json.loads(artifacts["prepare-receipt.json"])
+            receipt["fixture_batch"] = fixture_batch
+            artifacts["prepare-receipt.json"] = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode()
         for leaf, data in artifacts.items():
             fd = os.open(destination / leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
@@ -225,6 +243,8 @@ def main() -> int:
     parser.add_argument("--expected-ps-version", required=True)
     parser.add_argument("--expected-git-ssl-backend", required=True)
     parser.add_argument("--expected-git-ssl-backend-origin", required=True)
+    parser.add_argument("--fixture-layout", choices=("legacy", "run-scoped-v1"), default="legacy")
+    parser.add_argument("--fixture-batch-guid")
     args = parser.parse_args()
     try:
         guest = guest_pin(args.expected_guest_sid, args.expected_guest_account,
@@ -236,7 +256,8 @@ def main() -> int:
         route = git_route_pin(args.expected_git_ssl_backend,
                               args.expected_git_ssl_backend_origin)
         destination = prepare(args.repo, args.expected_head, args.expected_vm_guid,
-                              args.private_output_parent, args.trusted_git, guest, route)
+                              args.private_output_parent, args.trusted_git, guest, route,
+                              args.fixture_layout, args.fixture_batch_guid)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         print(f"Preparation refused: {type(error).__name__}: {error}", file=sys.stderr)
         return 1

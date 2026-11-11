@@ -1122,6 +1122,22 @@ does not change the branch or credit it as complete negative evidence; a focused
 native-return control and fail-closed correction remain separate work before
 full retained-root qualification.
 
+The optional run-scoped fixture layout admits only the exact profile-Temp
+batch/case GUID grammar. A new batch freezes source, VM, SID, parent/batch
+FileIDs and the bounded authority bytes/hash; controller and child checks reject
+stale or mismatched inputs before case creation, and the candidate revalidates
+before Stage/Commit inside the existing abort boundary. The original fixture
+factory remains separate and still refuses retained-root paths. This authority
+is disposable-fixture authority only.
+
+The fixture control plane assumes the maintained central VM lock and trusted,
+source-constrained diagnostic actors. Path/identity prechecks do not establish
+atomic namespace exclusion against a hostile process running as the same trusted
+user or administrator. Do not cite those checks as the missing retained-target
+exclusion proof. The legacy fixture inventory, original targets, ownership
+contract and full Gate 1/admission requirements remain unchanged. No source-only
+or synthetic binding control establishes selected-Windows execution.
+
 ### Owned-resource fixed-performance diagnostic
 
 The explicit `performance-sample-v2-owned-r3-` route applies the reviewed

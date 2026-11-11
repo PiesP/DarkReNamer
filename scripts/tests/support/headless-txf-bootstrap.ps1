@@ -3,11 +3,14 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$pin = @{schema=$null;vm_guid=$null;head=$null;tree=$null;guest=$null}
+$pin = @{schema=$null;vm_guid=$null;head=$null;tree=$null;guest=$null;fixture_batch=$null}
 $script:headlessRows = [Collections.Generic.List[object]]::new()
 $script:headlessRoot = $null
 $script:rootReceipt = $null
 $script:fixtureInventory = [Collections.Generic.List[object]]::new()
+$script:fixtureBatch = $null
+$script:fixtureBatchFinalReadbackError = $null
+$script:rootFinalReadbackError = $null
 $script:headlessFailure = $null
 $script:headlessOutcome = 'not-started'
 $private = $null
@@ -53,6 +56,20 @@ function Assert-HeadlessPayloadLimit([long]$RawBytes, [long]$TerminalRecordBytes
 function Limit-HeadlessError([string]$Value) {
     if ($Value.Length -gt 384) { return $Value.Substring(0,384) }
     return $Value
+}
+
+function Set-HeadlessFinalReadbackFailure([string]$Kind,[Exception]$Cause) {
+    $detail=[ordered]@{type=$Cause.GetType().FullName;
+        message=Limit-HeadlessError $Cause.Message}
+    if($Kind -ceq 'root'){$script:rootFinalReadbackError=$detail}
+    elseif($Kind -ceq 'batch'){
+        $script:fixtureBatchFinalReadbackError=$detail
+        if($null -ne $script:fixtureBatch){$script:fixtureBatch.final_readback_error=$detail}
+    }else{throw 'Unknown final readback scope.'}
+    if($script:headlessOutcome -ceq 'diagnostics-executed'){
+        $script:headlessOutcome='failed-or-incomplete'
+        $script:headlessFailure=$detail
+    }
 }
 
 function Write-HeadlessTerminal($Record,[long]$RawBytes) {
@@ -112,6 +129,20 @@ function Write-HeadlessTerminal($Record,[long]$RawBytes) {
             observed_vm_guid=$Record.observed_vm_guid;source_head=$Record.source_head;
             source_tree=$Record.source_tree;nonce=$Record.nonce;
             retained_root=$Record.retained_root;root_receipt=$Record.root_receipt;
+            root_final_readback_error=$Record.root_final_readback_error;
+            fixture_batch=if($Record.fixture_batch){[ordered]@{
+                mode=$Record.fixture_batch.mode;guid=$Record.fixture_batch.guid;
+                runs_root_path=$Record.fixture_batch.runs_root_path;
+                runs_root_id=$Record.fixture_batch.runs_root_id;
+                batch_root_path=$Record.fixture_batch.batch_root_path;
+                batch_root_id=$Record.fixture_batch.batch_root_id;
+                authority_path=$Record.fixture_batch.authority_path;
+                authority_sha256=$Record.fixture_batch.authority_sha256;
+                preparation=$Record.fixture_batch.preparation;
+                final_readback_error=$Record.fixture_batch.final_readback_error;
+                runs_root_receipt=$Record.fixture_batch.runs_root_receipt;
+                batch_root_receipt=$Record.fixture_batch.batch_root_receipt}
+                }else{$null};
             fixture_inventory=@($inventories.ToArray());jobs=@($smallJobs.ToArray());
             prior_failure=$Record.failure;error=$script:headlessFailure.message;
             cleanup='all diagnostic roots and raw files retained; exact-root cleanup pending';
@@ -290,6 +321,107 @@ function Get-HeadlessRootReceipt([string]$Path) {
         protected=$acl.AreAccessRulesProtected;rules=$rules.Count}
 }
 
+function Assert-HeadlessPrivateAcl([string]$Path) {
+    Assert-OrdinaryChain $Path
+    $acl=Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed=@($sid,'S-1-5-18','S-1-5-32-544')
+    $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if(-not $acl.AreAccessRulesProtected -or
+        $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid -or
+        $rules.Count -ne 3 -or @($rules.IdentityReference.Value | Sort-Object -Unique).Count -ne 3){
+        throw 'Run fixture directory owner or protected ACL differs.'}
+    foreach($rule in $rules){
+        if($rule.IdentityReference.Value -notin $allowed -or $rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None){
+            throw 'Run fixture directory ACL rule differs.'}
+    }
+}
+
+function New-HeadlessRunDirectory([string]$Path) {
+    if([IO.Directory]::Exists($Path)){
+        Assert-HeadlessPrivateAcl $Path
+        return
+    }
+    if(Test-Path -LiteralPath $Path){throw 'Run fixture path exists as a non-directory.'}
+    Assert-OrdinaryChain ([IO.Path]::GetDirectoryName($Path))
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security=[Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true,$false)
+    $security.SetOwner($sid)
+    foreach($ownerSid in @($sid,
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $ownerSid,[Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    [void][IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($Path),$security)
+    Assert-HeadlessPrivateAcl $Path
+}
+
+function New-HeadlessFixtureBatch([string]$ProfileTemp,$BatchPin,$SourcePin,[string]$TokenSid) {
+    if($null -eq $BatchPin -or $BatchPin.mode -cne 'run-scoped-v1' -or
+        $BatchPin.guid -cnotmatch '^[0-9a-f]{32}$'){
+        throw 'Run fixture batch pin is invalid.'}
+    $runsRoot=Join-Path $ProfileTemp 'Dark180-TxfPhaseB-runs'
+    $batchRoot=Join-Path $runsRoot $BatchPin.guid
+    $authorityPath=Join-Path $runsRoot ($BatchPin.guid+'.authority.txt')
+    $script:fixtureBatch=[ordered]@{mode='run-scoped-v1';guid=$BatchPin.guid;
+        runs_root_path=$runsRoot;runs_root_id=$null;
+        batch_root_path=$batchRoot;batch_root_id=$null;
+        authority_path=$authorityPath;authority_sha256=$null;
+        source_head=$SourcePin.head;vm_guid=$SourcePin.vm_guid;token_sid=$TokenSid;
+        authority_record=$null;runs_root_receipt=$null;batch_root_receipt=$null;
+        preparation='started';final_readback_error=$null}
+    New-HeadlessRunDirectory $runsRoot
+    $runsReceipt=Get-HeadlessRootReceipt $runsRoot
+    $script:fixtureBatch.runs_root_id=$runsReceipt.file_id
+    $script:fixtureBatch.runs_root_receipt=$runsReceipt
+    if(Test-Path -LiteralPath $batchRoot){throw 'Run fixture batch GUID already exists.'}
+    if(Test-Path -LiteralPath $authorityPath){throw 'Run fixture authority already exists.'}
+    New-HeadlessRunDirectory $batchRoot
+    $batchReceipt=Get-HeadlessRootReceipt $batchRoot
+    $script:fixtureBatch.batch_root_id=$batchReceipt.file_id
+    $script:fixtureBatch.batch_root_receipt=$batchReceipt
+    $text=(@('dark240-run-batch-v1',$SourcePin.head,$SourcePin.vm_guid,$TokenSid,
+        $BatchPin.guid,$runsReceipt.file_id,$batchReceipt.file_id) -join "`n")+"`n"
+    Write-HeadlessFile $authorityPath $text
+    $authorityRecord=New-HeadlessAuthorityEvidence $authorityPath
+    if($authorityRecord.bytes -gt 1024){throw 'Run fixture authority exceeds its 1 KiB bound.'}
+    $script:fixtureBatch.authority_sha256=$authorityRecord.sha256
+    $script:fixtureBatch.authority_record=$authorityRecord
+    $script:fixtureBatch.preparation='complete'
+    return $script:fixtureBatch
+}
+
+function Assert-HeadlessFixtureBatch($Batch) {
+    if($null -eq $Batch){return}
+    if($Batch.preparation -cne 'complete'){throw 'Run fixture batch preparation was incomplete.'}
+    Assert-HeadlessPrivateAcl $Batch.runs_root_path
+    Assert-HeadlessPrivateAcl $Batch.batch_root_path
+    Assert-HeadlessRootUnchanged $Batch.runs_root_receipt $Batch.runs_root_path
+    Assert-HeadlessRootUnchanged $Batch.batch_root_receipt $Batch.batch_root_path
+    $record=New-HeadlessAuthorityEvidence $Batch.authority_path
+    if($record.bytes -gt 1024 -or $record.sha256 -cne $Batch.authority_sha256 -or
+        $record.base64 -cne $Batch.authority_record.base64){
+        throw 'Run fixture batch authority changed.'}
+}
+
+function Test-HeadlessBatchBinding($Actual,$Expected) {
+    if($null -eq $Expected){return $null -eq $Actual}
+    if($null -eq $Actual){return $false}
+    foreach($key in @('mode','guid','runs_root_id','batch_root_id',
+            'authority_sha256','source_head','vm_guid','token_sid')){
+        if($Actual[$key] -cne $Expected[$key]){return $false}}
+    return $true
+}
+
 function Assert-HeadlessRootUnchanged($Expected,[string]$Path) {
     $actual=Get-HeadlessRootReceipt $Path
     if($actual.file_id -cne $Expected.file_id -or
@@ -385,6 +517,32 @@ function New-HeadlessEvidence([string]$Path) {
     if ($bytes.Length -ne $item.Length) { throw 'Captured output size changed.' }
     return [ordered]@{bytes=$bytes.Length;sha256=[Convert]::ToHexString(
         [Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant();base64=[Convert]::ToBase64String($bytes)}
+}
+
+function New-HeadlessAuthorityEvidence([string]$Path) {
+    Assert-OrdinaryChain $Path
+    $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if($item -isnot [IO.FileInfo] -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -gt 1024){throw 'Run fixture authority is unsafe or too large.'}
+    $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        if($stream.Length -gt 1024){throw 'Run fixture authority grew.'}
+        $buffer=[byte[]]::new(1025);$count=0
+        while($count -lt $buffer.Length){
+            $read=$stream.Read($buffer,$count,$buffer.Length-$count)
+            if($read -eq 0){break};$count+=$read
+        }
+        if($count -gt 1024 -or $count -ne $stream.Length){
+            throw 'Run fixture authority exceeded its bounded read.'}
+        $raw=[byte[]]::new($count)
+        [Array]::Copy($buffer,$raw,$count)
+    } finally {$stream.Dispose()}
+    Assert-OrdinaryChain $Path
+    return [ordered]@{bytes=$raw.Length;
+        sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant();
+        base64=[Convert]::ToBase64String($raw)}
 }
 
 function Invoke-HeadlessJob([string]$Name,[string]$File,[string]$Arguments,
@@ -585,6 +743,10 @@ try {
         ConvertFrom-Json -AsHashtable
     if (-not $IsWindows -or $pin.schema -cne 'dark240-win11-headless-bootstrap-pin-v1' -or
         [guid]$pin.vm_guid -eq [guid]::Empty) { throw 'Headless diagnostic platform or pin is invalid.' }
+    if($pin.ContainsKey('fixture_batch') -and
+        ($null -eq $pin.fixture_batch -or $pin.fixture_batch.mode -cne 'run-scoped-v1' -or
+            $pin.fixture_batch.guid -cnotmatch '^[0-9a-f]{32}$')){
+        throw 'Run fixture batch pin is invalid.'}
     Assert-HeadlessGitRoutePin $pin.git_route
     $actualGuid=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' `
         -ErrorAction Stop).VirtualMachineId
@@ -729,14 +891,31 @@ try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.D
         Assert-HeadlessClonePin $script:headlessRoot 'source-proof-clone.json' $pin
         $cloneRow.source_proof=New-HeadlessEvidence (Join-Path $script:headlessRoot 'source-proof-clone.json')
         $fixtureBase=Join-Path $profileTemp 'Dark180-TxfPhaseB'
+        if($pin.ContainsKey('fixture_batch')){
+            $script:fixtureBatch=New-HeadlessFixtureBatch $profileTemp $pin.fixture_batch `
+                $pin $token.User.Value
+            $fixtureBase=$script:fixtureBatch.batch_root_path
+            Assert-HeadlessFixtureBatch $script:fixtureBatch
+        }
         $priorInventory=$null
         foreach($phase in @(@('B','exact-manifest-txf-phase-b',210),
                 @('C','exact-manifest-txf-phase-c',90))) {
             $phaseName=[string]$phase[0]
-            $inventoryRow=[ordered]@{phase=$phaseName;before=$null;after=$null;
+            $inventoryRow=[ordered]@{phase=$phaseName;batch_binding=$null;before=$null;after=$null;
                 after_error=$null;controller_observed=$false;reconciled=$false;
                 unattributed=@();primary_start_attempted=$false;
                 primary_started=$false;failure=$null}
+            if($null -ne $script:fixtureBatch){
+                Assert-HeadlessFixtureBatch $script:fixtureBatch
+                $inventoryRow.batch_binding=[ordered]@{mode=$script:fixtureBatch.mode;
+                    guid=$script:fixtureBatch.guid;
+                    runs_root_id=$script:fixtureBatch.runs_root_id;
+                    batch_root_id=$script:fixtureBatch.batch_root_id;
+                    authority_sha256=$script:fixtureBatch.authority_sha256;
+                    source_head=$script:fixtureBatch.source_head;
+                    vm_guid=$script:fixtureBatch.vm_guid;
+                    token_sid=$script:fixtureBatch.token_sid}
+            }
             $inventoryRow.before=Get-HeadlessFixtureInventory $fixtureBase
             $script:fixtureInventory.Add($inventoryRow)
             if($phaseName -ceq 'B' -and @($inventoryRow.before.entries).Count -ne 0){
@@ -757,6 +936,9 @@ try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.D
                 Assert-HeadlessRootUnchanged $script:rootReceipt $script:headlessRoot
                 $fixture=Join-Path $checkout ("scripts/tests/powershell/test-exact-manifest-txf-phase-$($phaseName.ToLowerInvariant()).ps1")
                 $arguments="-NoLogo -NoProfile -NonInteractive -File `"$fixture`""
+                if($null -ne $script:fixtureBatch){
+                    $arguments += " -BatchGuid $($script:fixtureBatch.guid) -RunsRootId $($script:fixtureBatch.runs_root_id) -BatchRootId $($script:fixtureBatch.batch_root_id) -BatchAuthoritySha $($script:fixtureBatch.authority_sha256) -BatchVmGuid $($script:fixtureBatch.vm_guid) -BatchSid $($script:fixtureBatch.token_sid)"
+                }
                 $row=Invoke-HeadlessJob -Name "phase-$phaseName" -File $pwsh `
                     -Arguments $arguments -Work $checkout -Seconds ([int]$phase[2])
             }
@@ -770,6 +952,10 @@ try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.D
             catch {$phaseFailure=Limit-HeadlessError ("$phaseFailure; controller: $($_.Exception.Message)")}
             try {$inventoryRow.after=Get-HeadlessFixtureInventory $fixtureBase}
             catch {$inventoryRow.after_error=Limit-HeadlessError $_.Exception.Message}
+            if($null -ne $script:fixtureBatch){
+                try {Assert-HeadlessFixtureBatch $script:fixtureBatch}
+                catch {$inventoryRow.after_error=Limit-HeadlessError $_.Exception.Message}
+            }
             $inventoryRow.controller_observed=$null -ne $controller
             $inventoryRow.unattributed=@(Get-HeadlessUnattributed $inventoryRow.before $inventoryRow.after $controller)
             if($null -ne $inventoryRow.after -and $null -ne $controller){
@@ -779,6 +965,7 @@ try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.D
                 -not $inventoryRow.reconciled -or $inventoryRow.unattributed.Count -ne 0 -or
                 $null -eq $controller -or $controller.gate1 -cne 'unverified' -or
                 $controller.error -or $controller.source.commit -cne $pin.head -or
+                -not (Test-HeadlessBatchBinding $controller.batch_binding $inventoryRow.batch_binding) -or
                 @($controller.trials).Count -ne $(if($phaseName -ceq 'B'){7}else{2})){
                 $inventoryRow.failure=if($phaseFailure){$phaseFailure}else{'Phase fixture inventory or controller is incomplete.'}
                 throw "Phase $phaseName diagnostic or exact fixture attribution is incomplete."}
@@ -790,6 +977,7 @@ try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.D
             -Arguments $proofArguments -Work $script:headlessRoot -Seconds 15
         Assert-HeadlessClonePin $script:headlessRoot $proofLeaf $pin
         $proofRow.source_proof=New-HeadlessEvidence (Join-Path $script:headlessRoot $proofLeaf)
+        if($null -ne $script:fixtureBatch){Assert-HeadlessFixtureBatch $script:fixtureBatch}
     }
     $script:headlessOutcome='diagnostics-executed'
 }
@@ -803,9 +991,11 @@ catch {
 finally {
     try {if($null -ne $script:rootReceipt){
         Assert-HeadlessRootUnchanged $script:rootReceipt $script:headlessRoot}}
-    catch {$script:headlessOutcome='failed-or-incomplete';
-        $script:headlessFailure=[ordered]@{type=$_.Exception.GetType().FullName;
-            message=Limit-HeadlessError $_.Exception.Message}}
+    catch {Set-HeadlessFinalReadbackFailure 'root' $_.Exception}
+    try {if($null -ne $script:fixtureBatch -and
+            $script:fixtureBatch.preparation -ceq 'complete'){
+        Assert-HeadlessFixtureBatch $script:fixtureBatch}}
+    catch {Set-HeadlessFinalReadbackFailure 'batch' $_.Exception}
     if($pin -isnot [System.Collections.IDictionary]){
         $pin=@{schema=$null;vm_guid=$null;head=$null;tree=$null;guest=$null}}
     $record=[ordered]@{schema='dark240-win11-headless-diagnostic-v1';
@@ -815,6 +1005,8 @@ finally {
         source_tree=if($pin.ContainsKey('tree')){$pin['tree']}else{$null};
         nonce=if($private){$private.nonce}else{$null};
         retained_root=$script:headlessRoot;root_receipt=$script:rootReceipt;
+        root_final_readback_error=$script:rootFinalReadbackError;
+        fixture_batch=$script:fixtureBatch;
         fixture_inventory=@($script:fixtureInventory.ToArray());
         guest_exec_outer_timeout_floor_seconds=780;outcome=$script:headlessOutcome;
         guest_terminal_record_cap_bytes=$script:maxTerminalRecordBytes;
@@ -827,6 +1019,8 @@ finally {
     foreach($row in $record.jobs){foreach($key in @('stdout','stderr','controller_result',
                 'source_proof','route_record')){
         if($null -ne $row[$key]){$raw += [long]$row[$key].bytes}}}
+    if($null -ne $script:fixtureBatch -and $null -ne $script:fixtureBatch.authority_record){
+        $raw += [long]$script:fixtureBatch.authority_record.bytes}
     Write-Output (Write-HeadlessTerminal $record $raw)
 }
 Assert-HeadlessTerminalAccepted

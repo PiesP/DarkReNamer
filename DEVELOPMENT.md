@@ -692,6 +692,24 @@ account, administrator-role cohort, OS build and installed tool path/hash/versio
 inputs must come from a separately reviewed authenticated observation. An
 administrator diagnostic cohort is not a limited interactive product run.
 
+The generator keeps the legacy fixed-base layout by default. Explicit
+`--fixture-layout run-scoped-v1` selects a fresh
+`Dark180-TxfPhaseB-runs/<batchGUID>/<caseGUID>/target` fixture layout under the
+independently resolved profile Temp directory. An optional
+`--fixture-batch-guid` is valid only with that selected layout; otherwise one GUID
+is generated once during host preparation and pinned in the receipt. A guest
+batch-root or authority-file collision stops that attempt before B/C; it does
+not select another GUID automatically.
+
+The wrapper freezes the protected parent and batch FileIDs and exact authority
+bytes/hash before launching B/C. Every child receives and rechecks the same
+source/VM/SID/batch-GUID binding and its case nonce. Only the new batch root is
+inventoried, preserving
+B's 0-to-7 and C's 7-to-9 case reconciliation and the existing assertions and
+budgets. Existing legacy fixture scopes are not inspected or cleaned by this
+selected path. Partial preparation and final readback errors remain evidence;
+they do not replace the first failure or grant another execution slot.
+
 The bootstrap can preserve an independently observed Schannel configuration
 only when its exact expected value and configuration origin are pinned. It
 rechecks that input before isolation, carries it through process-only Git
@@ -708,6 +726,9 @@ Use named variables for argument strings passed through nested PowerShell
 scriptblocks: the automatic `$args` array belongs to the current invocation.
 Require the expected structured output as well as a successful child exit; an
 argument-free shell can exit successfully without executing the intended query.
+Suppress incidental .NET return values in helpers that return one structured
+record: for example, `Dictionary.Remove` emits a Boolean unless explicitly
+suppressed. Check the actual returned shape in both legacy and selected paths.
 Its bounded terminal records contain original output bytes, source and Job
 receipts; their guest-side size limit is not an independently enforced host or
 PSRP transport cap. It retains the new private and fixture roots for independent

@@ -24,10 +24,15 @@ foreach($assignment in $embedded){
 foreach($name in @('Test-HeadlessJobClean','Test-HeadlessSourcePin',
         'Get-HeadlessTerminalByteCount','Assert-HeadlessPayloadLimit',
         'Limit-HeadlessError','Assert-HeadlessCheckoutBudget',
+        'Set-HeadlessFinalReadbackFailure',
         'Write-HeadlessTerminal','Assert-HeadlessTerminalAccepted',
         'Test-HeadlessInventoryReconciled','Set-HeadlessPrimaryAttribution',
         'Test-HeadlessUntrustedWriter','Initialize-HeadlessIdentityRuntime',
         'Assert-OrdinaryChain','New-HeadlessPrivateRoot','Get-HeadlessRootReceipt',
+        'Assert-HeadlessPrivateAcl','New-HeadlessRunDirectory',
+        'New-HeadlessFixtureBatch','Assert-HeadlessFixtureBatch',
+        'Test-HeadlessBatchBinding','New-HeadlessAuthorityEvidence',
+        'Write-HeadlessFile',
         'Assert-HeadlessRootUnchanged','Assert-HeadlessRouteInputs',
         'Invoke-HeadlessRouteEnvironment','Assert-HeadlessGitRoutePin',
         'Invoke-HeadlessGitEnvironment',
@@ -153,6 +158,53 @@ $actual.files['one.ps1']='d'
 Require (-not (Test-HeadlessSourcePin $actual $expected)) 'changed source file'
 $actual.files['one.ps1']='c';$actual.files['extra']='e'
 Require (-not (Test-HeadlessSourcePin $actual $expected)) 'extra source file'
+$batchExpected=[ordered]@{mode='run-scoped-v1';guid=('1'*32);
+    runs_root_id=('2'*48);batch_root_id=('3'*48);authority_sha256=('4'*64);
+    source_head=('5'*40);vm_guid='11111111-2222-4333-8444-555555555555';
+    token_sid='S-1-5-21-1-2-3-4'}
+Require (Test-HeadlessBatchBinding $batchExpected $batchExpected) 'exact frozen batch tuple'
+$batchChanged=[ordered]@{};foreach($key in $batchExpected.Keys){$batchChanged[$key]=$batchExpected[$key]}
+$batchChanged.batch_root_id='0'*48
+Require (-not (Test-HeadlessBatchBinding $batchChanged $batchExpected)) 'changed batch FileID'
+Require (-not (Test-HeadlessBatchBinding $null $batchExpected)) 'missing batch binding'
+Require (Test-HeadlessBatchBinding $null $null) 'legacy batch absence'
+$batchTestRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark240-run-batch-protocol-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($batchTestRoot)
+$batchTestPath=Join-Path $batchTestRoot 'Dark180-TxfPhaseB-runs'
+$batchTestChild=Join-Path $batchTestPath ('1'*32)
+$batchTestAuthority=Join-Path $batchTestPath (('1'*32)+'.authority.txt')
+try {
+    function New-HeadlessRunDirectory([string]$Path) {[void][IO.Directory]::CreateDirectory($Path)}
+    function Get-HeadlessRootReceipt([string]$Path) {
+        return [ordered]@{path=$Path;file_id=$(if($Path -ceq $batchTestPath){'2'*48}else{'3'*48});
+            owner_sid='S-1-5-21-1-2-3-4';protected=$true;rules=3;volume=$null;dacl_sha256='4'*64}
+    }
+    $batchPin=@{mode='run-scoped-v1';guid='1'*32}
+    $sourcePin=@{head='5'*40;vm_guid='11111111-2222-4333-8444-555555555555'}
+    $created=New-HeadlessFixtureBatch $batchTestRoot $batchPin $sourcePin 'S-1-5-21-1-2-3-4'
+    $authority=New-HeadlessAuthorityEvidence $batchTestAuthority
+    $expectedText=(@('dark240-run-batch-v1',('5'*40),$sourcePin.vm_guid,
+        'S-1-5-21-1-2-3-4',('1'*32),('2'*48),('3'*48)) -join "`n")+"`n"
+    Require ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($authority.base64)) -ceq
+        $expectedText -and $authority.sha256 -ceq $created.authority_sha256 -and
+        $created.preparation -ceq 'complete') 'actual seven-line frozen authority bytes'
+    RequireThrow {New-HeadlessFixtureBatch $batchTestRoot $batchPin $sourcePin `
+        'S-1-5-21-1-2-3-4'} 'same batch GUID collision refuses before writes'
+}
+finally {
+    if([IO.File]::Exists($batchTestAuthority)){[IO.File]::Delete($batchTestAuthority)}
+    if([IO.Directory]::Exists($batchTestChild)){
+        Require (@([IO.Directory]::EnumerateFileSystemEntries($batchTestChild)).Count -eq 0) `
+            'owned batch test root remained empty'
+        [IO.Directory]::Delete($batchTestChild,$false)}
+    if([IO.Directory]::Exists($batchTestPath)){
+        Require (@([IO.Directory]::EnumerateFileSystemEntries($batchTestPath)).Count -eq 0) `
+            'owned run test root remained empty'
+        [IO.Directory]::Delete($batchTestPath,$false)}
+    Require (@([IO.Directory]::EnumerateFileSystemEntries($batchTestRoot)).Count -eq 0) `
+        'owned batch test parent remained empty'
+    [IO.Directory]::Delete($batchTestRoot,$false)
+}
 RequireThrow {Assert-HeadlessPayloadLimit (1MB+1) 1} 'raw cap'
 RequireThrow {Assert-HeadlessPayloadLimit 1 1500001} 'wire cap'
 Assert-HeadlessPayloadLimit 1MB 1500000
@@ -180,8 +232,27 @@ $record=[ordered]@{schema='dark240-win11-headless-diagnostic-v1';
     observed_vm_guid='11111111-2222-4333-8444-555555555555';source_tree=('b'*40);
     nonce=('c'*32);retained_root=$receiptRoot;
     root_receipt=@{file_id='root-id';volume='C:\'};
-    fixture_inventory=@();failure=$null;outcome='diagnostics-executed';jobs=@()}
+    root_final_readback_error=$null;
+    fixture_batch=$null;fixture_inventory=@();failure=$null;outcome='diagnostics-executed';jobs=@()}
 $script:headlessOutcome='diagnostics-executed'
+$script:headlessFailure=$null;$script:rootFinalReadbackError=$null
+$script:fixtureBatchFinalReadbackError=$null;$script:fixtureBatch=$null
+$primary=[ordered]@{type='PrimaryError';message='original phase failure'}
+$script:headlessOutcome='failed-or-incomplete';$script:headlessFailure=$primary
+Set-HeadlessFinalReadbackFailure 'root' ([InvalidOperationException]::new('root readback failed'))
+$script:fixtureBatch=[ordered]@{final_readback_error=$null}
+Set-HeadlessFinalReadbackFailure 'batch' ([InvalidOperationException]::new('batch readback failed'))
+Require ($script:headlessFailure -eq $primary -and
+    $script:rootFinalReadbackError.message -ceq 'root readback failed' -and
+    $script:fixtureBatch.final_readback_error.message -ceq 'batch readback failed') `
+    'primary failure survives both final readback faults'
+$script:headlessOutcome='diagnostics-executed';$script:headlessFailure=$null
+Set-HeadlessFinalReadbackFailure 'root' ([InvalidOperationException]::new('root-only failure'))
+Require ($script:headlessOutcome -ceq 'failed-or-incomplete' -and
+    $script:headlessFailure.message -ceq 'root-only failure') `
+    'final readback alone rejects diagnostic completion'
+$script:fixtureBatch=$null;$script:headlessOutcome='diagnostics-executed'
+$script:headlessFailure=$null;$script:rootFinalReadbackError=$null
 $terminalBytes=Get-HeadlessTerminalByteCount ($record | ConvertTo-Json -Depth 15 -Compress)
 $script:maxTerminalRecordBytes=$terminalBytes
 $wire=Write-HeadlessTerminal $record 0
@@ -507,7 +578,7 @@ $pythonCode=@'
 import importlib.util, pathlib, tempfile, json, os
 spec=importlib.util.spec_from_file_location('headless_generator',r'__GENERATOR__')
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-with tempfile.TemporaryDirectory() as temp:
+with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temp:
     root=pathlib.Path(temp)
     for name, data in ((module.HELPER,b'function Helper {}\n'),
                        (module.WRAPPER,b'$pin="__HEADLESS_PIN_BASE64__"\n')):
@@ -519,6 +590,39 @@ with tempfile.TemporaryDirectory() as temp:
     route=module.git_route_pin('schannel','file:C:/Program Files/Git/etc/gitconfig')
     good=module.assemble(root,pin,'11111111-2222-4333-8444-555555555555',guest,route)
     assert b'__HEADLESS_PIN_BASE64__' not in good and len(good)<module.MAX_SCRIPT_BYTES
+    import re, base64
+    legacy=json.loads(base64.b64decode(re.search(rb'\$pin="([^"]+)"',good).group(1)))
+    assert 'fixture_batch' not in legacy
+    selected=module.assemble(root,pin,'11111111-2222-4333-8444-555555555555',guest,route,'1'*32)
+    selected_pin=json.loads(base64.b64decode(re.search(rb'\$pin="([^"]+)"',selected).group(1)))
+    assert selected_pin['fixture_batch']=={'mode':'run-scoped-v1','guid':'1'*32}
+    for bad_batch in ('not-a-guid','A'*32,''):
+        try:module.assemble(root,pin,'11111111-2222-4333-8444-555555555555',guest,route,bad_batch)
+        except ValueError:pass
+        else:raise AssertionError('invalid selected fixture batch accepted')
+    if os.name=='posix':
+        output=root/'output';output.mkdir(mode=0o700)
+        checkout=root/'checkout';checkout.mkdir()
+        for name in (module.HELPER,module.WRAPPER):
+            copied=checkout/name;copied.parent.mkdir(parents=True,exist_ok=True)
+            copied.write_bytes((root/name).read_bytes())
+        trusted_git=root/'trusted-git';trusted_git.write_bytes(b'git-test')
+        trusted_git.chmod(0o700)
+        original_source_pin=module.source_pin
+        module.source_pin=lambda repo,head:pin
+        legacy_dir=module.prepare(checkout,'a'*40,'11111111-2222-4333-8444-555555555555',
+                                  output,trusted_git,guest,route)
+        legacy_receipt=json.loads((legacy_dir/'prepare-receipt.json').read_text())
+        assert 'fixture_batch' not in legacy_receipt
+        selected_dir=module.prepare(checkout,'a'*40,'11111111-2222-4333-8444-555555555555',
+                                    output,trusted_git,guest,route,'run-scoped-v1','1'*32)
+        selected_receipt=json.loads((selected_dir/'prepare-receipt.json').read_text())
+        assert selected_receipt['fixture_batch']=={'mode':'run-scoped-v1','guid':'1'*32}
+        try:module.prepare(checkout,'a'*40,'11111111-2222-4333-8444-555555555555',
+                           output,trusted_git,guest,route,'legacy','1'*32)
+        except ValueError:pass
+        else:raise AssertionError('legacy preparation accepted an unpinned selected batch')
+        module.source_pin=original_source_pin
     for bad in ('00000000-0000-0000-0000-000000000000','not-a-guid'):
         try:module.assemble(root,pin,bad,guest,route)
         except ValueError:pass

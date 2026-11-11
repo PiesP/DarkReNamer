@@ -123,9 +123,13 @@ public static class DarkPhaseCStreams {
     }
     public static Capability Prepare(string scope,string target,string trial,
         string frozenRootId,string frozenFileId) {
+        return Prepare(scope,target,trial,frozenRootId,frozenFileId,null);
+    }
+    public static Capability Prepare(string scope,string target,string trial,
+        string frozenRootId,string frozenFileId,string batchGuid) {
         string profile=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         string local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        RequireFixtureScope(profile,local,scope,target,trial,frozenRootId,frozenFileId);
+        RequireFixtureScope(profile,local,scope,target,trial,frozenRootId,frozenFileId,batchGuid);
         DriveInfo drive=new DriveInfo(profile.Substring(0,3));
         if (!drive.IsReady || drive.DriveType!=DriveType.Fixed ||
             !String.Equals(drive.DriveFormat,"NTFS",StringComparison.OrdinalIgnoreCase))
@@ -172,12 +176,21 @@ public static class DarkPhaseCStreams {
     }
     public static void RequireFixtureScope(string profile,string local,string scope,
         string target,string trial,string frozenRootId,string frozenFileId) {
+        RequireFixtureScope(profile,local,scope,target,trial,frozenRootId,frozenFileId,null);
+    }
+    public static void RequireFixtureScope(string profile,string local,string scope,
+        string target,string trial,string frozenRootId,string frozenFileId,string batchGuid) {
         if (trial!="C1" && trial!="C2") throw new InvalidOperationException("Phase C trial differs.");
         if (profile==null || profile.Length<4 || !Char.IsLetter(profile[0]) ||
             profile[1]!=':' || profile[2]!='\\' ||
             !String.Equals(local,profile+"\\AppData\\Local",StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Phase C lacks canonical profile origin.");
-        string prefix=profile+"\\AppData\\Local\\Temp\\Dark180-TxfPhaseB\\";
+        if (!String.IsNullOrEmpty(batchGuid) &&
+            (!LowerHex(batchGuid,32) || !Guid.TryParseExact(batchGuid,"N",out Guid parsedBatch)))
+            throw new InvalidOperationException("Phase C run batch GUID is invalid.");
+        string prefix=profile+"\\AppData\\Local\\Temp\\"+
+            (String.IsNullOrEmpty(batchGuid) ? "Dark180-TxfPhaseB\\" :
+                "Dark180-TxfPhaseB-runs\\"+batchGuid+"\\");
         string leaf=scope!=null && scope.StartsWith(prefix,StringComparison.OrdinalIgnoreCase) ?
             scope.Substring(prefix.Length) : "";
         Guid parsed;

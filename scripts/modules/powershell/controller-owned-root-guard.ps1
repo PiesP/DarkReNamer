@@ -501,14 +501,18 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
         public string ManifestDigest { get; private set; }
         readonly string[] rows;
         public string[] ApprovedRows { get { return (string[])rows.Clone(); } }
+        readonly Action runBindingRecheck;
         public FixturePreparation(string scope, string target, string sourceSha,
-            string nonceSha, string rootId, string digest, string[] approvedRows) {
+            string nonceSha, string rootId, string digest, string[] approvedRows,
+            Action runRecheck) {
             Scope = scope; Target = target; SourceSha = sourceSha; NonceSha = nonceSha;
             FrozenRootId = rootId; ManifestDigest = digest;
             rows = (string[])approvedRows.Clone();
+            runBindingRecheck = runRecheck;
         }
         public void RequirePredeleteReceipt(string receiptPath, string rootId,
             string approvedDigest) {
+            if (runBindingRecheck != null) runBindingRecheck();
             if (String.IsNullOrEmpty(receiptPath))
                 throw new InvalidOperationException("Phase B predelete receipt path is absent.");
             string expectedPath = Path.Combine(Scope, "predelete.txt");
@@ -591,6 +595,7 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
         public string ApprovedDigest { get { return engine.ApprovedDigest; } }
         public string[] CloseReceipts { get { return engine.CloseReceipts; } }
         const string ScopeName = "Dark180-TxfPhaseB";
+        const string RunScopeName = "Dark180-TxfPhaseB-runs";
         static void CheckWindowsComponents(string path) {
             if (String.IsNullOrEmpty(path) || path.Length < 4 ||
                 !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) ||
@@ -622,6 +627,121 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
                 throw new InvalidOperationException("Phase B fixture scope lacks one exact GUID component.");
             return scopePath;
         }
+        public static string RequireRunFixturePathScope(string scopePath, string targetPath,
+            string independentlyResolvedUserProfile, string batchGuid) {
+            CheckWindowsComponents(independentlyResolvedUserProfile);
+            CheckWindowsComponents(scopePath);
+            CheckWindowsComponents(targetPath);
+            if (!ExactSetEngine.LowerHex(batchGuid, 32))
+                throw new InvalidOperationException("Run fixture batch GUID is invalid.");
+            string prefix = independentlyResolvedUserProfile +
+                "\\AppData\\Local\\Temp\\" + RunScopeName + "\\" + batchGuid + "\\";
+            string leaf = scopePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ?
+                scopePath.Substring(prefix.Length) : "";
+            if (!ExactSetEngine.LowerHex(leaf, 32) ||
+                !String.Equals(targetPath, scopePath + "\\target", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Run fixture is outside its exact batch scope.");
+            return scopePath;
+        }
+        static string ReadRunDirectoryId(string path) {
+            using (SafeFileHandle handle = CreateFileW(path,
+                    READ_ATTRIBUTES | LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE, 7,
+                    IntPtr.Zero, OPEN_EXISTING, BACKUP_SEMANTICS | OPEN_REPARSE_POINT,
+                    IntPtr.Zero)) {
+                if (handle == null || handle.IsInvalid)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Run fixture directory identity open failed.");
+                Ordinary(handle, true);
+                return Identity(handle);
+            }
+        }
+        static void RequireRunPrivateDirectory(string path, string currentSid) {
+            DirectorySecurity acl = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
+            if (!acl.AreAccessRulesProtected ||
+                acl.GetOwner(typeof(SecurityIdentifier)).Value != currentSid)
+                throw new InvalidOperationException("Run fixture directory owner or ACL is not private.");
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true,
+                    typeof(SecurityIdentifier))) {
+                string sid = rule.IdentityReference.Value;
+                if (!seen.Add(sid) ||
+                    (sid != currentSid && sid != "S-1-5-18" && sid != "S-1-5-32-544") ||
+                    rule.AccessControlType != AccessControlType.Allow ||
+                    rule.FileSystemRights != FileSystemRights.FullControl ||
+                    rule.IsInherited ||
+                    rule.InheritanceFlags != (InheritanceFlags.ContainerInherit |
+                        InheritanceFlags.ObjectInherit) ||
+                    rule.PropagationFlags != PropagationFlags.None)
+                    throw new InvalidOperationException("Run fixture directory has an unexpected ACE.");
+            }
+            if (seen.Count != 3 || !seen.Contains(currentSid) ||
+                !seen.Contains("S-1-5-18") || !seen.Contains("S-1-5-32-544"))
+                throw new InvalidOperationException("Run fixture directory ACL is incomplete.");
+        }
+        static void RequireRunBatchBinding(string scopePath, string batchGuid,
+            string expectedSourceSha, string expectedVmGuid, string expectedSid,
+            string runsRootId, string batchRootId, string authoritySha) {
+            if (!ExactSetEngine.LowerHex(expectedSourceSha, 40) ||
+                !ExactSetEngine.LowerHex(runsRootId, 48) ||
+                !ExactSetEngine.LowerHex(batchRootId, 48) ||
+                !ExactSetEngine.LowerHex(authoritySha, 64) ||
+                !Guid.TryParseExact(expectedVmGuid, "D", out Guid vm) ||
+                vm == Guid.Empty || expectedVmGuid != vm.ToString("D") ||
+                String.IsNullOrEmpty(expectedSid) ||
+                WindowsIdentity.GetCurrent().User.Value != expectedSid)
+                throw new InvalidOperationException("Run fixture source, VM, SID or frozen identity is invalid.");
+            string batchRoot = Path.GetDirectoryName(scopePath);
+            string runsRoot = Path.GetDirectoryName(batchRoot);
+            string[] paths = new string[] { runsRoot, batchRoot, scopePath };
+            List<DirectoryInfo> chain = new List<DirectoryInfo>();
+            for (DirectoryInfo ancestor = new DirectoryInfo(scopePath);
+                ancestor != null; ancestor = ancestor.Parent) chain.Add(ancestor);
+            for (int index = chain.Count - 1; index >= 0; index--) {
+                if ((chain[index].Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Run fixture ancestry is reparse.");
+            }
+            foreach (string path in paths) {
+                CheckWindowsComponents(path);
+                RequireRunPrivateDirectory(path, expectedSid);
+            }
+            if (ReadRunDirectoryId(runsRoot) != runsRootId ||
+                ReadRunDirectoryId(batchRoot) != batchRootId)
+                throw new InvalidOperationException("Run fixture parent or batch FileID changed.");
+            string authorityPath = Path.Combine(runsRoot, batchGuid + ".authority.txt");
+            FileInfo info = new FileInfo(authorityPath);
+            if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                info.Length > 1024)
+                throw new InvalidOperationException("Run fixture batch authority is absent or unsafe.");
+            byte[] bytes;
+            using (FileStream input = new FileStream(authorityPath, FileMode.Open,
+                    FileAccess.Read, FileShare.Read)) {
+                Ordinary(input.SafeFileHandle, false);
+                if (input.Length > 1024)
+                    throw new InvalidOperationException("Run fixture batch authority exceeded its bound.");
+                byte[] bounded = new byte[1025];
+                int count = 0, read;
+                while (count < bounded.Length &&
+                    (read = input.Read(bounded, count, bounded.Length - count)) != 0) count += read;
+                if (count > 1024 || input.Length != count)
+                    throw new InvalidOperationException("Run fixture batch authority grew or was incomplete.");
+                bytes = new byte[count];
+                Array.Copy(bounded, bytes, count);
+            }
+            string observedSha = BitConverter.ToString(SHA256.HashData(bytes)).Replace("-", "")
+                .ToLowerInvariant();
+            if (observedSha != authoritySha)
+                throw new InvalidOperationException("Run fixture batch authority bytes changed.");
+            string content = Encoding.UTF8.GetString(bytes);
+            if (!content.EndsWith("\n", StringComparison.Ordinal) ||
+                content.IndexOf('\r') >= 0 || content.IndexOf('\0') >= 0)
+                throw new InvalidOperationException("Run fixture batch authority encoding changed.");
+            string[] fields = content.Substring(0, content.Length - 1).Split('\n');
+            if (fields.Length != 7 || fields[0] != "dark240-run-batch-v1" ||
+                fields[1] != expectedSourceSha || fields[2] != expectedVmGuid ||
+                fields[3] != expectedSid || fields[4] != batchGuid ||
+                fields[5] != runsRootId || fields[6] != batchRootId)
+                throw new InvalidOperationException("Run fixture batch authority fields changed.");
+        }
         public static void RequireFixtureApprovalFields(string[] fields,
             string source, string nonceHash, string scopePath, string targetPath,
             string expectedRootId, string manifestDigest) {
@@ -651,6 +771,30 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
             string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string exactScope = RequireFixturePathScope(scopePath, targetPath, profile);
+            return PrepareValidatedFixture(exactScope, targetPath, nonce,
+                expectedSourceSha, profile, localAppData, null);
+        }
+        public static ExactManifestTxFFixtureLease PrepareRunFixtureOnly(
+            string scopePath, string targetPath, string nonce, string expectedSourceSha,
+            string batchGuid, string expectedVmGuid, string expectedSid,
+            string runsRootId, string batchRootId, string authoritySha) {
+            if (String.IsNullOrEmpty(scopePath) || String.IsNullOrEmpty(targetPath) ||
+                !ExactSetEngine.LowerHex(nonce, 32) ||
+                !ExactSetEngine.LowerHex(expectedSourceSha, 40))
+                throw new InvalidOperationException("Run fixture capability is incomplete.");
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string exactScope = RequireRunFixturePathScope(scopePath, targetPath, profile, batchGuid);
+            Action recheck = () => RequireRunBatchBinding(exactScope, batchGuid,
+                expectedSourceSha, expectedVmGuid, expectedSid,
+                runsRootId, batchRootId, authoritySha);
+            recheck();
+            return PrepareValidatedFixture(exactScope, targetPath, nonce,
+                expectedSourceSha, profile, localAppData, recheck);
+        }
+        static ExactManifestTxFFixtureLease PrepareValidatedFixture(
+            string exactScope, string targetPath, string nonce, string expectedSourceSha,
+            string profile, string localAppData, Action runBindingRecheck) {
             if (!String.Equals(localAppData, profile + "\\AppData\\Local",
                     StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Phase B profile temp origin is not independently resolved.");
@@ -708,9 +852,18 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
             RequireFixtureApprovalFields(File.ReadAllLines(predeletePath, Encoding.UTF8),
                 expectedSourceSha, nonceSha, exactScope, targetPath, lines[4], lines[5]);
             FixturePreparation prepared = new FixturePreparation(exactScope, targetPath,
-                expectedSourceSha, nonceSha, lines[4], lines[5], frozenRows);
+                expectedSourceSha, nonceSha, lines[4], lines[5], frozenRows,
+                runBindingRecheck);
             ExactSetEngine exactSet = new ExactSetEngine(prepared);
             exactSet.OpenRoot();
+            if (runBindingRecheck != null) {
+                try { runBindingRecheck(); }
+                catch (Exception primary) {
+                    try { exactSet.Dispose(); }
+                    catch (Exception closure) { throw new AggregateException(primary, closure); }
+                    throw;
+                }
+            }
             return new ExactManifestTxFFixtureLease(exactSet);
         }
         public string[] ObserveExactManifest() { return engine.ObserveExactManifest(); }

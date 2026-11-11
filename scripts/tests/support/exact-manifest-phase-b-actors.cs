@@ -80,7 +80,15 @@ public static class DarkPhaseBFixtureActors {
         if (!drive.IsReady || drive.DriveType!=DriveType.Fixed ||
             !String.Equals(drive.DriveFormat,"NTFS",StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Phase B actor requires fixed local NTFS.");
-        string expected=profile+"\\AppData\\Local\\Temp\\Dark180-TxfPhaseB\\";
+        string batch=Environment.GetEnvironmentVariable("DARK_PHASE_B_BATCH_GUID");
+        if (!String.IsNullOrEmpty(batch)) {
+            if (batch.Length!=32 || batch!=batch.ToLowerInvariant() ||
+                !Guid.TryParseExact(batch,"N",out Guid parsedBatch))
+                throw new InvalidOperationException("Phase B actor batch GUID is invalid.");
+        }
+        string expected=profile+"\\AppData\\Local\\Temp\\"+
+            (String.IsNullOrEmpty(batch) ? "Dark180-TxfPhaseB\\" :
+                "Dark180-TxfPhaseB-runs\\"+batch+"\\");
         string leaf=scope.StartsWith(expected,StringComparison.OrdinalIgnoreCase) ?
             scope.Substring(expected.Length) : "";
         Guid parsed;
