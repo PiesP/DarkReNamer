@@ -14,12 +14,13 @@ if ($parseErrors.Count -ne 0) { throw 'TxF fixture did not parse.' }
 $definitions=@{}
 foreach ($node in $ast.FindAll({param($item)
     $item -is [Management.Automation.Language.FunctionDefinitionAst] -and
-    $item.Name -in @('Hash-File','Assert-Preserved')},$true)) {
+    $item.Name -in @('Hash-File','Assert-Preserved','Assert-PhaseACompletedCases')},$true)) {
     $definitions[$node.Name]=$node
 }
-if ($definitions.Count -ne 2) { throw 'Expected preservation functions are absent or ambiguous.' }
+if ($definitions.Count -ne 3) { throw 'Expected protocol functions are absent or ambiguous.' }
 . ([scriptblock]::Create($definitions['Hash-File'].Extent.Text))
 . ([scriptblock]::Create($definitions['Assert-Preserved'].Extent.Text))
+. ([scriptblock]::Create($definitions['Assert-PhaseACompletedCases'].Extent.Text))
 
 function Assert-Throws([scriptblock]$Action,[string]$Expected) {
     $caught=$false
@@ -30,6 +31,36 @@ function Assert-Throws([scriptblock]$Action,[string]$Expected) {
     }
     if (-not $caught) { throw "Expected preservation rejection: $Expected" }
 }
+function New-CompletedCases {
+    $cases=@('overlap','mismatch','close-first','commit-first','abort','late-child')
+    foreach ($name in $cases) {
+        [ordered]@{case=$name;exited=$true;timed_out=$false;
+            exit_code=$(if($name -eq 'abort'){71}else{0});controller_error=$null}
+    }
+}
+
+$completed=@(New-CompletedCases)
+Assert-PhaseACompletedCases -Results $completed
+$fromJson=$completed | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+Assert-PhaseACompletedCases -Results @($fromJson)
+$bad=@(New-CompletedCases);$bad[0].controller_error='retained failure'
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases);$bad[0].Remove('controller_error')
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'lacks required receipt field controller_error'
+$bad=@(New-CompletedCases);$bad[0].case='mismatch'
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases);$swap=$bad[0];$bad[0]=$bad[1];$bad[1]=$swap
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases);$bad[2].Remove('exit_code')
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'lacks required receipt field exit_code'
+$bad=@(New-CompletedCases);$bad[4].exit_code=0
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases);$bad[2].timed_out=$true
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases);$bad[3].exited=$false
+Assert-Throws { Assert-PhaseACompletedCases -Results $bad } 'wrong identity, exit or closure'
+$bad=@(New-CompletedCases)
+Assert-Throws { Assert-PhaseACompletedCases -Results @($bad[0..4]) } 'case count is incomplete'
 
 $root=Join-Path ([IO.Path]::GetTempPath()) ('dark180-txf-protocol-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)

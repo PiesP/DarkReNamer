@@ -217,6 +217,25 @@ function Write-WorkerError([string]$Scope,$Fixture,$Observed,[Management.Automat
         [Console]::Error.WriteLine('DR_PHASE_A_WORKER_ERROR receipt-serialization-failed')
     }
 }
+function Assert-PhaseACompletedCases([object[]]$Results) {
+    $expected=@('overlap','mismatch','close-first','commit-first','abort','late-child')
+    if ($Results.Count -ne $expected.Count) { throw 'Phase A case count is incomplete.' }
+    for ($index=0; $index -lt $expected.Count; $index++) {
+        $row=$Results[$index]
+        if ($null -eq $row) { throw "Phase A case $index has no receipt." }
+        foreach ($field in @('case','exited','timed_out','exit_code','controller_error')) {
+            $present=if ($row -is [Collections.IDictionary]) { $row.Contains($field) }
+                else { $null -ne $row.PSObject.Properties[$field] }
+            if (-not $present) { throw "Phase A case $index lacks required receipt field $field." }
+        }
+        $expectedExit=if ($expected[$index] -eq 'abort') { 71 } else { 0 }
+        if ($row.case -cne $expected[$index] -or $row.exited -ne $true -or
+            $row.timed_out -ne $false -or $row.exit_code -ne $expectedExit -or
+            $null -ne $row.controller_error) {
+            throw "Phase A case $index has a wrong identity, exit or closure receipt."
+        }
+    }
+}
 function Invoke-LateTrial([string]$Barrier) {
     $f=New-CaseRoot ('late-' + $Barrier)
     $p=$null; $ancestors=$null; $root=$null; $file=$null; $tx=$null; $rootWriter=$null; $fileWriter=$null
@@ -398,7 +417,7 @@ if ($Mode -eq 'controller') {
             $stdout=$outTask.GetAwaiter().GetResult(); $stderr=$errTask.GetAwaiter().GetResult()
             $caseReceipt=[ordered]@{case=$name; started_utc=$started; ended_utc=[datetime]::UtcNow.ToString('o');
                 pid=$child.Id; exited=$exited; timed_out=$timedOut; exit_code=$child.ExitCode;
-                stdout=$stdout; stderr=$stderr }
+                stdout=$stdout; stderr=$stderr; controller_error=$null }
             $results.Add($caseReceipt)
             if ($timedOut) { throw 'Owned child exceeded its bounded run deadline.' }
             $expectedExit=if($name -eq 'abort'){71}else{0}
@@ -535,7 +554,8 @@ if ($Mode -eq 'controller') {
                     pid=$(if($childStarted){$child.Id}else{$null});
                     exit_code=$(if($exited){$child.ExitCode}else{$null});
                     stdout=$(if($exited -and $null -ne $outTask){$outTask.GetAwaiter().GetResult()}else{$null});
-                    stderr=$(if($exited -and $null -ne $errTask){$errTask.GetAwaiter().GetResult()}else{$null})}
+                    stderr=$(if($exited -and $null -ne $errTask){$errTask.GetAwaiter().GetResult()}else{$null});
+                    controller_error=$null}
                 $results.Add($caseReceipt)
             }
             $caseReceipt.controller_error=$_.Exception.Message
@@ -551,11 +571,7 @@ if ($Mode -eq 'controller') {
     $json=$record | ConvertTo-Json -Depth 12 -Compress
     [Console]::Out.WriteLine('DR_GATE1_PHASE_A ' + $json)
     if ($null -ne $controllerError) { throw $controllerError }
-    if ($results.Count -ne $caseNames.Count -or
-        (@($results | ForEach-Object case) -join ',') -cne ($caseNames -join ',') -or
-        @($results | Where-Object { $_.controller_error -or $_.timed_out }).Count -ne 0) {
-        throw 'Native phase A failed or was incomplete; preserved raw evidence above.'
-    }
+    Assert-PhaseACompletedCases -Results @($results)
     return
 }
 
