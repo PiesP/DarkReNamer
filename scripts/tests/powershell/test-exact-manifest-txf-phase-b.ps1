@@ -609,13 +609,30 @@ function Stop-OwnedChild($Child) {
 }
 function Complete-OwnedChild($Child,[int]$SettleMilliseconds) {
     if ($null -eq $Child) { return $null }
-    $closed=$Child.process.WaitForExit([Math]::Max(0,$SettleMilliseconds))
+    $budget=[Math]::Max(0,$SettleMilliseconds)
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $closed=$Child.process.WaitForExit($budget)
     $stdout=$null;$stderr=$null;$capture_error=$null
     if ($closed) {
         try {
-            $stdout=$Child.stdout_task.GetAwaiter().GetResult()
-            $stderr=$Child.stderr_task.GetAwaiter().GetResult()
+            $remaining=[Math]::Max(0,$budget-[int]$clock.ElapsedMilliseconds)
+            $capture=[Threading.Tasks.Task]::WhenAll(
+                [Threading.Tasks.Task[]]@($Child.stdout_task,$Child.stderr_task))
+            if (-not $capture.Wait($remaining)) {
+                $capture_error='Redirected child output did not complete within the owned closure budget.'
+            }
         } catch { $capture_error=$_.Exception.Message }
+        if ($Child.stdout_task.IsCompleted) {
+            try { $stdout=$Child.stdout_task.GetAwaiter().GetResult() }
+            catch { if ($null -eq $capture_error) { $capture_error=$_.Exception.Message } }
+        }
+        if ($Child.stderr_task.IsCompleted) {
+            try { $stderr=$Child.stderr_task.GetAwaiter().GetResult() }
+            catch { if ($null -eq $capture_error) { $capture_error=$_.Exception.Message } }
+        }
+        if ($null -eq $capture_error -and ($null -eq $stdout -or $null -eq $stderr)) {
+            $capture_error='Redirected child output is incomplete.'
+        }
     }
     $row=[ordered]@{role=$Child.role;pid=$Child.pid;started_utc=$Child.started_utc;
         completed_utc=[DateTime]::UtcNow.ToString('o');closed=$closed;
@@ -624,6 +641,16 @@ function Complete-OwnedChild($Child,[int]$SettleMilliseconds) {
         stdout=$stdout;stderr=$stderr;capture_error=$capture_error}
     if ($closed) { $Child.process.Dispose() }
     return $row
+}
+function Observe-OwnedChildClosure($Child,[int]$WaitMilliseconds,$Observations,[string]$Phase) {
+    $result=Complete-OwnedChild $Child $WaitMilliseconds
+    if ($null -ne $result) {
+        $Observations.Add([ordered]@{phase=$Phase;wait_budget_ms=$WaitMilliseconds;
+            observed_utc=$result.completed_utc;pid=$result.pid;closed=$result.closed;
+            kill_requested=$result.kill_requested;exit_code=$result.exit_code;
+            capture_error=$result.capture_error})
+    }
+    return $result
 }
 function Read-WorkerRecord($ProcessRow,[string]$ExpectedRole,[string]$ExpectedTrial) {
     if ($null -eq $ProcessRow -or -not $ProcessRow.closed -or
@@ -1021,6 +1048,7 @@ try {
             source=$source;actor=$null;candidate=$null;actor_receipt=$null;
             candidate_receipt=$null;ready=$null;barrier=$null;late_probe_marker=$null;
             controller_error=$null;verdict=$null;
+            closure_observations=[Collections.Generic.List[object]]::new();
             active_deadline_seconds=15;settle_deadline_seconds=5}
         $all.Add($row)
         $activeActor=$null;$activeCandidate=$null
@@ -1082,7 +1110,10 @@ try {
             $b6RollbackConfirmed=$false
             if ($name -eq 'B6L' -and $null -ne $row.barrier) {
                 $row.late_probe_marker=Read-Marker (Join-Path $scope 'actor-done.json')
-                $row.candidate=Complete-OwnedChild $activeCandidate 0
+                $activeRemaining=[Math]::Max(0,[Math]::Min(5000,
+                    15000-[int]$trialClock.ElapsedMilliseconds))
+                $row.candidate=Observe-OwnedChildClosure $activeCandidate $activeRemaining `
+                    $row.closure_observations 'B6L-active-candidate-confirmation'
                 if (-not $row.candidate.closed) {
                     throw 'B6L candidate process closure is not confirmed.'
                 }
@@ -1133,8 +1164,9 @@ try {
                 }
             }
             $remaining=[Math]::Max(0,[Math]::Min(5000,20000-[int]$trialClock.ElapsedMilliseconds))
-            if ($null -eq $row.candidate) {
-                $row.candidate=Complete-OwnedChild $activeCandidate $remaining
+            if ($null -eq $row.candidate -or -not $row.candidate.closed) {
+                $row.candidate=Observe-OwnedChildClosure $activeCandidate $remaining `
+                    $row.closure_observations 'candidate-settle-confirmation'
             }
             $remaining=[Math]::Max(0,[Math]::Min(5000-[int]$settle.ElapsedMilliseconds,
                 20000-[int]$trialClock.ElapsedMilliseconds))

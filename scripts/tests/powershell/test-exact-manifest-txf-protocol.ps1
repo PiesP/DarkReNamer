@@ -131,7 +131,8 @@ $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
 foreach ($name in @('Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
-        'Get-ExactOpenWriterRefusalCode','Assert-PhaseB6LReceipt','Assert-PhaseBTrialReceipt')) {
+        'Get-ExactOpenWriterRefusalCode','Complete-OwnedChild','Observe-OwnedChildClosure',
+        'Read-WorkerRecord','Assert-PhaseB6LReceipt','Assert-PhaseBTrialReceipt')) {
     $definition=$fixtureAst.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $name},$true)
@@ -539,6 +540,87 @@ try {
     foreach ($root in @($testRoot,$otherRoot)) {
         foreach ($file in @([IO.Directory]::EnumerateFiles($root))) { [IO.File]::Delete($file) }
         [IO.Directory]::Delete($root)
+    }
+}
+
+function New-OwnedProtocolChild([string]$Command) {
+    $start=[Diagnostics.ProcessStartInfo]::new()
+    $start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $start.UseShellExecute=$false
+    $start.RedirectStandardInput=$true
+    $start.RedirectStandardOutput=$true
+    $start.RedirectStandardError=$true
+    foreach ($arg in @('-NoLogo','-NoProfile','-NonInteractive','-Command',$Command)) {
+        $start.ArgumentList.Add($arg)
+    }
+    $process=[Diagnostics.Process]::Start($start)
+    if ($null -eq $process) { throw 'Owned protocol child failed to start.' }
+    return [ordered]@{process=$process;stdout_task=$process.StandardOutput.ReadToEndAsync();
+        stderr_task=$process.StandardError.ReadToEndAsync();
+        started_utc=[DateTime]::UtcNow.ToString('o');role='candidate';pid=$process.Id;
+        kill_requested=$false}
+}
+$owned=$null;$pending=$null;$capturePending=$null
+try {
+    $command='$null=[Console]::ReadLine(); [Console]::Out.WriteLine("DR_PHASE_B_CHILD test"); [Console]::Error.WriteLine("stderr-test")'
+    $owned=New-OwnedProtocolChild $command
+    $observations=[Collections.Generic.List[object]]::new()
+    $early=Observe-OwnedChildClosure $owned 0 $observations 'active-unknown'
+    if ($early.closed -or $observations.Count -ne 1 -or $observations[0].closed) {
+        throw 'Zero-wait observation falsely confirmed a live owned process.'
+    }
+    Assert-Rejected { Read-WorkerRecord $early 'candidate' 'B6L' } 'did not close'
+    $owned.process.StandardInput.WriteLine('release')
+    $owned.process.StandardInput.Flush()
+    $terminal=Observe-OwnedChildClosure $owned 3000 $observations 'settle-confirmed'
+    if (-not $terminal.closed -or $terminal.exit_code -ne 0 -or $terminal.capture_error -or
+        $terminal.stdout.TrimEnd("`r","`n") -cne 'DR_PHASE_B_CHILD test' -or
+        $terminal.stderr.TrimEnd("`r","`n") -cne 'stderr-test' -or
+        $observations.Count -ne 2 -or $observations[0].closed -or
+        -not $observations[1].closed -or $observations[0].pid -ne $observations[1].pid) {
+        throw 'Final same-process closure did not preserve unknown history and exact drained output.'
+    }
+    $owned=$null # Complete-OwnedChild disposed the confirmed process.
+
+    $pending=New-OwnedProtocolChild '$null=[Console]::ReadLine()'
+    $pendingObservations=[Collections.Generic.List[object]]::new()
+    $null=Observe-OwnedChildClosure $pending 0 $pendingObservations 'active-unknown'
+    $stillPending=Observe-OwnedChildClosure $pending 50 $pendingObservations 'settle-unknown'
+    if ($stillPending.closed -or $pendingObservations.Count -ne 2 -or
+        $pendingObservations[0].closed -or $pendingObservations[1].closed) {
+        throw 'A still-running owned child was falsely accepted after bounded wait.'
+    }
+    Assert-Rejected { Read-WorkerRecord $stillPending 'candidate' 'B6L' } 'did not close'
+    $pending.kill_requested=$true
+    $pending.process.Kill($true)
+    $killed=Observe-OwnedChildClosure $pending 3000 $pendingObservations 'killed-confirmed'
+    if (-not $killed.closed -or -not $killed.kill_requested -or $killed.exit_code -eq 0 -or
+        $pendingObservations[0].closed -or $pendingObservations[1].closed) {
+        throw 'Owned kill erased earlier unknown observations or appeared successful.'
+    }
+    $pending=$null
+
+    $capturePending=New-OwnedProtocolChild 'exit 0'
+    $neverOutput=[Threading.Tasks.TaskCompletionSource[string]]::new()
+    $capturePending.stdout_task=$neverOutput.Task
+    $capturePending.stderr_task=$neverOutput.Task
+    $bounded=[Diagnostics.Stopwatch]::StartNew()
+    $incomplete=Complete-OwnedChild $capturePending 1000
+    if (-not $incomplete.closed -or [string]::IsNullOrEmpty($incomplete.capture_error) -or
+        $bounded.ElapsedMilliseconds -gt 1800) {
+        throw 'Incomplete redirected output was not bounded and reported as incomplete.'
+    }
+    Assert-Rejected { Read-WorkerRecord $incomplete 'candidate' 'B6L' } 'complete raw capture'
+    $capturePending=$null
+} finally {
+    foreach ($child in @($owned,$pending,$capturePending)) {
+        if ($null -ne $child) {
+            try {
+                if (-not $child.process.HasExited) { $child.process.Kill($true) }
+                [void]$child.process.WaitForExit(3000)
+                $child.process.Dispose()
+            } catch { }
+        }
     }
 }
 Write-Host 'Phase B exact-manifest protocol tests passed.'
