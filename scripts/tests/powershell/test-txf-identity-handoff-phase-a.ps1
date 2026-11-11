@@ -181,8 +181,14 @@ function Snapshot-AncestorChain($Chain) {
 function Assert-Preserved($Fixture, [string] $UnknownPath, [string] $UnknownSha) {
     if ((Hash-File $Fixture.snapshot) -cne $Fixture.approved_sha) { throw 'Approved pre-disposition snapshot changed or disappeared.' }
     if ((Hash-File $Fixture.sentinel) -cne $Fixture.sentinel_sha) { throw 'Unapproved sentinel changed or disappeared.' }
-    if ($null -ne $UnknownPath -and (Hash-File $UnknownPath) -cne $UnknownSha) {
-        throw 'Unapproved late child changed or disappeared.'
+    $hasUnknownPath=-not [string]::IsNullOrEmpty($UnknownPath)
+    $hasUnknownSha=-not [string]::IsNullOrEmpty($UnknownSha)
+    if ($hasUnknownPath -ne $hasUnknownSha) { throw 'Unapproved late child path and expected hash must be paired.' }
+    if ($hasUnknownPath) {
+        if ($UnknownSha -cnotmatch '^[0-9a-f]{64}$' -or
+            (Hash-File $UnknownPath) -cne $UnknownSha) {
+            throw 'Unapproved late child changed or disappeared.'
+        }
     }
     $approvedHash=Hash-File $Fixture.approved
     if ($null -ne $approvedHash -and $approvedHash -cne $Fixture.approved_sha) {
@@ -196,6 +202,20 @@ function Complete-Record([string]$Name,$Fixture,$Events,[string]$Verdict) {
         approved_sha_after=(Hash-File $Fixture.approved); sentinel_sha_after=(Hash-File $Fixture.sentinel);
         stream_coverage='partial: separate file/directory ADS writer controls, not complete bound-stream inventory';
         gate1='unverified'; target_collection=0; original_vm_product=0 }
+}
+function Write-WorkerError([string]$Scope,$Fixture,$Observed,[Management.Automation.ErrorRecord]$Failure) {
+    try {
+        $receipt=[ordered]@{schema='dark180-txf-handoff-phase-a-worker-error-v1';
+            utc=[datetime]::UtcNow.ToString('o');case=$Mode;scope=$Scope;
+            source=$sourceBinding;fixture_root=$Fixture.root;events=@($Observed);
+            error_type=$Failure.Exception.GetType().FullName;
+            error_id=$Failure.FullyQualifiedErrorId;error_message=$Failure.Exception.Message;
+            gate1='unverified'}
+        [Console]::Error.WriteLine('DR_PHASE_A_WORKER_ERROR ' +
+            ($receipt | ConvertTo-Json -Depth 12 -Compress))
+    } catch {
+        [Console]::Error.WriteLine('DR_PHASE_A_WORKER_ERROR receipt-serialization-failed')
+    }
 }
 function Invoke-LateTrial([string]$Barrier) {
     $f=New-CaseRoot ('late-' + $Barrier)
@@ -284,23 +304,31 @@ function Invoke-LateTrial([string]$Barrier) {
         $verdict=if ($admitted) { 'admitted-child-preserved' } else { 'late-child-refused' }
         return [ordered]@{barrier=$Barrier;fixture=$f;steps=@($steps);verdict=$verdict;
             unknown_sha=$newHash;poststate='pending-owned-handle-closure'}
+    } catch {
+        Write-WorkerError ('late-trial:' + $Barrier) $f $steps $_
+        throw
     } finally {
-        Close-Handle $fileWriter; Close-Handle $rootWriter
-        if ($null -ne $tx -and $tx.Accepted -and -not $committedLocal) {
-            $rollbackCode=[DarkTxfHandoffProbe]::Rollback($tx.Handle)
-            $rollbackLocal=if ($rollbackCode -eq 0) { 'succeeded' } else { "unknown:$rollbackCode" }
-            if ($null -ne $outcome) { $outcome.rollback=$rollbackLocal }
-            [Console]::Error.WriteLine('DR_PHASE_A_ROLLBACK ' + ([ordered]@{
-                barrier=$Barrier;fixture=$f.root;outcome=$rollbackLocal;
-                utc=[datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress))
-        }
-        Close-Handle $file; Close-Handle $root; Close-AncestorChain $ancestors; Close-Handle $tx
-        if ($rollbackLocal -like 'unknown:*') { throw 'Late-trial rollback outcome is unknown.' }
-        Assert-Preserved $f $(if($admitted){$newChild}else{$null}) $newHash
-        if ($null -ne $outcome -and
-            $outcome.verdict -eq 'root-stage-refused-with-late-child-present' -and
-            (Hash-File $f.approved) -cne $f.approved_sha) {
-            throw 'Root-stage refusal did not preserve the approved original bytes.'
+        try {
+            Close-Handle $fileWriter; Close-Handle $rootWriter
+            if ($null -ne $tx -and $tx.Accepted -and -not $committedLocal) {
+                $rollbackCode=[DarkTxfHandoffProbe]::Rollback($tx.Handle)
+                $rollbackLocal=if ($rollbackCode -eq 0) { 'succeeded' } else { "unknown:$rollbackCode" }
+                if ($null -ne $outcome) { $outcome.rollback=$rollbackLocal }
+                [Console]::Error.WriteLine('DR_PHASE_A_ROLLBACK ' + ([ordered]@{
+                    barrier=$Barrier;fixture=$f.root;outcome=$rollbackLocal;
+                    utc=[datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress))
+            }
+            Close-Handle $file; Close-Handle $root; Close-AncestorChain $ancestors; Close-Handle $tx
+            if ($rollbackLocal -like 'unknown:*') { throw 'Late-trial rollback outcome is unknown.' }
+            Assert-Preserved $f $(if($admitted){$newChild}else{$null}) $newHash
+            if ($null -ne $outcome -and
+                $outcome.verdict -eq 'root-stage-refused-with-late-child-present' -and
+                (Hash-File $f.approved) -cne $f.approved_sha) {
+                throw 'Root-stage refusal did not preserve the approved original bytes.'
+            }
+        } catch {
+            Write-WorkerError ('late-trial-cleanup-and-preservation:' + $Barrier) $f $steps $_
+            throw
         }
     }
 }
@@ -683,16 +711,25 @@ try {
             }
         }
     }
+} catch {
+    Write-WorkerError 'main-case-before-cleanup' $fixture $events $_
+    throw
 } finally {
-    Close-Handle $writerFile; Close-Handle $writerRoot
-    if ($null -ne $transaction -and $transaction.Accepted -and -not $committed -and
-        $rollback -eq 'not-attempted') {
-        $rollbackCode=[DarkTxfHandoffProbe]::Rollback($transaction.Handle)
-        $rollback=if ($rollbackCode -eq 0) { 'succeeded' } else { "unknown:$rollbackCode" }
+    try {
+        Close-Handle $writerFile; Close-Handle $writerRoot
+        if ($null -ne $transaction -and $transaction.Accepted -and -not $committed -and
+            $rollback -eq 'not-attempted') {
+            $rollbackCode=[DarkTxfHandoffProbe]::Rollback($transaction.Handle)
+            $rollback=if ($rollbackCode -eq 0) { 'succeeded' } else { "unknown:$rollbackCode" }
+        }
+        Close-Handle $oldRoot; Close-Handle $anchorFile; Close-Handle $anchorRoot;
+        Close-AncestorChain $ancestors; Close-Handle $transaction
+    } catch {
+        Write-WorkerError 'main-case-cleanup' $fixture $events $_
+        throw
     }
-    Close-Handle $oldRoot; Close-Handle $anchorFile; Close-Handle $anchorRoot;
-    Close-AncestorChain $ancestors; Close-Handle $transaction
 }
+try {
 if ($rollback -like 'unknown:*') { throw 'Transaction rollback outcome is unknown.' }
 Assert-Preserved $fixture $unknownPath $unknownSha
 if ($Mode -in @('mismatch','overlap','abort','late-child') -and (Hash-File $fixture.approved) -cne $fixture.approved_sha) {
@@ -730,3 +767,7 @@ $events.Add([ordered]@{stage='terminal'; rollback=$rollback; os=[Environment]::O
     volume_format=$fs.DriveFormat; native_windows_runner=$true})
 $record=Complete-Record $Mode $fixture $events $verdict
 [Console]::Out.WriteLine(($record | ConvertTo-Json -Depth 12 -Compress))
+} catch {
+    Write-WorkerError 'main-case-post-cleanup-verification' $fixture $events $_
+    throw
+}
