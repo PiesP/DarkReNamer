@@ -683,9 +683,22 @@ account, administrator-role cohort, OS build and installed tool path/hash/versio
 inputs must come from a separately reviewed authenticated observation. An
 administrator diagnostic cohort is not a limited interactive product run.
 
-This bootstrap currently stops before cloning when existing Git-specific proxy,
-CA, TLS-backend or client-certificate inputs need separate route qualification.
-It preserves ordinary proxy environment inputs and certificate verification.
+The bootstrap can preserve an independently observed Schannel configuration
+only when its exact expected value and configuration origin are pinned. It
+rechecks that input before isolation, carries it through process-only Git
+configuration, and records the isolated effective value before cloning. This
+records configured input, not an attested TLS implementation or handshake.
+Other unqualified Git-specific proxy, CA, pinned-key, client-certificate or TLS
+inputs stop before cloning. Certificate verification, the Windows trust store
+and revocation protections remain intact; shared Git or trust settings are not
+changed. The named TLS/proxy environment inputs must remain absent for this
+observed cohort; a changed input stops for separate qualification and is never
+silently cleared to obtain a pass.
+
+Use named variables for argument strings passed through nested PowerShell
+scriptblocks: the automatic `$args` array belongs to the current invocation.
+Require the expected structured output as well as a successful child exit; an
+argument-free shell can exit successfully without executing the intended query.
 Its bounded terminal records contain original output bytes, source and Job
 receipts; their guest-side size limit is not an independently enforced host or
 PSRP transport cap. It retains the new private and fixture roots for independent

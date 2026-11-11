@@ -469,6 +469,14 @@ function Assert-HeadlessRouteInputs {
     }
 }
 
+function Assert-HeadlessGitRoutePin($Pin) {
+    if($null -eq $Pin -or $Pin.Count -ne 2 -or
+        $Pin.backend -cne 'schannel' -or
+        $Pin.origin -cne 'file:C:/Program Files/Git/etc/gitconfig') {
+        throw 'Git backend or system-config origin differs from the reviewed route.'
+    }
+}
+
 function Invoke-HeadlessRouteEnvironment([scriptblock]$Action) {
     Assert-HeadlessRouteInputs # Reject before any Git process can read redirected locations.
     $names=@(@([Environment]::GetEnvironmentVariables('Process').Keys | Where-Object {
@@ -489,7 +497,8 @@ function Invoke-HeadlessRouteEnvironment([scriptblock]$Action) {
 }
 
 function Invoke-HeadlessGitEnvironment([scriptblock]$Action,[string]$PrivateRoot,
-        [string]$GitExecutable,[string]$PwshExecutable) {
+        [string]$GitExecutable,[string]$PwshExecutable,$GitRoute) {
+    Assert-HeadlessGitRoutePin $GitRoute
     foreach($name in @('GIT_SSL_CAINFO','GIT_SSL_CAPATH')){
         if(-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name,'Process'))){
             throw 'A Git-specific TLS trust input needs separate route qualification.'
@@ -498,6 +507,7 @@ function Invoke-HeadlessGitEnvironment([scriptblock]$Action,[string]$PrivateRoot
     $original=@{}
     $names=@([Environment]::GetEnvironmentVariables('Process').Keys |
         Where-Object { $_ -like 'GIT_*' }) + @('GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL',
+        'GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0','GIT_CONFIG_VALUE_0',
         'GIT_TERMINAL_PROMPT','GIT_TEMPLATE_DIR','GIT_NO_REPLACE_OBJECTS',
         'GIT_OPTIONAL_LOCKS','SSH_ASKPASS','PATH')
     $names=@($names | Select-Object -Unique)
@@ -512,6 +522,10 @@ function Invoke-HeadlessGitEnvironment([scriptblock]$Action,[string]$PrivateRoot
         [Environment]::SetEnvironmentVariable('GIT_OPTIONAL_LOCKS','0','Process')
         [Environment]::SetEnvironmentVariable('GIT_TEMPLATE_DIR',
             (Join-Path $PrivateRoot 'empty-template'),'Process')
+        # Command-scope configuration reaches the clone and each later proof/fixture Git child.
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_COUNT','1','Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_KEY_0','http.sslBackend','Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_VALUE_0',$GitRoute.backend,'Process')
         $trustedPath=@([IO.Path]::GetDirectoryName($GitExecutable),
             [IO.Path]::GetDirectoryName($PwshExecutable),$original['PATH']) -join ';'
         [Environment]::SetEnvironmentVariable('PATH',$trustedPath,'Process')
@@ -531,6 +545,12 @@ function Assert-HeadlessClonePin([string]$Root,[string]$Leaf,$Expected) {
     $actual=Get-Content -LiteralPath $proof -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
     if (-not (Test-HeadlessSourcePin $actual $Expected) -or -not $actual.clean) {
         throw 'Cloned source identity, tree, clean state or runtime file hash differs.'
+    }
+    if($null -eq $actual.isolated_git_route -or
+        $actual.isolated_git_route.configured_backend -cne $Expected.git_route.backend -or
+        $actual.isolated_git_route.effective_backend -cne $Expected.git_route.backend -or
+        $actual.isolated_git_route.effective_origin -cne 'command line:') {
+        throw 'Isolated Git backend readback differs from the reviewed route.'
     }
 }
 
@@ -565,6 +585,7 @@ try {
         ConvertFrom-Json -AsHashtable
     if (-not $IsWindows -or $pin.schema -cne 'dark240-win11-headless-bootstrap-pin-v1' -or
         [guid]$pin.vm_guid -eq [guid]::Empty) { throw 'Headless diagnostic platform or pin is invalid.' }
+    Assert-HeadlessGitRoutePin $pin.git_route
     $actualGuid=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' `
         -ErrorAction Stop).VirtualMachineId
     if ([guid]$actualGuid -ne [guid]$pin.vm_guid) { throw 'Guest VM GUID differs from prepared pin.' }
@@ -611,6 +632,14 @@ param([string]$Git,[string]$Root,[string]$PinBase64,[string]$ProofLeaf,[switch]$
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 $pin=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($PinBase64)) | ConvertFrom-Json -AsHashtable
 $checkout=Join-Path $Root 'checkout'
+$url='https://github.com/PiesP/DarkReNamer.git'
+$backendLines=@(& $Git config get --url=$url --show-origin --no-show-names http.sslBackend)
+if($LASTEXITCODE -ne 0 -or $backendLines.Count -ne 1 -or
+    $backendLines[0] -cne ("command line:`t"+$pin.git_route.backend)){
+    throw 'Isolated Git backend command-scope readback differs before clone or proof.'}
+$isolated=[ordered]@{configured_backend=$pin.git_route.backend;
+    effective_backend=$pin.git_route.backend;effective_origin='command line:'}
+Write-Output ('DR_HEADLESS_GIT_ISOLATED_ROUTE '+($isolated | ConvertTo-Json -Compress))
 if(-not $ProofOnly){
     & $Git -c core.fsmonitor=false -c http.sslVerify=true -c credential.helper= -c core.hooksPath=NUL clone --depth=1 --single-branch --branch master https://github.com/PiesP/DarkReNamer.git $checkout
     if($LASTEXITCODE -ne 0){throw 'Exact public clone failed.'}
@@ -627,7 +656,8 @@ foreach($relative in $pin.files.Keys){$path=Join-Path $checkout $relative
     $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Runtime file not ordinary.'}
     $hashes[$relative]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
-$actual=[ordered]@{head=([string]$head).Trim();tree=([string]$tree).Trim();clean=([string]::IsNullOrWhiteSpace(($status -join '')));files=$hashes}
+$actual=[ordered]@{head=([string]$head).Trim();tree=([string]$tree).Trim();clean=([string]::IsNullOrWhiteSpace(($status -join '')));files=$hashes;
+    isolated_git_route=$isolated}
 $json=$actual | ConvertTo-Json -Depth 8 -Compress
 $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
 $stream=[IO.FileStream]::new((Join-Path $Root $ProofLeaf),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
@@ -637,46 +667,62 @@ foreach($key in $pin.files.Keys){if($actual.files[$key] -cne $pin.files[$key]){t
 '@
     Write-HeadlessFile $gitScript $cloneCode
     $routeScript=Join-Path $script:headlessRoot 'route-check.ps1'
-    $routeCode=@'
-param([string]$Git,[string]$Root)
+$routeCode=@'
+param([string]$Git,[string]$Root,[string]$ExpectedBackend,[string]$ExpectedOrigin)
 $ErrorActionPreference='Stop'
 $url='https://github.com/PiesP/DarkReNamer.git'
-foreach($key in @('http.proxy','http.sslCAInfo','http.sslBackend','http.sslCert','http.sslKey')){
-    $value=(& $Git config --get-urlmatch $key $url)
+$backendLines=@(& $Git config get --url=$url --show-origin --no-show-names http.sslBackend)
+if($LASTEXITCODE -ne 0 -or $backendLines.Count -ne 1 -or
+    $backendLines[0] -cne ($ExpectedOrigin+"`t"+$ExpectedBackend)){
+    throw 'Effective Git backend or origin differs from the prepared route.'}
+foreach($key in @('http.proxy','http.sslCAInfo','http.sslCAPath','http.sslCert','http.sslKey',
+        'http.schannelCheckRevoke','http.schannelUseSSLCAInfo','http.pinnedPubkey',
+        'http.sslCertType','http.sslKeyType','http.sslCertPasswordProtected',
+        'http.sslVersion','http.sslCipherList')){
+    $value=(& $Git config get --url=$url --no-show-names $key)
     $code=$LASTEXITCODE
-    if($code -notin @(0,1)){throw "Effective Git $key configuration could not be observed."}
-    if($code -eq 0 -and -not [string]::IsNullOrWhiteSpace(($value -join ''))){
+    if($code -ne 1 -or @($value).Count -ne 0){
         throw "Configured Git $key input needs separate route qualification under isolated Git config."}
 }
-$verification=(& $Git config --get-urlmatch http.sslVerify $url)
-if($LASTEXITCODE -notin @(0,1)){throw 'Effective Git TLS verification setting could not be observed.'}
-if(-not [string]::IsNullOrWhiteSpace(($verification -join '')) -and
-    ($verification -join '').Trim().ToLowerInvariant() -cne 'true'){
-    throw 'Existing Git TLS verification differs from strict verified mode.'}
-$proxyEnv=@('HTTPS_PROXY','https_proxy','ALL_PROXY','all_proxy') | Where-Object {
-    -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}
+$verification=(& $Git config get --url=$url --no-show-names http.sslVerify)
+if($LASTEXITCODE -ne 1 -or @($verification).Count -ne 0){
+    throw 'Existing Git TLS verification input differs from the observed route.'}
+$environmentNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach($name in [Environment]::GetEnvironmentVariables('Process').Keys){
+    [void]$environmentNames.Add([string]$name)}
+$unexpectedEnv=@('GIT_SSL_NO_VERIFY','GIT_SSL_CAINFO','GIT_SSL_CAPATH',
+    'GIT_SSL_CERT','GIT_SSL_KEY','GIT_SSL_VERSION','GIT_SSL_CIPHER_LIST',
+    'GIT_SSL_CERT_PASSWORD_PROTECTED','GIT_SSL_CERT_TYPE','GIT_SSL_KEY_TYPE',
+    'CURL_CA_BUNDLE',
+    'SSL_CERT_FILE','SSL_CERT_DIR','HTTPS_PROXY','https_proxy',
+    'ALL_PROXY','all_proxy','NO_PROXY','no_proxy') | Where-Object {
+    $environmentNames.Contains($_)}
+if(@($unexpectedEnv).Count -ne 0){throw 'A TLS, certificate or proxy environment input differs from the observed route.'}
 $route=[ordered]@{schema='dark240-headless-git-route-v1';
-    configured_git_proxy=$false;proxy_environment_present=($proxyEnv.Count -gt 0);
-    route='ordinary HTTPS with process proxy environment preserved; configured Git proxy absent'}
+    configured_git_proxy=$false;proxy_environment_present=$false;
+    configured_git_backend=$ExpectedBackend;configured_git_backend_origin=$ExpectedOrigin;
+    route='ordinary HTTPS with observed system Schannel setting; strict verification and no proxy or custom trust input'}
 $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($route | ConvertTo-Json -Compress))
 $stream=[IO.FileStream]::new((Join-Path $Root 'route.json'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
 try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
 '@
     Write-HeadlessFile $routeScript $routeCode
-    $routeArguments="-NoLogo -NoProfile -NonInteractive -File `"$routeScript`" -Git `"$git`" -Root `"$script:headlessRoot`""
+    $routeArguments="-NoLogo -NoProfile -NonInteractive -File `"$routeScript`" -Git `"$git`" -Root `"$script:headlessRoot`" -ExpectedBackend $($pin.git_route.backend) -ExpectedOrigin `"$($pin.git_route.origin)`""
     $routeRow=Invoke-HeadlessRouteEnvironment -Action {
         Invoke-HeadlessJob -Name 'git-route' -File $pwsh -Arguments $routeArguments `
             -Work $script:headlessRoot -Seconds 10
     }
     $route=Get-Content -LiteralPath (Join-Path $script:headlessRoot 'route.json') -Raw |
         ConvertFrom-Json -AsHashtable
-    if($route.schema -cne 'dark240-headless-git-route-v1' -or $route.configured_git_proxy){
+    if($route.schema -cne 'dark240-headless-git-route-v1' -or $route.configured_git_proxy -or
+        $route.configured_git_backend -cne $pin.git_route.backend -or
+        $route.configured_git_backend_origin -cne $pin.git_route.origin){
         throw 'Git route preflight differs.'
     }
     $routeRow.route_record=New-HeadlessEvidence (Join-Path $script:headlessRoot 'route.json')
     $gitArguments="-NoLogo -NoProfile -NonInteractive -File `"$gitScript`" -Git `"$git`" -Root `"$script:headlessRoot`" -PinBase64 $pinLiteral -ProofLeaf source-proof-clone.json"
     Invoke-HeadlessGitEnvironment -PrivateRoot $script:headlessRoot -GitExecutable $git `
-            -PwshExecutable $pwsh -Action {
+            -PwshExecutable $pwsh -GitRoute $pin.git_route -Action {
         $cloneRow=Invoke-HeadlessJob -Name 'clone' -File $pwsh -Arguments $gitArguments `
             -Work $script:headlessRoot -Seconds 120 -WatchCheckout
         Assert-HeadlessCheckoutBudget $checkout ([Diagnostics.Stopwatch]::StartNew()) 15

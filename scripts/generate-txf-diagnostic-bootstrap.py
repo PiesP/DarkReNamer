@@ -135,12 +135,21 @@ def source_pin(repo: Path, expected_head: str) -> dict:
     return {"head": head, "tree": tree, "files": hashes}
 
 
-def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict) -> bytes:
+def git_route_pin(backend: str, origin: str) -> dict:
+    # Bind only the independently observed installed Git system-config cohort.
+    if backend != "schannel" or origin != "file:C:/Program Files/Git/etc/gitconfig":
+        raise ValueError("Expected Git backend or origin is outside the reviewed route")
+    return {"backend": backend, "origin": origin}
+
+
+def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict, git_route: dict) -> bytes:
     guid = vm_guid.lower()
     if not GUID.fullmatch(guid) or uuid.UUID(guid).int == 0:
         raise ValueError("Expected VM GUID must be a nonzero canonical GUID")
+    if git_route != git_route_pin(git_route.get("backend"), git_route.get("origin")):
+        raise ValueError("Git route pin differs")
     pinned = {"schema": "dark240-win11-headless-bootstrap-pin-v1", "vm_guid": guid,
-              "guest": guest, **pin}
+              "guest": guest, "git_route": git_route, **pin}
     literal = base64.b64encode(json.dumps(pinned, sort_keys=True, separators=(",", ":")).encode()).decode()
     helper = (repo / HELPER).read_bytes()
     wrapper = (repo / WRAPPER).read_bytes()
@@ -153,7 +162,7 @@ def assemble(repo: Path, pin: dict, vm_guid: str, guest: dict) -> bytes:
 
 
 def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
-            trusted_git: Path, guest: dict) -> Path:
+            trusted_git: Path, guest: dict, git_route: dict) -> Path:
     global GIT_EXECUTABLE
     GIT_EXECUTABLE = trusted_local_path(trusted_git)
     repo = repo.resolve(strict=True)
@@ -162,7 +171,7 @@ def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
     if repo == output_parent or repo in output_parent.parents or output_parent in repo.parents:
         raise ValueError("Prepared output must be outside the source checkout")
     pin = source_pin(repo, expected_head)
-    script = assemble(repo, pin, vm_guid, guest)
+    script = assemble(repo, pin, vm_guid, guest, git_route)
     name = f"dark240-win11-headless-{uuid.uuid4().hex}"
     destination = output_parent / name
     destination.mkdir(mode=0o700)
@@ -173,6 +182,7 @@ def prepare(repo: Path, expected_head: str, vm_guid: str, output_parent: Path,
                 "schema": "dark240-win11-headless-prepare-v1",
                 "source": pin,
                 "guest": guest,
+                "git_route": git_route,
                 "vm_guid": vm_guid.lower(),
                 "bootstrap_sha256": hashlib.sha256(script).hexdigest(),
                 "bootstrap_bytes": len(script),
@@ -213,6 +223,8 @@ def main() -> int:
     parser.add_argument("--expected-pwsh-sha256", required=True)
     parser.add_argument("--expected-pwsh-file-version", required=True)
     parser.add_argument("--expected-ps-version", required=True)
+    parser.add_argument("--expected-git-ssl-backend", required=True)
+    parser.add_argument("--expected-git-ssl-backend-origin", required=True)
     args = parser.parse_args()
     try:
         guest = guest_pin(args.expected_guest_sid, args.expected_guest_account,
@@ -221,8 +233,10 @@ def main() -> int:
                           args.expected_git_file_version, args.expected_git_product_version,
                           args.expected_pwsh_path, args.expected_pwsh_sha256,
                           args.expected_pwsh_file_version, args.expected_ps_version)
+        route = git_route_pin(args.expected_git_ssl_backend,
+                              args.expected_git_ssl_backend_origin)
         destination = prepare(args.repo, args.expected_head, args.expected_vm_guid,
-                              args.private_output_parent, args.trusted_git, guest)
+                              args.private_output_parent, args.trusted_git, guest, route)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         print(f"Preparation refused: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
