@@ -129,7 +129,8 @@ $tokens=$null;$parseErrors=$null
 $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
     [ref]$tokens,[ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
-foreach ($name in @('Assert-PhaseBTrialReceipt')) {
+foreach ($name in @('Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
+        'Wait-Marker','Wait-ActorBarrier','Assert-PhaseBTrialReceipt')) {
     $definition=$fixtureAst.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $name},$true)
@@ -246,4 +247,66 @@ if ((Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding) -cne
 }
 $late.actor_receipt.postproof.late_child.status='absent'
 Assert-Rejected { Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding } 'late child'
+
+$testRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark180-phase-b-marker-protocol-'+[Guid]::NewGuid().ToString('N'))
+$otherRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark180-phase-b-marker-protocol-'+[Guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($testRoot)
+[void][IO.Directory]::CreateDirectory($otherRoot)
+$Scope=$testRoot
+try {
+    $unpublished=Join-Path $testRoot 'unpublished.json'
+    Write-NewText $unpublished '{'
+    if (Test-MarkerReady $unpublished) { throw 'A data-only marker became observable.' }
+    Assert-Rejected { Read-Marker $unpublished } 'not published'
+    Assert-Rejected { Wait-Marker $unpublished 0 } 'unavailable'
+    $noData=Join-Path $testRoot 'no-data.json'
+    Write-NewText ($noData+'.ready') ''
+    Assert-Rejected { Test-MarkerReady $noData } 'readiness exists without data'
+    $published=Join-Path $testRoot 'published.json'
+    Write-Marker $published ([ordered]@{trial='B2';phase='after-last-close'})
+    if (-not (Test-MarkerReady $published)) { throw 'A fully published marker was not observable.' }
+    $payload=Read-Marker $published
+    if ($payload.trial -cne 'B2' -or $payload.phase -cne 'after-last-close' -or
+        (Wait-Marker $published 0).trial -cne 'B2') {
+        throw 'Published marker payload changed in transit.'
+    }
+    $before=(Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash
+    Assert-Rejected { Write-Marker $published ([ordered]@{trial='B6'}) } 'exists'
+    if ((Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash -cne $before) {
+        throw 'Duplicate publication overwrote immutable marker data.'
+    }
+    $malformed=Join-Path $testRoot 'malformed.json'
+    Write-NewText $malformed '{'
+    Write-NewText ($malformed+'.ready') ''
+    Assert-Rejected { Read-Marker $malformed } 'malformed'
+    $wrongSchema=Join-Path $testRoot 'wrong-schema.json'
+    Write-NewText $wrongSchema (([ordered]@{schema='old';scope=$testRoot;
+        marker='wrong-schema.json';value=[ordered]@{trial='B2'}} | ConvertTo-Json -Compress))
+    Write-NewText ($wrongSchema+'.ready') ''
+    Assert-Rejected { Read-Marker $wrongSchema } 'scope, name or value differs'
+    $nullValue=Join-Path $testRoot 'null-value.json'
+    Write-NewText $nullValue (([ordered]@{schema='dark180-phase-b-marker-v2';scope=$testRoot;
+        marker='null-value.json';value=$null} | ConvertTo-Json -Compress))
+    Write-NewText ($nullValue+'.ready') ''
+    Assert-Rejected { Read-Marker $nullValue } 'scope, name or value differs'
+    $mixed=Join-Path $otherRoot 'published.json'
+    Write-NewText $mixed ([IO.File]::ReadAllText($published))
+    if (Test-MarkerReady $mixed) { throw 'Mixed-scope data without readiness became observable.' }
+    Write-NewText ($mixed+'.ready') ''
+    Assert-Rejected { Read-Marker $mixed } 'scope, name or value differs'
+    $stale=Join-Path $testRoot 'stale.json'
+    Write-NewText $stale ([IO.File]::ReadAllText($published))
+    Write-NewText ($stale+'.ready') ''
+    Assert-Rejected { Read-Marker $stale } 'scope, name or value differs'
+    $barrier=Join-Path $testRoot 'barrier.json'
+    Write-NewText $barrier '{"schema":"dark180-phase-b-marker-v2"}'
+    Write-Marker (Join-Path $testRoot 'actor-cancel.json') ([ordered]@{reason='probe'})
+    if (Wait-ActorBarrier $barrier 0) { throw 'Unpublished barrier displaced a published cancellation.' }
+    if (-not (Wait-ActorBarrier $published 0)) { throw 'Published barrier was ignored.' }
+} finally {
+    foreach ($root in @($testRoot,$otherRoot)) {
+        foreach ($file in @([IO.Directory]::EnumerateFiles($root))) { [IO.File]::Delete($file) }
+        [IO.Directory]::Delete($root)
+    }
+}
 Write-Host 'Phase B exact-manifest protocol tests passed.'

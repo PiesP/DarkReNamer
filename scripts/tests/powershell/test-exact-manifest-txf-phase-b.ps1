@@ -34,22 +34,46 @@ function Write-NewText([string]$Path,[string]$Value) {
     finally { $stream.Dispose() }
 }
 function Write-Marker([string]$Path,$Value) {
-    $pending=$Path + '.pending-' + [Guid]::NewGuid().ToString('N')
-    Write-NewText $pending (($Value | ConvertTo-Json -Depth 6 -Compress) + "`n")
-    [IO.File]::Move($pending,$Path) # Same-directory, no-overwrite publication after flush.
+    $record=[ordered]@{schema='dark180-phase-b-marker-v2';
+        scope=[IO.Path]::GetDirectoryName($Path);
+        marker=[IO.Path]::GetFileName($Path);value=$Value}
+    Write-NewText $Path (($record | ConvertTo-Json -Depth 8 -Compress) + "`n")
+    Write-NewText ($Path + '.ready') '' # Published only after data flush and close.
+}
+function Read-Marker([string]$Path) {
+    if (-not [IO.File]::Exists(($Path + '.ready'))) {
+        throw "Phase B marker is not published: $([IO.Path]::GetFileName($Path))"
+    }
+    if (-not [IO.File]::Exists($Path)) {
+        throw 'Phase B marker readiness exists without data.'
+    }
+    try { $record=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable }
+    catch { throw 'Phase B published marker JSON is malformed.' }
+    if ($null -eq $record -or $record.schema -cne 'dark180-phase-b-marker-v2' -or
+        $record.scope -cne [IO.Path]::GetDirectoryName($Path) -or
+        $record.marker -cne [IO.Path]::GetFileName($Path) -or
+        -not $record.Contains('value') -or $null -eq $record.value) {
+        throw 'Phase B published marker scope, name or value differs.'
+    }
+    return $record.value
+}
+function Test-MarkerReady([string]$Path) {
+    if (-not [IO.File]::Exists(($Path + '.ready'))) { return $false }
+    $null=Read-Marker $Path
+    return $true
 }
 function Wait-Marker([string]$Path,[int]$Milliseconds) {
     $clock=[Diagnostics.Stopwatch]::StartNew()
-    while (-not [IO.File]::Exists($Path)) {
+    while (-not (Test-MarkerReady $Path)) {
         if ($clock.ElapsedMilliseconds -ge $Milliseconds) { throw "Phase B marker unavailable: $([IO.Path]::GetFileName($Path))" }
         Start-Sleep -Milliseconds 50
     }
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    return Read-Marker $Path
 }
 function Wait-ActorBarrier([string]$Path,[int]$Milliseconds) {
     $clock=[Diagnostics.Stopwatch]::StartNew()
-    while (-not [IO.File]::Exists($Path)) {
-        if ([IO.File]::Exists((Join-Path $Scope 'actor-cancel.json'))) { return $false }
+    while (-not (Test-MarkerReady $Path)) {
+        if (Test-MarkerReady (Join-Path $Scope 'actor-cancel.json')) { return $false }
         if ($clock.ElapsedMilliseconds -ge $Milliseconds) {
             throw "Phase B actor barrier unavailable: $([IO.Path]::GetFileName($Path))"
         }
@@ -664,12 +688,12 @@ try {
         try {
             $activeActor=Start-OwnedChild 'observer-actor' $name $scope $nonce
             $actorCount++
-            while (-not [IO.File]::Exists((Join-Path $scope 'actor-ready.json'))) {
+            while (-not (Test-MarkerReady (Join-Path $scope 'actor-ready.json'))) {
                 if ($activeActor.process.HasExited) { throw 'Phase B actor exited before independent freeze.' }
                 if ($trialClock.Elapsed.TotalSeconds -ge 15) { throw 'Phase B actor preparation exceeded 15 seconds.' }
                 Start-Sleep -Milliseconds 50
             }
-            $ready=Get-Content -LiteralPath (Join-Path $scope 'actor-ready.json') -Raw | ConvertFrom-Json -AsHashtable
+            $ready=Read-Marker (Join-Path $scope 'actor-ready.json')
             if ($ready.trial -cne $name -or $ready.source.commit -cne $source.commit) {
                 throw 'Phase B actor readiness is not bound to this trial/source.'
             }
@@ -680,18 +704,17 @@ try {
             while (-not $activeCandidate.process.HasExited) {
                 if ($trialClock.Elapsed.TotalSeconds -ge 15) { throw 'Phase B active trial exceeded 15 seconds.' }
                 if ($name -eq 'B4' -and -not $goWritten -and
-                    [IO.File]::Exists((Join-Path $scope 'candidate-acquired.json'))) {
+                    (Test-MarkerReady (Join-Path $scope 'candidate-acquired.json'))) {
                     Write-Marker (Join-Path $scope 'actor-go.json') ([ordered]@{phase='post-acquisition';trial=$name})
                     $goWritten=$true
                 }
                 if ($name -eq 'B6' -and -not $goWritten -and
-                    [IO.File]::Exists((Join-Path $scope 'candidate-barrier.json'))) {
+                    (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
                     Write-Marker (Join-Path $scope 'actor-go.json') ([ordered]@{phase='post-last-close';trial=$name})
                     $goWritten=$true
                 }
-                if ($name -eq 'B7' -and [IO.File]::Exists((Join-Path $scope 'candidate-barrier.json'))) {
-                    $row.barrier=Get-Content -LiteralPath (Join-Path $scope 'candidate-barrier.json') -Raw |
-                        ConvertFrom-Json -AsHashtable
+                if ($name -eq 'B7' -and (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
+                    $row.barrier=Read-Marker (Join-Path $scope 'candidate-barrier.json')
                     if ($row.barrier.trial -cne 'B7' -or
                         $row.barrier.state -cne 'staged' -or
                         $row.barrier.stage_calls -lt 2 -or
@@ -714,12 +737,11 @@ try {
                 throw 'Phase B B7 owned candidate death could not be confirmed.'
             }
             if ($name -in @('B2','B6') -and
-                [IO.File]::Exists((Join-Path $scope 'candidate-barrier.json'))) {
-                $row.barrier=Get-Content -LiteralPath (Join-Path $scope 'candidate-barrier.json') -Raw |
-                    ConvertFrom-Json -AsHashtable
+                (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
+                $row.barrier=Read-Marker (Join-Path $scope 'candidate-barrier.json')
             }
             if ($name -in @('B2','B4','B6') -and -not $goWritten -and
-                -not [IO.File]::Exists((Join-Path $scope 'candidate-barrier.json'))) {
+                -not (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
                 Write-Marker (Join-Path $scope 'actor-cancel.json') ([ordered]@{reason='candidate-rejected-before-barrier'})
             }
             Write-Marker (Join-Path $scope 'candidate-done.json') ([ordered]@{trial=$name;
