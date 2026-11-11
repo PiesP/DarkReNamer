@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
@@ -24,6 +25,28 @@ public static class DarkPhaseBFixtureActors {
         [MarshalAs(UnmanagedType.Bool)] out bool present,out IntPtr dacl,
         [MarshalAs(UnmanagedType.Bool)] out bool defaulted);
     [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetSecurityDescriptorOwner(IntPtr descriptor,out IntPtr owner,
+        [MarshalAs(UnmanagedType.Bool)] out bool defaulted);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetSecurityDescriptorGroup(IntPtr descriptor,out IntPtr group,
+        [MarshalAs(UnmanagedType.Bool)] out bool defaulted);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetSecurityDescriptorControl(IntPtr descriptor,
+        out ushort control,out uint revision);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool IsValidSid(IntPtr sid);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern uint GetLengthSid(IntPtr sid);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetAclInformation(IntPtr acl,IntPtr information,uint length,int kind);
+    [DllImport("advapi32.dll", SetLastError=true)]
     static extern uint SetSecurityInfo(SafeFileHandle file,int objectType,uint requested,
         IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
     [DllImport("advapi32.dll", SetLastError=true)]
@@ -35,6 +58,8 @@ public static class DarkPhaseBFixtureActors {
         IntPtr descriptor,uint revision,uint information,out IntPtr output,out uint length);
     [DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern UIntPtr LocalSize(IntPtr memory);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool WriteFile(SafeFileHandle file,byte[] bytes,uint size,
         out uint written,IntPtr overlapped);
@@ -116,6 +141,177 @@ public static class DarkPhaseBFixtureActors {
         public bool Changed {get;set;}
         public string Before {get;set;}
         public string After {get;set;}
+    }
+    public sealed class NativeDaclProjection {
+        public bool Present {get;set;}
+        public bool Defaulted {get;set;}
+        public bool Null {get;set;}
+        public int AllocationBytes {get;set;}
+        public int UsedBytes {get;set;}
+        public int FreeBytes {get;set;}
+        public int AceCount {get;set;}
+        public string UsedSha256 {get;set;}
+    }
+    public sealed class NativeDescriptorSnapshot {
+        public string Sddl {get;set;}
+        public bool ComponentsObserved {get;set;}
+        public int ComponentsError {get;set;}
+        public string ComponentsException {get;set;}
+        public int OwnerSidBytes {get;set;}
+        public string OwnerSidSha256 {get;set;}
+        public int GroupSidBytes {get;set;}
+        public string GroupSidSha256 {get;set;}
+        public int ControlWord {get;set;}
+        public int ControlRevision {get;set;}
+        public NativeDaclProjection Dacl {get;set;}
+    }
+    static bool CompleteNativeSnapshot(NativeDescriptorSnapshot value) {
+        if (value==null || !value.ComponentsObserved || value.ComponentsError!=0 ||
+            value.ComponentsException!=null || String.IsNullOrEmpty(value.Sddl) ||
+            value.OwnerSidBytes<8 || value.OwnerSidBytes>68 ||
+            String.IsNullOrEmpty(value.OwnerSidSha256) ||
+            value.GroupSidBytes<8 || value.GroupSidBytes>68 ||
+            String.IsNullOrEmpty(value.GroupSidSha256) ||
+            value.ControlRevision!=1 || (value.ControlWord&0x00c0)!=0 || value.Dacl==null ||
+            !value.Dacl.Present || value.Dacl.Null ||
+            (((value.ControlWord&4)!=0)!=value.Dacl.Present) ||
+            (((value.ControlWord&8)!=0)!=value.Dacl.Defaulted) ||
+            value.Dacl.AllocationBytes<8 || value.Dacl.AllocationBytes>65535 ||
+            value.Dacl.UsedBytes<8 || value.Dacl.UsedBytes>value.Dacl.AllocationBytes ||
+            value.Dacl.FreeBytes<0 ||
+            (long)value.Dacl.UsedBytes+value.Dacl.FreeBytes>value.Dacl.AllocationBytes ||
+            value.Dacl.AceCount<0 || value.Dacl.AceCount>(value.Dacl.UsedBytes-8)/4 ||
+            String.IsNullOrEmpty(value.Dacl.UsedSha256)) return false;
+        return true;
+    }
+    // This is the support actor's gate before its one authorized DACL write.
+    public static bool CanAttemptSupportSet(NativeDescriptorSnapshot observed,
+        NativeDescriptorSnapshot frozen) {
+        if (!CompleteNativeSnapshot(observed) || !CompleteNativeSnapshot(frozen)) return false;
+        NativeDaclProjection actual=observed.Dacl,expected=frozen.Dacl;
+        return String.Equals(observed.Sddl,frozen.Sddl,StringComparison.Ordinal) &&
+            observed.OwnerSidBytes==frozen.OwnerSidBytes &&
+            String.Equals(observed.OwnerSidSha256,frozen.OwnerSidSha256,StringComparison.Ordinal) &&
+            observed.GroupSidBytes==frozen.GroupSidBytes &&
+            String.Equals(observed.GroupSidSha256,frozen.GroupSidSha256,StringComparison.Ordinal) &&
+            observed.ControlRevision==frozen.ControlRevision &&
+            (observed.ControlWord&0x150f)==(frozen.ControlWord&0x150f) &&
+            actual.Present==expected.Present && actual.Defaulted==expected.Defaulted &&
+            actual.Null==expected.Null && actual.AllocationBytes==expected.AllocationBytes &&
+            actual.UsedBytes==expected.UsedBytes && actual.FreeBytes==expected.FreeBytes &&
+            actual.AceCount==expected.AceCount &&
+            String.Equals(actual.UsedSha256,expected.UsedSha256,StringComparison.Ordinal);
+    }
+    static string Sha256(byte[] bytes) {
+        return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+    static long Remaining(IntPtr descriptor,int length,IntPtr component,int minimum) {
+        long offset=component.ToInt64()-descriptor.ToInt64();
+        if (component==IntPtr.Zero || offset<0 || offset>length-minimum)
+            throw new InvalidOperationException("B6L native security component lies outside its descriptor.");
+        return length-offset;
+    }
+    static string ReadSid(IntPtr descriptor,int length,IntPtr sid,out int sidBytes) {
+        long remaining=Remaining(descriptor,length,sid,8);
+        int expected=8+4*Marshal.ReadByte(sid,1);
+        if (expected>68 || expected>remaining)
+            throw new InvalidOperationException("B6L native SID header exceeds its bounded descriptor.");
+        if (!IsValidSid(sid))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),"B6L native SID is invalid.");
+        uint count=GetLengthSid(sid);
+        if (count!=(uint)expected)
+            throw new InvalidOperationException("B6L native SID length exceeds its bounded descriptor.");
+        sidBytes=(int)count;
+        byte[] bytes=new byte[sidBytes];
+        Marshal.Copy(sid,bytes,0,sidBytes);
+        return Sha256(bytes);
+    }
+    static NativeDaclProjection ReadDacl(IntPtr descriptor,int length,IntPtr dacl,
+        bool present,bool defaulted) {
+        NativeDaclProjection result=new NativeDaclProjection {
+            Present=present,Defaulted=defaulted,Null=dacl==IntPtr.Zero };
+        if (!present || dacl==IntPtr.Zero) return result;
+        long remaining=Remaining(descriptor,length,dacl,8);
+        int allocation=(ushort)Marshal.ReadInt16(dacl,2);
+        if (allocation<8 || allocation>65535 || allocation>remaining)
+            throw new InvalidOperationException("B6L native ACL allocation exceeds its descriptor.");
+        IntPtr details=Marshal.AllocHGlobal(12);
+        try {
+            if (!GetAclInformation(dacl,details,12,2))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),"B6L native ACL size query failed.");
+            uint aceCount=unchecked((uint)Marshal.ReadInt32(details,0));
+            uint used=unchecked((uint)Marshal.ReadInt32(details,4));
+            uint free=unchecked((uint)Marshal.ReadInt32(details,8));
+            if (used<8 || used>allocation || (ulong)used+free>(uint)allocation ||
+                aceCount>(used-8)/4)
+                throw new InvalidOperationException("B6L native ACL used/free/ACE count is outside allocation.");
+            byte[] bytes=new byte[used];
+            Marshal.Copy(dacl,bytes,0,(int)used);
+            result.AllocationBytes=allocation;result.UsedBytes=(int)used;
+            result.FreeBytes=(int)free;result.AceCount=(int)aceCount;
+            result.UsedSha256=Sha256(bytes);
+            return result;
+        } finally { Marshal.FreeHGlobal(details); }
+    }
+    static NativeDescriptorSnapshot ReadDescriptor(IntPtr descriptor,int actualLength) {
+        if (descriptor==IntPtr.Zero || actualLength<20)
+            throw new InvalidOperationException("B6L native descriptor buffer is unavailable.");
+        uint reported=GetSecurityDescriptorLength(descriptor);
+        if (reported<20 || reported>65535 || reported>actualLength)
+            throw new InvalidOperationException("B6L native descriptor length is outside its bounded buffer.");
+        int length=(int)reported;
+        NativeDescriptorSnapshot result=new NativeDescriptorSnapshot();
+        IntPtr text=IntPtr.Zero;
+        try {
+            uint textLength;
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor,1,7,
+                    out text,out textLength))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "B6L native descriptor SDDL conversion failed.");
+            result.Sddl=Marshal.PtrToStringUni(text);
+            if (result.Sddl==null)
+                throw new InvalidOperationException("B6L native descriptor SDDL is absent.");
+        } finally { if (text!=IntPtr.Zero) LocalFree(text); }
+        try {
+            IntPtr owner,group,dacl;
+            bool ownerDefaulted,groupDefaulted,present,daclDefaulted;
+            ushort control;uint revision;
+            if (!GetSecurityDescriptorOwner(descriptor,out owner,out ownerDefaulted) ||
+                !GetSecurityDescriptorGroup(descriptor,out group,out groupDefaulted) ||
+                !GetSecurityDescriptorDacl(descriptor,out present,out dacl,out daclDefaulted) ||
+                !GetSecurityDescriptorControl(descriptor,out control,out revision))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),"B6L native descriptor query failed.");
+            if (((control&0x0001)!=0)!=ownerDefaulted ||
+                ((control&0x0002)!=0)!=groupDefaulted ||
+                ((control&0x0004)!=0)!=present ||
+                ((control&0x0008)!=0)!=daclDefaulted)
+                throw new InvalidOperationException("B6L native descriptor control disagrees with its components.");
+            result.OwnerSidSha256=ReadSid(descriptor,length,owner,out int ownerBytes);
+            result.OwnerSidBytes=ownerBytes;
+            result.GroupSidSha256=ReadSid(descriptor,length,group,out int groupBytes);
+            result.GroupSidBytes=groupBytes;
+            result.ControlWord=control;result.ControlRevision=(int)revision;
+            result.Dacl=ReadDacl(descriptor,length,dacl,present,daclDefaulted);
+            result.ComponentsObserved=true;
+        } catch (Exception failure) {
+            Win32Exception native=failure as Win32Exception;
+            result.ComponentsError=native==null ? -1 : native.NativeErrorCode;
+            result.ComponentsException=failure.GetType().FullName+": "+failure.Message;
+        }
+        return result;
+    }
+    static NativeDescriptorSnapshot HeldSnapshot(SafeFileHandle held) {
+        IntPtr owner,group,dacl,sacl,descriptor;
+        uint error=GetSecurityInfo(held,1,7,out owner,out group,out dacl,out sacl,
+            out descriptor);
+        if (error!=0) throw new Win32Exception((int)error,"B6L held descriptor readback failed.");
+        try {
+            ulong allocated=descriptor==IntPtr.Zero ? 0 : LocalSize(descriptor).ToUInt64();
+            if (allocated<20 || allocated>Int32.MaxValue)
+                throw new InvalidOperationException("B6L held descriptor allocation is unavailable.");
+            return ReadDescriptor(descriptor,(int)allocated);
+        }
+        finally { if (descriptor!=IntPtr.Zero) LocalFree(descriptor); }
     }
     static string HeldSddl(SafeFileHandle held) {
         IntPtr owner,group,dacl,sacl,descriptor;
@@ -264,6 +460,7 @@ public static class DarkPhaseBFixtureActors {
         public int BeforeError {get;set;}
         public string BeforeException {get;set;}
         public string BeforeSddl {get;set;}
+        public NativeDescriptorSnapshot BeforeNative {get;set;}
         public bool SetAttempted {get;set;}
         public int SetError {get;set;}
         public string SetException {get;set;}
@@ -271,6 +468,7 @@ public static class DarkPhaseBFixtureActors {
         public int AfterError {get;set;}
         public string AfterException {get;set;}
         public string AfterSddl {get;set;}
+        public NativeDescriptorSnapshot AfterNative {get;set;}
         public NativeCloseReceipt Close {get;set;}
     }
     public sealed class LateDaclCapability {
@@ -278,17 +476,22 @@ public static class DarkPhaseBFixtureActors {
         readonly string path,originalId,baselineSddl,proposedSddl;
         readonly NativeCloseReceipt preparationClose;
         readonly byte[] proposedDescriptor;
+        readonly NativeDescriptorSnapshot baselineNative,proposedNative;
         SafeFileHandle lateHandle;
         bool lateAttempted,supportAttempted,lateCloseDone,lateCloseConfirmed;
         internal LateDaclCapability(string approvedPath,string id,string baseline,
-            string expectedProposed,byte[] proposed,NativeCloseReceipt close) {
+            string expectedProposed,byte[] proposed,NativeDescriptorSnapshot nativeBaseline,
+            NativeDescriptorSnapshot nativeProposed,NativeCloseReceipt close) {
             path=approvedPath;originalId=id;baselineSddl=baseline;
             proposedSddl=expectedProposed;proposedDescriptor=proposed;
+            baselineNative=nativeBaseline;proposedNative=nativeProposed;
             preparationClose=close;
         }
         public string OriginalId {get{return originalId;}}
         public string BaselineSddl {get{return baselineSddl;}}
         public string ProposedSddl {get{return proposedSddl;}}
+        public NativeDescriptorSnapshot BaselineNative {get{return baselineNative;}}
+        public NativeDescriptorSnapshot ProposedNative {get{return proposedNative;}}
         public NativeCloseReceipt PreparationClose {get{return preparationClose;}}
         static void TryIdentity(SafeFileHandle handle,string expected,LateDaclProbeResult result) {
             try {
@@ -299,11 +502,16 @@ public static class DarkPhaseBFixtureActors {
                 result.IdentityException=failure.GetType().FullName+": "+failure.Message;
             }
         }
-        static void TrySddl(SafeFileHandle handle,bool before,LateDaclProbeResult result) {
+        static void TrySnapshot(SafeFileHandle handle,bool before,LateDaclProbeResult result) {
             try {
-                string sddl=HeldSddl(handle);
-                if (before) { result.BeforeObserved=true;result.BeforeSddl=sddl; }
-                else { result.AfterObserved=true;result.AfterSddl=sddl; }
+                NativeDescriptorSnapshot snapshot=HeldSnapshot(handle);
+                if (before) {
+                    result.BeforeObserved=true;result.BeforeSddl=snapshot.Sddl;
+                    result.BeforeNative=snapshot;
+                } else {
+                    result.AfterObserved=true;result.AfterSddl=snapshot.Sddl;
+                    result.AfterNative=snapshot;
+                }
             } catch (Exception failure) {
                 if (before) {
                     result.BeforeError=NativeCode(failure);
@@ -328,10 +536,10 @@ public static class DarkPhaseBFixtureActors {
             try {
                 TryIdentity(opened,originalId,result);
                 if (!result.IdentityObserved || !result.IdentityMatches) return result;
-                TrySddl(opened,true,result);
-                if ((result.BeforeObserved &&
+                TrySnapshot(opened,true,result);
+                if ((retainHandle && result.BeforeObserved &&
                         !String.Equals(result.BeforeSddl,baselineSddl,StringComparison.Ordinal)) ||
-                    (!retainHandle && !result.BeforeObserved))
+                    (!retainHandle && !CanAttemptSupportSet(result.BeforeNative,baselineNative)))
                     return result;
                 GCHandle pin=GCHandle.Alloc(proposedDescriptor,GCHandleType.Pinned);
                 try {
@@ -350,7 +558,7 @@ public static class DarkPhaseBFixtureActors {
                         }
                     }
                 } finally { pin.Free(); }
-                TrySddl(opened,false,result);
+                TrySnapshot(opened,false,result);
                 return result;
             } finally {
                 if (!retainHandle) result.Close=CloseOnce(ref opened);
@@ -402,16 +610,25 @@ public static class DarkPhaseBFixtureActors {
             if (prep!=null) prep.Dispose();
             throw new Win32Exception(error,"B6L preparation identity open failed.");
         }
-        string observed=null;Exception primary=null;
-        try { observed=FileIdentity(prep);if (HeldSddl(prep)!=baselineSddl)
-            throw new InvalidOperationException("B6L preparation security differs across handles."); }
+        string observed=null;NativeDescriptorSnapshot baselineNative=null;Exception primary=null;
+        try {
+            observed=FileIdentity(prep);
+            baselineNative=HeldSnapshot(prep);
+            if (baselineNative.Sddl!=baselineSddl)
+                throw new InvalidOperationException("B6L preparation security differs across handles.");
+        }
         catch (Exception failure) {primary=failure;}
         NativeCloseReceipt close=CloseOnce(ref prep);
         if (!close.Confirmed) throw new InvalidOperationException("B6L preparation close is unknown.");
         if (primary!=null) throw primary;
         if (!String.Equals(observed,expectedFileId,StringComparison.Ordinal))
             throw new InvalidOperationException("B6L preparation FileID differs from independent freeze.");
+        byte[] proposedBytes=proposed.GetSecurityDescriptorBinaryForm();
+        NativeDescriptorSnapshot proposedNative;
+        GCHandle proposedPin=GCHandle.Alloc(proposedBytes,GCHandleType.Pinned);
+        try { proposedNative=ReadDescriptor(proposedPin.AddrOfPinnedObject(),proposedBytes.Length); }
+        finally { proposedPin.Free(); }
         return new LateDaclCapability(path,observed,baselineSddl,proposedSddl,
-            proposed.GetSecurityDescriptorBinaryForm(),close);
+            proposedBytes,baselineNative,proposedNative,close);
     }
 }

@@ -6,6 +6,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot '../../modules/powershell/controller-owned-root-guard.ps1')
 Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-observer.cs') -ErrorAction Stop
+Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-actors.cs') -ErrorAction Stop
 $candidate=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]
 
 function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
@@ -129,10 +130,12 @@ $tokens=$null;$parseErrors=$null
 $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
     [ref]$tokens,[ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
-foreach ($name in @('Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
+foreach ($name in @('Hash-Text','Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
         'Get-ExactOpenWriterRefusalCode','Complete-OwnedChild','Observe-OwnedChildClosure',
-        'Read-WorkerRecord','Assert-PhaseB6LReceipt','Assert-PhaseBTrialReceipt')) {
+        'Read-WorkerRecord','Convert-NativeDescriptor','Test-NativeDescriptorComplete',
+        'Test-NativeDescriptorBaseline','Test-NativeDaclSupport','Assert-PhaseB6LReceipt',
+        'Assert-PhaseBTrialReceipt')) {
     $definition=$fixtureAst.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $name},$true)
@@ -254,7 +257,110 @@ $b6=$early | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
 $b6.trial='B6L';$b6.actor_receipt.trial='B6L';$b6.candidate_receipt.trial='B6L'
 $b6.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
 $baselineOwner='a'*64;$baselineSddl='b'*64;$afterSupport='c'*64
+$proposedSddl='f'*64
 $rootOwner='d'*64;$rootSddl='e'*64
+$nativeBaseline=[ordered]@{sddl_sha256=$baselineSddl;
+    components_observed=$true;components_error=0;components_exception=$null;
+    owner_sid_bytes=12;owner_sid_sha256='1'*64;
+    group_sid_bytes=12;group_sid_sha256='2'*64;
+    control_word=0x1004;control_revision=1;
+    dacl=[ordered]@{present=$true;defaulted=$false;null=$false;
+        allocation_bytes=32;used_bytes=20;free_bytes=12;ace_count=1;
+        used_sha256='3'*64}}
+$nativeProposed=$nativeBaseline | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
+$nativeProposed.sddl_sha256='6'*64
+$nativeProposed.dacl.used_bytes=24;$nativeProposed.dacl.free_bytes=8
+$nativeProposed.dacl.ace_count=2;$nativeProposed.dacl.used_sha256='4'*64
+$nativeAfter=$nativeProposed | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
+$nativeAfter.sddl_sha256=$afterSupport
+$nativeAfter.control_word=0x1104
+function New-GateSnapshot {
+    $value=[DarkPhaseBFixtureActors+NativeDescriptorSnapshot]::new()
+    $value.Sddl='O:SYG:SYD:(A;;FA;;;SY)'
+    $value.ComponentsObserved=$true
+    $value.OwnerSidBytes=12;$value.OwnerSidSha256='1'*64
+    $value.GroupSidBytes=12;$value.GroupSidSha256='2'*64
+    $value.ControlWord=0x1004;$value.ControlRevision=1
+    $value.Dacl=[DarkPhaseBFixtureActors+NativeDaclProjection]::new()
+    $value.Dacl.Present=$true;$value.Dacl.AllocationBytes=32
+    $value.Dacl.UsedBytes=20;$value.Dacl.FreeBytes=12
+    $value.Dacl.AceCount=1;$value.Dacl.UsedSha256='3'*64
+    return $value
+}
+$gateFrozen=New-GateSnapshot
+if (-not [DarkPhaseBFixtureActors]::CanAttemptSupportSet(
+        (New-GateSnapshot),$gateFrozen)) {
+    throw 'Actual support pre-Set gate rejected a complete matching native snapshot.'
+}
+foreach ($change in @('missing','components-failed','sddl','owner','group','control',
+        'reserved-control',
+        'allocation','used','free','ace','acl-hash','size-overflow')) {
+    $gateActual=New-GateSnapshot
+    switch ($change) {
+        'missing' { $gateActual=$null }
+        'components-failed' { $gateActual.ComponentsObserved=$false;
+            $gateActual.ComponentsError=-1;$gateActual.ComponentsException='ACL extraction failed' }
+        'sddl' { $gateActual.Sddl='O:SYG:SYD:' }
+        'owner' { $gateActual.OwnerSidSha256='4'*64 }
+        'group' { $gateActual.GroupSidSha256='4'*64 }
+        'control' { $gateActual.ControlWord=$gateActual.ControlWord -bxor 0x1000 }
+        'reserved-control' { $gateActual.ControlWord=$gateActual.ControlWord -bor 0x0040 }
+        'allocation' { $gateActual.Dacl.AllocationBytes=33 }
+        'used' { $gateActual.Dacl.UsedBytes=21 }
+        'free' { $gateActual.Dacl.FreeBytes=11 }
+        'ace' { $gateActual.Dacl.AceCount=2 }
+        'acl-hash' { $gateActual.Dacl.UsedSha256='4'*64 }
+        'size-overflow' { $gateActual.Dacl.FreeBytes=[int]::MaxValue }
+    }
+    if ([DarkPhaseBFixtureActors]::CanAttemptSupportSet($gateActual,$gateFrozen)) {
+        throw "Actual support pre-Set gate admitted $change."
+    }
+}
+$partial=[DarkPhaseBFixtureActors+NativeDescriptorSnapshot]::new()
+$partial.Sddl='O:SYG:SYD:'
+$partial.ComponentsObserved=$false
+$partial.ComponentsError=-1
+$partial.ComponentsException='bounded ACL component unavailable'
+$convertedPartial=Convert-NativeDescriptor $partial
+if ($convertedPartial.sddl_sha256 -cne (Hash-Text $partial.Sddl) -or
+    $convertedPartial.components_observed -or $null -ne $convertedPartial.dacl -or
+    (Test-NativeDescriptorComplete $convertedPartial) -or
+    (($convertedPartial | ConvertTo-Json -Depth 8 -Compress).Contains($partial.Sddl))) {
+    throw 'Failed native component extraction erased an observed SDDL or appeared complete.'
+}
+if (-not (Test-NativeDaclSupport $nativeBaseline $nativeProposed $nativeAfter)) {
+    throw 'Actual native-component predicate rejected the scoped positive SDDL mismatch.'
+}
+foreach ($change in @('used-bytes','ace-count','dacl-hash','owner-hash','group-length',
+        'protection','defaulted','missing-present','missing-snapshot','unapproved-control',
+        'allocation-overrun','free-overrun','same-dacl','revision','components-unknown',
+        'reserved-control')) {
+    $bad=$nativeAfter | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
+    switch ($change) {
+        'used-bytes' { $bad.dacl.used_bytes=23 }
+        'ace-count' { $bad.dacl.ace_count=1 }
+        'dacl-hash' { $bad.dacl.used_sha256='5'*64 }
+        'owner-hash' { $bad.owner_sid_sha256='5'*64 }
+        'group-length' { $bad.group_sid_bytes=13 }
+        'protection' { $bad.control_word=$bad.control_word -bxor 0x1000 }
+        'defaulted' { $bad.dacl.defaulted=$true;$bad.control_word=$bad.control_word -bor 0x0008 }
+        'missing-present' { $bad.dacl.present=$false;$bad.control_word=$bad.control_word -band (-bnot 0x0004) }
+        'missing-snapshot' { $bad=$null }
+        'unapproved-control' { $bad.control_word=$bad.control_word -bxor 0x0001 }
+        'allocation-overrun' { $bad.dacl.allocation_bytes=22 }
+        'free-overrun' { $bad.dacl.free_bytes=32 }
+        'same-dacl' { $bad.dacl.used_bytes=$nativeBaseline.dacl.used_bytes;
+            $bad.dacl.ace_count=$nativeBaseline.dacl.ace_count;
+            $bad.dacl.used_sha256=$nativeBaseline.dacl.used_sha256 }
+        'revision' { $bad.control_revision=2 }
+        'components-unknown' { $bad.components_observed=$false;
+            $bad.components_error=-1;$bad.components_exception='ACL extraction failed' }
+        'reserved-control' { $bad.control_word=$bad.control_word -bor 0x0040 }
+    }
+    if (Test-NativeDaclSupport $nativeBaseline $nativeProposed $bad) {
+        throw "Actual native-component predicate accepted $change."
+    }
+}
 $b6.actor_receipt.postproof.approved_security=[ordered]@{
     owner_sha256=$baselineOwner;sddl_sha256=$afterSupport}
 $b6.actor_receipt.postproof.root_security=[ordered]@{
@@ -271,20 +377,23 @@ $lateDenied=[ordered]@{open_admitted=$false;open_error=6800;
     identity_observed=$false;identity_error=0;identity_exception=$null;file_id=$null;
     set_attempted=$false;set_error=0;set_exception=$null;
     before_observed=$false;before_error=0;before_exception=$null;before_sha256=$null;
-    after_observed=$false;after_error=0;after_exception=$null;after_sha256=$null}
+    before_native=$null;
+    after_observed=$false;after_error=0;after_exception=$null;after_sha256=$null;
+    after_native=$null}
 $supportPositive=[ordered]@{open_admitted=$true;open_error=0;
     identity_observed=$true;identity_error=0;identity_exception=$null;
     identity_matches=$true;file_id=$frozenFile;
     before_observed=$true;before_error=0;before_exception=$null;
-    before_sha256=$baselineSddl;
+    before_sha256=$baselineSddl;before_native=$nativeBaseline;
     set_attempted=$true;set_error=0;set_exception=$null;
     after_observed=$true;after_error=0;after_exception=$null;
-    after_sha256=$afterSupport;
+    after_sha256=$afterSupport;after_native=$nativeAfter;
     close=[ordered]@{Attempted=$true;Confirmed=$true;NativeError=0;
         ExceptionType=$null;ExceptionMessage=$null}}
 $b6.actor_receipt.events=@($b6.actor_receipt.events[0],
     [ordered]@{phase='B6L-prepared-no-held-handle';approved_id=$frozenFile;
-        proposed_sddl_sha256=$afterSupport;
+        proposed_sddl_sha256=$proposedSddl;
+        baseline_native=$nativeBaseline;proposed_native=$nativeProposed;
         preparation_close=[ordered]@{Attempted=$true;Confirmed=$true;
             NativeError=0;ExceptionType=$null};
         requested_access='READ_CONTROL|WRITE_DAC|WRITE_OWNER';share='READ|WRITE|DELETE';
@@ -311,10 +420,10 @@ $b6WriteRefused.actor_receipt.events[2].data=[ordered]@{
     open_admitted=$true;open_error=0;identity_observed=$true;identity_error=0;
     identity_exception=$null;identity_matches=$true;
     file_id=$frozenFile;before_observed=$true;before_error=0;
-    before_exception=$null;before_sha256=$baselineSddl;
+    before_exception=$null;before_sha256=$baselineSddl;before_native=$nativeBaseline;
     set_attempted=$true;set_error=32;set_exception=$null;
     after_observed=$true;after_error=0;after_exception=$null;
-    after_sha256=$baselineSddl}
+    after_sha256=$baselineSddl;after_native=$nativeBaseline}
 $b6WriteRefused.actor_receipt.events[3].data.Attempted=$true
 $b6WriteRefused.late_probe_marker.data=$b6WriteRefused.actor_receipt.events[2].data
 if ((Assert-PhaseBTrialReceipt $b6WriteRefused 'B6L' $sourceBinding) -cne
@@ -330,7 +439,8 @@ foreach ($change in @('wrong-file-id','late-set-succeeded','late-set-error-5',
         'late-open-error-6805','phase-mismatch','prep-close-unknown',
         'close-unknown','pre-support-bytes',
         'pre-support-dacl','set-exception','marker-mismatch',
-        'support-unchanged','proposed-mismatch',
+        'support-unchanged','support-native-owner','support-native-dacl',
+        'support-native-protection','support-native-missing',
         'owner-drift')) {
     $bad=$b6WriteRefused | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
     switch ($change) {
@@ -362,7 +472,10 @@ foreach ($change in @('wrong-file-id','late-set-succeeded','late-set-error-5',
         'set-exception' { $bad.actor_receipt.events[2].data.set_exception='managed throw' }
         'marker-mismatch' { $bad.late_probe_marker.data.open_error=5 }
         'support-unchanged' { $bad.actor_receipt.events[5].data.after_sha256=$baselineSddl }
-        'proposed-mismatch' { $bad.actor_receipt.events[1].proposed_sddl_sha256='0'*64 }
+        'support-native-owner' { $bad.actor_receipt.events[5].data.after_native.owner_sid_sha256='0'*64 }
+        'support-native-dacl' { $bad.actor_receipt.events[5].data.after_native.dacl.used_sha256='0'*64 }
+        'support-native-protection' { $bad.actor_receipt.events[5].data.after_native.control_word=4 }
+        'support-native-missing' { $bad.actor_receipt.events[5].data.after_native=$null }
         'owner-drift' { $bad.actor_receipt.postproof.approved_security.owner_sha256='0'*64 }
     }
     $rejected=$false

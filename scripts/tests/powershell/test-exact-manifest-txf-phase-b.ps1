@@ -156,6 +156,93 @@ function Read-SecurityControl([string]$Path,[bool]$Directory=$false) {
     $sddl=$acl.GetSecurityDescriptorSddlForm($sections)
     return [ordered]@{owner_sha256=(Hash-Text $owner);sddl_sha256=(Hash-Text $sddl)}
 }
+function Convert-NativeDescriptor($Snapshot) {
+    if ($null -eq $Snapshot) { return $null }
+    $dacl=$null
+    if ($null -ne $Snapshot.Dacl) {
+        $dacl=[ordered]@{present=$Snapshot.Dacl.Present;
+            defaulted=$Snapshot.Dacl.Defaulted;null=$Snapshot.Dacl.Null;
+            allocation_bytes=$Snapshot.Dacl.AllocationBytes;
+            used_bytes=$Snapshot.Dacl.UsedBytes;free_bytes=$Snapshot.Dacl.FreeBytes;
+            ace_count=$Snapshot.Dacl.AceCount;used_sha256=$Snapshot.Dacl.UsedSha256}
+    }
+    return [ordered]@{sddl_sha256=(Hash-Text $Snapshot.Sddl);
+        components_observed=$Snapshot.ComponentsObserved;
+        components_error=$Snapshot.ComponentsError;
+        components_exception=$Snapshot.ComponentsException;
+        owner_sid_bytes=$Snapshot.OwnerSidBytes;owner_sid_sha256=$Snapshot.OwnerSidSha256;
+        group_sid_bytes=$Snapshot.GroupSidBytes;group_sid_sha256=$Snapshot.GroupSidSha256;
+        control_word=$Snapshot.ControlWord;control_revision=$Snapshot.ControlRevision;
+        dacl=$dacl}
+}
+function Test-NativeDescriptorComplete($Value) {
+    if ($null -eq $Value -or $null -eq $Value.dacl) { return $false }
+    if (-not $Value.components_observed -or $Value.components_error -ne 0 -or
+        $Value.components_exception -or
+        $Value.sddl_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Value.owner_sid_bytes -lt 8 -or $Value.owner_sid_bytes -gt 68 -or
+        $Value.owner_sid_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Value.group_sid_bytes -lt 8 -or $Value.group_sid_bytes -gt 68 -or
+        $Value.group_sid_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Value.control_word -lt 0 -or $Value.control_word -gt 65535 -or
+        ($Value.control_word -band 0x00c0) -ne 0 -or
+        $Value.control_revision -ne 1 -or
+        -not $Value.dacl.present -or $Value.dacl.null -or
+        ((($Value.control_word -band 0x0004) -ne 0) -ne [bool]$Value.dacl.present) -or
+        ((($Value.control_word -band 0x0008) -ne 0) -ne [bool]$Value.dacl.defaulted) -or
+        $Value.dacl.allocation_bytes -lt 8 -or $Value.dacl.allocation_bytes -gt 65535 -or
+        $Value.dacl.used_bytes -lt 8 -or
+        $Value.dacl.used_bytes -gt $Value.dacl.allocation_bytes -or
+        $Value.dacl.free_bytes -lt 0 -or
+        ($Value.dacl.used_bytes+$Value.dacl.free_bytes) -gt $Value.dacl.allocation_bytes -or
+        $Value.dacl.ace_count -lt 0 -or
+        $Value.dacl.ace_count -gt [Math]::Floor(($Value.dacl.used_bytes-8)/4) -or
+        $Value.dacl.used_sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
+    return $true
+}
+function Test-NativeDescriptorBaseline($Actual,$Baseline) {
+    if (-not (Test-NativeDescriptorComplete $Actual) -or
+        -not (Test-NativeDescriptorComplete $Baseline)) { return $false }
+    foreach ($field in @('sddl_sha256','owner_sid_bytes','owner_sid_sha256','group_sid_bytes',
+            'group_sid_sha256','control_revision')) {
+        if ($Actual[$field] -cne $Baseline[$field]) { return $false }
+    }
+    if (($Actual.control_word -band 0x150f) -ne ($Baseline.control_word -band 0x150f)) {
+        return $false
+    }
+    foreach ($field in @('present','defaulted','null','allocation_bytes','used_bytes',
+            'free_bytes','ace_count','used_sha256')) {
+        if ($Actual.dacl[$field] -cne $Baseline.dacl[$field]) { return $false }
+    }
+    return $true
+}
+function Test-NativeDaclSupport($Before,$Expected,$After) {
+    if (-not (Test-NativeDescriptorComplete $Before) -or
+        -not (Test-NativeDescriptorComplete $After) -or
+        -not (Test-NativeDescriptorComplete $Expected)) { return $false }
+    if ($Before.owner_sid_bytes -ne $After.owner_sid_bytes -or
+        $Before.owner_sid_sha256 -cne $After.owner_sid_sha256 -or
+        $Before.group_sid_bytes -ne $After.group_sid_bytes -or
+        $Before.group_sid_sha256 -cne $After.group_sid_sha256 -or
+        $Before.control_revision -ne $After.control_revision -or
+        $After.dacl.defaulted -or -not $After.dacl.present -or $After.dacl.null) {
+        return $false
+    }
+    if ($After.dacl.used_bytes -ne $Expected.dacl.used_bytes -or
+        $After.dacl.ace_count -ne $Expected.dacl.ace_count -or
+        $After.dacl.used_sha256 -cne $Expected.dacl.used_sha256 -or
+        ($After.dacl.used_bytes -eq $Before.dacl.used_bytes -and
+         $After.dacl.ace_count -eq $Before.dacl.ace_count -and
+         $After.dacl.used_sha256 -ceq $Before.dacl.used_sha256)) { return $false }
+    $beforeProjection=$Before.control_word -band 0x150f
+    $afterProjection=$After.control_word -band 0x150f
+    if (($afterProjection -band 0x0004) -eq 0 -or
+        ($afterProjection -band 0x0008) -ne 0 -or
+        ((($beforeProjection -bxor $afterProjection) -band (-bnot 0x050c)) -ne 0)) {
+        return $false
+    }
+    return $true
+}
 function Convert-LateDaclResult($Result) {
     return [ordered]@{open_admitted=$Result.OpenAdmitted;open_error=$Result.OpenError;
         identity_observed=$Result.IdentityObserved;identity_error=$Result.IdentityError;
@@ -164,11 +251,13 @@ function Convert-LateDaclResult($Result) {
         before_observed=$Result.BeforeObserved;before_error=$Result.BeforeError;
         before_exception=$Result.BeforeException;
         before_sha256=$(if($Result.BeforeObserved){Hash-Text $Result.BeforeSddl}else{$null});
+        before_native=(Convert-NativeDescriptor $Result.BeforeNative);
         set_attempted=$Result.SetAttempted;set_error=$Result.SetError;
         set_exception=$Result.SetException;
         after_observed=$Result.AfterObserved;after_error=$Result.AfterError;
         after_exception=$Result.AfterException;
         after_sha256=$(if($Result.AfterObserved){Hash-Text $Result.AfterSddl}else{$null});
+        after_native=(Convert-NativeDescriptor $Result.AfterNative);
         close=$Result.Close}
 }
 function Path-State([string]$Path) {
@@ -346,9 +435,17 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                     $lateDaclCapability.OriginalId -cne $approvedFields[2]) {
                     throw 'B6L independent freeze differs from the no-held-handle preparation.'
                 }
+                $baselineNative=Convert-NativeDescriptor $lateDaclCapability.BaselineNative
+                $proposedNative=Convert-NativeDescriptor $lateDaclCapability.ProposedNative
+                if ($baselineNative.sddl_sha256 -cne $baselineControl.sddl_sha256 -or
+                    -not (Test-NativeDescriptorComplete $baselineNative) -or
+                    -not (Test-NativeDescriptorComplete $proposedNative)) {
+                    throw 'B6L bounded native preparation components are incomplete.'
+                }
                 $events.Add([ordered]@{phase='B6L-prepared-no-held-handle';
                     approved_id=$approvedFields[2];baseline=$baselineControl;
                     proposed_sddl_sha256=(Hash-Text $lateDaclCapability.ProposedSddl);
+                    baseline_native=$baselineNative;proposed_native=$proposedNative;
                     preparation_close=$lateDaclCapability.PreparationClose;
                     requested_access='READ_CONTROL|WRITE_DAC|WRITE_OWNER';share='READ|WRITE|DELETE';
                     disposition='OPEN_EXISTING|OPEN_REPARSE_POINT'})
@@ -427,10 +524,12 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                      $lateReceipt.identity_observed -and $lateReceipt.identity_matches -and
                      $lateReceipt.before_observed -and
                      $lateReceipt.before_sha256 -ceq $baselineControl.sddl_sha256 -and
+                     (Test-NativeDescriptorBaseline $lateReceipt.before_native $baselineNative) -and
                      $lateReceipt.set_attempted -and $null -eq $lateReceipt.set_exception -and
                      $lateReceipt.set_error -in @(32,6800) -and
                      $lateReceipt.after_observed -and
-                     $lateReceipt.after_sha256 -ceq $baselineControl.sddl_sha256)
+                     $lateReceipt.after_sha256 -ceq $baselineControl.sddl_sha256 -and
+                     (Test-NativeDescriptorBaseline $lateReceipt.after_native $baselineNative))
                 if ($baselineConfirmed -and $knownLateRefusal) {
                     $supportResult=$lateDaclCapability.AttemptSupport($true,$true)
                     $events.Add([ordered]@{phase='B6L-after-release-support-probe';
@@ -704,12 +803,19 @@ function Assert-PhaseB6LReceipt($Row,$Freeze) {
         $Row.late_probe_marker.data.file_id -cne $late[0].data.file_id -or
         $Row.late_probe_marker.data.set_attempted -ne $late[0].data.set_attempted -or
         $Row.late_probe_marker.data.set_error -ne $late[0].data.set_error -or
-        $Row.late_probe_marker.data.after_sha256 -cne $late[0].data.after_sha256) {
+        $Row.late_probe_marker.data.after_sha256 -cne $late[0].data.after_sha256 -or
+        ($Row.late_probe_marker.data.before_native | ConvertTo-Json -Depth 8 -Compress) -cne
+            ($late[0].data.before_native | ConvertTo-Json -Depth 8 -Compress) -or
+        ($Row.late_probe_marker.data.after_native | ConvertTo-Json -Depth 8 -Compress) -cne
+            ($late[0].data.after_native | ConvertTo-Json -Depth 8 -Compress)) {
         throw 'B6L independently published late operation differs from actor receipt.'
     }
     $baseline=$prepared[0].baseline
     if ($baseline.owner_sha256 -cne $Freeze.approved_security.owner_sha256 -or
-        $baseline.sddl_sha256 -cne $Freeze.approved_security.sddl_sha256) {
+        $baseline.sddl_sha256 -cne $Freeze.approved_security.sddl_sha256 -or
+        -not (Test-NativeDescriptorComplete $prepared[0].baseline_native) -or
+        -not (Test-NativeDescriptorComplete $prepared[0].proposed_native) -or
+        $prepared[0].baseline_native.sddl_sha256 -cne $baseline.sddl_sha256) {
         throw 'B6L prepared owner/DACL differs from independently frozen manifest.'
     }
     $original=[byte[]](9,18,27,36,45,54)
@@ -745,7 +851,8 @@ function Assert-PhaseB6LReceipt($Row,$Freeze) {
             $native.set_attempted -or $native.set_error -ne 0 -or $native.set_exception -or
             $native.before_observed -or $native.before_error -ne 0 -or
             $native.before_exception -or $native.after_observed -or
-            $native.after_error -ne 0 -or $native.after_exception) {
+            $native.after_error -ne 0 -or $native.after_exception -or
+            $null -ne $native.before_native -or $null -ne $native.after_native) {
             throw 'B6L late metadata open has an unsupported or ambiguous refusal.'
         }
         $refusal='late-metadata-open-refused-supported-gate1-unverified'
@@ -757,8 +864,10 @@ function Assert-PhaseB6LReceipt($Row,$Freeze) {
             -not $native.before_observed -or $native.before_error -ne 0 -or
             $native.before_exception -or
             $native.before_sha256 -cne $baseline.sddl_sha256 -or
+            -not (Test-NativeDescriptorBaseline $native.before_native $prepared[0].baseline_native) -or
             -not $native.set_attempted -or -not $native.after_observed -or
-            $native.after_error -ne 0 -or $native.after_exception) {
+            $native.after_error -ne 0 -or $native.after_exception -or
+            $native.after_sha256 -cne $native.after_native.sddl_sha256) {
             throw 'B6L late metadata identity or security observation is incomplete.'
         }
         if ($native.set_error -eq 0 -and
@@ -766,7 +875,8 @@ function Assert-PhaseB6LReceipt($Row,$Freeze) {
             throw 'B6L late DACL mutation succeeded inside the final-close interval.'
         }
         if ($native.set_exception -or $native.set_error -notin @(32,6800) -or
-            $native.after_sha256 -cne $baseline.sddl_sha256) {
+            $native.after_sha256 -cne $baseline.sddl_sha256 -or
+            -not (Test-NativeDescriptorBaseline $native.after_native $prepared[0].baseline_native)) {
             throw 'B6L late DACL SetSecurityInfo result is unsupported or changed.'
         }
         $refusal='late-dacl-write-refused-supported-gate1-unverified'
@@ -780,11 +890,14 @@ function Assert-PhaseB6LReceipt($Row,$Freeze) {
         -not $positive.before_observed -or $positive.before_error -ne 0 -or
         $positive.before_exception -or
         $positive.before_sha256 -cne $baseline.sddl_sha256 -or
+        -not (Test-NativeDescriptorBaseline $positive.before_native $prepared[0].baseline_native) -or
         -not $positive.set_attempted -or $positive.set_error -ne 0 -or
         $positive.set_exception -or -not $positive.after_observed -or
         $positive.after_error -ne 0 -or $positive.after_exception -or
         $positive.after_sha256 -ceq $positive.before_sha256 -or
-        $positive.after_sha256 -cne $prepared[0].proposed_sddl_sha256 -or
+        $positive.after_sha256 -cne $positive.after_native.sddl_sha256 -or
+        -not (Test-NativeDaclSupport $prepared[0].baseline_native `
+            $prepared[0].proposed_native $positive.after_native) -or
         $null -eq $positive.close -or -not $positive.close.Confirmed -or
         -not $positive.close.Attempted -or $positive.close.NativeError -ne 0 -or
         $positive.close.ExceptionType -or $positive.close.ExceptionMessage -or
