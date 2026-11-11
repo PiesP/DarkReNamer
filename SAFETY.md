@@ -1105,6 +1105,39 @@ refused at the GUI runner and authenticated controller while these proofs are
 missing; collection does not alter the original failed result or task-map
 rejection.
 
+The exact-set engine extraction preserves the existing fixture native access,
+sharing, identity checks, traversal limits and one-attempt close/rollback/commit
+state machine. The public fixture facade retains path/authority policy; the
+engine is private and no production authority issuer or retained-root entrypoint
+is added. This is a source separation, not a proof that the legacy production
+Delete path excludes every disallowed change.
+
+One native stream-inventory interpretation remains unqualified: the current
+`NoNamedStreams` guard accepts directory `ERROR_HANDLE_EOF` before testing the
+`GetFileInformationByHandleEx` success Boolean. The [Windows API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)
+describes successful FileStreamInfo calls with no streams; it does not establish
+that a failed call with the same error is a complete empty inventory. Existing
+fixture ADS refusals do not establish that missing return flag. This extraction
+does not change the branch or credit it as complete negative evidence; a focused
+native-return control and fail-closed correction remain separate work before
+full retained-root qualification.
+
+The optional run-scoped fixture layout admits only the exact profile-Temp
+batch/case GUID grammar. A new batch freezes source, VM, SID, parent/batch
+FileIDs and the bounded authority bytes/hash; controller and child checks reject
+stale or mismatched inputs before case creation, and the candidate revalidates
+before Stage/Commit inside the existing abort boundary. The original fixture
+factory remains separate and still refuses retained-root paths. This authority
+is disposable-fixture authority only.
+
+The fixture control plane assumes the maintained central VM lock and trusted,
+source-constrained diagnostic actors. Path/identity prechecks do not establish
+atomic namespace exclusion against a hostile process running as the same trusted
+user or administrator. Do not cite those checks as the missing retained-target
+exclusion proof. The legacy fixture inventory, original targets, ownership
+contract and full Gate 1/admission requirements remain unchanged. No source-only
+or synthetic binding control establishes selected-Windows execution.
+
 ### Owned-resource fixed-performance diagnostic
 
 The explicit `performance-sample-v2-owned-r3-` route applies the reviewed

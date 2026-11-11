@@ -6,6 +6,171 @@ $fixture=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-c.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($fixture,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Phase C fixture has PowerShell parse errors.' }
+$childDefinition=$ast.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Invoke-CChild'},$true)
+if($null -eq $childDefinition){throw 'Actual Phase C child initializer is missing.'}
+function Assert-FreshCProcessCommandBound([Diagnostics.ProcessStartInfo]$Start) {
+    [long]$length=$Start.FileName.Length+2
+    foreach($argument in $Start.ArgumentList){$length += $argument.Length+3}
+    if($length -ge 32767){throw 'Fresh Phase C process command exceeds Windows CreateProcessW bound.'}
+}
+$longStart=[Diagnostics.ProcessStartInfo]::new('pwsh.exe')
+$longStart.ArgumentList.Add(('x'*32768))
+$longRejected=$false
+try {Assert-FreshCProcessCommandBound $longStart}catch{$longRejected=$true}
+if(-not $longRejected){throw 'Oversized fresh Phase C command was admitted.'}
+$freshCode=@'
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$Mode='candidate';$Trial='C1';$BatchGuid='';$Scope=Join-Path ([IO.Path]::GetTempPath()) 'outside-exact-fixture'
+$RunsRootId='';$BatchRootId='';$BatchAuthoritySha='';$BatchVmGuid='';$BatchSid=''
+$sourceSha='a'*40;$source=[ordered]@{commit=$sourceSha};$script:sourceIdentityReceipt=$null
+$observerPath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__OBSERVER__'))
+$actorPath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__ACTOR__'))
+$modulePath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__MODULE__'))
+$env:DARK_PHASE_C_NONCE='1'*32
+function Test-PartialRunBatchInput {return $false}
+function Assert-CChildScope {}
+$functionText=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__FUNCTION__'))
+. ([scriptblock]::Create($functionText))
+Invoke-CChild
+'@
+foreach($replacement in @{
+        '__OBSERVER__'=(Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-observer.cs');
+        '__ACTOR__'=(Join-Path $PSScriptRoot '../support/exact-manifest-phase-c-streams.cs');
+        '__MODULE__'=(Join-Path $PSScriptRoot '../../modules/powershell/controller-owned-root-guard.ps1');
+        '__FUNCTION__'=$childDefinition.Extent.Text}.GetEnumerator()){
+    $freshCode=$freshCode.Replace($replacement.Key,
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($replacement.Value)))
+}
+$probeRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark240-c-deadline-'+[guid]::NewGuid().ToString('N'))
+if(Test-Path -LiteralPath $probeRoot){throw 'Fresh Phase C probe root already exists.'}
+$probeAncestors=[Collections.Generic.List[IO.DirectoryInfo]]::new()
+for($item=[IO.DirectoryInfo]::new([IO.Path]::GetDirectoryName($probeRoot));
+    $null -ne $item;$item=$item.Parent){$probeAncestors.Add($item)}
+for($index=$probeAncestors.Count-1;$index -ge 0;$index--){
+    if(-not $probeAncestors[$index].Exists -or
+        (($probeAncestors[$index].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){
+        throw 'Fresh Phase C probe parent is absent or reparse.'}
+}
+if($IsWindows){
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security=[Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true,$false);$security.SetOwner($sid)
+    foreach($ownerSid in @($sid,
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $ownerSid,[Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    [void][IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($probeRoot),$security)
+    $readback=Get-Acl -LiteralPath $probeRoot
+    if(-not $readback.AreAccessRulesProtected -or
+        $readback.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid.Value){
+        throw 'Fresh Phase C probe root owner or protected ACL differs.'}
+}else{
+    [void][IO.Directory]::CreateDirectory($probeRoot)
+    [IO.File]::SetUnixFileMode($probeRoot,
+        [IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+}
+$probeFile=Join-Path $probeRoot 'fresh-child.ps1'
+$probeBytes=[Text.UTF8Encoding]::new($false).GetBytes($freshCode)
+$probeStream=[IO.FileStream]::new($probeFile,[IO.FileMode]::CreateNew,
+    [IO.FileAccess]::Write,[IO.FileShare]::None)
+try {$probeStream.Write($probeBytes,0,$probeBytes.Length);$probeStream.Flush($true)}
+finally {$probeStream.Dispose()}
+$probeHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($probeBytes)).ToLowerInvariant()
+$freshStart=[Diagnostics.ProcessStartInfo]::new(
+    [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+$freshStart.UseShellExecute=$false;$freshStart.RedirectStandardOutput=$true
+$freshStart.RedirectStandardError=$true
+foreach($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',$probeFile)){
+    $freshStart.ArgumentList.Add($arg)
+}
+Assert-FreshCProcessCommandBound $freshStart
+$fresh=$null;$closedConfirmed=$false;$drainedConfirmed=$false;$probePassed=$false
+try {
+    $fresh=[Diagnostics.Process]::Start($freshStart)
+    if($null -eq $fresh){throw 'Fresh Phase C child initialization control did not start.'}
+    $freshOut=$fresh.StandardOutput.ReadToEndAsync()
+    $freshErr=$fresh.StandardError.ReadToEndAsync()
+    if(-not $fresh.WaitForExit(10000)){
+        $fresh.Kill($true)
+        $closedConfirmed=$fresh.WaitForExit(5000)
+        throw 'Fresh Phase C child initialization control timed out.'
+    }
+    $closedConfirmed=$true
+    if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($freshOut,$freshErr),5000)){
+        throw 'Fresh Phase C child initialization output did not drain.'
+    }
+    $drainedConfirmed=$true
+    $freshLines=@($freshOut.GetAwaiter().GetResult() -split "`r?`n" |
+        Where-Object { $_.StartsWith('DR_PHASE_C_CHILD ') })
+    if($fresh.ExitCode -ne 0 -or $freshLines.Count -ne 1 -or
+        $freshErr.GetAwaiter().GetResult().Contains('Unable to find type [DarkPhaseCDeadline]')){
+        throw "Fresh Phase C child did not initialize its actual deadline before lexical refusal: exit=$($fresh.ExitCode); stdout=$($freshOut.GetAwaiter().GetResult()); stderr=$($freshErr.GetAwaiter().GetResult())"
+    }
+    $freshReceipt=$freshLines[0].Substring('DR_PHASE_C_CHILD '.Length) |
+        ConvertFrom-Json -AsHashtable
+    $expectedRefusal=if($IsWindows){'Phase B target is outside exact local profile temp scope'}
+        else{'Phase B path is not a canonical local drive path'}
+    if($freshReceipt.status -cne 'rejected-or-unknown' -or
+        $freshReceipt.commit_calls -ne 0 -or $freshReceipt.stage_calls -ne 0 -or
+        $freshReceipt.rollback_calls -ne 0 -or
+        $freshReceipt.lease_state -cne 'not-started' -or
+        $null -ne $freshReceipt.cleanup_error -or
+        $null -eq $freshReceipt.error -or
+        -not ([string]$freshReceipt.error.message).Contains($expectedRefusal)){
+        throw 'Fresh Phase C child lexical refusal control changed its native scope.'
+    }
+    $probePassed=$true
+} finally {
+    if($null -ne $fresh){
+        if(-not $closedConfirmed){
+            try {$fresh.Kill($true)}
+            catch [InvalidOperationException] {}
+            finally {try {$closedConfirmed=$fresh.WaitForExit(5000)}catch {}}
+        }
+        $fresh.Dispose()
+    }
+    if($probePassed){
+        if(-not $closedConfirmed -or -not $drainedConfirmed){
+            throw 'Fresh Phase C probe closure or capture is unconfirmed.'}
+        $rootItem=Get-Item -LiteralPath $probeRoot -Force -ErrorAction Stop
+        $fileItem=Get-Item -LiteralPath $probeFile -Force -ErrorAction Stop
+        if($rootItem -isnot [IO.DirectoryInfo] -or
+            ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $fileItem -isnot [IO.FileInfo] -or
+            ($fileItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Get-FileHash -LiteralPath $probeFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                $probeHash){
+            throw 'Fresh Phase C owned probe script or root changed before exact cleanup.'}
+        [IO.File]::Delete($probeFile)
+        if(@([IO.Directory]::EnumerateFileSystemEntries($probeRoot)).Count -ne 0){
+            throw 'Fresh Phase C owned probe root is not empty after exact script deletion.'
+        }
+        [IO.Directory]::Delete($probeRoot,$false)
+    }
+}
+$phaseBFixture=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-b.ps1'
+$bTokens=$null;$bErrors=$null
+$bAst=[Management.Automation.Language.Parser]::ParseFile($phaseBFixture,
+    [ref]$bTokens,[ref]$bErrors)
+if($bErrors.Count){throw 'Phase C shared Phase B helper has parse errors.'}
+$batchHelper=$bAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Test-PartialRunBatchInput'},$true)
+if($null -eq $batchHelper){throw 'Phase C shared child argument helper is absent.'}
+. ([scriptblock]::Create($batchHelper.Extent.Text))
+if((Test-PartialRunBatchInput '' @('','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('x','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('x','y','','','') '') -or
+    (Test-PartialRunBatchInput ('1'*32) @('','','','','') '')){
+    throw 'Phase C shared actual child argument guard differs.'}
 foreach ($name in @('Stream-NameHex','Test-CSource','Test-CSourceIdentity','Test-CBarrier',
         'Test-CStreamContext','Test-CStreamDataIdentity',
         'Test-StreamCatalog','Test-COriginal','Test-CBaseline','Test-CAdmittedPost',

@@ -2,7 +2,13 @@
 param(
     [ValidateSet('controller','candidate','observer-actor')][string]$Mode='controller',
     [ValidateSet('C1','C2')][string]$Trial,
-    [string]$Scope
+    [string]$Scope,
+    [string]$BatchGuid,
+    [string]$RunsRootId,
+    [string]$BatchRootId,
+    [string]$BatchAuthoritySha,
+    [string]$BatchVmGuid,
+    [string]$BatchSid
 )
 
 Set-StrictMode -Version Latest
@@ -16,7 +22,8 @@ $actorPath=Join-Path $repo 'scripts/tests/support/exact-manifest-phase-c-streams
 $sharedNames=@('Hash-Text','Write-NewText','Write-Marker','Read-Marker',
     'Test-MarkerReady','Wait-Marker','Wait-ActorBarrier','Read-KnownBytes',
     'Read-SecurityControl','Path-State','Assert-PrivateDirectory','New-PrivateScope',
-    'Complete-OwnedChild','Observe-OwnedChildClosure')
+    'Complete-OwnedChild','Observe-OwnedChildClosure','Assert-RunBatchBinding',
+    'Test-PartialRunBatchInput')
 $tokens=$null;$parseErrors=$null
 $sharedAst=[Management.Automation.Language.Parser]::ParseFile($phaseBPath,
     [ref]$tokens,[ref]$parseErrors)
@@ -231,7 +238,13 @@ function Assert-CChildScope {
         throw 'Phase C child lacks controller-issued nonce and trial.'
     }
     $profile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    $base=Join-Path (Join-Path $profile 'AppData/Local/Temp') 'Dark180-TxfPhaseB'
+    $base=if ($BatchGuid) {
+        Join-Path (Join-Path (Join-Path $profile 'AppData/Local/Temp') `
+            'Dark180-TxfPhaseB-runs') $BatchGuid
+    } else { Join-Path (Join-Path $profile 'AppData/Local/Temp') 'Dark180-TxfPhaseB' }
+    if ($BatchGuid -and $BatchGuid -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'Phase C child has an invalid run batch GUID.'
+    }
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($Scope),$base,
             [StringComparison]::OrdinalIgnoreCase) -or
         [IO.Path]::GetFileName($Scope) -cne $env:DARK_PHASE_C_NONCE) {
@@ -464,15 +477,23 @@ function Assert-CReceipt($Row,$ExpectedSource) {
     return 'late-stream-refused-supported-gate1-unverified'
 }
 function Invoke-CChild {
-    Assert-CChildScope
-    Add-Type -Path $observerPath -ErrorAction Stop
-    Add-Type -Path $actorPath -ErrorAction Stop
-    $deadline=[DarkPhaseCDeadline]::new(15000)
+    $deadline=$null
     $target=Join-Path $Scope 'target'
     $events=[Collections.Generic.List[object]]::new()
     $lease=$null;$workerError=$null;$cleanupError=$null
     $status='not-started'
+    $batchBinding=$null
     try {
+        if(Test-PartialRunBatchInput $BatchGuid `
+                @($RunsRootId,$BatchRootId,$BatchAuthoritySha,$BatchVmGuid,$BatchSid) `
+                ([Environment]::GetEnvironmentVariable('DARK_PHASE_C_BATCH_GUID'))){
+            throw 'Phase C child received a partial or inherited run batch input.'
+        }
+        Assert-CChildScope
+        Add-Type -Path $observerPath -ErrorAction Stop
+        Add-Type -Path $actorPath -ErrorAction Stop
+        $deadline=[DarkPhaseCDeadline]::new(15000)
+        $batchBinding=if($BatchGuid){Assert-RunBatchBinding $Scope $sourceSha}else{$null}
         if ($Mode -eq 'observer-actor') {
             [void][IO.Directory]::CreateDirectory($target)
             [IO.File]::WriteAllBytes((Join-Path $target 'approved.bin'),[byte[]](9,18,27,36,45,54))
@@ -502,7 +523,9 @@ function Invoke-CChild {
             Write-NewText (Join-Path $Scope 'approved-manifest.txt') (($rows -join "`n") + "`n")
             Write-NewText (Join-Path $Scope 'authority.txt') (($fields -join "`n") + "`n")
             Write-NewText (Join-Path $Scope 'predelete.txt') (($fields -join "`n") + "`n")
-            $capability=[DarkPhaseCStreams]::Prepare($Scope,$target,$Trial,$rootId,$fileId)
+            $capability=if($BatchGuid){
+                [DarkPhaseCStreams]::Prepare($Scope,$target,$Trial,$rootId,$fileId,$BatchGuid)
+            }else{[DarkPhaseCStreams]::Prepare($Scope,$target,$Trial,$rootId,$fileId)}
             $events.Add([ordered]@{phase='exact-base-preflight';
                 root=$capability.RootPreflight;approved=$capability.FilePreflight;
                 eligible=$capability.Eligible})
@@ -558,14 +581,22 @@ function Invoke-CChild {
             [Console]::Out.WriteLine('DR_PHASE_C_CHILD ' + (([ordered]@{
                 schema='dark240-late-stream-phase-c-child-v1';role=$Mode;trial=$Trial;
                 source=$source;source_identity=$script:sourceIdentityReceipt;
+                batch_binding=$batchBinding;
                 scope=$Scope;status=$status;events=@($events);postproof=$post;
                 gate1='unverified';target_collection=0;product=0} | ConvertTo-Json -Depth 18 -Compress)))
         } else {
             . $modulePath
             Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
             try {
-                $lease=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]::PrepareFixtureOnly(
-                    $Scope,$target,$env:DARK_PHASE_C_NONCE,$sourceSha)
+                $lease=if($BatchGuid){
+                    [DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]::PrepareRunFixtureOnly(
+                        $Scope,$target,$env:DARK_PHASE_C_NONCE,$sourceSha,
+                        $BatchGuid,$BatchVmGuid,$BatchSid,$RunsRootId,$BatchRootId,
+                        $BatchAuthoritySha)
+                }else{
+                    [DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]::PrepareFixtureOnly(
+                        $Scope,$target,$env:DARK_PHASE_C_NONCE,$sourceSha)
+                }
                 $digest=$lease.AcquireExactSet()
                 $events.Add([ordered]@{phase='exact-set-acquired';digest=$digest;count=$lease.HeldEntryCount})
                 $lease.StageExactSet((Join-Path $Scope 'predelete.txt'))
@@ -592,6 +623,7 @@ function Invoke-CChild {
             [Console]::Out.WriteLine('DR_PHASE_C_CHILD ' + (([ordered]@{
                 schema='dark240-late-stream-phase-c-child-v1';role=$Mode;trial=$Trial;
                 source=$source;source_identity=$script:sourceIdentityReceipt;
+                batch_binding=$batchBinding;
                 scope=$Scope;status=$status;events=@($events);
                 error=$workerError;cleanup_error=$cleanupError;
                 stage_calls=$(if($null -ne $lease){$lease.StageCalls}else{0});
@@ -608,7 +640,7 @@ function Invoke-CChild {
             type=$_.Exception.GetType().FullName;message=$_.Exception.Message} |
             ConvertTo-Json -Depth 12 -Compress)))
         throw
-    } finally { $deadline.Dispose() }
+    } finally { if($null -ne $deadline){$deadline.Dispose()} }
 }
 
 function Start-CChild([string]$Role,[string]$TrialName,[string]$TrialScope,[string]$Nonce) {
@@ -618,6 +650,14 @@ function Start-CChild([string]$Role,[string]$TrialName,[string]$TrialScope,[stri
     $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     foreach ($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',$PSCommandPath,
             '-Mode',$Role,'-Trial',$TrialName,'-Scope',$TrialScope)) { $start.ArgumentList.Add($arg) }
+    if ($BatchGuid) {
+        foreach ($arg in @('-BatchGuid',$BatchGuid,'-RunsRootId',$RunsRootId,
+                '-BatchRootId',$BatchRootId,'-BatchAuthoritySha',$BatchAuthoritySha,
+                '-BatchVmGuid',$BatchVmGuid,'-BatchSid',$BatchSid)) {
+            $start.ArgumentList.Add($arg)
+        }
+        $start.Environment['DARK_PHASE_C_BATCH_GUID']=$BatchGuid
+    } else { [void]$start.Environment.Remove('DARK_PHASE_C_BATCH_GUID') }
     $start.Environment['DARK_PHASE_C_NONCE']=$Nonce
     $process=[Diagnostics.Process]::Start($start)
     if ($null -eq $process) { throw 'Phase C owned primary child did not start.' }
@@ -725,16 +765,46 @@ try {
             throw 'Phase C profile Temp ancestry is absent or reparse.'
         }
     }
-    $base=Join-Path $temp 'Dark180-TxfPhaseB'
-    if ([IO.Directory]::Exists($base)) { Assert-PrivateDirectory $base }
-    else { New-PrivateScope $base }
+    if ($BatchGuid) {
+        if ($BatchGuid -cnotmatch '^[0-9a-f]{32}$') {
+            throw 'Phase C run batch GUID is invalid.'
+        }
+        Add-Type -Path $observerPath -ErrorAction Stop
+        $runsRoot=Join-Path $temp 'Dark180-TxfPhaseB-runs'
+        $base=Join-Path $runsRoot $BatchGuid
+        if (-not [IO.Directory]::Exists($base)) {
+            throw 'Phase C run batch root was not prepared by the outer controller.'
+        }
+        Assert-PrivateDirectory $runsRoot
+        Assert-PrivateDirectory $base
+    } else {
+        if (@($RunsRootId,$BatchRootId,$BatchAuthoritySha,$BatchVmGuid,$BatchSid) |
+                Where-Object { -not [string]::IsNullOrEmpty($_) }) {
+            throw 'Phase C legacy fixture received an unpinned batch input.'
+        }
+        $base=Join-Path $temp 'Dark180-TxfPhaseB'
+        if ([IO.Directory]::Exists($base)) { Assert-PrivateDirectory $base }
+        else { New-PrivateScope $base }
+    }
+    $controllerBatchBinding=$null
     foreach ($name in $trials) {
         if ($suiteClock.Elapsed.TotalSeconds -ge 60) { throw 'Phase C suite exceeded 60 seconds.' }
         $trialClock=[Diagnostics.Stopwatch]::StartNew()
         $nonce=[Guid]::NewGuid().ToString('N')
         $scope=Join-Path $base $nonce
+        if($BatchGuid){[void](Assert-RunBatchBinding $scope $sourceSha -ParentOnly)}
         New-PrivateScope $scope
-        $row=[ordered]@{trial=$name;scope=$scope;source=$source;
+        $batchBinding=if($BatchGuid){
+            Assert-RunBatchBinding $scope $sourceSha
+        }else{$null}
+        if($BatchGuid){
+            if($null -eq $controllerBatchBinding){$controllerBatchBinding=$batchBinding}
+            elseif(($controllerBatchBinding|ConvertTo-Json -Compress) -cne
+                ($batchBinding|ConvertTo-Json -Compress)){
+                throw 'Phase C run batch binding changed between cases.'
+            }
+        }
+        $row=[ordered]@{trial=$name;scope=$scope;source=$source;batch_binding=$batchBinding;
             started_utc=[DateTime]::UtcNow.ToString('o');ready=$null;barrier=$null;
             late_marker=$null;actor=$null;candidate=$null;actor_receipt=$null;
             candidate_receipt=$null;controller_error=$null;verdict=$null;
@@ -810,6 +880,18 @@ try {
         if ($null -eq $row.controller_error) {
             try {
                 $row.actor_receipt=Read-CWorkerRecord $row.actor 'observer-actor' $name
+                if($BatchGuid){
+                    foreach($receipt in @($row.actor_receipt,$row.candidate_receipt)){
+                        if($null -eq $receipt){continue}
+                        foreach($key in @('mode','guid','runs_root_id','batch_root_id',
+                                'authority_sha256','source_head','vm_guid','token_sid')){
+                            if($null -eq $receipt.batch_binding -or
+                                $receipt.batch_binding[$key] -cne $row.batch_binding[$key]){
+                                throw "Phase C child changed the frozen batch binding: $key"
+                            }
+                        }
+                    }
+                }
                 $row.verdict=Assert-CReceipt $row $source
             } catch { $row.controller_error=[ordered]@{type=$_.Exception.GetType().FullName;
                 message=$_.Exception.Message} }
@@ -828,7 +910,8 @@ finally {
     }
 }
 $summary=[ordered]@{schema='dark240-late-stream-phase-c-controller-v1';
-    source=$source;source_identity=$script:sourceIdentityReceipt;environment=$environment;
+    source=$source;batch_binding=$controllerBatchBinding;
+    source_identity=$script:sourceIdentityReceipt;environment=$environment;
     preflight_receipts=@($script:preflightReceipts);
     utc=[DateTime]::UtcNow.ToString('o');
     trial_count=$all.Count;candidate_process_count=$candidateCount;

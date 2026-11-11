@@ -8,6 +8,52 @@ Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-observer.cs') -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-actors.cs') -ErrorAction Stop
 $candidate=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]
+$guard=[DarkReNamerVmOwnedRootGuard]
+$engine=$guard.GetNestedType('ExactSetEngine',
+    [Reflection.BindingFlags]::NonPublic)
+if ($null -eq $engine -or -not $engine.IsNestedPrivate -or
+    @($candidate.GetConstructors([Reflection.BindingFlags]'Public,Instance')).Count -ne 0) {
+    throw 'Exact-set engine gained a public construction path outside fixture preparation.'
+}
+$constructors=@($engine.GetConstructors([Reflection.BindingFlags]'Public,Instance'))
+if ($constructors.Count -ne 1 -or
+    $constructors[0].GetParameters().Count -ne 1 -or
+    -not $constructors[0].GetParameters()[0].ParameterType.IsNestedPrivate) {
+    throw 'Exact-set engine constructor no longer requires private prepared authority.'
+}
+$prepared=$constructors[0].GetParameters()[0].ParameterType
+$implementations=@($guard.GetNestedTypes([Reflection.BindingFlags]::NonPublic) |
+    Where-Object { $_.GetInterfaces() -contains $prepared })
+if ($implementations.Count -ne 1 -or
+    $implementations[0].Name -cne 'FixturePreparation' -or
+    $null -eq $candidate.GetField('engine',[Reflection.BindingFlags]'NonPublic,Instance') -or
+    $candidate.GetField('engine',[Reflection.BindingFlags]'NonPublic,Instance').FieldType -ne $engine) {
+    throw 'Exact-set engine acquired a non-fixture prepared authority path.'
+}
+$expectedProperties=@('LeaseState','ClosureUnknown','NativeExceptionType',
+    'NativeExceptionMessage','IsClosed','FixtureRoot','SourceSha','ScopePath',
+    'RootId','StageCalls','CommitCalls','RollbackCalls','LastNativeError',
+    'Settlement','TargetHandlesClosed','HeldEntryCount','ApprovedDigest','CloseReceipts')
+$actualProperties=@($candidate.GetProperties([Reflection.BindingFlags]'Public,Instance,DeclaredOnly') |
+    ForEach-Object Name | Sort-Object)
+if ([string]::Join(',', $actualProperties) -cne
+    [string]::Join(',', @($expectedProperties | Sort-Object))) {
+    throw 'Fixture facade changed its public observation properties.'
+}
+foreach ($method in @('RequireFixturePathScope','RequireFixtureApprovalFields',
+        'EncodeComponentUtf16','RequireExactManifest','ObserveExactManifest',
+        'AcquireExactSet','StageExactSet','CommitOnce','Abort','Dispose',
+        'PrepareFixtureOnly','PrepareRunFixtureOnly')) {
+    if ($null -eq $candidate.GetMethod($method,[Reflection.BindingFlags]'Public,Static,Instance')) {
+        throw "Fixture facade lost its existing public method: $method"
+    }
+}
+$factories=@($candidate.GetMethods([Reflection.BindingFlags]'Public,Static,DeclaredOnly') |
+    Where-Object ReturnType -eq $candidate)
+if ($factories.Count -ne 2 -or
+    @($factories.Name | Sort-Object) -join ',' -cne 'PrepareFixtureOnly,PrepareRunFixtureOnly') {
+    throw 'Fixture facade has an unexpected public construction path.'
+}
 
 function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
     $caught=$false
@@ -35,6 +81,15 @@ $scope=$profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\0123456789abcdef0123456
 if ($candidate::RequireFixturePathScope($scope,($scope + '\target'),$profile) -cne $scope) {
     throw 'Exact fixture path predicate rejected its positive control.'
 }
+$runScope=$profile + '\AppData\Local\Temp\Dark180-TxfPhaseB-runs\' + ('1'*32) + '\' + ('2'*32)
+if($candidate::RequireRunFixturePathScope($runScope,($runScope+'\target'),$profile,
+        ('1'*32)) -cne $runScope){throw 'Exact run fixture path predicate rejected its positive control.'}
+Assert-Rejected { $candidate::RequireFixturePathScope($runScope,
+        ($runScope+'\target'),$profile) } 'outside exact local profile temp scope'
+Assert-Rejected { $candidate::RequireRunFixturePathScope(
+        'C:\ProgramData\DarkReNamerVmRuns\'+('1'*32)+'\'+('2'*32),
+        'C:\ProgramData\DarkReNamerVmRuns\'+('1'*32)+'\'+('2'*32)+'\target',
+        $profile,('1'*32)) } 'protected-root component'
 $source='d'*40;$nonceHash='e'*64;$rootId='f'*48
 $approval=[string[]]@($source,$nonceHash,$scope,($scope + '\target'),$rootId,$digest)
 $candidate::RequireFixtureApprovalFields($approval,$source,$nonceHash,$scope,
@@ -131,6 +186,8 @@ $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
     [ref]$tokens,[ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
 foreach ($name in @('Hash-Text','Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
+        'Assert-PrivateDirectory','New-PrivateScope','Assert-RunBatchBinding','Assert-ChildScope',
+        'Test-PartialRunBatchInput',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
         'Get-ExactOpenWriterRefusalCode','Complete-OwnedChild','Observe-OwnedChildClosure',
         'Read-WorkerRecord','Convert-NativeDescriptor','Test-NativeDescriptorComplete',
@@ -141,6 +198,96 @@ foreach ($name in @('Hash-Text','Write-NewText','Write-Marker','Read-Marker','Te
         $node.Name -ceq $name},$true)
     if ($null -eq $definition) { throw "Actual Phase B terminal function is missing: $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
+}
+if((Test-PartialRunBatchInput '' @('','','','','') '') -or
+    (Test-PartialRunBatchInput ('1'*32) @('','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('','one','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('one','two','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('','','','','') ('1'*32))){
+    throw 'Actual legacy child argument guard mishandles empty, partial or selected inputs.'
+}
+if($IsWindows){
+    function Assert-ControlOrdinaryChain([string]$Path) {
+        $chain=[Collections.Generic.List[IO.DirectoryInfo]]::new()
+        for($item=[IO.DirectoryInfo]::new($Path);$null -ne $item;$item=$item.Parent){$chain.Add($item)}
+        for($index=$chain.Count-1;$index -ge 0;$index--){
+            if(-not $chain[$index].Exists -or
+                (($chain[$index].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){
+                throw 'Run binding control ancestor is absent or reparse.'}
+        }
+    }
+    $profile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $controlTemp=Join-Path $profile 'AppData/Local/Temp'
+    Assert-ControlOrdinaryChain $controlTemp
+    $runsRoot=Join-Path $controlTemp 'Dark180-TxfPhaseB-runs'
+    $createdParent=-not [IO.Directory]::Exists($runsRoot)
+    if(-not $createdParent){Assert-ControlOrdinaryChain $runsRoot}
+    $BatchGuid=[Guid]::NewGuid().ToString('N')
+    $nonce=[Guid]::NewGuid().ToString('N')
+    $batchRoot=Join-Path $runsRoot $BatchGuid
+    $caseScope=Join-Path $batchRoot $nonce
+    $authorityPath=Join-Path $runsRoot ($BatchGuid+'.authority.txt')
+    $sourceSha='a'*40;$BatchVmGuid='11111111-2222-4333-8444-555555555555'
+    $BatchSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $RunsRootId=$null;$BatchRootId=$null;$BatchAuthoritySha=$null;$caseId=$null
+    try {
+        if($createdParent){New-PrivateScope $runsRoot}else{Assert-PrivateDirectory $runsRoot}
+        Assert-ControlOrdinaryChain $runsRoot
+        New-PrivateScope $batchRoot
+        $RunsRootId=[DarkPhaseBFixtureObserver]::IdentityOf($runsRoot,$true)
+        $BatchRootId=[DarkPhaseBFixtureObserver]::IdentityOf($batchRoot,$true)
+        $authorityText=(@('dark240-run-batch-v1',$sourceSha,$BatchVmGuid,$BatchSid,
+            $BatchGuid,$RunsRootId,$BatchRootId) -join "`n")+"`n"
+        $authorityBytes=[Text.UTF8Encoding]::new($false).GetBytes($authorityText)
+        $stream=[IO.FileStream]::new($authorityPath,[IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,[IO.FileShare]::Read)
+        try{$stream.Write($authorityBytes,0,$authorityBytes.Length);$stream.Flush($true)}
+        finally{$stream.Dispose()}
+        $BatchAuthoritySha=[Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($authorityBytes)).ToLowerInvariant()
+        [void](Assert-RunBatchBinding $caseScope $sourceSha -ParentOnly)
+        New-PrivateScope $caseScope
+        $caseId=[DarkPhaseBFixtureObserver]::IdentityOf($caseScope,$true)
+        $savedNonce=[Environment]::GetEnvironmentVariable('DARK_PHASE_B_NONCE')
+        try {
+            $env:DARK_PHASE_B_NONCE=$nonce
+            & {param($path)
+                $Scope=$path;$Trial='B1'
+                Assert-ChildScope
+                $env:DARK_PHASE_B_NONCE='0'*32
+                Assert-Rejected {Assert-ChildScope} 'outside the exact profile temp root'
+            } $caseScope
+        } finally {
+            [Environment]::SetEnvironmentVariable('DARK_PHASE_B_NONCE',$savedNonce)
+        }
+        $binding=Assert-RunBatchBinding $caseScope $sourceSha
+        if($binding.runs_root_id -cne $RunsRootId -or
+            $binding.batch_root_id -cne $BatchRootId -or
+            $binding.authority_sha256 -cne $BatchAuthoritySha){
+            throw 'Native run fixture binding positive control differs.'}
+        $savedId=$RunsRootId;$RunsRootId='0'*48
+        Assert-Rejected {Assert-RunBatchBinding $caseScope $sourceSha} 'FileID changed'
+        $RunsRootId=$savedId
+        $savedSha=$BatchAuthoritySha;$BatchAuthoritySha='0'*64
+        Assert-Rejected {Assert-RunBatchBinding $caseScope $sourceSha} 'authority bytes changed'
+        $BatchAuthoritySha=$savedSha
+    } finally {
+        if($caseId -and [IO.Directory]::Exists($caseScope) -and
+            [DarkPhaseBFixtureObserver]::IdentityOf($caseScope,$true) -ceq $caseId -and
+            @([IO.Directory]::EnumerateFileSystemEntries($caseScope)).Count -eq 0){
+            [IO.Directory]::Delete($caseScope,$false)}
+        if($BatchAuthoritySha -and [IO.File]::Exists($authorityPath) -and
+            (Get-FileHash -LiteralPath $authorityPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+                $BatchAuthoritySha){[IO.File]::Delete($authorityPath)}
+        if($BatchRootId -and [IO.Directory]::Exists($batchRoot) -and
+            [DarkPhaseBFixtureObserver]::IdentityOf($batchRoot,$true) -ceq $BatchRootId -and
+            @([IO.Directory]::EnumerateFileSystemEntries($batchRoot)).Count -eq 0){
+            [IO.Directory]::Delete($batchRoot,$false)}
+        if($createdParent -and $RunsRootId -and [IO.Directory]::Exists($runsRoot) -and
+            [DarkPhaseBFixtureObserver]::IdentityOf($runsRoot,$true) -ceq $RunsRootId -and
+            @([IO.Directory]::EnumerateFileSystemEntries($runsRoot)).Count -eq 0){
+            [IO.Directory]::Delete($runsRoot,$false)}
+    }
 }
 function Hash-Control([byte[]]$Bytes) {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant()
@@ -501,7 +648,7 @@ if ($actualNative.Count -ne 1 -or $actualNative[0].native_error -ne 1224 -or
 $exactChain=$actualChain | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
 foreach ($node in $exactChain) {
     if ($null -ne $node.native_error) {
-        $node.method_frames=@('DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter')
+        $node.method_frames=@('DarkReNamerVmOwnedRootGuard+ExactSetEngine::OpenWriter')
     }
 }
 if ((Get-ExactOpenWriterRefusalCode $exactChain) -ne 1224) {
@@ -523,7 +670,7 @@ foreach ($change in @('code-32','code-5','code-6805','code-zero','wrong-method',
         'wrong-method' { @($bad | Where-Object { $null -ne $_.native_error })[0].method_frames=@('Other::OpenWriter') }
         'extra-native' { $bad+=@([ordered]@{type='System.ComponentModel.Win32Exception';
             native_error=1224;message='same text';hresult=0;method_frames=@(
-                'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter')}) }
+                'DarkReNamerVmOwnedRootGuard+ExactSetEngine::OpenWriter')}) }
         'message-only' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=$null;
             @($bad | Where-Object { $_.message -like '*probe native refusal*' })[0].message='OpenWriter ERROR_USER_MAPPED_FILE 1224' }
         'no-chain' { $bad=@() }

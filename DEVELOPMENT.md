@@ -673,6 +673,15 @@ blocks have these owners and review triggers:
 Test subprocess callers live under `scripts/tests/`; registered tests may run a
 public CLI in temporary fixtures without becoming public commands.
 
+The public `ExactManifestTxFFixtureLease` facade owns the strict disposable
+fixture path and frozen authority checks. Its private exact-set engine contains
+the transaction/handle mechanics; extracting that engine does not provide a
+retained-root factory or an admission capability. The fixture facade remains the
+only construction path, and its protected-root refusal remains in force. A
+future production path needs separately reviewed acquire-only authority followed
+by independently validated disposition permission while the same lease is held.
+Fixture predeclaration files do not supply either production permission.
+
 The optional headless TxF diagnostic is separate from product and release
 qualification. Invoke its prepared script through the maintained central
 `hyperv-control` with the selected exact profile and any applicable shared-VM
@@ -682,6 +691,24 @@ insufficient. Keep the central VM lock through execution and collection. Expecte
 account, administrator-role cohort, OS build and installed tool path/hash/version
 inputs must come from a separately reviewed authenticated observation. An
 administrator diagnostic cohort is not a limited interactive product run.
+
+The generator keeps the legacy fixed-base layout by default. Explicit
+`--fixture-layout run-scoped-v1` selects a fresh
+`Dark180-TxfPhaseB-runs/<batchGUID>/<caseGUID>/target` fixture layout under the
+independently resolved profile Temp directory. An optional
+`--fixture-batch-guid` is valid only with that selected layout; otherwise one GUID
+is generated once during host preparation and pinned in the receipt. A guest
+batch-root or authority-file collision stops that attempt before B/C; it does
+not select another GUID automatically.
+
+The wrapper freezes the protected parent and batch FileIDs and exact authority
+bytes/hash before launching B/C. Every child receives and rechecks the same
+source/VM/SID/batch-GUID binding and its case nonce. Only the new batch root is
+inventoried, preserving
+B's 0-to-7 and C's 7-to-9 case reconciliation and the existing assertions and
+budgets. Existing legacy fixture scopes are not inspected or cleaned by this
+selected path. Partial preparation and final readback errors remain evidence;
+they do not replace the first failure or grant another execution slot.
 
 The bootstrap can preserve an independently observed Schannel configuration
 only when its exact expected value and configuration origin are pinned. It
@@ -699,6 +726,11 @@ Use named variables for argument strings passed through nested PowerShell
 scriptblocks: the automatic `$args` array belongs to the current invocation.
 Require the expected structured output as well as a successful child exit; an
 argument-free shell can exit successfully without executing the intended query.
+Suppress incidental .NET return values in helpers that return one structured
+record: for example, `Dictionary.Remove` emits a Boolean unless explicitly
+suppressed. Check the actual returned shape in both legacy and selected paths.
+Under StrictMode, wrap a possibly empty filtered pipeline in `@()` before
+reading `.Count`; exercise zero, one and multiple results in the actual helper.
 Its bounded terminal records contain original output bytes, source and Job
 receipts; their guest-side size limit is not an independently enforced host or
 PSRP transport cap. It retains the new private and fixture roots for independent
