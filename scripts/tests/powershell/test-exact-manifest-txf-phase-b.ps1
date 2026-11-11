@@ -111,13 +111,16 @@ function Get-PhaseBExceptionChain([Exception]$Failure) {
     }
     return $rows.ToArray()
 }
-function Test-ExactOpenWriterMappedRefusal($Chain) {
-    if ($null -eq $Chain -or @($Chain).Count -eq 0 -or @($Chain).Count -gt 8) { return $false }
+function Get-ExactOpenWriterRefusalCode($Chain) {
+    if ($null -eq $Chain -or @($Chain).Count -eq 0 -or @($Chain).Count -gt 8) { return $null }
     $native=@($Chain | Where-Object { $null -ne $_.native_error })
     if ($native.Count -ne 1 -or $native[0].type -cne 'System.ComponentModel.Win32Exception' -or
-        $native[0].native_error -ne 1224) { return $false }
-    return @($native[0].method_frames) -ccontains
-        'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter'
+        $native[0].native_error -notin @(1224,6800) -or
+        @($native[0].method_frames) -cnotcontains
+            'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter') {
+        return $null
+    }
+    return [int]$native[0].native_error
 }
 function Read-KnownBytes([string]$Path,[bool]$AllowAbsent) {
     try {
@@ -333,6 +336,15 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                 if ($candidateDone.trial -cne 'B4' -or -not $candidateDone.worker_exit_observed -or
                     $candidateDone.death_at_barrier) {
                     throw 'B4 mapping support control lacks a confirmed candidate exit.'
+                }
+                $preControl=Read-KnownBytes (Join-Path $target 'approved.bin') $false
+                $events.Add([ordered]@{phase='approved-before-mapping-support-control';
+                    candidate_exit_confirmed=$true;data=$preControl})
+                if ($preControl.status -cne 'present' -or
+                    $preControl.base64 -cne [Convert]::ToBase64String([byte[]](9,18,27,36,45,54)) -or
+                    $preControl.sha256 -cne ([Convert]::ToHexString(
+                        [Security.Cryptography.SHA256]::HashData([byte[]](9,18,27,36,45,54))).ToLowerInvariant())) {
+                    throw 'B4 approved bytes changed before the held-mapping support control.'
                 }
                 $mappingWritten=$false;$mappingError=$null
                 try { $actorResource.WriteOne(82);$mappingWritten=$true }
@@ -697,17 +709,30 @@ function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) 
         @($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'required-barrier-unverified' }).Count -eq 1) {
         $held=@($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'writable-mapping-held-after-file-close' })
         $normalWrite=@($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'held-mapping-write-attempt' })
+        $preControl=@($Row.actor_receipt.events | Where-Object {
+            $_.phase -ceq 'approved-before-mapping-support-control' })
         $support=@($Row.actor_receipt.events | Where-Object {
             $_.phase -ceq 'held-mapping-after-candidate-exit-support-control' })
-        if ($held.Count -eq 1 -and $normalWrite.Count -eq 0 -and $support.Count -eq 1 -and
+        if ($held.Count -eq 1 -and $normalWrite.Count -eq 0 -and
+            $preControl.Count -eq 1 -and $preControl[0].candidate_exit_confirmed -and
+            $preControl[0].data.status -ceq 'present' -and
+            $preControl[0].data.base64 -ceq [Convert]::ToBase64String($approvedBytes) -and
+            $preControl[0].data.sha256 -ceq ([Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($approvedBytes)).ToLowerInvariant()) -and
+            $support.Count -eq 1 -and
             $support[0].candidate_exit_confirmed -and $support[0].written -and
             $support[0].byte -eq 82 -and $null -eq $support[0].error -and
             $candidate.stage_calls -eq 0 -and $candidate.commit_calls -eq 0 -and
             $candidate.rollback_calls -eq 1 -and
             $candidate.lease_state -ceq 'rollback-succeeded' -and
-            -not $candidate.closure_unknown -and
-            (Test-ExactOpenWriterMappedRefusal $candidate.error.exception_chain)) {
-            return 'safe-prestage-refusal-with-writable-mapping-control'
+            -not $candidate.closure_unknown) {
+            $refusalCode=Get-ExactOpenWriterRefusalCode $candidate.error.exception_chain
+            if ($refusalCode -eq 1224) {
+                return 'safe-prestage-refusal-with-writable-mapping-control'
+            }
+            if ($refusalCode -eq 6800) {
+                return 'prestage-transactional-conflict-with-writable-mapping-control'
+            }
         }
         return 'mapping-write-barrier-unverified-acquisition-rejected-preserved'
     }

@@ -131,7 +131,7 @@ $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
 foreach ($name in @('Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
-        'Test-ExactOpenWriterMappedRefusal','Assert-PhaseBTrialReceipt')) {
+        'Get-ExactOpenWriterRefusalCode','Assert-PhaseBTrialReceipt')) {
     $definition=$fixtureAst.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $name},$true)
@@ -269,13 +269,22 @@ foreach ($node in $exactChain) {
         $node.method_frames=@('DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter')
     }
 }
-if (-not (Test-ExactOpenWriterMappedRefusal $exactChain)) {
+if ((Get-ExactOpenWriterRefusalCode $exactChain) -ne 1224) {
     throw 'Exact mapped-file refusal metadata was rejected.'
 }
-foreach ($change in @('wrong-code','wrong-method','extra-native','message-only','no-chain')) {
+$transactionalChain=$exactChain | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
+@($transactionalChain | Where-Object { $null -ne $_.native_error })[0].native_error=6800
+if ((Get-ExactOpenWriterRefusalCode $transactionalChain) -ne 6800) {
+    throw 'Observed transactional-conflict code lost exact OpenWriter provenance.'
+}
+foreach ($change in @('code-32','code-5','code-6805','code-zero','wrong-method',
+        'extra-native','message-only','no-chain')) {
     $bad=$exactChain | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
     switch ($change) {
-        'wrong-code' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=32 }
+        'code-32' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=32 }
+        'code-5' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=5 }
+        'code-6805' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=6805 }
+        'code-zero' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=0 }
         'wrong-method' { @($bad | Where-Object { $null -ne $_.native_error })[0].method_frames=@('Other::OpenWriter') }
         'extra-native' { $bad+=@([ordered]@{type='System.ComponentModel.Win32Exception';
             native_error=1224;message='same text';hresult=0;method_frames=@(
@@ -284,7 +293,7 @@ foreach ($change in @('wrong-code','wrong-method','extra-native','message-only',
             @($bad | Where-Object { $_.message -like '*probe native refusal*' })[0].message='OpenWriter ERROR_USER_MAPPED_FILE 1224' }
         'no-chain' { $bad=@() }
     }
-    if (Test-ExactOpenWriterMappedRefusal $bad) {
+    if ($null -ne (Get-ExactOpenWriterRefusalCode $bad)) {
         throw "Mapped-file classifier accepted unproved provenance: $change"
     }
 }
@@ -294,6 +303,8 @@ $mapped.actor_receipt.postproof.approved=& $bytesProof ([byte[]](82,18,27,36,45,
 $mapped.actor_receipt.events=@($mapped.actor_receipt.events[0],
     [ordered]@{phase='writable-mapping-held-after-file-close'},
     [ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'},
+    [ordered]@{phase='approved-before-mapping-support-control';
+        candidate_exit_confirmed=$true;data=(& $bytesProof $approvedBytes)},
     [ordered]@{phase='held-mapping-after-candidate-exit-support-control';
         candidate_exit_confirmed=$true;byte=82;written=$true;error=$null})
 $mapped.candidate_receipt.stage_calls=0
@@ -302,21 +313,50 @@ if ((Assert-PhaseBTrialReceipt $mapped 'B4' $sourceBinding) -cne
     'safe-prestage-refusal-with-writable-mapping-control') {
     throw 'B4 exact native refusal and held-mapping control did not admit their narrow safe verdict.'
 }
-$badMapped=$mapped | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
-@($badMapped.candidate_receipt.error.exception_chain | Where-Object {
-    $null -ne $_.native_error })[0].native_error=32
-if ((Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding) -cne
-    'mapping-write-barrier-unverified-acquisition-rejected-preserved') {
-    throw 'B4 wrong native error was misclassified as the reviewed safe refusal.'
+$mapped6800=$mapped | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$mapped6800.candidate_receipt.error.exception_chain=$transactionalChain
+if ((Assert-PhaseBTrialReceipt $mapped6800 'B4' $sourceBinding) -cne
+    'prestage-transactional-conflict-with-writable-mapping-control') {
+    throw 'B4 transactional conflict lacked its distinct reviewed diagnostic verdict.'
+}
+foreach ($code in @(32,5,6805,0)) {
+    $badMapped=$mapped | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+    @($badMapped.candidate_receipt.error.exception_chain | Where-Object {
+        $null -ne $_.native_error })[0].native_error=$code
+    if ((Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding) -cne
+        'mapping-write-barrier-unverified-acquisition-rejected-preserved') {
+        throw "B4 native error $code was misclassified as a reviewed safe refusal."
+    }
 }
 $badMapped=$mapped | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
-$badMapped.actor_receipt.events[3].written=$false
+$badMapped.actor_receipt.events[4].written=$false
 Assert-Rejected { Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding } 'bytes changed'
 $badMapped=$mapped | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
 $badMapped.candidate_receipt.stage_calls=1
 if ((Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding) -cne
     'mapping-write-barrier-unverified-acquisition-rejected-preserved') {
     throw 'B4 staged candidate was misclassified as a pre-stage refusal.'
+}
+$badMapped=$mapped6800 | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$badMapped.candidate_receipt.settlement='rollback-outcome-unknown'
+Assert-Rejected { Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding } 'unknown settlement'
+foreach ($change in @('missing-precontrol','bad-precontrol-bytes','bad-precontrol-hash',
+        'missing-frame','missing-chain')) {
+    $badMapped=$mapped6800 | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+    switch ($change) {
+        'missing-precontrol' { $badMapped.actor_receipt.events=@(
+            $badMapped.actor_receipt.events | Where-Object {
+                $_.phase -cne 'approved-before-mapping-support-control' }) }
+        'bad-precontrol-bytes' { $badMapped.actor_receipt.events[3].data.base64='AA==' }
+        'bad-precontrol-hash' { $badMapped.actor_receipt.events[3].data.sha256='0'*64 }
+        'missing-frame' { @($badMapped.candidate_receipt.error.exception_chain | Where-Object {
+            $null -ne $_.native_error })[0].method_frames=@() }
+        'missing-chain' { $badMapped.candidate_receipt.error.exception_chain=@() }
+    }
+    if ((Assert-PhaseBTrialReceipt $badMapped 'B4' $sourceBinding) -cne
+        'mapping-write-barrier-unverified-acquisition-rejected-preserved') {
+        throw "B4 evidence gap was misclassified as a safe conflict: $change"
+    }
 }
 
 $testRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark180-phase-b-marker-protocol-'+[Guid]::NewGuid().ToString('N'))
