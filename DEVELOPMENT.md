@@ -673,6 +673,15 @@ blocks have these owners and review triggers:
 Test subprocess callers live under `scripts/tests/`; registered tests may run a
 public CLI in temporary fixtures without becoming public commands.
 
+The public `ExactManifestTxFFixtureLease` facade owns the strict disposable
+fixture path and frozen authority checks. Its private exact-set engine contains
+the transaction/handle mechanics; extracting that engine does not provide a
+retained-root factory or an admission capability. The fixture facade remains the
+only construction path, and its protected-root refusal remains in force. A
+future production path needs separately reviewed acquire-only authority followed
+by independently validated disposition permission while the same lease is held.
+Fixture predeclaration files do not supply either production permission.
+
 The optional headless TxF diagnostic is separate from product and release
 qualification. Invoke its prepared script through the maintained central
 `hyperv-control` with the selected exact profile and any applicable shared-VM

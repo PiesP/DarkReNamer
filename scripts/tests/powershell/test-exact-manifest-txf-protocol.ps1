@@ -8,6 +8,50 @@ Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-observer.cs') -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-actors.cs') -ErrorAction Stop
 $candidate=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]
+$guard=[DarkReNamerVmOwnedRootGuard]
+$engine=$guard.GetNestedType('ExactSetEngine',
+    [Reflection.BindingFlags]::NonPublic)
+if ($null -eq $engine -or -not $engine.IsNestedPrivate -or
+    @($candidate.GetConstructors([Reflection.BindingFlags]'Public,Instance')).Count -ne 0) {
+    throw 'Exact-set engine gained a public construction path outside fixture preparation.'
+}
+$constructors=@($engine.GetConstructors([Reflection.BindingFlags]'Public,Instance'))
+if ($constructors.Count -ne 1 -or
+    $constructors[0].GetParameters().Count -ne 1 -or
+    -not $constructors[0].GetParameters()[0].ParameterType.IsNestedPrivate) {
+    throw 'Exact-set engine constructor no longer requires private prepared authority.'
+}
+$prepared=$constructors[0].GetParameters()[0].ParameterType
+$implementations=@($guard.GetNestedTypes([Reflection.BindingFlags]::NonPublic) |
+    Where-Object { $_.GetInterfaces() -contains $prepared })
+if ($implementations.Count -ne 1 -or
+    $implementations[0].Name -cne 'FixturePreparation' -or
+    $null -eq $candidate.GetField('engine',[Reflection.BindingFlags]'NonPublic,Instance') -or
+    $candidate.GetField('engine',[Reflection.BindingFlags]'NonPublic,Instance').FieldType -ne $engine) {
+    throw 'Exact-set engine acquired a non-fixture prepared authority path.'
+}
+$expectedProperties=@('LeaseState','ClosureUnknown','NativeExceptionType',
+    'NativeExceptionMessage','IsClosed','FixtureRoot','SourceSha','ScopePath',
+    'RootId','StageCalls','CommitCalls','RollbackCalls','LastNativeError',
+    'Settlement','TargetHandlesClosed','HeldEntryCount','ApprovedDigest','CloseReceipts')
+$actualProperties=@($candidate.GetProperties([Reflection.BindingFlags]'Public,Instance,DeclaredOnly') |
+    ForEach-Object Name | Sort-Object)
+if ([string]::Join(',', $actualProperties) -cne
+    [string]::Join(',', @($expectedProperties | Sort-Object))) {
+    throw 'Fixture facade changed its public observation properties.'
+}
+foreach ($method in @('RequireFixturePathScope','RequireFixtureApprovalFields',
+        'EncodeComponentUtf16','RequireExactManifest','ObserveExactManifest',
+        'AcquireExactSet','StageExactSet','CommitOnce','Abort','Dispose','PrepareFixtureOnly')) {
+    if ($null -eq $candidate.GetMethod($method,[Reflection.BindingFlags]'Public,Static,Instance')) {
+        throw "Fixture facade lost its existing public method: $method"
+    }
+}
+$factories=@($candidate.GetMethods([Reflection.BindingFlags]'Public,Static,DeclaredOnly') |
+    Where-Object ReturnType -eq $candidate)
+if ($factories.Count -ne 1 -or $factories[0].Name -cne 'PrepareFixtureOnly') {
+    throw 'Fixture facade added another public construction path.'
+}
 
 function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
     $caught=$false
@@ -501,7 +545,7 @@ if ($actualNative.Count -ne 1 -or $actualNative[0].native_error -ne 1224 -or
 $exactChain=$actualChain | ConvertTo-Json -Depth 8 | ConvertFrom-Json -AsHashtable
 foreach ($node in $exactChain) {
     if ($null -ne $node.native_error) {
-        $node.method_frames=@('DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter')
+        $node.method_frames=@('DarkReNamerVmOwnedRootGuard+ExactSetEngine::OpenWriter')
     }
 }
 if ((Get-ExactOpenWriterRefusalCode $exactChain) -ne 1224) {
@@ -523,7 +567,7 @@ foreach ($change in @('code-32','code-5','code-6805','code-zero','wrong-method',
         'wrong-method' { @($bad | Where-Object { $null -ne $_.native_error })[0].method_frames=@('Other::OpenWriter') }
         'extra-native' { $bad+=@([ordered]@{type='System.ComponentModel.Win32Exception';
             native_error=1224;message='same text';hresult=0;method_frames=@(
-                'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter')}) }
+                'DarkReNamerVmOwnedRootGuard+ExactSetEngine::OpenWriter')}) }
         'message-only' { @($bad | Where-Object { $null -ne $_.native_error })[0].native_error=$null;
             @($bad | Where-Object { $_.message -like '*probe native refusal*' })[0].message='OpenWriter ERROR_USER_MAPPED_FILE 1224' }
         'no-chain' { $bad=@() }

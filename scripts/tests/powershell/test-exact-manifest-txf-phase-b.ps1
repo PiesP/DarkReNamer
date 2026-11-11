@@ -117,7 +117,7 @@ function Get-ExactOpenWriterRefusalCode($Chain) {
     if ($native.Count -ne 1 -or $native[0].type -cne 'System.ComponentModel.Win32Exception' -or
         $native[0].native_error -notin @(1224,6800) -or
         @($native[0].method_frames) -cnotcontains
-            'DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease::OpenWriter') {
+            'DarkReNamerVmOwnedRootGuard+ExactSetEngine::OpenWriter') {
         return $null
     }
     return [int]$native[0].native_error
