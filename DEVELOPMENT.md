@@ -651,6 +651,7 @@ second command or asset registry.
 | `tooling_bootstrap.py`, `tooling-bootstrap.ps1` / private authenticated loaders | Isolated Python or PowerShell 7.4+ after a public wrapper checks the pinned loader bytes; fixed manifest, role and layout | Validate and hold the required module closure, then expose verified import/scriptblock APIs. Bootstrap and bundle tests cover tampering, layouts and missing roles; neither loader is a general public CLI. |
 | `test-windows-vm.py`, `run-vm-automated-campaign.py` / Python `vm` and `campaign` modules | Isolated Python on host/WSL, prepared VM connection, selected profile/source/candidate | Prepare and run source-bound native tests/campaigns, producing private bundles and receipts; registered VM, campaign, authority and cleanup tests cover contracts. Actual VM evidence is a separate gate. |
 | `run-gui-regression.py` / Python `vm.gui` | Isolated Python on host/WSL, selected candidate and prepared VM; explicit diagnostic options | Produces bounded GUI diagnostic evidence. GUI diagnostic tests are opt-in; this command does not publish acceptance by itself. |
+| `generate-txf-diagnostic-bootstrap.py` / prepare-only diagnostic generator | Python 3.11+ with `-I` on Linux/WSL; trusted absolute Git executable, clean exact source, independently observed private guest/tool/cohort pins | Writes a new private script of at most 256 KiB and its preparation receipt. It does not contact a VM. The generated PowerShell diagnostic uses the existing pinned-SSH `guest-exec` transport and separate owned Jobs for the fixed B/C fixtures; `headless-txf-bootstrap-protocol` covers rejection and terminal evidence contracts. |
 | `validate-gui-regression-evidence.py`, `validate-vm-automated-evidence.py`, `validate-vm-automated-authority.py` / Python `evidence`, `campaign`, `contracts` | Isolated Python, source identity and private evidence or authenticated hosted facts | Independent verdict/JSON or failure; evidence, binding, authority and GUI fixture tests cover malformed and successful input. Workflow callers retain artifact and GitHub authority. |
 | `run-scheduled-rust-audit.py` / Python | Python 3.11+ on Ubuntu CI/security runners and hosted Windows candidate validation; checked-out lockfile, pinned scanners, fresh advisory data | Uses `SECURITY_TOOLS_ROOT/bin` on Ubuntu or explicit verified absolute `.exe` paths on Windows; validates versions, runs both scanners and rejects incomplete/data-failure results. `scheduled-rust-audit` tests and the three workflow callers own its invocation. |
 | `build-patched-cargo-audit.py` / Python | Python 3.11+, the selected Rust toolchain and native linker; reviewed release-tool metadata and patched scanner lock | Requires a fresh `--work` directory and explicit `--destination`; verifies source/lock hashes before extraction/build, uses isolated Cargo state, then copies the exact-version binary. `--archive` accepts already downloaded verified bytes; `--verify-only` checks inputs without building. `scheduled-rust-audit` fixtures cover tampering and the locked build boundary; actual platform builds remain separate evidence. |
@@ -671,6 +672,29 @@ blocks have these owners and review triggers:
 
 Test subprocess callers live under `scripts/tests/`; registered tests may run a
 public CLI in temporary fixtures without becoming public commands.
+
+The optional headless TxF diagnostic is separate from product and release
+qualification. Invoke its prepared script through the maintained central
+`hyperv-control` with the selected exact profile and any applicable shared-VM
+guard. Use the explicit outer timeout recorded in its preparation receipt
+(currently at least 780 seconds); the controller's 120-second default is
+insufficient. Keep the central VM lock through execution and collection. Expected
+account, administrator-role cohort, OS build and installed tool path/hash/version
+inputs must come from a separately reviewed authenticated observation. An
+administrator diagnostic cohort is not a limited interactive product run.
+
+This bootstrap currently stops before cloning when existing Git-specific proxy,
+CA, TLS-backend or client-certificate inputs need separate route qualification.
+It preserves ordinary proxy environment inputs and certificate verification.
+Its bounded terminal records contain original output bytes, source and Job
+receipts; their guest-side size limit is not an independently enforced host or
+PSRP transport cap. It retains the new private and fixture roots for independent
+readback and later exact-root cleanup. Unknown startup, closure, inventory or
+collection state remains incomplete. Do not infer cleanup, full Gate 1, original
+target admission or candidate acceptance from this diagnostic. Existing target
+holds and release campaign stop rules remain unchanged; this optional route is
+not an additional universal release prerequisite. Keep all private pins and raw
+evidence outside Git.
 
 The VM/evidence Python wrappers first re-execute in `-I` before file imports.
 They select exactly one checkout or flat-bundle layout, read the expected loader
