@@ -22,7 +22,8 @@ $actorPath=Join-Path $repo 'scripts/tests/support/exact-manifest-phase-c-streams
 $sharedNames=@('Hash-Text','Write-NewText','Write-Marker','Read-Marker',
     'Test-MarkerReady','Wait-Marker','Wait-ActorBarrier','Read-KnownBytes',
     'Read-SecurityControl','Path-State','Assert-PrivateDirectory','New-PrivateScope',
-    'Complete-OwnedChild','Observe-OwnedChildClosure','Assert-RunBatchBinding')
+    'Complete-OwnedChild','Observe-OwnedChildClosure','Assert-RunBatchBinding',
+    'Test-PartialRunBatchInput')
 $tokens=$null;$parseErrors=$null
 $sharedAst=[Management.Automation.Language.Parser]::ParseFile($phaseBPath,
     [ref]$tokens,[ref]$parseErrors)
@@ -483,9 +484,9 @@ function Invoke-CChild {
     $status='not-started'
     $batchBinding=$null
     try {
-        if(-not $BatchGuid -and ((@($RunsRootId,$BatchRootId,$BatchAuthoritySha,
-                    $BatchVmGuid,$BatchSid) | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count -ne 0 -or
-                -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('DARK_PHASE_C_BATCH_GUID')))){
+        if(Test-PartialRunBatchInput $BatchGuid `
+                @($RunsRootId,$BatchRootId,$BatchAuthoritySha,$BatchVmGuid,$BatchSid) `
+                ([Environment]::GetEnvironmentVariable('DARK_PHASE_C_BATCH_GUID'))){
             throw 'Phase C child received a partial or inherited run batch input.'
         }
         Assert-CChildScope

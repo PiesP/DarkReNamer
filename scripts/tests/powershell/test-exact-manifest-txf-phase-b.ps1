@@ -385,6 +385,12 @@ function Assert-RunBatchBinding([string]$ScopePath,[string]$SourceSha,
         authority_sha256=$BatchAuthoritySha;source_head=$SourceSha;
         vm_guid=$BatchVmGuid;token_sid=$BatchSid}
 }
+function Test-PartialRunBatchInput([string]$SelectedBatchGuid,[string[]]$Fields,
+        [string]$InheritedGuid) {
+    if(-not [string]::IsNullOrEmpty($SelectedBatchGuid)){return $false}
+    $extras=@($Fields | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    return ($extras.Count -ne 0 -or -not [string]::IsNullOrEmpty($InheritedGuid))
+}
 function Assert-ChildScope {
     if ([string]::IsNullOrWhiteSpace($Scope) -or [string]::IsNullOrWhiteSpace($Trial) -or
         $env:DARK_PHASE_B_NONCE -cnotmatch '^[0-9a-f]{32}$') {
@@ -434,9 +440,9 @@ public sealed class DarkPhaseBDeadline : IDisposable {
     $batchBinding=$null
     try {
         Assert-ChildScope
-        if(-not $BatchGuid -and ((@($RunsRootId,$BatchRootId,$BatchAuthoritySha,
-                    $BatchVmGuid,$BatchSid) | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count -ne 0 -or
-                -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('DARK_PHASE_B_BATCH_GUID')))){
+        if(Test-PartialRunBatchInput $BatchGuid `
+                @($RunsRootId,$BatchRootId,$BatchAuthoritySha,$BatchVmGuid,$BatchSid) `
+                ([Environment]::GetEnvironmentVariable('DARK_PHASE_B_BATCH_GUID'))){
             throw 'Phase B child received a partial or inherited run batch input.'
         }
         if ($BatchGuid) {

@@ -6,6 +6,21 @@ $fixture=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-c.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($fixture,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Phase C fixture has PowerShell parse errors.' }
+$phaseBFixture=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-b.ps1'
+$bTokens=$null;$bErrors=$null
+$bAst=[Management.Automation.Language.Parser]::ParseFile($phaseBFixture,
+    [ref]$bTokens,[ref]$bErrors)
+if($bErrors.Count){throw 'Phase C shared Phase B helper has parse errors.'}
+$batchHelper=$bAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Test-PartialRunBatchInput'},$true)
+if($null -eq $batchHelper){throw 'Phase C shared child argument helper is absent.'}
+. ([scriptblock]::Create($batchHelper.Extent.Text))
+if((Test-PartialRunBatchInput '' @('','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('x','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('x','y','','','') '') -or
+    (Test-PartialRunBatchInput ('1'*32) @('','','','','') '')){
+    throw 'Phase C shared actual child argument guard differs.'}
 foreach ($name in @('Stream-NameHex','Test-CSource','Test-CSourceIdentity','Test-CBarrier',
         'Test-CStreamContext','Test-CStreamDataIdentity',
         'Test-StreamCatalog','Test-COriginal','Test-CBaseline','Test-CAdmittedPost',

@@ -187,6 +187,7 @@ $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
 foreach ($name in @('Hash-Text','Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
         'Assert-PrivateDirectory','New-PrivateScope','Assert-RunBatchBinding','Assert-ChildScope',
+        'Test-PartialRunBatchInput',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
         'Get-ExactOpenWriterRefusalCode','Complete-OwnedChild','Observe-OwnedChildClosure',
         'Read-WorkerRecord','Convert-NativeDescriptor','Test-NativeDescriptorComplete',
@@ -197,6 +198,13 @@ foreach ($name in @('Hash-Text','Write-NewText','Write-Marker','Read-Marker','Te
         $node.Name -ceq $name},$true)
     if ($null -eq $definition) { throw "Actual Phase B terminal function is missing: $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
+}
+if((Test-PartialRunBatchInput '' @('','','','','') '') -or
+    (Test-PartialRunBatchInput ('1'*32) @('','','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('','one','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('one','two','','','') '') -or
+    -not (Test-PartialRunBatchInput '' @('','','','','') ('1'*32))){
+    throw 'Actual legacy child argument guard mishandles empty, partial or selected inputs.'
 }
 if($IsWindows){
     function Assert-ControlOrdinaryChain([string]$Path) {

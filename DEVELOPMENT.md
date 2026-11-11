@@ -729,6 +729,8 @@ argument-free shell can exit successfully without executing the intended query.
 Suppress incidental .NET return values in helpers that return one structured
 record: for example, `Dictionary.Remove` emits a Boolean unless explicitly
 suppressed. Check the actual returned shape in both legacy and selected paths.
+Under StrictMode, wrap a possibly empty filtered pipeline in `@()` before
+reading `.Count`; exercise zero, one and multiple results in the actual helper.
 Its bounded terminal records contain original output bytes, source and Job
 receipts; their guest-side size limit is not an independently enforced host or
 PSRP transport cap. It retains the new private and fixture roots for independent
