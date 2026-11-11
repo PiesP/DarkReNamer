@@ -477,7 +477,7 @@ function Assert-CReceipt($Row,$ExpectedSource) {
     return 'late-stream-refused-supported-gate1-unverified'
 }
 function Invoke-CChild {
-    $deadline=[DarkPhaseCDeadline]::new(15000)
+    $deadline=$null
     $target=Join-Path $Scope 'target'
     $events=[Collections.Generic.List[object]]::new()
     $lease=$null;$workerError=$null;$cleanupError=$null
@@ -492,6 +492,7 @@ function Invoke-CChild {
         Assert-CChildScope
         Add-Type -Path $observerPath -ErrorAction Stop
         Add-Type -Path $actorPath -ErrorAction Stop
+        $deadline=[DarkPhaseCDeadline]::new(15000)
         $batchBinding=if($BatchGuid){Assert-RunBatchBinding $Scope $sourceSha}else{$null}
         if ($Mode -eq 'observer-actor') {
             [void][IO.Directory]::CreateDirectory($target)
@@ -639,7 +640,7 @@ function Invoke-CChild {
             type=$_.Exception.GetType().FullName;message=$_.Exception.Message} |
             ConvertTo-Json -Depth 12 -Compress)))
         throw
-    } finally { $deadline.Dispose() }
+    } finally { if($null -ne $deadline){$deadline.Dispose()} }
 }
 
 function Start-CChild([string]$Role,[string]$TrialName,[string]$TrialScope,[string]$Nonce) {
