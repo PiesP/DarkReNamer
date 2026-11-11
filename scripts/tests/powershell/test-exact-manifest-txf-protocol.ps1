@@ -131,7 +131,7 @@ $fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
 if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
 foreach ($name in @('Write-NewText','Write-Marker','Read-Marker','Test-MarkerReady',
         'Wait-Marker','Wait-ActorBarrier','Get-PhaseBExceptionChain',
-        'Get-ExactOpenWriterRefusalCode','Assert-PhaseBTrialReceipt')) {
+        'Get-ExactOpenWriterRefusalCode','Assert-PhaseB6LReceipt','Assert-PhaseBTrialReceipt')) {
     $definition=$fixtureAst.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $name},$true)
@@ -215,7 +215,7 @@ $death.barrier.commit_calls=0
 $death.actor_receipt.postproof.approved.status='absent'
 Assert-Rejected { Assert-PhaseBTrialReceipt $death 'B7' $sourceBinding } 'independently preserved'
 $early=$complete | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
-$early.trial='B6';$early.actor_receipt.trial='B6';$early.candidate_receipt.trial='B6'
+$early.trial='B2';$early.actor_receipt.trial='B2';$early.candidate_receipt.trial='B2'
 $early.actor_receipt.postproof.root.status='present'
 $early.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
 $early.actor_receipt.postproof.root_id=$frozenRoot
@@ -227,12 +227,12 @@ $early.candidate_receipt.status='rejected-or-unknown'
 $early.candidate_receipt.settlement='rollback-succeeded'
 $early.candidate_receipt.lease_state='rollback-succeeded'
 $early.candidate_receipt.commit_calls=0;$early.candidate_receipt.rollback_calls=1
-if ((Assert-PhaseBTrialReceipt $early 'B6' $sourceBinding) -cne
+if ((Assert-PhaseBTrialReceipt $early 'B2' $sourceBinding) -cne
     'required-barrier-unverified-candidate-rejected-preserved') {
     throw 'Actual Phase B controller mislabeled an unreachable required barrier.'
 }
 $early.actor_receipt.postproof.approved.base64=[Convert]::ToBase64String([byte[]](99))
-Assert-Rejected { Assert-PhaseBTrialReceipt $early 'B6' $sourceBinding } 'bytes changed'
+Assert-Rejected { Assert-PhaseBTrialReceipt $early 'B2' $sourceBinding } 'bytes changed'
 $late=$early | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
 $late.trial='B2';$late.actor_receipt.trial='B2';$late.candidate_receipt.trial='B2'
 $late.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
@@ -248,6 +248,127 @@ if ((Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding) -cne
 }
 $late.actor_receipt.postproof.late_child.status='absent'
 Assert-Rejected { Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding } 'late child'
+
+$b6=$early | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$b6.trial='B6L';$b6.actor_receipt.trial='B6L';$b6.candidate_receipt.trial='B6L'
+$b6.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
+$baselineOwner='a'*64;$baselineSddl='b'*64;$afterSupport='c'*64
+$rootOwner='d'*64;$rootSddl='e'*64
+$b6.actor_receipt.postproof.approved_security=[ordered]@{
+    owner_sha256=$baselineOwner;sddl_sha256=$afterSupport}
+$b6.actor_receipt.postproof.root_security=[ordered]@{
+    owner_sha256=$rootOwner;sddl_sha256=$rootSddl}
+$b6.actor_receipt.events[0].root_security=[ordered]@{
+    owner_sha256=$rootOwner;sddl_sha256=$rootSddl}
+$b6.actor_receipt.events[0].approved_security=[ordered]@{
+    owner_sha256=$baselineOwner;sddl_sha256=$baselineSddl}
+$b6.candidate_receipt.status='intentional-rollback-B6L-post-barrier'
+$b6.candidate_receipt.stage_calls=2
+$b6.barrier=[ordered]@{trial='B6L';state='staged';stage_calls=2;
+    target_handles_closed=$true;commit_calls=0}
+$lateDenied=[ordered]@{open_admitted=$false;open_error=6800;
+    identity_observed=$false;identity_error=0;identity_exception=$null;file_id=$null;
+    set_attempted=$false;set_error=0;set_exception=$null;
+    before_observed=$false;before_error=0;before_exception=$null;before_sha256=$null;
+    after_observed=$false;after_error=0;after_exception=$null;after_sha256=$null}
+$supportPositive=[ordered]@{open_admitted=$true;open_error=0;
+    identity_observed=$true;identity_error=0;identity_exception=$null;
+    identity_matches=$true;file_id=$frozenFile;
+    before_observed=$true;before_error=0;before_exception=$null;
+    before_sha256=$baselineSddl;
+    set_attempted=$true;set_error=0;set_exception=$null;
+    after_observed=$true;after_error=0;after_exception=$null;
+    after_sha256=$afterSupport;
+    close=[ordered]@{Attempted=$true;Confirmed=$true;NativeError=0;
+        ExceptionType=$null;ExceptionMessage=$null}}
+$b6.actor_receipt.events=@($b6.actor_receipt.events[0],
+    [ordered]@{phase='B6L-prepared-no-held-handle';approved_id=$frozenFile;
+        proposed_sddl_sha256=$afterSupport;
+        preparation_close=[ordered]@{Attempted=$true;Confirmed=$true;
+            NativeError=0;ExceptionType=$null};
+        requested_access='READ_CONTROL|WRITE_DAC|WRITE_OWNER';share='READ|WRITE|DELETE';
+        disposition='OPEN_EXISTING|OPEN_REPARSE_POINT';
+        baseline=[ordered]@{owner_sha256=$baselineOwner;sddl_sha256=$baselineSddl}},
+    [ordered]@{phase='B6L-late-metadata-probe';data=$lateDenied},
+    [ordered]@{phase='B6L-late-handle-close-after-candidate-exit';
+        data=[ordered]@{Attempted=$false;Confirmed=$true;NativeError=0;
+            ExceptionType=$null;ExceptionMessage=$null}},
+    [ordered]@{phase='B6L-independent-postrollback-before-support';
+        root=[ordered]@{status='present';reparse=$false};root_id=$frozenRoot;
+        approved_id=$frozenFile;approved=(& $bytesProof $approvedBytes);
+        sentinel=(& $bytesProof $sentinel);
+        root_security=[ordered]@{owner_sha256=$rootOwner;sddl_sha256=$rootSddl};
+        security=[ordered]@{owner_sha256=$baselineOwner;sddl_sha256=$baselineSddl}},
+    [ordered]@{phase='B6L-after-release-support-probe';data=$supportPositive})
+$b6.late_probe_marker=[ordered]@{phase='B6L-late-probe-complete';data=$lateDenied}
+if ((Assert-PhaseBTrialReceipt $b6 'B6L' $sourceBinding) -cne
+    'late-metadata-open-refused-supported-gate1-unverified') {
+    throw 'B6L exact late-open refusal and after-release DACL support were rejected.'
+}
+$b6WriteRefused=$b6 | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$b6WriteRefused.actor_receipt.events[2].data=[ordered]@{
+    open_admitted=$true;open_error=0;identity_observed=$true;identity_error=0;
+    identity_exception=$null;identity_matches=$true;
+    file_id=$frozenFile;before_observed=$true;before_error=0;
+    before_exception=$null;before_sha256=$baselineSddl;
+    set_attempted=$true;set_error=32;set_exception=$null;
+    after_observed=$true;after_error=0;after_exception=$null;
+    after_sha256=$baselineSddl}
+$b6WriteRefused.actor_receipt.events[3].data.Attempted=$true
+$b6WriteRefused.late_probe_marker.data=$b6WriteRefused.actor_receipt.events[2].data
+if ((Assert-PhaseBTrialReceipt $b6WriteRefused 'B6L' $sourceBinding) -cne
+    'late-dacl-write-refused-supported-gate1-unverified') {
+    throw 'B6L exact late-DACL refusal and support were rejected.'
+}
+$b6NoBefore=$b6WriteRefused | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$b6NoBefore.actor_receipt.events[2].data.before_observed=$false
+$b6NoBefore.actor_receipt.events[2].data.before_sha256=$null
+Assert-Rejected { Assert-PhaseBTrialReceipt $b6NoBefore 'B6L' $sourceBinding } 'security observation'
+foreach ($change in @('wrong-file-id','late-set-succeeded','late-set-error-5',
+        'late-set-error-6805','late-after-unobserved','late-open-error-5',
+        'late-open-error-6805','phase-mismatch','prep-close-unknown',
+        'close-unknown','pre-support-bytes',
+        'pre-support-dacl','set-exception','marker-mismatch',
+        'support-unchanged','proposed-mismatch',
+        'owner-drift')) {
+    $bad=$b6WriteRefused | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+    switch ($change) {
+        'wrong-file-id' { $bad.actor_receipt.events[2].data.file_id='0'*48 }
+        'late-set-succeeded' { $bad.actor_receipt.events[2].data.set_error=0;
+            $bad.actor_receipt.events[2].data.after_sha256=$afterSupport }
+        'late-set-error-5' { $bad.actor_receipt.events[2].data.set_error=5 }
+        'late-set-error-6805' { $bad.actor_receipt.events[2].data.set_error=6805 }
+        'late-after-unobserved' { $bad.actor_receipt.events[2].data.after_observed=$false }
+        'late-open-error-5' { $bad.actor_receipt.events[2].data.open_admitted=$false;
+            $bad.actor_receipt.events[2].data.open_error=5;
+            $bad.actor_receipt.events[2].data.identity_observed=$false;
+            $bad.actor_receipt.events[2].data.set_attempted=$false;
+            $bad.actor_receipt.events[2].data.before_observed=$false;
+            $bad.actor_receipt.events[2].data.after_observed=$false;
+            $bad.actor_receipt.events[3].data.Attempted=$false }
+        'late-open-error-6805' { $bad.actor_receipt.events[2].data.open_admitted=$false;
+            $bad.actor_receipt.events[2].data.open_error=6805;
+            $bad.actor_receipt.events[2].data.identity_observed=$false;
+            $bad.actor_receipt.events[2].data.set_attempted=$false;
+            $bad.actor_receipt.events[2].data.before_observed=$false;
+            $bad.actor_receipt.events[2].data.after_observed=$false;
+            $bad.actor_receipt.events[3].data.Attempted=$false }
+        'phase-mismatch' { $bad.barrier.target_handles_closed=$false }
+        'prep-close-unknown' { $bad.actor_receipt.events[1].preparation_close.Confirmed=$false }
+        'close-unknown' { $bad.actor_receipt.events[3].data.Confirmed=$false }
+        'pre-support-bytes' { $bad.actor_receipt.events[4].approved.base64='AA==' }
+        'pre-support-dacl' { $bad.actor_receipt.events[4].security.sddl_sha256='0'*64 }
+        'set-exception' { $bad.actor_receipt.events[2].data.set_exception='managed throw' }
+        'marker-mismatch' { $bad.late_probe_marker.data.open_error=5 }
+        'support-unchanged' { $bad.actor_receipt.events[5].data.after_sha256=$baselineSddl }
+        'proposed-mismatch' { $bad.actor_receipt.events[1].proposed_sddl_sha256='0'*64 }
+        'owner-drift' { $bad.actor_receipt.postproof.approved_security.owner_sha256='0'*64 }
+    }
+    $rejected=$false
+    try { $null=Assert-PhaseBTrialReceipt $bad 'B6L' $sourceBinding }
+    catch { $rejected=$true }
+    if (-not $rejected) { throw "B6L protocol accepted unproved evidence: $change" }
+}
 
 Add-Type -TypeDefinition @'
 using System.ComponentModel;
@@ -382,7 +503,7 @@ try {
         throw 'Published marker payload changed in transit.'
     }
     $before=(Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash
-    Assert-Rejected { Write-Marker $published ([ordered]@{trial='B6'}) } 'exists'
+    Assert-Rejected { Write-Marker $published ([ordered]@{trial='B6L'}) } 'exists'
     if ((Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash -cne $before) {
         throw 'Duplicate publication overwrote immutable marker data.'
     }

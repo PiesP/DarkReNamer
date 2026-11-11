@@ -2,7 +2,7 @@
 param(
     [ValidateSet('controller','candidate','observer-actor')]
     [string]$Mode='controller',
-    [ValidateSet('B1','B2','B3','B4','B5','B6','B7')]
+    [ValidateSet('B1','B2','B3','B4','B5','B6L','B7')]
     [string]$Trial,
     [string]$Scope
 )
@@ -21,7 +21,7 @@ $source=[ordered]@{commit=$sourceSha;
     module_sha256=(Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash.ToLowerInvariant();
     observer_sha256=(Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash.ToLowerInvariant();
     actor_sha256=(Get-FileHash -LiteralPath $actorPath -Algorithm SHA256).Hash.ToLowerInvariant()}
-$trials=@('B1','B2','B3','B4','B5','B6','B7')
+$trials=@('B1','B2','B3','B4','B5','B6L','B7')
 
 function Hash-Text([string]$Value) {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
@@ -145,6 +145,32 @@ function Read-KnownBytes([string]$Path,[bool]$AllowAbsent) {
             base64=[Convert]::ToBase64String($bytes)}
     } finally { $stream.Dispose() }
 }
+function Read-SecurityControl([string]$Path,[bool]$Directory=$false) {
+    $acl=if($Directory){
+        [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Path))
+    }else{[IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]::new($Path))}
+    $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    $sections=[Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group -bor
+        [Security.AccessControl.AccessControlSections]::Access
+    $sddl=$acl.GetSecurityDescriptorSddlForm($sections)
+    return [ordered]@{owner_sha256=(Hash-Text $owner);sddl_sha256=(Hash-Text $sddl)}
+}
+function Convert-LateDaclResult($Result) {
+    return [ordered]@{open_admitted=$Result.OpenAdmitted;open_error=$Result.OpenError;
+        identity_observed=$Result.IdentityObserved;identity_error=$Result.IdentityError;
+        identity_exception=$Result.IdentityException;file_id=$Result.FileId;
+        identity_matches=$Result.IdentityMatches;
+        before_observed=$Result.BeforeObserved;before_error=$Result.BeforeError;
+        before_exception=$Result.BeforeException;
+        before_sha256=$(if($Result.BeforeObserved){Hash-Text $Result.BeforeSddl}else{$null});
+        set_attempted=$Result.SetAttempted;set_error=$Result.SetError;
+        set_exception=$Result.SetException;
+        after_observed=$Result.AfterObserved;after_error=$Result.AfterError;
+        after_exception=$Result.AfterException;
+        after_sha256=$(if($Result.AfterObserved){Hash-Text $Result.AfterSddl}else{$null});
+        close=$Result.Close}
+}
 function Path-State([string]$Path) {
     try {
         $attrs=[IO.File]::GetAttributes($Path)
@@ -222,7 +248,8 @@ public sealed class DarkPhaseBDeadline : IDisposable {
     $target=Join-Path $Scope 'target'
     $events=[Collections.Generic.List[object]]::new()
     $workerError=$null;$cleanupError=$null;$lease=$null;$actorResource=$null;$result=$null
-    $lateCapability=$null
+    $lateCapability=$null;$lateDaclCapability=$null;$lateDaclResult=$null
+    $baselineControl=$null
     try {
         if ($Mode -eq 'observer-actor') {
             Add-Type -Path $observerPath -ErrorAction Stop
@@ -241,6 +268,17 @@ public sealed class DarkPhaseBDeadline : IDisposable {
             $rows=[DarkPhaseBFixtureObserver]::Freeze($target)
             $digest=[DarkPhaseBFixtureObserver]::DigestRows($rows)
             $rootId=$rows[0].Split('|')[2]
+            $rootFields=$rows[0].Split('|');$fileFields=$rows[1].Split('|')
+            $rootFrozenSecurity=[ordered]@{
+                owner_sha256=(Hash-Text ([Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($rootFields[5]))));
+                sddl_sha256=(Hash-Text ([Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($rootFields[6]))))}
+            $fileFrozenSecurity=[ordered]@{
+                owner_sha256=(Hash-Text ([Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($fileFields[5]))));
+                sddl_sha256=(Hash-Text ([Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($fileFields[6]))))}
             $expectedPaths=switch ($Trial) {
                 'B1' {@('.', '61007000700072006f007600650064002e00620069006e00',
                     '66006f006c00640065007200','66006f006c00640065007200/6e00650073007400650064002e00620069006e00',
@@ -265,7 +303,8 @@ public sealed class DarkPhaseBDeadline : IDisposable {
             Write-NewText (Join-Path $Scope 'predelete.txt') (($fields -join "`n") + "`n")
             $events.Add([ordered]@{phase='independent-freeze';row_count=$rows.Count;
                 root_id=$rootId;approved_id=$rows[1].Split('|')[2];
-                manifest_digest=$digest;approved_before=$known})
+                manifest_digest=$digest;approved_before=$known;
+                root_security=$rootFrozenSecurity;approved_security=$fileFrozenSecurity})
             if ($Trial -eq 'B3') {
                 $ads=[DarkPhaseBFixtureActors]::CreateDirectoryAds($Scope,$target)
                 $events.Add([ordered]@{phase='preexisting-directory-ads';admitted=$ads.Admitted;
@@ -293,9 +332,26 @@ public sealed class DarkPhaseBDeadline : IDisposable {
             if ($Trial -eq 'B2') {
                 $lateCapability=[DarkPhaseBFixtureActors]::PrepareLateChild($Scope,$target)
             }
-            if ($Trial -eq 'B6') {
-                $actorResource=[DarkPhaseBFixtureActors]::OpenHeldDacl($Scope,$target)
-                $events.Add([ordered]@{phase='READ_CONTROL-WRITE_DAC-handle-held'})
+            if ($Trial -eq 'B6L') {
+                $approvedFields=$rows[1].Split('|')
+                $baselineOwner=[Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($approvedFields[5]))
+                $baselineSddl=[Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($approvedFields[6]))
+                $baselineControl=[ordered]@{owner_sha256=(Hash-Text $baselineOwner);
+                    sddl_sha256=(Hash-Text $baselineSddl)}
+                $lateDaclCapability=[DarkPhaseBFixtureActors]::PrepareLateDacl(
+                    $Scope,$target,$approvedFields[2])
+                if ($lateDaclCapability.BaselineSddl -cne $baselineSddl -or
+                    $lateDaclCapability.OriginalId -cne $approvedFields[2]) {
+                    throw 'B6L independent freeze differs from the no-held-handle preparation.'
+                }
+                $events.Add([ordered]@{phase='B6L-prepared-no-held-handle';
+                    approved_id=$approvedFields[2];baseline=$baselineControl;
+                    proposed_sddl_sha256=(Hash-Text $lateDaclCapability.ProposedSddl);
+                    preparation_close=$lateDaclCapability.PreparationClose;
+                    requested_access='READ_CONTROL|WRITE_DAC|WRITE_OWNER';share='READ|WRITE|DELETE';
+                    disposition='OPEN_EXISTING|OPEN_REPARSE_POINT'})
             }
             Write-Marker (Join-Path $Scope 'actor-ready.json') ([ordered]@{trial=$Trial;
                 source=$source;manifest_digest=$digest;root_id=$rootId})
@@ -321,17 +377,69 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                     $b4EarlyCancel=$true
                     $events.Add([ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'})
                 }
-            } elseif ($Trial -eq 'B6') {
+            } elseif ($Trial -eq 'B6L') {
                 if (Wait-ActorBarrier (Join-Path $Scope 'actor-go.json') 12000) {
-                    $change=[DarkPhaseBFixtureActors]::AddAuthenticatedUsersReadAttributes($actorResource)
-                    $events.Add([ordered]@{phase='held-WRITE_DAC-change';native_error=$change.NativeError;
-                        changed=$change.Changed;before_sha256=(Hash-Text $change.Before);
-                        after_sha256=(Hash-Text $change.After)})
+                    $lateDaclResult=$lateDaclCapability.AttemptLate()
+                    $lateReceipt=Convert-LateDaclResult $lateDaclResult
+                    $events.Add([ordered]@{phase='B6L-late-metadata-probe';data=$lateReceipt})
                     Write-Marker (Join-Path $Scope 'actor-done.json') ([ordered]@{
-                        native_error=$change.NativeError;changed=$change.Changed})
+                        phase='B6L-late-probe-complete';data=$lateReceipt})
                 } else { $events.Add([ordered]@{phase='required-barrier-unverified';reason='candidate-rejected-before-barrier'}) }
             }
             $candidateDone=Wait-Marker (Join-Path $Scope 'candidate-done.json') 12000
+            if ($Trial -eq 'B6L' -and $null -ne $lateDaclResult) {
+                if ($candidateDone.trial -cne 'B6L' -or -not $candidateDone.worker_exit_observed -or
+                    -not $candidateDone.candidate_rollback_confirmed -or
+                    $candidateDone.death_at_barrier) {
+                    throw 'B6L late handle must remain held until confirmed candidate exit and rollback.'
+                }
+                $lateClose=$lateDaclCapability.CloseLateOnce()
+                $events.Add([ordered]@{phase='B6L-late-handle-close-after-candidate-exit';
+                    data=$lateClose})
+                if (-not $lateClose.Confirmed) { throw 'B6L late handle closure is unknown.' }
+                $preRoot=Path-State $target
+                $preApproved=Read-KnownBytes (Join-Path $target 'approved.bin') $false
+                $preSentinel=Read-KnownBytes (Join-Path $Scope 'sentinel.bin') $false
+                $preRootId=[DarkPhaseBFixtureObserver]::IdentityOf($target,$true)
+                $preApprovedId=[DarkPhaseBFixtureObserver]::IdentityOf(
+                    (Join-Path $target 'approved.bin'),$false)
+                $preRootSecurity=Read-SecurityControl $target $true
+                $preSecurity=Read-SecurityControl (Join-Path $target 'approved.bin')
+                $preSupport=[ordered]@{phase='B6L-independent-postrollback-before-support';
+                    root=$preRoot;root_id=$preRootId;approved_id=$preApprovedId;
+                    approved=$preApproved;sentinel=$preSentinel;root_security=$preRootSecurity;
+                    security=$preSecurity}
+                $events.Add($preSupport)
+                $originalBytes=[byte[]](9,18,27,36,45,54)
+                $baselineConfirmed=$preRoot.status -ceq 'present' -and -not $preRoot.reparse -and
+                    $preRootId -ceq $rootId -and $preApprovedId -ceq $approvedFields[2] -and
+                    $preApproved.base64 -ceq [Convert]::ToBase64String($originalBytes) -and
+                    $preApproved.sha256 -ceq ([Convert]::ToHexString(
+                        [Security.Cryptography.SHA256]::HashData($originalBytes)).ToLowerInvariant()) -and
+                    $preSentinel.base64 -ceq [Convert]::ToBase64String([byte[]](72,63,54,45,36,27)) -and
+                    $preRootSecurity.owner_sha256 -ceq $rootFrozenSecurity.owner_sha256 -and
+                    $preRootSecurity.sddl_sha256 -ceq $rootFrozenSecurity.sddl_sha256 -and
+                    $preSecurity.owner_sha256 -ceq $baselineControl.owner_sha256 -and
+                    $preSecurity.sddl_sha256 -ceq $baselineControl.sddl_sha256
+                $knownLateRefusal=($lateReceipt.open_admitted -eq $false -and
+                    $lateReceipt.open_error -in @(32,6800)) -or
+                    ($lateReceipt.open_admitted -eq $true -and
+                     $lateReceipt.identity_observed -and $lateReceipt.identity_matches -and
+                     $lateReceipt.before_observed -and
+                     $lateReceipt.before_sha256 -ceq $baselineControl.sddl_sha256 -and
+                     $lateReceipt.set_attempted -and $null -eq $lateReceipt.set_exception -and
+                     $lateReceipt.set_error -in @(32,6800) -and
+                     $lateReceipt.after_observed -and
+                     $lateReceipt.after_sha256 -ceq $baselineControl.sddl_sha256)
+                if ($baselineConfirmed -and $knownLateRefusal) {
+                    $supportResult=$lateDaclCapability.AttemptSupport($true,$true)
+                    $events.Add([ordered]@{phase='B6L-after-release-support-probe';
+                        data=(Convert-LateDaclResult $supportResult)})
+                } else {
+                    $events.Add([ordered]@{phase='B6L-support-skipped';
+                        baseline_confirmed=$baselineConfirmed;known_late_refusal=$knownLateRefusal})
+                }
+            }
             if ($b4EarlyCancel) {
                 if ($candidateDone.trial -cne 'B4' -or -not $candidateDone.worker_exit_observed -or
                     $candidateDone.death_at_barrier) {
@@ -369,12 +477,16 @@ public sealed class DarkPhaseBDeadline : IDisposable {
             if ($rootState.status -eq 'present') {
                 $post.root_id=[DarkPhaseBFixtureObserver]::IdentityOf($target,$true)
                 $post.owner_sddl_sha256=Hash-Text (Get-Acl -LiteralPath $target).Sddl
+                if ($Trial -eq 'B6L') { $post.root_security=Read-SecurityControl $target $true }
             }
             if ($approvedAfter.status -eq 'present') {
                 $post.approved_id=[DarkPhaseBFixtureObserver]::IdentityOf(
                     (Join-Path $target 'approved.bin'),$false)
                 $post.approved_sddl_sha256=Hash-Text (
                     (Get-Acl -LiteralPath (Join-Path $target 'approved.bin')).Sddl)
+                if ($Trial -eq 'B6L') {
+                    $post.approved_security=Read-SecurityControl (Join-Path $target 'approved.bin')
+                }
             }
             if ($Trial -eq 'B2') {
                 $post.late_child=Read-KnownBytes (Join-Path $target 'late-child.bin') $true
@@ -417,20 +529,21 @@ public sealed class DarkPhaseBDeadline : IDisposable {
                 $lease.StageExactSet((Join-Path $Scope 'predelete.txt'))
                 $events.Add([ordered]@{phase='staged-target-handles-closed';stage_calls=$lease.StageCalls;
                     close_receipts=$lease.CloseReceipts})
-                if ($Trial -in @('B2','B6','B7')) {
+                if ($Trial -in @('B2','B6L','B7')) {
                     Write-Marker (Join-Path $Scope 'candidate-barrier.json') ([ordered]@{trial=$Trial;
                         state=$lease.LeaseState;stage_calls=$lease.StageCalls;
                         target_handles_closed=$lease.TargetHandlesClosed;
                         close_receipts=$lease.CloseReceipts;commit_calls=$lease.CommitCalls})
                 }
-                if ($Trial -in @('B2','B6')) { $null=Wait-Marker (Join-Path $Scope 'actor-done.json') 10000 }
+                if ($Trial -in @('B2','B6L')) { $null=Wait-Marker (Join-Path $Scope 'actor-done.json') 10000 }
                 if ($Trial -eq 'B7') {
                     $null=Wait-Marker (Join-Path $Scope 'candidate-release-should-not-exist.json') 12000
                     throw 'B7 candidate was released instead of killed at the precommit barrier.'
                 }
-                if ($Trial -eq 'B2') {
-                    if (-not $lease.Abort()) { throw 'B2 intentional rollback outcome is unknown.' }
-                    $status='intentional-rollback-post-barrier'
+                if ($Trial -in @('B2','B6L')) {
+                    if (-not $lease.Abort()) { throw "${Trial} intentional rollback outcome is unknown." }
+                    $status=if($Trial -eq 'B2'){'intentional-rollback-post-barrier'}
+                        else {'intentional-rollback-B6L-post-barrier'}
                 } else {
                 $lease.CommitOnce((Join-Path $Scope 'predelete.txt'))
                 $status='commit-call-succeeded-poststate-unverified'
@@ -525,6 +638,138 @@ function Read-WorkerRecord($ProcessRow,[string]$ExpectedRole,[string]$ExpectedTr
         throw "Phase B $ExpectedRole structured record is mixed or malformed."
     }
     return $receipt
+}
+function Assert-PhaseB6LReceipt($Row,$Freeze) {
+    $candidate=$Row.candidate_receipt
+    $post=$Row.actor_receipt.postproof
+    if ($candidate.status -cne 'intentional-rollback-B6L-post-barrier' -or
+        $candidate.lease_state -cne 'rollback-succeeded' -or
+        $candidate.settlement -cne 'rollback-succeeded' -or
+        $candidate.stage_calls -ne 2 -or $candidate.commit_calls -ne 0 -or
+        $candidate.rollback_calls -ne 1 -or $candidate.cleanup_error -or
+        $candidate.closure_unknown -or $null -eq $Row.barrier -or
+        $Row.barrier.trial -cne 'B6L' -or $Row.barrier.state -cne 'staged' -or
+        $Row.barrier.stage_calls -ne 2 -or $Row.barrier.commit_calls -ne 0 -or
+        -not $Row.barrier.target_handles_closed) {
+        throw 'B6L lacks an exact last-close barrier and settled intentional rollback.'
+    }
+    $events=$Row.actor_receipt.events
+    $prepared=@($events | Where-Object { $_.phase -ceq 'B6L-prepared-no-held-handle' })
+    $late=@($events | Where-Object { $_.phase -ceq 'B6L-late-metadata-probe' })
+    $close=@($events | Where-Object { $_.phase -ceq 'B6L-late-handle-close-after-candidate-exit' })
+    $before=@($events | Where-Object { $_.phase -ceq 'B6L-independent-postrollback-before-support' })
+    $support=@($events | Where-Object { $_.phase -ceq 'B6L-after-release-support-probe' })
+    if ($prepared.Count -ne 1 -or $late.Count -ne 1 -or $close.Count -ne 1 -or
+        $before.Count -ne 1 -or $prepared[0].approved_id -cne $Freeze.approved_id -or
+        $prepared[0].requested_access -cne 'READ_CONTROL|WRITE_DAC|WRITE_OWNER' -or
+        $prepared[0].share -cne 'READ|WRITE|DELETE' -or
+        $prepared[0].disposition -cne 'OPEN_EXISTING|OPEN_REPARSE_POINT' -or
+        -not $prepared[0].preparation_close.Attempted -or
+        -not $prepared[0].preparation_close.Confirmed -or
+        $prepared[0].preparation_close.NativeError -ne 0 -or
+        $prepared[0].preparation_close.ExceptionType) {
+        throw 'B6L independent preparation or phase evidence is incomplete.'
+    }
+    if ($null -eq $Row.late_probe_marker -or
+        $Row.late_probe_marker.phase -cne 'B6L-late-probe-complete' -or
+        $Row.late_probe_marker.data.open_admitted -ne $late[0].data.open_admitted -or
+        $Row.late_probe_marker.data.open_error -ne $late[0].data.open_error -or
+        $Row.late_probe_marker.data.file_id -cne $late[0].data.file_id -or
+        $Row.late_probe_marker.data.set_attempted -ne $late[0].data.set_attempted -or
+        $Row.late_probe_marker.data.set_error -ne $late[0].data.set_error -or
+        $Row.late_probe_marker.data.after_sha256 -cne $late[0].data.after_sha256) {
+        throw 'B6L independently published late operation differs from actor receipt.'
+    }
+    $baseline=$prepared[0].baseline
+    if ($baseline.owner_sha256 -cne $Freeze.approved_security.owner_sha256 -or
+        $baseline.sddl_sha256 -cne $Freeze.approved_security.sddl_sha256) {
+        throw 'B6L prepared owner/DACL differs from independently frozen manifest.'
+    }
+    $original=[byte[]](9,18,27,36,45,54)
+    $sentinel=[byte[]](72,63,54,45,36,27)
+    $pre=$before[0]
+    if ($pre.root.status -cne 'present' -or $pre.root.reparse -or
+        $pre.root_id -cne $Freeze.root_id -or $pre.approved_id -cne $Freeze.approved_id -or
+        $pre.approved.status -cne 'present' -or
+        $pre.approved.base64 -cne [Convert]::ToBase64String($original) -or
+        $pre.approved.sha256 -cne ([Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($original)).ToLowerInvariant()) -or
+        $pre.sentinel.base64 -cne [Convert]::ToBase64String($sentinel) -or
+        $pre.sentinel.sha256 -cne ([Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($sentinel)).ToLowerInvariant()) -or
+        $pre.root_security.owner_sha256 -cne $Freeze.root_security.owner_sha256 -or
+        $pre.root_security.sddl_sha256 -cne $Freeze.root_security.sddl_sha256 -or
+        $pre.security.owner_sha256 -cne $baseline.owner_sha256 -or
+        $pre.security.sddl_sha256 -cne $baseline.sddl_sha256) {
+        throw 'B6L original identity, bytes or owner/DACL changed before support mutation.'
+    }
+    $native=$late[0].data
+    $closeReceipt=$close[0].data
+    if (-not $closeReceipt.Confirmed -or
+        $closeReceipt.Attempted -ne [bool]$native.open_admitted -or
+        $closeReceipt.NativeError -ne 0 -or $closeReceipt.ExceptionType -or
+        $closeReceipt.ExceptionMessage) {
+        throw 'B6L late metadata handle closure is unknown or mismatched.'
+    }
+    $refusal=$null
+    if (-not $native.open_admitted) {
+        if ($native.open_error -notin @(32,6800) -or $native.identity_observed -or
+            $native.identity_error -ne 0 -or $native.identity_exception -or $native.file_id -or
+            $native.set_attempted -or $native.set_error -ne 0 -or $native.set_exception -or
+            $native.before_observed -or $native.before_error -ne 0 -or
+            $native.before_exception -or $native.after_observed -or
+            $native.after_error -ne 0 -or $native.after_exception) {
+            throw 'B6L late metadata open has an unsupported or ambiguous refusal.'
+        }
+        $refusal='late-metadata-open-refused-supported-gate1-unverified'
+    } else {
+        if ($native.open_error -ne 0 -or
+            -not $native.identity_observed -or $native.identity_error -ne 0 -or
+            $native.identity_exception -or -not $native.identity_matches -or
+            $native.file_id -cne $Freeze.approved_id -or
+            -not $native.before_observed -or $native.before_error -ne 0 -or
+            $native.before_exception -or
+            $native.before_sha256 -cne $baseline.sddl_sha256 -or
+            -not $native.set_attempted -or -not $native.after_observed -or
+            $native.after_error -ne 0 -or $native.after_exception) {
+            throw 'B6L late metadata identity or security observation is incomplete.'
+        }
+        if ($native.set_error -eq 0 -and
+            $native.after_sha256 -cne $baseline.sddl_sha256) {
+            throw 'B6L late DACL mutation succeeded inside the final-close interval.'
+        }
+        if ($native.set_exception -or $native.set_error -notin @(32,6800) -or
+            $native.after_sha256 -cne $baseline.sddl_sha256) {
+            throw 'B6L late DACL SetSecurityInfo result is unsupported or changed.'
+        }
+        $refusal='late-dacl-write-refused-supported-gate1-unverified'
+    }
+    if ($support.Count -ne 1) { throw 'B6L after-release same-rights positive control is absent.' }
+    $positive=$support[0].data
+    if (-not $positive.open_admitted -or $positive.open_error -ne 0 -or
+        -not $positive.identity_observed -or $positive.identity_error -ne 0 -or
+        $positive.identity_exception -or -not $positive.identity_matches -or
+        $positive.file_id -cne $Freeze.approved_id -or
+        -not $positive.before_observed -or $positive.before_error -ne 0 -or
+        $positive.before_exception -or
+        $positive.before_sha256 -cne $baseline.sddl_sha256 -or
+        -not $positive.set_attempted -or $positive.set_error -ne 0 -or
+        $positive.set_exception -or -not $positive.after_observed -or
+        $positive.after_error -ne 0 -or $positive.after_exception -or
+        $positive.after_sha256 -ceq $positive.before_sha256 -or
+        $positive.after_sha256 -cne $prepared[0].proposed_sddl_sha256 -or
+        $null -eq $positive.close -or -not $positive.close.Confirmed -or
+        -not $positive.close.Attempted -or $positive.close.NativeError -ne 0 -or
+        $positive.close.ExceptionType -or $positive.close.ExceptionMessage -or
+        $post.approved.status -cne 'present' -or
+        $post.approved.base64 -cne [Convert]::ToBase64String($original) -or
+        $post.root_security.owner_sha256 -cne $Freeze.root_security.owner_sha256 -or
+        $post.root_security.sddl_sha256 -cne $Freeze.root_security.sddl_sha256 -or
+        $post.approved_security.owner_sha256 -cne $baseline.owner_sha256 -or
+        $post.approved_security.sddl_sha256 -cne $positive.after_sha256) {
+        throw 'B6L after-release support lacks actual same-rights DACL mutation and readback.'
+    }
+    return $refusal
 }
 function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) {
     if ($Row.trial -cne $ExpectedTrial -or $Row.controller_error -or
@@ -621,15 +866,10 @@ function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) 
         if ($ExpectedTrial -in @('B3','B4','B5')) {
             throw "Phase B $ExpectedTrial committed despite its frozen falsifier."
         }
-        if ($ExpectedTrial -eq 'B6') {
-            $dacl=@($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'held-WRITE_DAC-change' })
-            if ($dacl.Count -ne 1 -or $dacl[0].native_error -eq 0 -or
-                $dacl[0].changed -or $dacl[0].before_sha256 -cne $dacl[0].after_sha256) {
-                throw 'Phase B B6 committed without excluding the held DACL mutation.'
-            }
-        }
+        if ($ExpectedTrial -eq 'B6L') { throw 'B6L candidate committed instead of intentionally rolling back.' }
         return 'exact-fixture-deleted-gate1-unverified'
     }
+    if ($ExpectedTrial -eq 'B6L') { return Assert-PhaseB6LReceipt $Row $freeze[0] }
     $intentionalB2=$ExpectedTrial -eq 'B2' -and
         $candidate.status -ceq 'intentional-rollback-post-barrier'
     if ((-not $intentionalB2 -and $candidate.status -cne 'rejected-or-unknown') -or
@@ -701,7 +941,7 @@ function Assert-PhaseBTrialReceipt($Row,[string]$ExpectedTrial,$ExpectedSource) 
     }
     if ($intentionalB2) { return 'intentional-rollback-late-child-preserved-gate1-unverified' }
     if ($ExpectedTrial -eq 'B1') { return 'positive-control-rejected-preserved-mechanism-falsified' }
-    if ($ExpectedTrial -in @('B2','B6') -and
+    if ($ExpectedTrial -eq 'B2' -and
         @($Row.actor_receipt.events | Where-Object { $_.phase -ceq 'required-barrier-unverified' }).Count -eq 1) {
         return 'required-barrier-unverified-candidate-rejected-preserved'
     }
@@ -779,7 +1019,8 @@ try {
         New-PrivateScope $scope
         $row=[ordered]@{trial=$name;scope=$scope;started_utc=[DateTime]::UtcNow.ToString('o');
             source=$source;actor=$null;candidate=$null;actor_receipt=$null;
-            candidate_receipt=$null;ready=$null;barrier=$null;controller_error=$null;verdict=$null;
+            candidate_receipt=$null;ready=$null;barrier=$null;late_probe_marker=$null;
+            controller_error=$null;verdict=$null;
             active_deadline_seconds=15;settle_deadline_seconds=5}
         $all.Add($row)
         $activeActor=$null;$activeCandidate=$null
@@ -806,7 +1047,7 @@ try {
                     Write-Marker (Join-Path $scope 'actor-go.json') ([ordered]@{phase='post-acquisition';trial=$name})
                     $goWritten=$true
                 }
-                if ($name -eq 'B6' -and -not $goWritten -and
+                if ($name -eq 'B6L' -and -not $goWritten -and
                     (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
                     Write-Marker (Join-Path $scope 'actor-go.json') ([ordered]@{phase='post-last-close';trial=$name})
                     $goWritten=$true
@@ -834,16 +1075,49 @@ try {
                     [Math]::Min(5000,20000-[int]$trialClock.ElapsedMilliseconds)))) {
                 throw 'Phase B B7 owned candidate death could not be confirmed.'
             }
-            if ($name -in @('B2','B6') -and
+            if ($name -in @('B2','B6L') -and
                 (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
                 $row.barrier=Read-Marker (Join-Path $scope 'candidate-barrier.json')
             }
-            if ($name -in @('B2','B4','B6') -and -not $goWritten -and
+            $b6RollbackConfirmed=$false
+            if ($name -eq 'B6L' -and $null -ne $row.barrier) {
+                $row.late_probe_marker=Read-Marker (Join-Path $scope 'actor-done.json')
+                $row.candidate=Complete-OwnedChild $activeCandidate 0
+                if (-not $row.candidate.closed) {
+                    throw 'B6L candidate process closure is not confirmed.'
+                }
+                $activeCandidate=$null
+                $earlyReceipt=Read-WorkerRecord $row.candidate 'candidate' $name
+                $sourceMatches=$true
+                foreach ($field in @('commit','fixture_sha256','module_sha256',
+                        'observer_sha256','actor_sha256')) {
+                    if (-not $earlyReceipt.source.Contains($field) -or
+                        $earlyReceipt.source[$field] -cne $source[$field]) { $sourceMatches=$false }
+                }
+                if (-not $sourceMatches -or $row.candidate.exit_code -ne 0 -or
+                    $earlyReceipt.status -cne 'intentional-rollback-B6L-post-barrier' -or
+                    $earlyReceipt.cleanup_error -or $earlyReceipt.closure_unknown -or
+                    $earlyReceipt.lease_state -cne 'rollback-succeeded' -or
+                    $earlyReceipt.settlement -cne 'rollback-succeeded' -or
+                    $earlyReceipt.stage_calls -ne 2 -or $earlyReceipt.commit_calls -ne 0 -or
+                    $earlyReceipt.rollback_calls -ne 1 -or
+                    $row.barrier.trial -cne 'B6L' -or $row.barrier.state -cne 'staged' -or
+                    $row.barrier.stage_calls -ne 2 -or $row.barrier.commit_calls -ne 0 -or
+                    -not $row.barrier.target_handles_closed) {
+                    throw 'B6L candidate exit lacks exact settled rollback and barrier receipts.'
+                }
+                $row.candidate_receipt=$earlyReceipt
+                $b6RollbackConfirmed=$true
+            }
+            if ($name -in @('B2','B4','B6L') -and -not $goWritten -and
                 -not (Test-MarkerReady (Join-Path $scope 'candidate-barrier.json'))) {
                 Write-Marker (Join-Path $scope 'actor-cancel.json') ([ordered]@{reason='candidate-rejected-before-barrier'})
             }
             Write-Marker (Join-Path $scope 'candidate-done.json') ([ordered]@{trial=$name;
-                worker_exit_observed=$activeCandidate.process.HasExited;death_at_barrier=$deathAtBarrier})
+                worker_exit_observed=$(if($null -ne $row.candidate){$row.candidate.closed}
+                    else{$activeCandidate.process.HasExited});
+                candidate_rollback_confirmed=$b6RollbackConfirmed;
+                death_at_barrier=$deathAtBarrier})
             while (-not $activeActor.process.HasExited) {
                 if ($trialClock.Elapsed.TotalSeconds -ge 15) { throw 'Phase B actor postproof exceeded 15 seconds.' }
                 Start-Sleep -Milliseconds 50
@@ -859,7 +1133,9 @@ try {
                 }
             }
             $remaining=[Math]::Max(0,[Math]::Min(5000,20000-[int]$trialClock.ElapsedMilliseconds))
-            $row.candidate=Complete-OwnedChild $activeCandidate $remaining
+            if ($null -eq $row.candidate) {
+                $row.candidate=Complete-OwnedChild $activeCandidate $remaining
+            }
             $remaining=[Math]::Max(0,[Math]::Min(5000-[int]$settle.ElapsedMilliseconds,
                 20000-[int]$trialClock.ElapsedMilliseconds))
             $row.actor=Complete-OwnedChild $activeActor $remaining

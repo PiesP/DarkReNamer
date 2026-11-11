@@ -11,7 +11,8 @@ using Microsoft.Win32.SafeHandles;
 // Deliberately limited to one named file inside an exact Phase-B fixture.
 // These actors cannot acquire a transaction or commit authority.
 public static class DarkPhaseBFixtureActors {
-    const uint ReadControl=0x20000, WriteDac=0x40000, GenericWrite=0x40000000;
+    const uint ReadControl=0x20000, WriteDac=0x40000, ReadAttributes=0x80,
+        GenericWrite=0x40000000;
     const uint ShareAll=7, OpenExisting=3, CreateNew=1;
     [DllImport("kernel32.dll", EntryPoint="CreateFileW", CharSet=CharSet.Unicode,
         ExactSpelling=true, SetLastError=true)]
@@ -37,6 +38,11 @@ public static class DarkPhaseBFixtureActors {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool WriteFile(SafeFileHandle file,byte[] bytes,uint size,
         out uint written,IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool CloseHandle(SafeFileHandle file);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int kind,
+        byte[] buffer,uint size);
 
     static string ApprovedFile(string scope,string target) {
         string profile=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -207,5 +213,205 @@ public static class DarkPhaseBFixtureActors {
     public static OneByteWriterResult CreateDirectoryAds(string scope,string target) {
         ApprovedFile(scope,target);
         return WriteOneNew(target+":unexpected",91);
+    }
+    public sealed class NativeCloseReceipt {
+        public bool Attempted {get;set;}
+        public bool Confirmed {get;set;}
+        public int NativeError {get;set;}
+        public string ExceptionType {get;set;}
+        public string ExceptionMessage {get;set;}
+    }
+    static NativeCloseReceipt CloseOnce(ref SafeFileHandle owned) {
+        SafeFileHandle file=owned;owned=null;
+        if (file==null) return new NativeCloseReceipt {Attempted=false,Confirmed=true};
+        NativeCloseReceipt result=new NativeCloseReceipt {Attempted=true,NativeError=-1};
+        try {
+            result.Confirmed=CloseHandle(file);
+            result.NativeError=result.Confirmed ? 0 : Marshal.GetLastWin32Error();
+        } catch (Exception failure) {
+            result.ExceptionType=failure.GetType().FullName;
+            result.ExceptionMessage=failure.Message;
+        } finally {
+            file.SetHandleAsInvalid(); // one native close attempt, no SafeHandle retry
+            file.Dispose();
+        }
+        return result;
+    }
+    static string FileIdentity(SafeFileHandle file) {
+        byte[] attributes=new byte[8],id=new byte[24];
+        if (!GetFileInformationByHandleEx(file,9,attributes,(uint)attributes.Length))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),"B6L attribute query failed.");
+        int flags=BitConverter.ToInt32(attributes,0);
+        if ((flags&(0x10|0x400))!=0)
+            throw new InvalidOperationException("B6L opened object changed kind or became reparse.");
+        if (!GetFileInformationByHandleEx(file,18,id,(uint)id.Length))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),"B6L FileID query failed.");
+        return BitConverter.ToString(id).Replace("-","").ToLowerInvariant();
+    }
+    static int NativeCode(Exception failure) {
+        Win32Exception win=failure as Win32Exception;
+        return win==null ? -1 : win.NativeErrorCode;
+    }
+    public sealed class LateDaclProbeResult {
+        public bool OpenAdmitted {get;set;}
+        public int OpenError {get;set;}
+        public bool IdentityObserved {get;set;}
+        public int IdentityError {get;set;}
+        public string IdentityException {get;set;}
+        public string FileId {get;set;}
+        public bool IdentityMatches {get;set;}
+        public bool BeforeObserved {get;set;}
+        public int BeforeError {get;set;}
+        public string BeforeException {get;set;}
+        public string BeforeSddl {get;set;}
+        public bool SetAttempted {get;set;}
+        public int SetError {get;set;}
+        public string SetException {get;set;}
+        public bool AfterObserved {get;set;}
+        public int AfterError {get;set;}
+        public string AfterException {get;set;}
+        public string AfterSddl {get;set;}
+        public NativeCloseReceipt Close {get;set;}
+    }
+    public sealed class LateDaclCapability {
+        const uint WriteOwner=0x80000,ReadAttributes=0x80,OpenReparsePoint=0x00200000;
+        readonly string path,originalId,baselineSddl,proposedSddl;
+        readonly NativeCloseReceipt preparationClose;
+        readonly byte[] proposedDescriptor;
+        SafeFileHandle lateHandle;
+        bool lateAttempted,supportAttempted,lateCloseDone,lateCloseConfirmed;
+        internal LateDaclCapability(string approvedPath,string id,string baseline,
+            string expectedProposed,byte[] proposed,NativeCloseReceipt close) {
+            path=approvedPath;originalId=id;baselineSddl=baseline;
+            proposedSddl=expectedProposed;proposedDescriptor=proposed;
+            preparationClose=close;
+        }
+        public string OriginalId {get{return originalId;}}
+        public string BaselineSddl {get{return baselineSddl;}}
+        public string ProposedSddl {get{return proposedSddl;}}
+        public NativeCloseReceipt PreparationClose {get{return preparationClose;}}
+        static void TryIdentity(SafeFileHandle handle,string expected,LateDaclProbeResult result) {
+            try {
+                result.FileId=FileIdentity(handle);result.IdentityObserved=true;
+                result.IdentityMatches=String.Equals(result.FileId,expected,StringComparison.Ordinal);
+            } catch (Exception failure) {
+                result.IdentityError=NativeCode(failure);
+                result.IdentityException=failure.GetType().FullName+": "+failure.Message;
+            }
+        }
+        static void TrySddl(SafeFileHandle handle,bool before,LateDaclProbeResult result) {
+            try {
+                string sddl=HeldSddl(handle);
+                if (before) { result.BeforeObserved=true;result.BeforeSddl=sddl; }
+                else { result.AfterObserved=true;result.AfterSddl=sddl; }
+            } catch (Exception failure) {
+                if (before) {
+                    result.BeforeError=NativeCode(failure);
+                    result.BeforeException=failure.GetType().FullName+": "+failure.Message;
+                } else {
+                    result.AfterError=NativeCode(failure);
+                    result.AfterException=failure.GetType().FullName+": "+failure.Message;
+                }
+            }
+        }
+        LateDaclProbeResult Probe(bool retainHandle) {
+            LateDaclProbeResult result=new LateDaclProbeResult();
+            SafeFileHandle opened=CreateFile(path,ReadControl|WriteDac|WriteOwner,ShareAll,
+                IntPtr.Zero,OpenExisting,OpenReparsePoint,IntPtr.Zero);
+            if (opened==null || opened.IsInvalid) {
+                result.OpenError=Marshal.GetLastWin32Error();
+                if (opened!=null) opened.Dispose();
+                return result;
+            }
+            result.OpenAdmitted=true;
+            if (retainHandle) { lateHandle=opened; }
+            try {
+                TryIdentity(opened,originalId,result);
+                if (!result.IdentityObserved || !result.IdentityMatches) return result;
+                TrySddl(opened,true,result);
+                if ((result.BeforeObserved &&
+                        !String.Equals(result.BeforeSddl,baselineSddl,StringComparison.Ordinal)) ||
+                    (!retainHandle && !result.BeforeObserved))
+                    return result;
+                GCHandle pin=GCHandle.Alloc(proposedDescriptor,GCHandleType.Pinned);
+                try {
+                    bool present,defaulted;IntPtr dacl;
+                    if (!GetSecurityDescriptorDacl(pin.AddrOfPinnedObject(),out present,
+                            out dacl,out defaulted) || !present || dacl==IntPtr.Zero) {
+                        result.SetException="Proposed DACL could not be inspected.";
+                        result.SetError=Marshal.GetLastWin32Error();
+                    } else {
+                        result.SetAttempted=true;
+                        try { result.SetError=(int)SetSecurityInfo(opened,1,4,
+                            IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero); }
+                        catch (Exception failure) {
+                            result.SetError=NativeCode(failure);
+                            result.SetException=failure.GetType().FullName+": "+failure.Message;
+                        }
+                    }
+                } finally { pin.Free(); }
+                TrySddl(opened,false,result);
+                return result;
+            } finally {
+                if (!retainHandle) result.Close=CloseOnce(ref opened);
+            }
+        }
+        public LateDaclProbeResult AttemptLate() {
+            if (lateAttempted || supportAttempted)
+                throw new InvalidOperationException("B6L late metadata open cannot repeat.");
+            lateAttempted=true;
+            return Probe(true);
+        }
+        public NativeCloseReceipt CloseLateOnce() {
+            if (!lateAttempted || lateCloseDone)
+                throw new InvalidOperationException("B6L late handle close cannot repeat or precede open.");
+            lateCloseDone=true;
+            NativeCloseReceipt receipt=CloseOnce(ref lateHandle);
+            lateCloseConfirmed=receipt.Confirmed;
+            return receipt;
+        }
+        public LateDaclProbeResult AttemptSupport(bool candidateExitedAndRolledBack,
+            bool independentBaselineConfirmed) {
+            if (!lateAttempted || !lateCloseDone || !lateCloseConfirmed || supportAttempted ||
+                !candidateExitedAndRolledBack || !independentBaselineConfirmed)
+                throw new InvalidOperationException("B6L support lacks settled independent authority.");
+            supportAttempted=true;
+            return Probe(false);
+        }
+    }
+    public static LateDaclCapability PrepareLateDacl(string scope,string target,
+        string expectedFileId) {
+        string path=ApprovedFile(scope,target);
+        if (expectedFileId==null || expectedFileId.Length!=48)
+            throw new InvalidOperationException("B6L frozen FileID is absent.");
+        FileSecurity baseline=FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        string baselineSddl=baseline.GetSecurityDescriptorSddlForm(
+            AccessControlSections.Owner|AccessControlSections.Group|AccessControlSections.Access);
+        FileSecurity proposed=new FileSecurity();
+        proposed.SetSecurityDescriptorBinaryForm(baseline.GetSecurityDescriptorBinaryForm());
+        proposed.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-5-11"),
+            FileSystemRights.ReadAttributes,AccessControlType.Allow));
+        string proposedSddl=proposed.GetSecurityDescriptorSddlForm(
+            AccessControlSections.Owner|AccessControlSections.Group|AccessControlSections.Access);
+        if (String.Equals(proposedSddl,baselineSddl,StringComparison.Ordinal))
+            throw new InvalidOperationException("B6L proposed benign DACL is indistinguishable.");
+        SafeFileHandle prep=CreateFile(path,ReadControl|ReadAttributes,ShareAll,
+            IntPtr.Zero,OpenExisting,0x00200000,IntPtr.Zero);
+        if (prep==null || prep.IsInvalid) {
+            int error=Marshal.GetLastWin32Error();
+            if (prep!=null) prep.Dispose();
+            throw new Win32Exception(error,"B6L preparation identity open failed.");
+        }
+        string observed=null;Exception primary=null;
+        try { observed=FileIdentity(prep);if (HeldSddl(prep)!=baselineSddl)
+            throw new InvalidOperationException("B6L preparation security differs across handles."); }
+        catch (Exception failure) {primary=failure;}
+        NativeCloseReceipt close=CloseOnce(ref prep);
+        if (!close.Confirmed) throw new InvalidOperationException("B6L preparation close is unknown.");
+        if (primary!=null) throw primary;
+        if (!String.Equals(observed,expectedFileId,StringComparison.Ordinal))
+            throw new InvalidOperationException("B6L preparation FileID differs from independent freeze.");
+        return new LateDaclCapability(path,observed,baselineSddl,proposedSddl,
+            proposed.GetSecurityDescriptorBinaryForm(),close);
     }
 }
