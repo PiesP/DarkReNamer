@@ -4787,6 +4787,9 @@ mod tests {
             let apply = rail
                 .command_hwnd(APPLY)
                 .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+            // SAFETY: apply is a live child window created by the command rail.
+            let apply_control_id = unsafe { GetDlgCtrlID(apply) };
+            assert_eq!(apply_control_id, i32::from(APPLY));
             // SAFETY: apply is live and rect is writable for this query.
             let rect = unsafe {
                 let mut rect = RECT::default();
@@ -4813,6 +4816,7 @@ mod tests {
                 let resources = AppearanceResources::create(GRAPHITE_DARK)?;
                 let mut draw = DRAWITEMSTRUCT {
                     CtlType: ODT_BUTTON,
+                    CtlID: apply_control_id as u32,
                     itemState: ODS_DEFAULT,
                     hwndItem: apply,
                     hDC: dc,

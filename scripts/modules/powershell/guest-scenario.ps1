@@ -3444,8 +3444,22 @@ function Invoke-GuiSmoke {
             try {
                 $processState.process.process.Refresh()
                 if (-not $processState.process.job_closed) {
-                    $jobCleanup = Complete-AcceptanceOwnedProcessJob `
-                        -Owned $processState.process -StopActive
+                    $activeProcessCount = $processState.process.owner.ActiveProcessCount
+                    if ($null -eq $activeProcessCount) {
+                        throw 'The production GUI process job count is unavailable.'
+                    }
+                    if ($processState.process.process.HasExited) {
+                        if ($activeProcessCount -ne 0) {
+                            throw 'The exited production GUI process left an unverified Job process.'
+                        }
+                    }
+                    elseif ($activeProcessCount -eq 1) {
+                        Stop-JobBoundProcess -State $processState.process -RequireSolePrimary
+                    }
+                    else {
+                        throw 'The live production GUI process is not the sole Job process.'
+                    }
+                    $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $processState.process
                     $row.job_cleanup = $jobCleanup.status -ceq 'clean'
                     if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                         throw 'The production GUI process job did not close cleanly.'
