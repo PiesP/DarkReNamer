@@ -345,10 +345,42 @@ $checkedEnvironment=@('GIT_SSL_NO_VERIFY','GIT_SSL_CAINFO','GIT_SSL_CAPATH',
     'CURL_CA_BUNDLE',
     'SSL_CERT_FILE','SSL_CERT_DIR','HTTPS_PROXY','https_proxy','ALL_PROXY',
     'all_proxy','NO_PROXY','no_proxy')
-$savedEnvironment=@{}
-foreach($name in $checkedEnvironment){
-    $savedEnvironment[$name]=@{present=([Environment]::GetEnvironmentVariables('Process').Contains($name));
-        value=[Environment]::GetEnvironmentVariable($name,'Process')}}
+function Save-ProtocolEnvironment([string[]]$Names) {
+    $snapshot=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $current=[Environment]::GetEnvironmentVariables('Process')
+    foreach($name in $Names){
+        $snapshot[$name]=@{present=$current.Contains($name);
+            value=[Environment]::GetEnvironmentVariable($name,'Process')}}
+    return $snapshot
+}
+function Restore-ProtocolEnvironment([string[]]$Names,$Snapshot) {
+    foreach($name in $Names){
+        if($Snapshot[$name].present){
+            Set-Item -LiteralPath ('Env:'+$name) -Value $Snapshot[$name].value
+        }else{Remove-Item -LiteralPath ('Env:'+$name) -ErrorAction SilentlyContinue}}
+}
+if(-not $IsWindows){
+    $caseNames=@('HTTPS_PROXY','https_proxy')
+    $originalCase=Save-ProtocolEnvironment $caseNames
+    try{
+        Set-Item -LiteralPath 'Env:HTTPS_PROXY' -Value 'http://uppercase.invalid'
+        Set-Item -LiteralPath 'Env:https_proxy' -Value 'http://lowercase.invalid'
+        $caseSnapshot=Save-ProtocolEnvironment $caseNames
+        Require ($caseSnapshot.Count -eq 2 -and $caseSnapshot['HTTPS_PROXY'].present -and
+            $caseSnapshot['https_proxy'].present -and
+            $caseSnapshot['HTTPS_PROXY'].value -cne $caseSnapshot['https_proxy'].value) `
+            'Linux environment snapshot retains distinct proxy key casing'
+        foreach($name in $caseNames){Remove-Item -LiteralPath ('Env:'+$name)}
+        Restore-ProtocolEnvironment $caseNames $caseSnapshot
+        Require ([Environment]::GetEnvironmentVariable('HTTPS_PROXY','Process') -ceq
+                'http://uppercase.invalid' -and
+            [Environment]::GetEnvironmentVariable('https_proxy','Process') -ceq
+                'http://lowercase.invalid') `
+            'Linux environment restore retains both distinct proxy values'
+    }
+    finally{Restore-ProtocolEnvironment $caseNames $originalCase}
+}else{Write-Host 'Case-distinct environment control applies only to Linux.'}
+$savedEnvironment=Save-ProtocolEnvironment $checkedEnvironment
 try{
     foreach($name in $checkedEnvironment){Remove-Item -LiteralPath ('Env:'+$name) -ErrorAction SilentlyContinue}
     function RunRoute([string]$Case) {
@@ -402,10 +434,7 @@ try{
     }else{Write-Host 'Empty-present environment control unavailable on this runtime.'}
 }
 finally{
-    foreach($name in $checkedEnvironment){
-        if($savedEnvironment[$name].present){
-            Set-Item -LiteralPath ('Env:'+$name) -Value $savedEnvironment[$name].value
-        }else{Remove-Item -LiteralPath ('Env:'+$name) -ErrorAction SilentlyContinue}}
+    Restore-ProtocolEnvironment $checkedEnvironment $savedEnvironment
     [IO.Directory]::Delete($routeBase,$true)
 }
 
