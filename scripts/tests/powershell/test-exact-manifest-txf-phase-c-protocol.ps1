@@ -7,6 +7,7 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($fixture,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Phase C fixture has PowerShell parse errors.' }
 foreach ($name in @('Stream-NameHex','Test-CSource','Test-CSourceIdentity','Test-CBarrier',
+        'Test-CStreamContext','Test-CStreamDataIdentity',
         'Test-StreamCatalog','Test-COriginal','Test-CBaseline','Test-CAdmittedPost',
         'Assert-CReceipt','Read-CWorkerRecord','Read-HeadBounded',
         'Invoke-CBoundedPreflight')) {
@@ -143,20 +144,24 @@ function New-Receipt([string]$TrialName) {
         $after.directory_catalog.before_id=$rootId;$after.directory_catalog.after_id=$rootId
     }
     $close=[ordered]@{Attempted=$true;Confirmed=$true;NativeError=0;ExceptionType=$null}
-    $late=[ordered]@{open_admitted=$false;open_error=6800;
+    $baseKind=if($TrialName -eq 'C1'){'file'}else{'directory'}
+    $late=[ordered]@{base_kind_expected=$baseKind;stream_kind_expected='named-data';
+        open_admitted=$false;open_error=6800;
         identity_observed=$false;file_id=$null;attributes=0;kind_matches=$false;
+        stream_data_kind_matches=$false;
         identity_matches=$false;identity_error=$null;identity_native_error=0;
         write_attempted=$false;write_error=0;write_exception=$null;bytes_written=0;
         close=[ordered]@{Attempted=$false;Confirmed=$true;NativeError=0;ExceptionType=$null}}
-    $positive=[ordered]@{open_admitted=$true;open_error=0;
+    $positive=[ordered]@{base_kind_expected=$baseKind;stream_kind_expected='named-data';
+        open_admitted=$true;open_error=0;
         identity_observed=$true;file_id=$(if($TrialName -eq 'C1'){$fileId}else{$rootId});
-        attributes=$(if($TrialName -eq 'C1'){0}else{16});kind_matches=$true;
+        attributes=32;kind_matches=$true;stream_data_kind_matches=$true;
         identity_matches=$true;identity_error=$null;identity_native_error=0;
         write_attempted=$true;write_error=0;write_exception=$null;bytes_written=1;close=$close}
     $preflight=[ordered]@{phase='exact-base-preflight';eligible=$true;
         root=[ordered]@{OpenAdmitted=$true;OpenError=0;FileId=$rootId;Attributes=16;
             KindMatches=$true;QueryError=$null;QueryNativeError=0;Close=$close};
-        approved=[ordered]@{OpenAdmitted=$true;OpenError=0;FileId=$fileId;Attributes=0;
+        approved=[ordered]@{OpenAdmitted=$true;OpenError=0;FileId=$fileId;Attributes=32;
             KindMatches=$true;QueryError=$null;QueryNativeError=0;Close=$close}}
     $candidate=[ordered]@{schema='dark240-late-stream-phase-c-child-v1';role='candidate';
         trial=$TrialName;source=$source;source_identity=$sourceIdentity;scope='C:\fixture';
@@ -192,7 +197,9 @@ foreach ($trial in @('C1','C2')) {
     }
     foreach ($fault in @('late-error','late-admitted-unknown','late-close-error',
             'late-close-exception','event-reorder','baseline-after-support','support-close',
-            'support-write','support-id','missing-stream','extra-stream','rollback',
+            'support-write','support-id','support-context','support-stream-kind',
+            'support-directory-attr','support-reparse-attr','support-query',
+            'root-base-kind','file-base-kind','missing-stream','extra-stream','rollback',
             'foreign-source','source-git-unknown','missing-actor','default-bytes')) {
         $bad=Copy-Value $ok
         switch ($fault) {
@@ -209,6 +216,13 @@ foreach ($trial in @('C1','C2')) {
             'support-close' { $bad.actor_receipt.events[5].result.close.Confirmed=$false }
             'support-write' { $bad.actor_receipt.events[5].result.bytes_written=0 }
             'support-id' { $bad.actor_receipt.events[5].result.file_id='0'*48 }
+            'support-context' { $bad.actor_receipt.events[5].result.base_kind_expected='other' }
+            'support-stream-kind' { $bad.actor_receipt.events[5].result.stream_kind_expected='index-allocation' }
+            'support-directory-attr' { $bad.actor_receipt.events[5].result.attributes=16 }
+            'support-reparse-attr' { $bad.actor_receipt.events[5].result.attributes=0x400 }
+            'support-query' { $bad.actor_receipt.events[5].result.identity_observed=$false }
+            'root-base-kind' { $bad.actor_receipt.events[1].root.Attributes=32 }
+            'file-base-kind' { $bad.actor_receipt.events[1].approved.Attributes=16 }
             'missing-stream' { $bad.actor_receipt.postproof.named_stream.status='absent';
                 $bad.actor_receipt.events[6].data.named_stream.status='absent' }
             'extra-stream' { $bad.actor_receipt.events[6].data.state.directory_catalog.native.Rows=@(
@@ -226,9 +240,11 @@ foreach ($trial in @('C1','C2')) {
     $counter=New-Receipt $trial
     $selectedId=if($trial -eq 'C1'){$fileId}else{$rootId}
     $fixed=if($trial -eq 'C1'){[byte]91}else{[byte]92}
-    $counter.actor_receipt.events[3].result=[ordered]@{open_admitted=$true;open_error=0;
+    $counter.actor_receipt.events[3].result=[ordered]@{
+        base_kind_expected=$(if($trial -eq 'C1'){'file'}else{'directory'});
+        stream_kind_expected='named-data';open_admitted=$true;open_error=0;
         identity_observed=$true;file_id=$selectedId;
-        attributes=$(if($trial -eq 'C1'){0}else{16});kind_matches=$true;
+        attributes=32;kind_matches=$true;stream_data_kind_matches=$true;
         identity_matches=$true;identity_error=$null;identity_native_error=0;
         write_attempted=$true;write_error=0;write_exception=$null;bytes_written=1;
         close=[ordered]@{Attempted=$true;Confirmed=$true;NativeError=0;ExceptionType=$null}}
@@ -255,6 +271,25 @@ foreach ($trial in @('C1','C2')) {
     }
     $counter.actor_receipt.events[3].result.identity_matches=$false
     Assert-Rejected { Assert-CReceipt $counter $source } "$trial unbound admitted stream"
+    foreach ($fault in @('wrong-base-context','wrong-stream-context','wrong-id',
+            'directory-attr','reparse-attr','query-unobserved','unknown-close',
+            'missing-byteproof')) {
+        $bad=Copy-Value $counter
+        $bad.actor_receipt.events[3].result.identity_matches=$true
+        switch ($fault) {
+            'wrong-base-context' { $bad.actor_receipt.events[3].result.base_kind_expected='other' }
+            'wrong-stream-context' { $bad.actor_receipt.events[3].result.stream_kind_expected='index-allocation' }
+            'wrong-id' { $bad.actor_receipt.events[3].result.file_id='0'*48 }
+            'directory-attr' { $bad.actor_receipt.events[3].result.attributes=16 }
+            'reparse-attr' { $bad.actor_receipt.events[3].result.attributes=0x400 }
+            'query-unobserved' { $bad.actor_receipt.events[3].result.identity_observed=$false }
+            'unknown-close' { $bad.actor_receipt.events[3].result.close.Confirmed=$false }
+            'missing-byteproof' { $bad.actor_receipt.events[6].data.named_stream.status='absent';
+                $bad.actor_receipt.postproof.named_stream.status='absent' }
+        }
+        $bad.late_marker.result=$bad.actor_receipt.events[3].result
+        Assert-Rejected { Assert-CReceipt $bad $source } "$trial admitted $fault"
+    }
 }
 
 $phaseB=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-b.ps1'

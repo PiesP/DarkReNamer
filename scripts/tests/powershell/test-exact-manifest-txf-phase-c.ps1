@@ -240,14 +240,32 @@ function Assert-CChildScope {
     Assert-PrivateDirectory $Scope
 }
 function Convert-StreamAttempt($Value) {
-    return [ordered]@{open_admitted=$Value.OpenAdmitted;open_error=$Value.OpenError;
+    return [ordered]@{base_kind_expected=$Value.BaseKindExpected;
+        stream_kind_expected=$Value.StreamKindExpected;
+        open_admitted=$Value.OpenAdmitted;open_error=$Value.OpenError;
         identity_observed=$Value.IdentityObserved;file_id=$Value.FileId;
         attributes=$Value.Attributes;kind_matches=$Value.KindMatches;
+        stream_data_kind_matches=$Value.StreamDataKindMatches;
         identity_matches=$Value.IdentityMatches;
         identity_error=$Value.IdentityError;identity_native_error=$Value.IdentityNativeError;
         write_attempted=$Value.WriteAttempted;
         write_error=$Value.WriteError;write_exception=$Value.WriteException;
         bytes_written=$Value.BytesWritten;close=$Value.Close}
+}
+function Test-CStreamContext($Attempt,[string]$Trial) {
+    if ($null -eq $Attempt -or $Trial -notin @('C1','C2')) { return $false }
+    $expected=if($Trial -eq 'C2'){'directory'}else{'file'}
+    return $Attempt.base_kind_expected -ceq $expected -and
+        $Attempt.stream_kind_expected -ceq 'named-data'
+}
+function Test-CStreamDataIdentity($Attempt,[string]$Trial,[string]$ExpectedId) {
+    return (Test-CStreamContext $Attempt $Trial) -and $Attempt.open_admitted -and
+        $Attempt.identity_observed -and $Attempt.identity_matches -and
+        $Attempt.kind_matches -and $Attempt.stream_data_kind_matches -and
+        $null -ne $Attempt.attributes -and
+        ($Attempt.attributes -band 0x410) -eq 0 -and
+        $Attempt.file_id -ceq $ExpectedId -and -not $Attempt.identity_error -and
+        $Attempt.identity_native_error -eq 0
 }
 function Test-CSource($Actual,$Expected) {
     if ($null -eq $Actual -or $null -eq $Expected) { return $false }
@@ -366,6 +384,8 @@ function Assert-CReceipt($Row,$ExpectedSource) {
         $id=if($kind -eq 'root'){$freeze[0].root_id}else{$freeze[0].approved_id}
         if (-not $item.OpenAdmitted -or $item.OpenError -ne 0 -or
             $item.FileId -cne $id -or -not $item.KindMatches -or
+            $null -eq $item.Attributes -or ($item.Attributes -band 0x400) -ne 0 -or
+            [bool]($item.Attributes -band 0x10) -ne ($kind -eq 'root') -or
             $item.QueryError -or $item.QueryNativeError -ne 0 -or
             -not $item.Close.Attempted -or
             -not $item.Close.Confirmed -or $item.Close.NativeError -ne 0 -or
@@ -384,6 +404,9 @@ function Assert-CReceipt($Row,$ExpectedSource) {
         throw 'Phase C candidate did not settle one exact rollback.'
     }
     $actual=$late[0].result
+    if (-not (Test-CStreamContext $actual $trial)) {
+        throw 'Phase C late ADS handle context differs from the selected base kind.'
+    }
     if ($Row.late_marker.trial -cne $trial -or
         -not (Test-CSource $Row.late_marker.source $ExpectedSource) -or
         ($Row.late_marker.result | ConvertTo-Json -Depth 10 -Compress) -cne
@@ -394,10 +417,7 @@ function Assert-CReceipt($Row,$ExpectedSource) {
     $expectedBaseId=if($trial -eq 'C1'){$freeze[0].approved_id}else{$freeze[0].root_id}
     if ($actual.open_admitted) {
         if ($actual.open_error -ne 0 -or -not $actual.identity_observed -or
-            -not $actual.identity_matches -or
-            -not $actual.kind_matches -or $actual.identity_error -or
-            $actual.identity_native_error -ne 0 -or
-            $actual.file_id -cne $expectedBaseId -or
+            -not (Test-CStreamDataIdentity $actual $trial $expectedBaseId) -or
             -not $actual.write_attempted -or
             -not $actual.close.Attempted -or -not $actual.close.Confirmed -or
             $actual.close.NativeError -ne 0 -or $actual.close.ExceptionType -or
@@ -413,6 +433,8 @@ function Assert-CReceipt($Row,$ExpectedSource) {
     }
     if ($actual.open_error -notin @(32,6800) -or $actual.identity_observed -or
         $actual.file_id -or $actual.identity_error -or $actual.identity_native_error -ne 0 -or
+        $actual.attributes -ne 0 -or $actual.kind_matches -or
+        $actual.stream_data_kind_matches -or $actual.identity_matches -or
         $actual.write_attempted -or $actual.write_error -ne 0 -or
         $actual.write_exception -or $actual.bytes_written -ne 0 -or
         $actual.close.Attempted -or
@@ -425,10 +447,7 @@ function Assert-CReceipt($Row,$ExpectedSource) {
     $positive=$support[0].result
     $expectedByte=[byte]$(if($trial -eq 'C1'){91}else{92})
     if (-not $positive.open_admitted -or $positive.open_error -ne 0 -or
-        -not $positive.identity_observed -or -not $positive.identity_matches -or
-        -not $positive.kind_matches -or $positive.identity_error -or
-        $positive.identity_native_error -ne 0 -or
-        $positive.file_id -cne $expectedBaseId -or
+        -not (Test-CStreamDataIdentity $positive $trial $expectedBaseId) -or
         -not $positive.write_attempted -or $positive.write_error -ne 0 -or
         $positive.write_exception -or $positive.bytes_written -ne 1 -or
         -not $positive.close.Attempted -or -not $positive.close.Confirmed -or
@@ -513,7 +532,10 @@ function Invoke-CChild {
             $events.Add([ordered]@{phase='independent-postrollback-before-support';
                 state=$before;named_stream=$streamBefore})
             $knownRefusal=-not $late.open_admitted -and $late.open_error -in @(32,6800) -and
+                (Test-CStreamContext $late $Trial) -and
                 -not $late.identity_observed -and -not $late.file_id -and
+                $late.attributes -eq 0 -and -not $late.kind_matches -and
+                -not $late.stream_data_kind_matches -and -not $late.identity_matches -and
                 -not $late.identity_error -and $late.identity_native_error -eq 0 -and
                 -not $late.write_attempted -and $late.write_error -eq 0 -and
                 -not $late.write_exception -and $late.bytes_written -eq 0 -and

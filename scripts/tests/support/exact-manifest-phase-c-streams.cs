@@ -195,12 +195,15 @@ public static class DarkPhaseCStreams {
         }
     }
     public sealed class StreamAttempt {
+        public string BaseKindExpected {get;set;}
+        public string StreamKindExpected {get;set;}
         public bool OpenAdmitted {get;set;}
         public int OpenError {get;set;}
         public bool IdentityObserved {get;set;}
         public string FileId {get;set;}
         public int Attributes {get;set;}
         public bool KindMatches {get;set;}
+        public bool StreamDataKindMatches {get;set;}
         public bool IdentityMatches {get;set;}
         public string IdentityError {get;set;}
         public int IdentityNativeError {get;set;}
@@ -211,7 +214,10 @@ public static class DarkPhaseCStreams {
         public CloseReceipt Close {get;set;}
     }
     static StreamAttempt Attempt(string path,string expected,bool directory,byte value) {
-        StreamAttempt result=new StreamAttempt();
+        StreamAttempt result=new StreamAttempt {
+            BaseKindExpected=directory?"directory":"file",
+            StreamKindExpected="named-data"
+        };
         SafeFileHandle file=CreateFile(path,GenericWrite,ShareAll,IntPtr.Zero,
             CreateNew,Normal,IntPtr.Zero);
         if (file==null || file.IsInvalid) {
@@ -222,13 +228,15 @@ public static class DarkPhaseCStreams {
         try {
             int attrs=0;bool kind=false;
             try {
-                result.FileId=Identity(file,directory,out attrs,out kind);
+                // A named $DATA handle is a data stream even when its base is a directory.
+                result.FileId=Identity(file,false,out attrs,out kind);
                 result.IdentityObserved=true;
                 result.IdentityMatches=String.Equals(result.FileId,expected,StringComparison.Ordinal) && kind;
             } catch (Exception error) {Win32Exception native=error as Win32Exception;
                 result.IdentityNativeError=native==null?-1:native.NativeErrorCode;
                 result.IdentityError=error.GetType().FullName+": "+error.Message; }
-            finally {result.Attributes=attrs;result.KindMatches=kind;}
+            finally {result.Attributes=attrs;result.KindMatches=kind;
+                result.StreamDataKindMatches=kind;}
             if (result.IdentityObserved && result.IdentityMatches) {
                 result.WriteAttempted=true;
                 try {
