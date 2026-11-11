@@ -1,0 +1,249 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot '../../modules/powershell/controller-owned-root-guard.ps1')
+Add-Type -TypeDefinition $script:DrOwnedRootGuardSource -ErrorAction Stop
+Add-Type -Path (Join-Path $PSScriptRoot '../support/exact-manifest-phase-b-observer.cs') -ErrorAction Stop
+$candidate=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease]
+
+function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
+    $caught=$false
+    try { & $Action }
+    catch {
+        $caught=$true
+        if ($_.Exception.Message -notlike ('*' + $Expected + '*')) { throw }
+    }
+    if (-not $caught) { throw "Expected Phase B rejection: $Expected" }
+}
+
+$owner=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('S-1-5-21-1'))
+$sddl=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('O:SYG:SYD:(A;;FA;;;SY)'))
+$id1='a'*48;$id2='b'*48;$sha='c'*64
+$rootRow=".|directory|$id1|-|-|$owner|$sddl|default-stream-only"
+$fileRow="6100|file|$id2|1|$sha|$owner|$sddl|default-stream-only"
+$approved=[string[]]@($rootRow,$fileRow)
+$digest=$candidate::RequireExactManifest($approved,[string[]]@($approved))
+if ($digest -cnotmatch '^[0-9a-f]{64}$') { throw 'Exact manifest digest is not SHA-256.' }
+if ([DarkPhaseBFixtureObserver]::DigestRows($approved) -cne $digest) {
+    throw 'Independent observer and candidate disagree on raw UTF-16 row digest.'
+}
+$profile='C:\Users\runneradmin'
+$scope=$profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef'
+if ($candidate::RequireFixturePathScope($scope,($scope + '\target'),$profile) -cne $scope) {
+    throw 'Exact fixture path predicate rejected its positive control.'
+}
+$source='d'*40;$nonceHash='e'*64;$rootId='f'*48
+$approval=[string[]]@($source,$nonceHash,$scope,($scope + '\target'),$rootId,$digest)
+$candidate::RequireFixtureApprovalFields($approval,$source,$nonceHash,$scope,
+    ($scope + '\target'),$rootId,$digest)
+foreach ($index in @(0,1,2,3,4,5)) {
+    $changed=[string[]]@($approval)
+    $changed[$index]='other'
+    Assert-Rejected { $candidate::RequireFixtureApprovalFields($changed,$source,$nonceHash,$scope,
+            ($scope + '\target'),$rootId,$digest) } 'predelete approval differs'
+}
+Assert-Rejected { $candidate::RequireFixtureApprovalFields([string[]]@($approval[0..4]),
+        $source,$nonceHash,$scope,($scope + '\target'),$rootId,$digest) } 'predelete approval differs'
+$protocol=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease+FixtureLeaseProtocol]::new()
+$protocol.Acquired();$protocol.StageStarted();$protocol.StageCompleted()
+$protocol.CommitRequested();$protocol.CommitReturned($true)
+Assert-Rejected { $protocol.CommitRequested() } 'cannot proceed'
+Assert-Rejected { $protocol.RolledBack($true) } 'cannot repeat or follow commit'
+$protocol=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease+FixtureLeaseProtocol]::new()
+$protocol.Acquired();$protocol.RolledBack($true)
+Assert-Rejected { $protocol.StageStarted() } 'cannot repeat'
+Assert-Rejected { $protocol.RolledBack($true) } 'cannot repeat or follow commit'
+$protocol=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease+FixtureLeaseProtocol]::new()
+$protocol.Acquired();$protocol.StageStarted();$protocol.CloseUnknown()
+Assert-Rejected { $protocol.StageCompleted() } 'confirmed handle closure'
+$protocol.CloseUnknown() # A later cleanup pass cannot turn unknown closure into confirmed closure.
+Assert-Rejected { $protocol.StageCompleted() } 'confirmed handle closure'
+$protocol.RolledBack($true)
+if ($protocol.State -cne 'rollback-succeeded-closure-unknown') {
+    throw 'Unknown native close was erased by successful rollback.'
+}
+Assert-Rejected { $protocol.CommitRequested() } 'cannot proceed'
+$protocol=[DarkReNamerVmOwnedRootGuard+ExactManifestTxFFixtureLease+FixtureLeaseProtocol]::new()
+$protocol.Acquired();$protocol.StageStarted();$protocol.StageCompleted()
+$protocol.CommitRequested();$protocol.CommitReturned($false)
+Assert-Rejected { $protocol.CommitRequested() } 'cannot proceed'
+Assert-Rejected { $protocol.RolledBack($true) } 'cannot repeat or follow commit'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        'C:\ProgramData\DarkReNamerVmRuns\0123456789abcdef0123456789abcdef',
+        'C:\ProgramData\DarkReNamerVmRuns\0123456789abcdef0123456789abcdef\target',
+        $profile) } 'protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        ($profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\..\0123456789abcdef0123456789abcdef'),
+        ($profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\..\0123456789abcdef0123456789abcdef\target'),
+        $profile) } 'alias or protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        ($profile + '\AppData\Local\Temp\DARK18~1\0123456789abcdef0123456789abcdef'),
+        ($profile + '\AppData\Local\Temp\DARK18~1\0123456789abcdef0123456789abcdef\target'),
+        $profile) } 'alias or protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        ($profile + '\AppData\Local\Temp.\Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef'),
+        ($profile + '\AppData\Local\Temp.\Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef\target'),
+        $profile) } 'alias or protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        ($profile + '\AppData\Local\Temp \Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef'),
+        ($profile + '\AppData\Local\Temp \Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef\target'),
+        $profile) } 'alias or protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        'C:\ProgramData\DarkReNamerVmRuns.\0123456789abcdef0123456789abcdef',
+        'C:\ProgramData\DarkReNamerVmRuns.\0123456789abcdef0123456789abcdef\target',
+        $profile) } 'alias or protected-root component'
+Assert-Rejected { $candidate::RequireFixturePathScope(
+        ($profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef'),
+        ($profile + '\AppData\Local\Temp\Dark180-TxfPhaseB\0123456789abcdef0123456789abcdef\other'),
+        $profile) } 'outside exact local profile temp scope'
+Assert-Rejected { $candidate::RequireExactManifest($approved,[string[]]@($approved[1],$approved[0])) } 'row differs'
+Assert-Rejected { $candidate::RequireExactManifest($approved,[string[]]@($approved[0])) } 'incomplete'
+Assert-Rejected { $candidate::RequireExactManifest($approved,[string[]]@($approved[0],$fileRow.Replace($id2,$id1))) } 'row differs'
+Assert-Rejected { $candidate::RequireExactManifest([string[]]@($rootRow,$rootRow),[string[]]@($rootRow,$rootRow)) } 'row differs'
+Assert-Rejected { $candidate::RequireExactManifest([string[]]@(''),[string[]]@('')) } 'row is empty'
+Assert-Rejected { $candidate::RequireExactManifest($null,$approved) } 'absent'
+$unpaired=[string][char]0xD800
+$replacement=[string][char]0xFFFD
+$unpairedHex=$candidate::EncodeComponentUtf16($unpaired)
+$replacementHex=$candidate::EncodeComponentUtf16($replacement)
+if ($unpairedHex -ceq $replacementHex -or $unpairedHex -cne '00d8') {
+    throw 'Raw UTF-16 component encoding conflated a surrogate with replacement.'
+}
+$surrogateRow="$unpairedHex|file|$id2|1|$sha|$owner|$sddl|default-stream-only"
+$replacementRow="$replacementHex|file|$id2|1|$sha|$owner|$sddl|default-stream-only"
+$surrogateDigest=$candidate::RequireExactManifest([string[]]@($rootRow,$surrogateRow),
+    [string[]]@($rootRow,$surrogateRow))
+$replacementDigest=$candidate::RequireExactManifest([string[]]@($rootRow,$replacementRow),
+    [string[]]@($rootRow,$replacementRow))
+if ($surrogateDigest -ceq $replacementDigest) { throw 'Raw UTF-16 manifest digests collided.' }
+Assert-Rejected { $candidate::RequireExactManifest([string[]]@($unpaired),[string[]]@($unpaired)) } 'canonical ASCII'
+if ($IsWindows) {
+    Assert-Rejected { $candidate::PrepareFixtureOnly('C:\DarkReNamerVmRuns\original',
+            'C:\DarkReNamerVmRuns\original\target', 'a'*32,
+            '0123456789abcdef0123456789abcdef01234567') } 'protected-root component'
+}
+$nativeFixture=Join-Path $PSScriptRoot 'test-exact-manifest-txf-phase-b.ps1'
+$tokens=$null;$parseErrors=$null
+$fixtureAst=[Management.Automation.Language.Parser]::ParseFile($nativeFixture,
+    [ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Phase B native fixture has PowerShell syntax errors.' }
+foreach ($name in @('Assert-PhaseBTrialReceipt')) {
+    $definition=$fixtureAst.Find({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq $name},$true)
+    if ($null -eq $definition) { throw "Actual Phase B terminal function is missing: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+function Hash-Control([byte[]]$Bytes) {
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant()
+}
+$sourceBinding=[ordered]@{commit='a'*40;fixture_sha256='b'*64;module_sha256='c'*64;
+    observer_sha256='d'*64;actor_sha256='e'*64}
+$sentinel=[byte[]](72,63,54,45,36,27)
+$approvedBytes=[byte[]](9,18,27,36,45,54)
+$bytesProof={param([byte[]]$Bytes)
+    return [ordered]@{status='present';base64=[Convert]::ToBase64String($Bytes);
+        sha256=(Hash-Control $Bytes);bytes=$Bytes.Length}
+}
+$post=[ordered]@{root=[ordered]@{status='absent'};approved=[ordered]@{status='absent'};
+    sentinel=(& $bytesProof $sentinel);approved_before=(& $bytesProof $approvedBytes);
+    nested=[ordered]@{status='absent'};sibling=[ordered]@{status='absent'}}
+$frozenRoot='f'*48;$frozenFile='1'*48;$frozenDigest='2'*64
+$freeze=[ordered]@{phase='independent-freeze';row_count=5;root_id=$frozenRoot;
+    approved_id=$frozenFile;manifest_digest=$frozenDigest;
+    approved_before=(& $bytesProof $approvedBytes)}
+$actorReceipt=[ordered]@{schema='dark180-exact-manifest-phase-b-child-v1';role='observer-actor';
+    trial='B1';scope='C:\fixture';source=$sourceBinding;status='completed';postproof=$post;
+    events=@($freeze);gate1='unverified';target_collection=0;product=0}
+$candidateReceipt=[ordered]@{schema='dark180-exact-manifest-phase-b-child-v1';role='candidate';
+    trial='B1';scope='C:\fixture';source=$sourceBinding;
+    status='commit-call-succeeded-poststate-unverified';
+    cleanup_error=$null;closure_unknown=$false;settlement='commit-call-succeeded-poststate-unverified';
+    lease_state='commit-returned-poststate-unverified';commit_calls=1;rollback_calls=0;
+    stage_calls=5;gate1='unverified';target_collection=0;product=0}
+$complete=[ordered]@{trial='B1';scope='C:\fixture';controller_error=$null;
+    ready=[ordered]@{root_id=$frozenRoot;manifest_digest=$frozenDigest};
+    actor=[ordered]@{closed=$true;capture_error=$null;exit_code=0};
+    candidate=[ordered]@{closed=$true;capture_error=$null;exit_code=0;kill_requested=$false};
+    actor_receipt=$actorReceipt;candidate_receipt=$candidateReceipt;barrier=$null}
+if ((Assert-PhaseBTrialReceipt $complete 'B1' $sourceBinding) -cne
+    'exact-fixture-deleted-gate1-unverified') {
+    throw 'Actual Phase B controller rejected a complete positive protocol receipt.'
+}
+foreach ($changed in @('controller-error','missing-controller-error','missing-postproof',
+        'missing-source','unclosed','unknown-closure','false-commit','lost-sentinel',
+        'mismatched-freeze','mismatched-ready')) {
+    $copy=$complete | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+    switch ($changed) {
+        'controller-error' { $copy.controller_error='observer failed' }
+        'missing-controller-error' { $copy.Remove('controller_error') }
+        'missing-postproof' { $copy.actor_receipt.Remove('postproof') }
+        'missing-source' { $copy.candidate_receipt.source.Remove('module_sha256') }
+        'unclosed' { $copy.candidate.closed=$false }
+        'unknown-closure' { $copy.candidate_receipt.closure_unknown=$true }
+        'false-commit' { $copy.candidate_receipt.commit_calls=0 }
+        'lost-sentinel' { $copy.actor_receipt.postproof.sentinel.status='absent' }
+        'mismatched-freeze' { $copy.actor_receipt.events[0].manifest_digest='3'*64 }
+        'mismatched-ready' { $copy.ready.root_id='4'*48 }
+    }
+    $rejected=$false
+    try { $null=Assert-PhaseBTrialReceipt $copy 'B1' $sourceBinding }
+    catch { $rejected=$true }
+    if (-not $rejected) { throw "Actual Phase B controller accepted protocol fault: $changed" }
+}
+$death=$complete | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$death.trial='B7';$death.actor_receipt.trial='B7';$death.candidate_receipt=$null
+$death.actor_receipt.events[0].row_count=2
+$death.candidate.exit_code=137;$death.candidate.kill_requested=$true
+$death.actor_receipt.postproof.root.status='present'
+$death.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
+$death.actor_receipt.postproof.root_id=$frozenRoot
+$death.actor_receipt.postproof.approved_id=$frozenFile
+$death.barrier=[ordered]@{trial='B7';state='staged';stage_calls=2;
+    target_handles_closed=$true;commit_calls=0}
+if ((Assert-PhaseBTrialReceipt $death 'B7' $sourceBinding) -cne
+    'worker-death-preserved-gate1-unverified') {
+    throw 'Actual Phase B controller rejected a proven owned-death receipt.'
+}
+$death.barrier.commit_calls=1
+Assert-Rejected { Assert-PhaseBTrialReceipt $death 'B7' $sourceBinding } 'precommit barrier'
+$death.barrier.commit_calls=0
+$death.actor_receipt.postproof.approved.status='absent'
+Assert-Rejected { Assert-PhaseBTrialReceipt $death 'B7' $sourceBinding } 'independently preserved'
+$early=$complete | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$early.trial='B6';$early.actor_receipt.trial='B6';$early.candidate_receipt.trial='B6'
+$early.actor_receipt.postproof.root.status='present'
+$early.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
+$early.actor_receipt.postproof.root_id=$frozenRoot
+$early.actor_receipt.postproof.approved_id=$frozenFile
+$early.actor_receipt.events[0].row_count=2
+$early.actor_receipt.events+=@([ordered]@{phase='required-barrier-unverified';
+    reason='candidate-rejected-before-barrier'})
+$early.candidate_receipt.status='rejected-or-unknown'
+$early.candidate_receipt.settlement='rollback-succeeded'
+$early.candidate_receipt.lease_state='rollback-succeeded'
+$early.candidate_receipt.commit_calls=0;$early.candidate_receipt.rollback_calls=1
+if ((Assert-PhaseBTrialReceipt $early 'B6' $sourceBinding) -cne
+    'required-barrier-unverified-candidate-rejected-preserved') {
+    throw 'Actual Phase B controller mislabeled an unreachable required barrier.'
+}
+$early.actor_receipt.postproof.approved.base64=[Convert]::ToBase64String([byte[]](99))
+Assert-Rejected { Assert-PhaseBTrialReceipt $early 'B6' $sourceBinding } 'bytes changed'
+$late=$early | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
+$late.trial='B2';$late.actor_receipt.trial='B2';$late.candidate_receipt.trial='B2'
+$late.actor_receipt.postproof.approved=& $bytesProof $approvedBytes
+$late.actor_receipt.postproof.late_child=& $bytesProof ([byte[]](81))
+$late.actor_receipt.events=@($late.actor_receipt.events[0],
+    [ordered]@{phase='late-child-after-last-close';admitted=$true;written=$true;native_error=0})
+$late.candidate_receipt.status='intentional-rollback-post-barrier'
+$late.barrier=[ordered]@{trial='B2';state='staged';stage_calls=2;
+    target_handles_closed=$true;commit_calls=0}
+if ((Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding) -cne
+    'intentional-rollback-late-child-preserved-gate1-unverified') {
+    throw 'Actual Phase B controller rejected a complete intentional-rollback receipt.'
+}
+$late.actor_receipt.postproof.late_child.status='absent'
+Assert-Rejected { Assert-PhaseBTrialReceipt $late 'B2' $sourceBinding } 'late child'
+Write-Host 'Phase B exact-manifest protocol tests passed.'
