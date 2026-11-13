@@ -234,6 +234,26 @@ prompt, and shutdown paths would add broad transitions and drop-order review.
 The current procedural gates and worker-specific retirement remain the smaller
 supported design until a concrete overlap or missed transition is found.
 
+### Stored-size sorting contract
+
+The portable core's default size sorting and `LegacyDarkNamer080210` semantics
+compare the stored 32-bit size with unsigned total ordering. This deliberately
+modernizes only the original wrapping-subtraction relation at differences of
+2 GiB or greater: the original relation is non-antisymmetric at exactly 2 GiB
+and cyclic across wraparound, so it cannot be passed to standard stable sorting.
+Ordinary compatibility golden cases and stable equal-size row order remain.
+The default still ignores the separate 64-bit actual-size metadata. The shipping
+Windows caller explicitly selects `SafeActualSize`, which continues to compare
+the complete observed 64-bit size. Text comparator callers must also provide a
+total order. Sort permutations move complete rows and preserve the existing
+no-change, revision, budget and selection-identity behavior.
+
+This contract is the proposal in [#277](https://github.com/PiesP/DarkReNamer/issues/277).
+Its compatibility decision requires explicit maintainer admission before landing;
+passing regressions alone do not establish that admission. Exact emulation of
+the inconsistent original relation would need a separately specified deterministic
+algorithm and its own compatibility evidence, rather than standard `sort_by`.
+
 ## Native Windows development
 
 Install Git, PowerShell 7.4 or newer, Python 3.11 or newer, and rustup. The tooling
