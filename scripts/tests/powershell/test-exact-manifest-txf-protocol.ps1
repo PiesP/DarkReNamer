@@ -937,4 +937,122 @@ try {
         }
     }
 }
-Write-Host 'Phase B exact-manifest protocol tests passed.'
+$acquirePath=Join-Path $PSScriptRoot 'test-exact-manifest-txf-acquire-child.ps1'
+$acquireTokens=$null;$acquireErrors=$null
+$acquireAst=[Management.Automation.Language.Parser]::ParseFile($acquirePath,
+    [ref]$acquireTokens,[ref]$acquireErrors)
+if ($acquireErrors.Count -ne 0) { throw 'Active-Acquire control source does not parse.' }
+$classifier=$acquireAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-AcquireChildReceipt'},$true)
+if ($null -eq $classifier) { throw 'Active-Acquire receipt classifier is missing.' }
+. ([scriptblock]::Create($classifier.Extent.Text))
+$strictSource=@($acquireAst.FindAll({param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value.Contains('public static class DarkAcquireChildStrictStreams')},$true))
+if ($strictSource.Count -ne 1) { throw 'Independent strict stream helper source is missing.' }
+Add-Type -TypeDefinition $strictSource[0].Value -ErrorAction Stop
+
+$acquireSource=[ordered]@{commit=('a'*40);control_sha256=('b'*64);
+    module_sha256=('c'*64);observer_sha256=('d'*64);actor_sha256=('e'*64);
+    phase_b_sha256=('f'*64);registry_sha256=('7'*64)}
+$approvedHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](9,18,27,36,45,54))).ToLowerInvariant()
+$sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](72,63,54,45,36,27))).ToLowerInvariant()
+$approved=('61007000700072006f007600650064002e00620069006e00|file|' +
+    ('3'*48) + '|6|' + $approvedHash + '|owner|sddl|default-stream-only')
+$root='root-row-with-identity-security-and-streams'
+$childHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](81))).ToLowerInvariant()
+$childRow=('6c006100740065002d006300680069006c0064002e00620069006e00|file|' +
+    ('1'*48) + '|1|' + $childHash + '|owner|sddl|default-stream-only')
+$stream=@{result=0;io_status=0;information=24;named_streams=0}
+$ready=@{phase='independent-freeze';issued_utc='2026-11-14T00:00:01.0000000Z';
+    row_count=2;manifest_digest=('9'*64);
+    root_id=('2'*48);root_row=$root;approved_id=('3'*48);approved_row=$approved;
+    sentinel_sha256=$sentinelHash;stream_checks=@($stream,$stream)}
+$barrier=@{phase='active-acquire-before-stage';issued_utc='2026-11-14T00:00:02.0000000Z';
+    digest=$ready.manifest_digest;
+    lease_state='acquired';settlement='active-exact-set';held_count=2;
+    stage_calls=0;commit_calls=0}
+$candidate=@{schema='dark240-acquire-child-v1';role='candidate';source=$acquireSource;
+    gate1='unverified';target_collection=0;product=0;
+    acquire_digest=$ready.manifest_digest;barrier_phase=$barrier.phase;
+    done_utc='2026-11-14T00:00:04.0000000Z';
+    settlement='rollback-succeeded';lease_state='rollback-succeeded';
+    rollback_calls=1;commit_calls=0;stage_calls=0;closure_unknown=$false;
+    cleanup_error=$null;native_error=0;close_receipts=@('writer:0:closed','anchor:0:closed');
+    status='refused-intentional-abort-preserved';stage_attempted=$false;
+    stage_rejected=$false;stage_error=$null}
+$actor=@{schema='dark240-acquire-child-v1';role='actor';source=$acquireSource;
+    gate1='unverified';target_collection=0;product=0;
+    attempt_phase='child-create-during-active-acquire';barrier_digest=$barrier.digest;
+    attempt_utc='2026-11-14T00:00:03.0000000Z';
+    attempt=@{admitted=$false;native_error=6800;written=$false;
+        attempt_utc='2026-11-14T00:00:03.0000000Z'};
+    support_attempted=$true;support=@{admitted=$true;native_error=0;written=$true};
+    postproof=@{observed_utc='2026-11-14T00:00:05.0000000Z';
+        row_count=3;root_id=$ready.root_id;root_row=$root;
+        approved_id=$ready.approved_id;approved_row=$approved;
+        sentinel_sha256=$ready.sentinel_sha256;child_row=$childRow;
+        child_bytes=[Convert]::ToBase64String([byte[]](81));child_sha256=$childHash;
+        stream_checks=@($stream,$stream,$stream)}}
+$attemptMarker=$actor.attempt
+$doneMarker=@{status=$candidate.status;issued_utc=$candidate.done_utc;
+    settlement=$candidate.settlement;commit_calls=$candidate.commit_calls}
+if ((Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource) -cne
+    'refused-during-active-acquire-gate1-unverified') {
+    throw 'Actual active-Acquire refusal classifier lost its narrow result.'
+}
+$candidate.status='admitted-stage-rejected-preserved'
+$candidate.stage_attempted=$true;$candidate.stage_rejected=$true
+$candidate.stage_error='exact-manifest-mismatch'
+$actor.attempt=@{admitted=$true;native_error=0;written=$true;
+    attempt_utc=$actor.attempt_utc}
+$actor.support_attempted=$false;$actor.support=$null
+$attemptMarker=$actor.attempt;$doneMarker.status=$candidate.status
+if ((Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource) -cne
+    'admitted-stage-rejected-gate1-unverified') {
+    throw 'Actual admitted-child Stage-refusal classifier lost its narrow result.'
+}
+foreach ($change in @('stage-call','commit-call','rollback-unknown','original-drift',
+        'stream-incomplete','child-bytes','child-stream','actor-phase','source-drift',
+        'chronology','marker-mismatch')) {
+    $badCandidate=$candidate | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    $badActor=$actor | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    switch ($change) {
+        'stage-call' { $badCandidate.stage_calls=1 }
+        'commit-call' { $badCandidate.commit_calls=1 }
+        'rollback-unknown' { $badCandidate.settlement='rollback-outcome-unknown' }
+        'original-drift' { $badActor.postproof.approved_row='changed' }
+        'stream-incomplete' { $badActor.postproof.stream_checks[0].io_status=38 }
+        'child-bytes' { $badActor.postproof.child_bytes='AA==' }
+        'child-stream' { $badActor.postproof.child_row=$badActor.postproof.child_row.Replace(
+            'default-stream-only','named-stream-present') }
+        'actor-phase' { $badActor.attempt_phase='late-child-after-last-close' }
+        'source-drift' { $badActor.source.actor_sha256='0'*64 }
+        'chronology' { $badActor.attempt_utc='2026-11-14T00:00:06.0000000Z' }
+        'marker-mismatch' { $badActor.attempt.native_error=32 }
+    }
+    $rejected=$false
+    try { $null=Assert-AcquireChildReceipt $badCandidate $badActor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource }
+    catch { $rejected=$true }
+    if (-not $rejected) { throw "Active-Acquire classifier accepted unsafe evidence: $change" }
+}
+$actor.attempt=@{admitted=$false;native_error=5;written=$false;
+    attempt_utc=$actor.attempt_utc}
+$actor.support_attempted=$true;$actor.support=@{admitted=$true;native_error=0;written=$true}
+$candidate.status='refused-intentional-abort-preserved'
+$candidate.stage_attempted=$false;$candidate.stage_rejected=$false
+$candidate.stage_error=$null
+$attemptMarker=$actor.attempt;$doneMarker.status=$candidate.status
+$rejected=$false
+try { $null=Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource }
+catch { $rejected=$true }
+if (-not $rejected) { throw 'Unsupported native refusal was classified as an exclusion result.' }
+Write-Host 'Phase B and active-Acquire exact-manifest protocol tests passed.'
