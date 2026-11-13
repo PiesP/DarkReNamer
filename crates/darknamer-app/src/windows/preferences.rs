@@ -305,7 +305,7 @@ fn save_language_staged(
         "could not allocate a unique language preference temporary file",
     )
     .map_err(LanguageWriteFailure::at(Stage::CreateTemporary))?;
-    let mut cleanup = OwnedTemp::new(temporary_path.clone());
+    let mut cleanup = OwnedTemp::new(temporary_path);
     let bytes = encode_language(preference);
     let write_result = (|| {
         temporary
@@ -320,7 +320,7 @@ fn save_language_staged(
     })();
     drop(temporary);
     write_result?;
-    atomic_replace(&temporary_path, path)
+    atomic_replace(&cleanup.path, path)
         .map_err(LanguageWriteFailure::at(Stage::ReplaceDestination))?;
     cleanup.disarm();
     sync_parent(parent).map_err(LanguageWriteFailure::at(Stage::SyncParent))?;
@@ -918,7 +918,7 @@ fn persist_encoded_with(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, parent_error))?;
     fs::create_dir_all(parent)?;
     let (temporary_path, mut temporary) = create_process_temp(parent, leaf, temp_error)?;
-    let mut cleanup = OwnedTemp::new(temporary_path.clone());
+    let mut cleanup = OwnedTemp::new(temporary_path);
     // Close the handle before owned cleanup on either success or failure.
     let write_result = (|| {
         write(&mut temporary, bytes)?;
@@ -927,7 +927,7 @@ fn persist_encoded_with(
     })();
     drop(temporary);
     write_result?;
-    replace(&temporary_path, path)?;
+    replace(&cleanup.path, path)?;
     cleanup.disarm();
     sync_parent(parent)?;
     Ok(())
