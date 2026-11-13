@@ -8,7 +8,7 @@
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Weak};
 
@@ -345,7 +345,12 @@ pub enum LegacySortMode {
 pub enum SortSemantics {
     /// Compare the full observed 64-bit size.
     SafeActualSize,
-    /// Preserve DarkNamer 08.02.10 wrapping 32-bit subtraction.
+    /// Compare the legacy stored 32-bit size as an unsigned value.
+    ///
+    /// Equal sizes retain row order. This preserves ordinary legacy cases but
+    /// deliberately replaces wrapping subtraction at differences of 2 GiB or
+    /// more, where the original relation was not a total order. The full
+    /// observed 64-bit size is used only by [`Self::SafeActualSize`].
     LegacyDarkNamer080210,
 }
 
@@ -2535,13 +2540,14 @@ fn parent_folder_units(root_path: &LegacyText) -> Option<&[u16]> {
 }
 
 fn normalized_indices(indices: &[usize], length: usize) -> Vec<usize> {
-    indices
+    let mut normalized = indices
         .iter()
         .copied()
         .filter(|index| *index < length)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
 }
 
 fn last_digit_run(units: &[u16]) -> Option<(usize, usize)> {
@@ -2591,7 +2597,7 @@ fn padded_digit_run_proposal(
 }
 
 fn compare_legacy_size(left: u32, right: u32) -> Ordering {
-    (left.wrapping_sub(right) as i32).cmp(&0)
+    left.cmp(&right)
 }
 
 fn export_lines<'a>(lines: impl IntoIterator<Item = &'a LegacyText>) -> LegacyText {
@@ -2609,6 +2615,31 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn legacy_size_comparison_is_a_total_order_at_wrap_boundaries() {
+        let sizes = [0, 1, 0x4000_0000, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+        for left in sizes {
+            for right in sizes {
+                assert_eq!(
+                    compare_legacy_size(left, right),
+                    compare_legacy_size(right, left).reverse(),
+                    "antisymmetry: {left:#x}, {right:#x}"
+                );
+                assert_eq!(compare_legacy_size(left, right), left.cmp(&right));
+                for last in sizes {
+                    if compare_legacy_size(left, right).is_lt()
+                        && compare_legacy_size(right, last).is_lt()
+                    {
+                        assert!(
+                            compare_legacy_size(left, last).is_lt(),
+                            "transitivity: {left:#x}, {right:#x}, {last:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn item(path: String) -> LegacyListItem {
         LegacyListItem::new(path, false, 0, 0, 0)

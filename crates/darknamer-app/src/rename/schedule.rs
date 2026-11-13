@@ -58,30 +58,30 @@ pub(super) fn build_schedule_cancellable(
     backend: &mut dyn RenameBackend,
     cancellation_requested: &dyn Fn() -> bool,
 ) -> Result<Vec<ScheduleStep>, ScheduleError> {
-    let mut source_keys = Vec::with_capacity(plan.entries.len());
-    let mut destination_keys = Vec::with_capacity(plan.entries.len());
+    let mut reserved = BTreeSet::new();
     for entry in &plan.entries {
         check_cancelled(cancellation_requested)?;
-        source_keys.push(entry.source_entry_key.clone());
-        destination_keys.push(entry.destination_entry_key.clone());
+        reserved.insert(entry.source_entry_key.clone());
     }
-    let mut reserved = BTreeSet::new();
-    for key in source_keys.iter().chain(&destination_keys) {
+    for entry in &plan.entries {
         check_cancelled(cancellation_requested)?;
-        reserved.insert(key.clone());
+        reserved.insert(entry.destination_entry_key.clone());
     }
     let mut source_owners = BTreeMap::new();
-    for (index, key) in source_keys.iter().cloned().enumerate() {
+    for (index, entry) in plan.entries.iter().enumerate() {
         check_cancelled(cancellation_requested)?;
-        if source_owners.insert(key, index).is_some() {
+        if source_owners
+            .insert(&entry.source_entry_key, index)
+            .is_some()
+        {
             return Err(ScheduleError::Invalid);
         }
     }
     let mut dependencies = vec![None; plan.entries.len()];
     let mut predecessors = vec![None; plan.entries.len()];
-    for (index, destination) in destination_keys.iter().enumerate() {
+    for (index, entry) in plan.entries.iter().enumerate() {
         check_cancelled(cancellation_requested)?;
-        let Some(owner) = source_owners.get(destination).copied() else {
+        let Some(owner) = source_owners.get(&entry.destination_entry_key).copied() else {
             continue;
         };
         dependencies[index] = Some(owner);
