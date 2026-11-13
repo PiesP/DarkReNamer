@@ -2225,10 +2225,8 @@ fn apply_rendered_row_with_mask(window: HWND, row: usize, new: &RenderedRow, mas
     if mask & 1 != 0 && !set_native_primary(window, row, new) {
         return false;
     }
-    for column in 1..NATIVE_LIST_COLUMN_COUNT {
-        if mask & (1 << column) != 0
-            && !set_native_subitem(window, row, column, &new.values[column])
-        {
+    for (column, value) in new.values.iter().enumerate().skip(1) {
+        if mask & (1 << column) != 0 && !set_native_subitem(window, row, column, value) {
             return false;
         }
     }
