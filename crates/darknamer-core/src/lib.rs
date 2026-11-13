@@ -8,7 +8,7 @@
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Weak};
 
@@ -2535,13 +2535,14 @@ fn parent_folder_units(root_path: &LegacyText) -> Option<&[u16]> {
 }
 
 fn normalized_indices(indices: &[usize], length: usize) -> Vec<usize> {
-    indices
+    let mut normalized = indices
         .iter()
         .copied()
         .filter(|index| *index < length)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
 }
 
 fn last_digit_run(units: &[u16]) -> Option<(usize, usize)> {
