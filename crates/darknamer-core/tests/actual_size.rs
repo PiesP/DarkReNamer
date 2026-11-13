@@ -79,3 +79,51 @@ fn actual_size_is_display_metadata_while_sort_remains_legacy_compatible() {
     );
     assert_eq!(list.items()[0].actual_size(), u64::from(u32::MAX) + 2);
 }
+
+#[test]
+fn legacy_low_word_order_is_stable_at_boundaries_in_both_directions() {
+    for mode in [
+        LegacySortMode::SizeAscending,
+        LegacySortMode::SizeDescending,
+    ] {
+        let mut list = LegacyList::new();
+        for (name, size, actual) in [
+            ("max.bin", u32::MAX, u64::MAX),
+            ("half-first.bin", 0x8000_0000, 0x8000_0000),
+            ("zero.bin", 0, 1_u64 << 32),
+            ("half-second.bin", 0x8000_0000, 3_u64 << 32),
+        ] {
+            assert_eq!(
+                list.append(LegacyListItem::new_with_actual_size(
+                    format!(r"C:\{name}"),
+                    false,
+                    size,
+                    actual,
+                    1,
+                    2,
+                )),
+                Ok(true)
+            );
+        }
+        assert!(list.sort_by_changed(mode, LegacyText::case_insensitive_cmp));
+        let names = list
+            .items()
+            .iter()
+            .map(|row| row.current_name().to_string_lossy())
+            .collect::<Vec<_>>();
+        let expected = if mode == LegacySortMode::SizeAscending {
+            ["zero.bin", "half-first.bin", "half-second.bin", "max.bin"]
+        } else {
+            ["max.bin", "half-first.bin", "half-second.bin", "zero.bin"]
+        };
+        assert_eq!(names, expected);
+        assert!(!list.sort_by_changed(mode, LegacyText::case_insensitive_cmp));
+        assert_eq!(
+            list.items()
+                .iter()
+                .find(|row| row.size() == 0)
+                .map(LegacyListItem::actual_size),
+            Some(1_u64 << 32)
+        );
+    }
+}
