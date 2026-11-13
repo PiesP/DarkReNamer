@@ -942,6 +942,37 @@ $acquireTokens=$null;$acquireErrors=$null
 $acquireAst=[Management.Automation.Language.Parser]::ParseFile($acquirePath,
     [ref]$acquireTokens,[ref]$acquireErrors)
 if ($acquireErrors.Count -ne 0) { throw 'Active-Acquire control source does not parse.' }
+$deadlineSource=@($acquireAst.FindAll({param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value.Contains('public sealed class DarkAcquireChildDeadline')},$true))
+if ($deadlineSource.Count -ne 1) { throw 'Active-Acquire child deadline source is missing.' }
+Add-Type -TypeDefinition $deadlineSource[0].Value -ErrorAction Stop
+$normalDeadline=[DarkAcquireChildDeadline]::new(500)
+$normalDeadline.Dispose()
+Start-Sleep -Milliseconds 550 # A normally disposed child must not exit at its former deadline.
+$deadlineCode=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+    $deadlineSource[0].Value))
+$deadlineCommand='$code=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("' +
+    $deadlineCode + '")); Add-Type -TypeDefinition $code; ' +
+    '$null=[DarkAcquireChildDeadline]::new(150); Start-Sleep -Seconds 10'
+$deadlineChild=$null;$deadlineResult=$null
+try {
+    $deadlineChild=New-OwnedProtocolChild $deadlineCommand
+    $deadlineResult=Complete-OwnedChild $deadlineChild 5000
+    if (-not $deadlineResult.closed -or $deadlineResult.exit_code -ne 124 -or
+        $deadlineResult.capture_error -or
+        $deadlineResult.stderr -cnotmatch 'DR_ACQUIRE_CHILD_OWNED_DEADLINE') {
+        throw 'Child-local hard deadline did not exit 124 with its owned marker.'
+    }
+} finally {
+    if ($null -ne $deadlineChild -and
+        ($null -eq $deadlineResult -or -not $deadlineResult.closed)) {
+        try {
+            if (-not $deadlineChild.process.HasExited) { $deadlineChild.process.Kill($true) }
+            [void]$deadlineChild.process.WaitForExit(3000)
+        } finally { $deadlineChild.process.Dispose() }
+    }
+}
 $classifier=$acquireAst.Find({param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
     $node.Name -ceq 'Assert-AcquireChildReceipt'},$true)
@@ -1007,7 +1038,7 @@ $barrier=@{phase='active-acquire-before-stage';issued_utc='2026-11-14T00:00:02.0
     lease_state='acquired';settlement='active-exact-set';held_count=2;
     stage_calls=0;commit_calls=0}
 $candidate=@{schema='dark240-acquire-child-v1';role='candidate';source=$acquireSource;
-    gate1='unverified';target_collection=0;product=0;
+    gate1='unverified';target_collection=0;product=0;owned_deadline_ms=30000;
     acquire_digest=$ready.manifest_digest;barrier_phase=$barrier.phase;
     done_utc='2026-11-14T00:00:04.0000000Z';
     settlement='rollback-succeeded';lease_state='rollback-succeeded';
@@ -1018,7 +1049,7 @@ $candidate=@{schema='dark240-acquire-child-v1';role='candidate';source=$acquireS
     status='refused-intentional-abort-postproof-pending';stage_attempted=$false;
     stage_rejected=$false;stage_error=$null}
 $actor=@{schema='dark240-acquire-child-v1';role='actor';source=$acquireSource;
-    gate1='unverified';target_collection=0;product=0;
+    gate1='unverified';target_collection=0;product=0;owned_deadline_ms=30000;
     attempt_phase='child-create-during-active-acquire';barrier_digest=$barrier.digest;
     attempt_utc='2026-11-14T00:00:03.0000000Z';
     attempt=@{admitted=$false;native_error=6800;written=$false;

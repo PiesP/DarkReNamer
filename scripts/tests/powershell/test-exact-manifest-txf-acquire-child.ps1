@@ -7,6 +7,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if (-not $IsWindows) { throw 'Active-Acquire child control requires Windows.' }
+$ownedDeadline=$null
+if ($Mode -ne 'controller') {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+public sealed class DarkAcquireChildDeadline : IDisposable {
+    readonly Timer timer;
+    public DarkAcquireChildDeadline(int milliseconds) {
+        if (milliseconds<1 || milliseconds>30000)
+            throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        timer=new Timer(_ => {
+            Console.Error.WriteLine("DR_ACQUIRE_CHILD_OWNED_DEADLINE");
+            Environment.Exit(124);
+        },null,milliseconds,Timeout.Infinite);
+    }
+    public void Dispose() { timer.Dispose(); }
+}
+'@ -ErrorAction Stop
+    $ownedDeadline=[DarkAcquireChildDeadline]::new(30000)
+}
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $modulePath=Join-Path $repo 'scripts/modules/powershell/controller-owned-root-guard.ps1'
 $observerPath=Join-Path $repo 'scripts/tests/support/exact-manifest-phase-b-observer.cs'
@@ -33,7 +53,9 @@ function Assert-AcquireChildReceipt($Candidate,$Actor,$Barrier,$Ready,
     foreach ($receipt in @($Candidate,$Actor)) {
         if ($null -eq $receipt -or $receipt.schema -cne 'dark240-acquire-child-v1' -or
             $receipt.gate1 -cne 'unverified' -or $receipt.target_collection -ne 0 -or
-            $receipt.product -ne 0) { throw 'Control receipt scope differs.' }
+            $receipt.product -ne 0 -or $receipt.owned_deadline_ms -ne 30000) {
+            throw 'Control receipt scope differs.'
+        }
         foreach ($field in @('commit','control_sha256','module_sha256',
                 'observer_sha256','actor_sha256','phase_b_sha256','registry_sha256')) {
             if ($receipt.source[$field] -cne $ExpectedSource[$field]) {
@@ -222,12 +244,13 @@ function Assert-ControlScope {
 function Write-ControlRecord([string]$Role,$Fields) {
     $Fields.schema='dark240-acquire-child-v1';$Fields.role=$Role
     $Fields.source=$source;$Fields.gate1='unverified'
-    $Fields.target_collection=0;$Fields.product=0
+    $Fields.target_collection=0;$Fields.product=0;$Fields.owned_deadline_ms=30000
     [Console]::Out.WriteLine('DR_ACQUIRE_CHILD ' +
         ($Fields | ConvertTo-Json -Depth 10 -Compress))
 }
 
 if ($Mode -ne 'controller') {
+    try {
     Assert-ControlScope
     $target=Join-Path $Scope 'target'
     if ($Mode -eq 'actor') {
@@ -487,6 +510,7 @@ public static class DarkAcquireChildStrictStreams {
             transaction_closed=$true})
         Write-ControlRecord 'candidate' $record
     }
+    } finally { $ownedDeadline.Dispose() }
     return
 }
 
@@ -567,7 +591,7 @@ try {
         candidate=$candidateReceipt;actor=$actorReceipt;
         candidate_close=$candidateResult;actor_close=$actorResult;verdict=$verdict;
         elapsed_ms=[int]$clock.ElapsedMilliseconds;active_deadline_ms=20000;
-        settle_deadline_ms=25000;
+        settle_deadline_ms=25000;owned_child_deadline_ms=30000;
         gate1='unverified'} | ConvertTo-Json -Depth 12) + "`n")
     Write-Host "Active-Acquire child diagnostic passed: $verdict. Gate 1 unverified."
 } catch {
