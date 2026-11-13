@@ -47,7 +47,8 @@ public static class DrOwnedGuardTestNative {
         IoStatusBlock status;
         int result = NtQueryInformationFile(file, out status, data,
             (uint)data.Length, 22);
-        return ((uint)result).ToString("x8") + ":" + status.Information.ToInt64();
+        return ((uint)result).ToString("x8") + ":" +
+            status.Status.ToInt64().ToString("x16") + ":" + status.Information.ToInt64();
     }
 }
 '@
@@ -97,13 +98,13 @@ try {
     $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
     $directoryQuery = [DrOwnedGuardTestNative]::StreamQuery($chain[$chain.Count - 1])
     $heldFile = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $false))
-    $noNamedStreams = [DarkReNamerVmOwnedRootGuard].GetMethod('NoNamedStreams', $flags)
-    if ($null -eq $noNamedStreams) { throw 'Source-bound stream guard is unavailable.' }
-    $directoryNative = [DrOwnedGuardTestNative]::NativeStreamQuery($chain[$chain.Count - 1])
-    $directoryGuard = 'accepted'
-    try { $noNamedStreams.Invoke($null, @($chain[$chain.Count - 1], $true)) }
-    catch { $directoryGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
     try {
+        $noNamedStreams = [DarkReNamerVmOwnedRootGuard].GetMethod('NoNamedStreams', $flags)
+        if ($null -eq $noNamedStreams) { throw 'Source-bound stream guard is unavailable.' }
+        $directoryNative = [DrOwnedGuardTestNative]::NativeStreamQuery($chain[$chain.Count - 1])
+        $directoryGuard = 'accepted'
+        try { $noNamedStreams.Invoke($null, @($chain[$chain.Count - 1], $true)) }
+        catch { $directoryGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
         $fileQuery = [DrOwnedGuardTestNative]::StreamQuery($heldFile)
         $fileNative = [DrOwnedGuardTestNative]::NativeStreamQuery($heldFile)
         $fileGuard = 'accepted'
