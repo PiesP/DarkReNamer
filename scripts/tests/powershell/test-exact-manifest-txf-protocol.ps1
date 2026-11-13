@@ -65,6 +65,60 @@ function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
     if (-not $caught) { throw "Expected Phase B rejection: $Expected" }
 }
 
+$flags=[Reflection.BindingFlags]'NonPublic,Static'
+$streamResult=$guard.GetMethod('StreamResultLength',$flags)
+$streamFrames=$guard.GetMethod('ValidateStreamInventory',$flags)
+if ($null -eq $streamResult -or $null -eq $streamFrames) {
+    throw 'Held stream result and frame validators are unavailable.'
+}
+function Stream-Length([int]$result,[long]$ioStatus,[long]$information,
+    [int]$capacity,[bool]$directory) {
+    $streamResult.Invoke($null,@($result,$ioStatus,$information,$capacity,$directory))
+}
+if ((Stream-Length 0 0 0 4096 $true) -ne 0 -or
+    (Stream-Length 0 0 38 4096 $false) -ne 38 -or
+    (Stream-Length ([int]0x80000005) 0 24 4096 $false) -ne -1 -or
+    (Stream-Length ([int]0xc0000023) 0 24 4096 $false) -ne -1) {
+    throw 'Held stream query did not distinguish complete results from retryable partial data.'
+}
+Assert-Rejected { Stream-Length ([int]0x80000006) 0 0 4096 $true } 'NTSTATUS 80000006'
+Assert-Rejected { Stream-Length ([int]0xc0000011) 0 0 4096 $true } 'NTSTATUS c0000011'
+Assert-Rejected { Stream-Length ([int]0xc0000003) 0 0 4096 $true } 'NTSTATUS c0000003'
+Assert-Rejected { Stream-Length 0 38 0 4096 $true } 'IO_STATUS_BLOCK.Status 00000026'
+Assert-Rejected { Stream-Length 259 0 0 4096 $true } 'NTSTATUS 00000103'
+Assert-Rejected { Stream-Length 0 0 0 4096 $false } 'no default data stream'
+Assert-Rejected { Stream-Length 0 0 4097 4096 $true } 'length is invalid'
+Assert-Rejected { Stream-Length 0 0 -1 4096 $true } 'length is invalid'
+
+function Stream-Frame([string]$name,[uint32]$next=0) {
+    [byte[]]$nameBytes=[Text.Encoding]::Unicode.GetBytes($name)
+    [byte[]]$frame=[byte[]]::new(24+$nameBytes.Length)
+    [BitConverter]::GetBytes($next).CopyTo($frame,0)
+    [BitConverter]::GetBytes([uint32]$nameBytes.Length).CopyTo($frame,4)
+    $nameBytes.CopyTo($frame,24)
+    return ,$frame
+}
+$default=Stream-Frame '::$DATA'
+$index=Stream-Frame ':$I30:$INDEX_ALLOCATION'
+$named=Stream-Frame ':hidden:$DATA'
+$streamFrames.Invoke($null,@([byte[]]::new(16),0,$true))
+$streamFrames.Invoke($null,@($default,$default.Length,$false))
+$streamFrames.Invoke($null,@($index,$index.Length,$true))
+$oversized=[byte[]]::new($default.Length+32)
+$default.CopyTo($oversized,0)
+$oversized[$default.Length]=0xff
+$streamFrames.Invoke($null,@($oversized,$default.Length,$false))
+Assert-Rejected { $streamFrames.Invoke($null,@($oversized,$oversized.Length,$false)) } 'trailing data'
+Assert-Rejected { $streamFrames.Invoke($null,@($default,($default.Length-1),$false)) } 'frame is invalid'
+Assert-Rejected { $streamFrames.Invoke($null,@($named,$named.Length,$false)) } 'unindexed named stream'
+Assert-Rejected { $streamFrames.Invoke($null,@($index,$index.Length,$false)) } 'unindexed named stream'
+Assert-Rejected { $streamFrames.Invoke($null,@($default,$default.Length,$true)) } 'unindexed named stream'
+$unaligned=Stream-Frame '::$DATA' 25
+Assert-Rejected { $streamFrames.Invoke($null,@($unaligned,$unaligned.Length,$false)) } 'frame is invalid'
+$badNameLength=[byte[]]$default.Clone()
+[BitConverter]::GetBytes([uint32]15).CopyTo($badNameLength,4)
+Assert-Rejected { $streamFrames.Invoke($null,@($badNameLength,$badNameLength.Length,$false)) } 'frame is invalid'
+
 $owner=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('S-1-5-21-1'))
 $sddl=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('O:SYG:SYD:(A;;FA;;;SY)'))
 $id1='a'*48;$id2='b'*48;$sha='c'*64
