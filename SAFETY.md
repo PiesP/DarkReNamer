@@ -1112,15 +1112,16 @@ engine is private and no production authority issuer or retained-root entrypoint
 is added. This is a source separation, not a proof that the legacy production
 Delete path excludes every disallowed change.
 
-One native stream-inventory interpretation remains unqualified: the current
-`NoNamedStreams` guard accepts directory `ERROR_HANDLE_EOF` before testing the
-`GetFileInformationByHandleEx` success Boolean. The [Windows API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)
-describes successful FileStreamInfo calls with no streams; it does not establish
-that a failed call with the same error is a complete empty inventory. Existing
-fixture ADS refusals do not establish that missing return flag. This extraction
-does not change the branch or credit it as complete negative evidence; a focused
-native-return control and fail-closed correction remain separate work before
-full retained-root qualification.
+The `NoNamedStreams` guard accepts directory `ERROR_HANDLE_EOF` as an empty
+inventory only when `GetFileInformationByHandleEx` succeeds. A failed call with
+the same error is rejected. The [Windows API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)
+describes the successful empty FileStreamInfo result; it does not establish that
+a failed call is a complete inventory. The focused protocol regression checks
+both return values, and the existing Windows owned-root fixture now records the
+actual native result for an ordinary directory and file. Until that Windows
+control runs at the reviewed source, actual BOOL/EOF behavior remains
+unverified. Existing fixture ADS refusals do not replace this observation or
+provide full retained-root qualification.
 
 The optional run-scoped fixture layout admits only the exact profile-Temp
 batch/case GUID grammar. A new batch freezes source, VM, SID, parent/batch

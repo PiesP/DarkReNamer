@@ -320,6 +320,12 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     static long Length(SafeFileHandle file) {
         return BitConverter.ToInt64(Info(file, FILE_STANDARD_INFO, 24), 8);
     }
+    static bool EmptyStreamInventory(bool found, int error, bool directory) {
+        if (!found || error != 38) return false;
+        if (!directory)
+            throw new InvalidOperationException("Held file has no default data stream.");
+        return true;
+    }
     static void NoNamedStreams(SafeFileHandle file, bool directory) {
         int size = 4096;
         byte[] data;
@@ -328,12 +334,8 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
             SetLastErrorNative(0);
             bool found = GetFileInformationByHandleEx(file, FILE_STREAM_INFO, data, (uint)data.Length);
             int error = Marshal.GetLastWin32Error();
-            if (error == 38 && directory) return; // no streams on an ordinary directory
-            if (found) {
-                if (error == 38)
-                    throw new InvalidOperationException("Held file has no default data stream.");
-                break;
-            }
+            if (EmptyStreamInventory(found, error, directory)) return;
+            if (found) break;
             if ((error != 122 && error != 234) || size >= 1024 * 1024)
                 throw new Win32Exception(error, "Held owned stream inventory failed or exceeded its bound.");
             size *= 2;

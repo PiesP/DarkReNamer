@@ -65,6 +65,16 @@ function Assert-Rejected([scriptblock]$Action,[string]$Expected) {
     if (-not $caught) { throw "Expected Phase B rejection: $Expected" }
 }
 
+$emptyStream = $guard.GetMethod('EmptyStreamInventory',
+    [Reflection.BindingFlags]'NonPublic,Static')
+if ($null -eq $emptyStream -or
+    -not $emptyStream.Invoke($null,@($true,38,$true)) -or
+    $emptyStream.Invoke($null,@($false,38,$true)) -or
+    $emptyStream.Invoke($null,@($true,0,$true))) {
+    throw 'Stream inventory accepted failed EOF or lost successful empty-directory handling.'
+}
+Assert-Rejected { $emptyStream.Invoke($null,@($true,38,$false)) } 'no default data stream'
+
 $owner=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('S-1-5-21-1'))
 $sddl=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('O:SYG:SYD:(A;;FA;;;SY)'))
 $id1='a'*48;$id2='b'*48;$sha='c'*64

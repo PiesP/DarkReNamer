@@ -828,7 +828,7 @@
       "bundle": "controller-owned-root-guard.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "10b11d7659c9a7f0cbd1410b5269b71d3b0e35b2408a27d7106b51ec2b180334",
+      "sha256": "cd70ab61a92577d7756e626d2d4f8d0b97deb0f837061d188562833bf43ae92f",
       "dependencies": []
     },
     {

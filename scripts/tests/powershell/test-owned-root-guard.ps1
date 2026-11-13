@@ -19,10 +19,23 @@ Add-Type -TypeDefinition $definitions[0].Value
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 public static class DrOwnedGuardTestNative {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool RemoveDirectoryW(string name);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind,
+        byte[] data, uint size);
+    [DllImport("kernel32.dll", EntryPoint="SetLastError")]
+    static extern void SetLastErrorNative(uint error);
+    public static string StreamQuery(SafeFileHandle file) {
+        byte[] data = new byte[4096];
+        SetLastErrorNative(0);
+        bool found = GetFileInformationByHandleEx(file, 7, data, (uint)data.Length);
+        int error = Marshal.GetLastWin32Error();
+        return (found ? "success" : "failure") + ":" + error;
+    }
 }
 '@
 
@@ -66,6 +79,17 @@ try {
     $readOnly = New-Fixture
     [IO.File]::WriteAllText((Join-Path $readOnly 'content.txt'), 'held')
     $guard = [DarkReNamerVmOwnedRootGuard]::new($readOnly, $false)
+    $flags = [Reflection.BindingFlags]'NonPublic,Instance,Static'
+    $openRelative = [DarkReNamerVmOwnedRootGuard].GetMethod('OpenRelative', $flags)
+    $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
+    $directoryQuery = [DrOwnedGuardTestNative]::StreamQuery($chain[$chain.Count - 1])
+    $heldFile = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $false))
+    try { $fileQuery = [DrOwnedGuardTestNative]::StreamQuery($heldFile) }
+    finally { $heldFile.Dispose() }
+    if ($directoryQuery -ceq 'failure:38' -or $fileQuery -ceq 'failure:38') {
+        throw 'Native stream query reported failed EOF; it cannot prove an empty stream inventory.'
+    }
+    Write-Output "Held stream query: directory=$directoryQuery file=$fileQuery"
     Assert-Rejected { $guard.ContentIndex(0, [long]0) } 'oversized entry'
     Assert-Rejected { $guard.ContentIndex(20, [long]2) } 'aggregate byte bound'
     $index = @($guard.ContentIndex())
@@ -77,8 +101,6 @@ try {
     Assert-Rejected { $guard.Delete() } 'Read-only'
     $guard.Dispose(); $guard = $null
 
-    $flags = [Reflection.BindingFlags]'NonPublic,Instance,Static'
-    $openRelative = [DarkReNamerVmOwnedRootGuard].GetMethod('OpenRelative', $flags)
     $writerShare = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
     foreach ($scenario in @(
         @{ name = 'read-only'; delete_access = $false },
