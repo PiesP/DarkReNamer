@@ -12,8 +12,9 @@ rust-version = "1.100.0"
 authors = ["PiesP"]
 license = "MIT"
 repository = "https://github.com/PiesP/DarkReNamer"
-homepage = "https://github.com/PiesP/DarkReNamer"
-readme = "README.md"
+
+[workspace.lints.cargo]
+unused_workspace_package_fields = "deny"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
