@@ -694,8 +694,7 @@ fn unicode_source_whitespace_does_not_end_line_comments() {
 }
 
 #[test]
-fn identifier_table_matches_the_selected_compiler_lexer() -> Result<(), Box<dyn std::error::Error>>
-{
+fn identifier_table_matches_the_selected_compiler_lexer() {
     // Rust 1.100.0's Cargo.lock resolves unicode-ident 1.0.24 (Unicode 17).
     // rustc_lexer uses that crate for XID_Start and XID_Continue; std's
     // Unicode 18 character tables are a different contract. Recheck both
@@ -730,7 +729,14 @@ fn identifier_table_matches_the_selected_compiler_lexer() -> Result<(), Box<dyn 
         UnsafeCounts::from_source(&source),
         UnsafeCounts::new(1, 0, 0, 0)
     );
+}
 
+#[cfg(not(windows))]
+#[test]
+fn compiler_identifier_boundary_matches_the_scanner() -> Result<(), Box<dyn std::error::Error>> {
+    // The Windows VM runs staged test executables without a compiler. Keep
+    // compiler subprocess probes on the compiler-equipped Linux/WSL host;
+    // the scanner and compiled Unicode identifier tests above run everywhere.
     // Exercise the actual compiler parser as well as the scanner's table. The
     // later Unicode scalar must fail as an identifier, while a Unicode 17
     // suffix remains part of one identifier under the selected compiler.
@@ -767,9 +773,7 @@ fn identifier_table_matches_the_selected_compiler_lexer() -> Result<(), Box<dyn 
         "{}",
         String::from_utf8_lossy(&accepted.stderr)
     );
-    let rejected = compile(&format!(
-        "pub fn sample() {{ let {later_identifier_start} = 1; }}"
-    ))?;
+    let rejected = compile(&format!("pub fn sample() {{ let {} = 1; }}", '\u{0558}'))?;
     assert!(
         !rejected.status.success(),
         "Unicode 18-only identifier was accepted by rustc"
