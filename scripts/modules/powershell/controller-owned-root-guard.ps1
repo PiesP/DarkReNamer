@@ -19,8 +19,10 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
     const int FILE_ATTRIBUTE_DIRECTORY = 0x10, FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
     const int FILE_ID_INFO = 18, FILE_ATTRIBUTE_TAG_INFO = 9, FILE_DISPOSITION_INFO = 4;
-    const int FILE_STANDARD_INFO = 1, FILE_STREAM_INFO = 7;
+    const int FILE_STANDARD_INFO = 1, FILE_STREAM_INFORMATION = 22;
     const int FILE_ID_EXTD_DIRECTORY_INFO = 19, FILE_ID_EXTD_DIRECTORY_RESTART_INFO = 20;
+    const int STATUS_BUFFER_OVERFLOW = unchecked((int)0x80000005);
+    const int STATUS_BUFFER_TOO_SMALL = unchecked((int)0xc0000023);
     readonly List<SafeFileHandle> chain = new List<SafeFileHandle>();
     readonly bool mayDelete;
     int nodes, enumerated;
@@ -80,6 +82,9 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
         ref ObjectAttributes attributes, out IoStatusBlock status, IntPtr allocation,
         uint fileAttributes, uint share, uint disposition, uint options,
         IntPtr ea, uint eaLength);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationFile(SafeFileHandle file,
+        out IoStatusBlock status, byte[] data, uint size, int informationClass);
     [DllImport("advapi32.dll")]
     static extern uint GetSecurityInfo(SafeFileHandle file, int objectType, uint requested,
         out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl,
@@ -320,36 +325,36 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
     static long Length(SafeFileHandle file) {
         return BitConverter.ToInt64(Info(file, FILE_STANDARD_INFO, 24), 8);
     }
-    static bool EmptyStreamInventory(bool found, int error, bool directory) {
-        if (!found || error != 38) return false;
-        if (!directory)
+    static int StreamResultLength(int result, long ioStatus, long information,
+        int capacity, bool directory) {
+        if (result == STATUS_BUFFER_OVERFLOW || result == STATUS_BUFFER_TOO_SMALL) return -1;
+        if (result != 0 || unchecked((uint)ioStatus) != 0)
+            throw new InvalidOperationException("Held owned stream inventory query failed: NTSTATUS " +
+                unchecked((uint)result).ToString("x8") + ", IO_STATUS_BLOCK.Status " +
+                unchecked((uint)ioStatus).ToString("x8") + ".");
+        if (information < 0 || information > capacity)
+            throw new InvalidOperationException("Held owned stream inventory length is invalid.");
+        if (information == 0 && !directory)
             throw new InvalidOperationException("Held file has no default data stream.");
-        return true;
+        return (int)information;
     }
-    static void NoNamedStreams(SafeFileHandle file, bool directory) {
-        int size = 4096;
-        byte[] data;
-        while (true) {
-            data = new byte[size];
-            SetLastErrorNative(0);
-            bool found = GetFileInformationByHandleEx(file, FILE_STREAM_INFO, data, (uint)data.Length);
-            int error = Marshal.GetLastWin32Error();
-            if (EmptyStreamInventory(found, error, directory)) return;
-            if (found) break;
-            if ((error != 122 && error != 234) || size >= 1024 * 1024)
-                throw new Win32Exception(error, "Held owned stream inventory failed or exceeded its bound.");
-            size *= 2;
+    static void ValidateStreamInventory(byte[] data, int length, bool directory) {
+        if (length < 0 || length > data.Length)
+            throw new InvalidOperationException("Held owned stream inventory length is invalid.");
+        if (length == 0) {
+            if (!directory) throw new InvalidOperationException("Held file has no default data stream.");
+            return;
         }
         int offset = 0, count = 0;
         while (true) {
-            if (offset > data.Length - 24 || ++count > 20000)
+            if (offset > length - 24 || ++count > 20000)
                 throw new InvalidOperationException("Held owned stream inventory is malformed or oversized.");
             uint next = BitConverter.ToUInt32(data, offset);
             uint nameBytes = BitConverter.ToUInt32(data, offset + 4);
             if ((nameBytes & 1) != 0 ||
-                nameBytes > data.Length - offset - 24 ||
+                nameBytes > length - offset - 24 ||
                 (next != 0 && ((next & 7) != 0 || next < 24 + nameBytes ||
-                               next > data.Length - offset)))
+                               next > length - offset)))
                 throw new InvalidOperationException("Held owned stream inventory frame is invalid.");
             string name = System.Text.Encoding.Unicode.GetString(data, offset + 24, (int)nameBytes);
             bool allowed = directory
@@ -358,8 +363,30 @@ public sealed class DarkReNamerVmOwnedRootGuard : IDisposable {
                 : name.Length == 0 || String.Equals(name, "::$DATA", StringComparison.OrdinalIgnoreCase);
             if (!allowed)
                 throw new InvalidOperationException("Held owned entry has an unindexed named stream.");
-            if (next == 0) break;
+            if (next == 0) {
+                if (length - offset - 24 - nameBytes > 7)
+                    throw new InvalidOperationException("Held owned stream inventory has trailing data.");
+                break;
+            }
             offset += (int)next;
+        }
+    }
+    static void NoNamedStreams(SafeFileHandle file, bool directory) {
+        int size = 4096;
+        while (true) {
+            byte[] data = new byte[size];
+            IoStatusBlock status;
+            int result = NtQueryInformationFile(file, out status, data,
+                (uint)data.Length, FILE_STREAM_INFORMATION);
+            int length = StreamResultLength(result, status.Status.ToInt64(),
+                status.Information.ToInt64(), size, directory);
+            if (length >= 0) {
+                ValidateStreamInventory(data, length, directory);
+                return;
+            }
+            if (size >= 1024 * 1024)
+                throw new InvalidOperationException("Held owned stream inventory exceeded its bound.");
+            size *= 2;
         }
     }
     static string HashFile(SafeFileHandle file, long maximum) {

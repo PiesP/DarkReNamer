@@ -1112,16 +1112,30 @@ engine is private and no production authority issuer or retained-root entrypoint
 is added. This is a source separation, not a proof that the legacy production
 Delete path excludes every disallowed change.
 
-The `NoNamedStreams` guard accepts directory `ERROR_HANDLE_EOF` as an empty
-inventory only when `GetFileInformationByHandleEx` succeeds. A failed call with
-the same error is rejected. The [Windows API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)
-describes the successful empty FileStreamInfo result; it does not establish that
-a failed call is a complete inventory. The focused protocol regression checks
-both return values, and the existing Windows owned-root fixture now records the
-actual native result for an ordinary directory and file. Until that Windows
-control runs at the reviewed source, actual BOOL/EOF behavior remains
-unverified. Existing fixture ADS refusals do not replace this observation or
-provide full retained-root qualification.
+The first `NoNamedStreams` guard required a successful
+`GetFileInformationByHandleEx(FileStreamInfo)` BOOL to accept an empty directory
+inventory. The source-bound hosted Windows diagnostic at `3afbfadb` retained
+its failure: the same held ordinary directory returned BOOL false/Win32 38,
+while `NtQueryInformationFile(FileStreamInformation)` returned NT success,
+`IO_STATUS_BLOCK.Status` success and zero bytes. The held ordinary file returned
+an NT-success 38-byte default-stream frame. This narrower observation explains
+the earlier strict-BOOL failure; it does not turn a failed Win32 result into a
+successful inventory.
+
+`NoNamedStreams` now queries the held handle directly with
+`NtQueryInformationFile(FileStreamInformation)`. It accepts an empty directory
+only after NT return status and `IO_STATUS_BLOCK.Status` both report success
+and `Information` reports zero bytes. A file still requires a default data
+stream. It parses only the returned byte count, checks bounded frame offsets,
+alignment, names and the 20,000-entry/1 MiB limits, and retries only documented
+buffer-overflow or buffer-too-small results without parsing partial data.
+Other statuses, status/length inconsistencies and named streams fail closed.
+Query failures retain both status words as eight-digit hexadecimal evidence.
+The protocol fixtures cover these cases; the Windows owned-root fixture checks
+the actual guard against an independent same-handle NT readback on an empty
+directory, ordinary file and named-stream controls. Hosted Windows execution
+is a source-bound diagnostic, not selected Windows 11 or full retained-root
+qualification. Existing fixture ADS refusals do not provide that qualification.
 
 The optional run-scoped fixture layout admits only the exact profile-Temp
 batch/case GUID grammar. A new batch freezes source, VM, SID, parent/batch

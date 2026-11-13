@@ -18,6 +18,7 @@ if ($definitions.Count -ne 1) { throw 'Expected exactly one source-bound owned r
 Add-Type -TypeDefinition $definitions[0].Value
 Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class DrOwnedGuardTestNative {
@@ -27,6 +28,12 @@ public static class DrOwnedGuardTestNative {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool RemoveDirectoryW(string name);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+        IntPtr security, uint creation, uint flags, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool WriteFile(SafeFileHandle file, byte[] data, uint count,
+        out uint written, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind,
         byte[] data, uint size);
@@ -49,6 +56,45 @@ public static class DrOwnedGuardTestNative {
             (uint)data.Length, 22);
         return ((uint)result).ToString("x8") + ":" +
             status.Status.ToInt64().ToString("x16") + ":" + status.Information.ToInt64();
+    }
+    public static string[] NativeStreamNames(SafeFileHandle file) {
+        byte[] data = new byte[4096];
+        IoStatusBlock status;
+        int result = NtQueryInformationFile(file, out status, data,
+            (uint)data.Length, 22);
+        long length = status.Information.ToInt64();
+        if (result != 0 || unchecked((uint)status.Status.ToInt64()) != 0 ||
+            length < 0 || length > data.Length)
+            throw new InvalidOperationException("Independent held NT stream readback failed.");
+        List<string> names = new List<string>();
+        int offset = 0;
+        while (offset < length) {
+            if (length - offset < 24)
+                throw new InvalidOperationException("Independent NT stream frame is short.");
+            uint next = BitConverter.ToUInt32(data, offset);
+            uint nameBytes = BitConverter.ToUInt32(data, offset + 4);
+            if ((nameBytes & 1) != 0 || nameBytes > length - offset - 24)
+                throw new InvalidOperationException("Independent NT stream name is malformed.");
+            names.Add(System.Text.Encoding.Unicode.GetString(data, offset + 24, (int)nameBytes));
+            if (next == 0) break;
+            if (next < 24 + nameBytes || next > length - offset)
+                throw new InvalidOperationException("Independent NT stream offset is malformed.");
+            offset += (int)next;
+        }
+        return names.ToArray();
+    }
+    public static void CreateDirectoryStream(string directory) {
+        using (SafeFileHandle stream = CreateFileW(directory + ":hidden:$DATA",
+                0x40000000, 7, IntPtr.Zero, 1, 0x02000000, IntPtr.Zero)) {
+            if (stream.IsInvalid)
+                throw new InvalidOperationException("Directory ADS creation failed: " +
+                    Marshal.GetLastWin32Error());
+            byte[] content = new byte[] { 65 };
+            uint written;
+            if (!WriteFile(stream, content, 1, out written, IntPtr.Zero) || written != 1)
+                throw new InvalidOperationException("Directory ADS write failed: " +
+                    Marshal.GetLastWin32Error());
+        }
     }
 }
 '@
@@ -90,39 +136,56 @@ try {
     $guard.Dispose(); $guard = $null
     if (Test-Path -LiteralPath $nested) { throw 'Nested fixture remains.' }
 
+    $emptyDirectory = New-Fixture
+    $guard = [DarkReNamerVmOwnedRootGuard]::new($emptyDirectory, $false)
+    $flags = [Reflection.BindingFlags]'NonPublic,Instance,Static'
+    $openRelative = [DarkReNamerVmOwnedRootGuard].GetMethod('OpenRelative', $flags)
+    $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
+    $noNamedStreams = [DarkReNamerVmOwnedRootGuard].GetMethod('NoNamedStreams', $flags)
+    if ($null -eq $noNamedStreams) { throw 'Source-bound stream guard is unavailable.' }
+    $emptyNative = [DrOwnedGuardTestNative]::NativeStreamQuery($chain[$chain.Count - 1])
+    $emptyNames = @([DrOwnedGuardTestNative]::NativeStreamNames($chain[$chain.Count - 1]))
+    $noNamedStreams.Invoke($null, @($chain[$chain.Count - 1], $true))
+    if ($emptyNames.Count -gt 1 -or
+        @($emptyNames | Where-Object {
+            $_ -notin @('::$INDEX_ALLOCATION', ':$I30:$INDEX_ALLOCATION')
+        }).Count -ne 0) {
+        throw 'Independent empty-directory NT stream readback differs from the guard policy.'
+    }
+    Write-Output "Empty-directory held NT stream query: $emptyNative names=$($emptyNames -join ',') guard=accepted"
+    $guard.Dispose(); $guard = $null
+
     $readOnly = New-Fixture
     [IO.File]::WriteAllText((Join-Path $readOnly 'content.txt'), 'held')
     $guard = [DarkReNamerVmOwnedRootGuard]::new($readOnly, $false)
-    $flags = [Reflection.BindingFlags]'NonPublic,Instance,Static'
-    $openRelative = [DarkReNamerVmOwnedRootGuard].GetMethod('OpenRelative', $flags)
     $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
     $directoryQuery = [DrOwnedGuardTestNative]::StreamQuery($chain[$chain.Count - 1])
     $heldFile = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $false))
     try {
-        $noNamedStreams = [DarkReNamerVmOwnedRootGuard].GetMethod('NoNamedStreams', $flags)
-        if ($null -eq $noNamedStreams) { throw 'Source-bound stream guard is unavailable.' }
         $directoryNative = [DrOwnedGuardTestNative]::NativeStreamQuery($chain[$chain.Count - 1])
+        $directoryNames = @([DrOwnedGuardTestNative]::NativeStreamNames($chain[$chain.Count - 1]))
         $directoryGuard = 'accepted'
         try { $noNamedStreams.Invoke($null, @($chain[$chain.Count - 1], $true)) }
         catch { $directoryGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
         $fileQuery = [DrOwnedGuardTestNative]::StreamQuery($heldFile)
         $fileNative = [DrOwnedGuardTestNative]::NativeStreamQuery($heldFile)
+        $fileNames = @([DrOwnedGuardTestNative]::NativeStreamNames($heldFile))
         $fileGuard = 'accepted'
         try { $noNamedStreams.Invoke($null, @($heldFile, $false)) }
         catch { $fileGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
     }
     finally { $heldFile.Dispose() }
-    Write-Output "Held stream query: directory=$directoryQuery native=$directoryNative guard=$directoryGuard file=$fileQuery native=$fileNative guard=$fileGuard"
-    if ($directoryQuery -ceq 'failure:38' -or $fileQuery -ceq 'failure:38') {
-        if (($directoryQuery -ceq 'failure:38' -and $directoryGuard -notlike 'rejected:*') -or
-            ($fileQuery -ceq 'failure:38' -and $fileGuard -notlike 'rejected:*')) {
-            throw 'Failed EOF was incorrectly accepted by the source-bound stream guard.'
-        }
-        throw 'Native stream query failed with EOF; no empty inventory was proven.'
-    }
     if ($directoryGuard -cne 'accepted' -or $fileGuard -cne 'accepted') {
-        throw 'Source-bound stream guard rejected a reported successful inventory.'
+        throw 'Source-bound stream guard rejected the independent held NT stream readback.'
     }
+    if ($directoryNames.Count -gt 1 -or
+        @($directoryNames | Where-Object {
+            $_ -notin @('::$INDEX_ALLOCATION', ':$I30:$INDEX_ALLOCATION')
+        }).Count -ne 0 -or $fileNames.Count -ne 1 -or
+        $fileNames[0] -ne '::$DATA') {
+        throw 'Independent held NT stream names differ from the expected ordinary entries.'
+    }
+    Write-Output "Held stream query: directory=$directoryQuery native=$directoryNative names=$($directoryNames -join ',') guard=$directoryGuard file=$fileQuery native=$fileNative names=$($fileNames -join ',') guard=$fileGuard"
     Assert-Rejected { $guard.ContentIndex(0, [long]0) } 'oversized entry'
     Assert-Rejected { $guard.ContentIndex(20, [long]2) } 'aggregate byte bound'
     $index = @($guard.ContentIndex())
@@ -171,6 +234,21 @@ try {
         Write-Output "Held $($scenario.name) ADS writer outcome: $writerOutcome (root/child DELETE=$($scenario.delete_access), child SHARE_READ, writer WRITE with share ReadWrite|Delete)"
         $guard.Dispose(); $guard = $null
     }
+
+    $streamedDirectory = New-Fixture
+    [DrOwnedGuardTestNative]::CreateDirectoryStream($streamedDirectory)
+    $guard = [DarkReNamerVmOwnedRootGuard]::new($streamedDirectory, $false)
+    $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
+    $heldDirectory = $chain[$chain.Count - 1]
+    $directoryAdsNative = [DrOwnedGuardTestNative]::NativeStreamQuery($heldDirectory)
+    $directoryAdsNames = @([DrOwnedGuardTestNative]::NativeStreamNames($heldDirectory))
+    if ($directoryAdsNames -notcontains ':hidden:$DATA') {
+        throw 'Independent held NT readback did not find the known directory ADS.'
+    }
+    Assert-Rejected { $noNamedStreams.Invoke($null, @($heldDirectory, $true)) } 'unindexed named stream'
+    Assert-Rejected { $guard.ContentIndex() } 'unindexed named stream'
+    Write-Output "Held named-directory NT stream query: $directoryAdsNative names=$($directoryAdsNames -join ',') guard=rejected"
+    $guard.Dispose(); $guard = $null
 
     $streamed = New-Fixture
     $streamedFile = Join-Path $streamed 'content.txt'
