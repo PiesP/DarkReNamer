@@ -438,8 +438,8 @@ calendar schedule, or permanent open tracker.
 
 The safety track established in [#262](https://github.com/PiesP/DarkReNamer/issues/262)
 owns the shared fields below. Detailed revision-bound records may live in issue
-comments. Latest recorded cycles: [safety analysis](https://github.com/PiesP/DarkReNamer/issues/262#issuecomment-6723644078)
-and [unsafe reduction](https://github.com/PiesP/DarkReNamer/issues/263#issuecomment-6723644277).
+comments. Latest recorded cycles: [safety analysis](https://github.com/PiesP/DarkReNamer/issues/275#issuecomment-6841044792)
+and [unsafe reduction](https://github.com/PiesP/DarkReNamer/issues/275#issuecomment-6841045148).
 When a later cycle completes, update only its pointer and retain the earlier
 record through a link. Closing a setup/cycle issue does not certify unreviewed
 boundaries or authorize a release.
