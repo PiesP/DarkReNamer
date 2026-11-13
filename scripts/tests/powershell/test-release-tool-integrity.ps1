@@ -195,7 +195,7 @@ try {
         @{ label = 'schema-bool'; before = '"schemaVersion": 1'; after = '"schemaVersion": true'; field = 'schemaVersion' }
         @{ label = 'schema-string'; before = '"schemaVersion": 1'; after = '"schemaVersion": "1"'; field = 'schemaVersion' }
         @{ label = 'platform-array'; before = '"platform": "x86_64-pc-windows-msvc"'; after = '"platform": ["x86_64-pc-windows-msvc"]'; field = 'platform' }
-        @{ label = 'rust-version-array'; before = '"version": "1.99.1"'; after = '"version": ["1.99.1"]'; field = 'version' }
+        @{ label = 'rust-version-array'; before = "`"version`": `"$($record.rust.version)`""; after = "`"version`": [`"$($record.rust.version)`"]"; field = 'version' }
         @{ label = 'manifest-url-array'; before = "`"url`": `"$($manifest.url)`""; after = "`"url`": [`"$($manifest.url)`"]"; field = 'url' }
         @{ label = 'manifest-digest-array'; before = "`"sha256`": `"$($manifest.sha256)`""; after = "`"sha256`": [`"$($manifest.sha256)`"]"; field = 'sha256' }
         @{ label = 'component-id-array'; before = "`"id`": `"$($component.id)`""; after = "`"id`": [`"$($component.id)`"]"; field = 'id' }

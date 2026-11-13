@@ -2100,6 +2100,17 @@ cargo tree --locked --target x86_64-pc-windows-msvc -d
 Lockfile package counts include target-specific, build, and development
 packages. They are not counts of crates linked into `DarkReNamer.exe`.
 
+The unsafe-policy source scanner uses the compiler's identifier rules. For the
+selected Rust 1.100.0 release, the [compiler lockfile](https://github.com/rust-lang/rust/blob/1.100.0/Cargo.lock)
+resolves `unicode-ident` 1.0.24 (Unicode 17), and
+[`rustc_lexer`](https://github.com/rust-lang/rust/blob/1.100.0/compiler/rustc_lexer/src/lib.rs)
+uses that crate's XID start/continue functions. The standard library's
+[character tables](https://github.com/rust-lang/rust/blob/1.100.0/library/core/src/unicode/unicode_data.rs)
+use Unicode 18 and do not define identifier acceptance. Keep the scanner's
+`unicode-ident` pin aligned with the selected compiler lexer; on each compiler
+change, recheck the tagged compiler lockfile, lexer calls and table versions,
+then run the boundary and full source-inventory regressions.
+
 Import Names, Import Paths and destination-folder selection use a small typed
 COM adapter in `windows/dialog.rs`. It shares creation, error classification and
 owned exact UTF-16 extraction, while input selection and destination validation

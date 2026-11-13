@@ -406,6 +406,7 @@ class ScannerPinMetadataTests(unittest.TestCase):
     def test_invalid_metadata_stops_before_scanner_execution(self) -> None:
         original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
         invalid_lock_digest = json.loads(original)
+        rust_version_field = f'"version": {json.dumps(invalid_lock_digest["rust"]["version"])},'
         audit_tool = next(tool for tool in invalid_lock_digest["tools"] if tool["id"] == "cargo-audit")
         audit_tool["lock"]["sha256"] = "0" * 64
         cases = {
@@ -418,8 +419,8 @@ class ScannerPinMetadataTests(unittest.TestCase):
             "lock digest": json.dumps(invalid_lock_digest),
             "schema": original.replace('"schemaVersion": 1,', '"schemaVersion": 2,'),
             "boolean-schema": original.replace('"schemaVersion": 1,', '"schemaVersion": true,'),
-            "nan": original.replace('"version": "1.99.1",', '"version": NaN,'),
-            "infinity": original.replace('"version": "1.99.1",', '"version": Infinity,'),
+            "nan": original.replace(rust_version_field, '"version": NaN,'),
+            "infinity": original.replace(rust_version_field, '"version": Infinity,'),
         }
         for label, content in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="darkrenamer-bad-scanner-pins-") as directory:
