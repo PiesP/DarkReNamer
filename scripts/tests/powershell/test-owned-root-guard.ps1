@@ -21,6 +21,9 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class DrOwnedGuardTestNative {
+    [StructLayout(LayoutKind.Sequential)] struct IoStatusBlock {
+        public IntPtr Status, Information;
+    }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool RemoveDirectoryW(string name);
@@ -29,12 +32,22 @@ public static class DrOwnedGuardTestNative {
         byte[] data, uint size);
     [DllImport("kernel32.dll", EntryPoint="SetLastError")]
     static extern void SetLastErrorNative(uint error);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationFile(SafeFileHandle file,
+        out IoStatusBlock status, byte[] data, uint size, int informationClass);
     public static string StreamQuery(SafeFileHandle file) {
         byte[] data = new byte[4096];
         SetLastErrorNative(0);
         bool found = GetFileInformationByHandleEx(file, 7, data, (uint)data.Length);
         int error = Marshal.GetLastWin32Error();
         return (found ? "success" : "failure") + ":" + error;
+    }
+    public static string NativeStreamQuery(SafeFileHandle file) {
+        byte[] data = new byte[4096];
+        IoStatusBlock status;
+        int result = NtQueryInformationFile(file, out status, data,
+            (uint)data.Length, 22);
+        return ((uint)result).ToString("x8") + ":" + status.Information.ToInt64();
     }
 }
 '@
@@ -84,12 +97,31 @@ try {
     $chain = [DarkReNamerVmOwnedRootGuard].GetField('chain', $flags).GetValue($guard)
     $directoryQuery = [DrOwnedGuardTestNative]::StreamQuery($chain[$chain.Count - 1])
     $heldFile = $openRelative.Invoke($null, @($chain[$chain.Count - 1], 'content.txt', $false))
-    try { $fileQuery = [DrOwnedGuardTestNative]::StreamQuery($heldFile) }
-    finally { $heldFile.Dispose() }
-    if ($directoryQuery -ceq 'failure:38' -or $fileQuery -ceq 'failure:38') {
-        throw 'Native stream query reported failed EOF; it cannot prove an empty stream inventory.'
+    $noNamedStreams = [DarkReNamerVmOwnedRootGuard].GetMethod('NoNamedStreams', $flags)
+    if ($null -eq $noNamedStreams) { throw 'Source-bound stream guard is unavailable.' }
+    $directoryNative = [DrOwnedGuardTestNative]::NativeStreamQuery($chain[$chain.Count - 1])
+    $directoryGuard = 'accepted'
+    try { $noNamedStreams.Invoke($null, @($chain[$chain.Count - 1], $true)) }
+    catch { $directoryGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
+    try {
+        $fileQuery = [DrOwnedGuardTestNative]::StreamQuery($heldFile)
+        $fileNative = [DrOwnedGuardTestNative]::NativeStreamQuery($heldFile)
+        $fileGuard = 'accepted'
+        try { $noNamedStreams.Invoke($null, @($heldFile, $false)) }
+        catch { $fileGuard = 'rejected:' + $_.Exception.GetBaseException().GetType().Name }
     }
-    Write-Output "Held stream query: directory=$directoryQuery file=$fileQuery"
+    finally { $heldFile.Dispose() }
+    Write-Output "Held stream query: directory=$directoryQuery native=$directoryNative guard=$directoryGuard file=$fileQuery native=$fileNative guard=$fileGuard"
+    if ($directoryQuery -ceq 'failure:38' -or $fileQuery -ceq 'failure:38') {
+        if (($directoryQuery -ceq 'failure:38' -and $directoryGuard -notlike 'rejected:*') -or
+            ($fileQuery -ceq 'failure:38' -and $fileGuard -notlike 'rejected:*')) {
+            throw 'Failed EOF was incorrectly accepted by the source-bound stream guard.'
+        }
+        throw 'Native stream query failed with EOF; no empty inventory was proven.'
+    }
+    if ($directoryGuard -cne 'accepted' -or $fileGuard -cne 'accepted') {
+        throw 'Source-bound stream guard rejected a reported successful inventory.'
+    }
     Assert-Rejected { $guard.ContentIndex(0, [long]0) } 'oversized entry'
     Assert-Rejected { $guard.ContentIndex(20, [long]2) } 'aggregate byte bound'
     $index = @($guard.ContentIndex())
