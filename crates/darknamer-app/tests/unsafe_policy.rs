@@ -694,8 +694,96 @@ fn unicode_source_whitespace_does_not_end_line_comments() {
 }
 
 #[test]
-fn identifier_table_matches_the_pinned_rust_unicode_version() {
-    assert_eq!(unicode_ident::UNICODE_VERSION, std::char::UNICODE_VERSION);
+fn identifier_table_matches_the_selected_compiler_lexer() {
+    // Rust 1.100.0's Cargo.lock resolves unicode-ident 1.0.24 (Unicode 17).
+    // rustc_lexer uses that crate for XID_Start and XID_Continue; std's
+    // Unicode 18 character tables are a different contract. Recheck both
+    // rustc_lexer and its lockfile whenever the compiler pin changes.
+    assert_eq!(unicode_ident::UNICODE_VERSION, (17, 0, 0));
+
+    // This identifier and the Unicode lifetime/label tests above compile with
+    // the selected compiler. The scanner must keep the suffix attached to the
+    // identifier, while a standalone unsafe block must keep its policy verdict.
+    let unsafe한 = 1;
+    assert_eq!(unsafe한, 1);
+    assert_eq!(
+        UnsafeCounts::from_source("fn sample() { let unsafe한 = 1; }").blocks,
+        0
+    );
+    let counts = UnsafeCounts::from_source("fn sample() { let unsafe한 = 1; unsafe {} }");
+    assert_eq!(counts, UnsafeCounts::new(1, 0, 0, 0));
+    assert!(!unsafe_counts_allowed("src/windows/new_module.rs", counts));
+    assert!(unsafe_counts_allowed(
+        "src/rename/windows_native.rs",
+        counts
+    ));
+
+    // U+0558 enters the Unicode 18 XID table but is not an identifier start
+    // in this compiler's Unicode 17 lexer. It remains ordinary source text to
+    // this scanner; it cannot make the following unsafe block disappear.
+    let later_identifier_start = '\u{0558}';
+    assert!(!is_identifier_start(later_identifier_start));
+    assert!(!is_identifier_continue(later_identifier_start));
+    let source = format!("{later_identifier_start} unsafe {{}}");
+    assert_eq!(
+        UnsafeCounts::from_source(&source),
+        UnsafeCounts::new(1, 0, 0, 0)
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn compiler_identifier_boundary_matches_the_scanner() -> Result<(), Box<dyn std::error::Error>> {
+    // The Windows VM runs staged test executables without a compiler. Keep
+    // compiler subprocess probes on the compiler-equipped Linux/WSL host;
+    // the scanner and compiled Unicode identifier tests above run everywhere.
+    // Exercise the actual compiler parser as well as the scanner's table. The
+    // later Unicode scalar must fail as an identifier, while a Unicode 17
+    // suffix remains part of one identifier under the selected compiler.
+    let compile = |source: &str| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let directory = tempfile::tempdir()?;
+        let mut compiler = Command::new("rustc")
+            .args([
+                "--crate-name",
+                "unicode_lexer_boundary",
+                "--crate-type",
+                "lib",
+            ])
+            .args(["--edition", "2024", "--emit", "metadata"])
+            .arg("--out-dir")
+            .arg(directory.path())
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        compiler
+            .stdin
+            .take()
+            .ok_or("rustc stdin is unavailable")?
+            .write_all(source.as_bytes())?;
+        Ok(compiler.wait_with_output()?)
+    };
+    let accepted = compile("pub fn sample() { let unsafe한 = 1; let _ = unsafe한; }")?;
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let rejected = compile(&format!("pub fn sample() {{ let {} = 1; }}", '\u{0558}'))?;
+    assert!(
+        !rejected.status.success(),
+        "Unicode 18-only identifier was accepted by rustc"
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("unknown start of token"),
+        "rustc failed for an unrelated reason: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    Ok(())
 }
 
 #[test]
