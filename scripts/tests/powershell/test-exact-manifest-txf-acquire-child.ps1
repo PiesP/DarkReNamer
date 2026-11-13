@@ -69,24 +69,51 @@ function Assert-AcquireChildReceipt($Candidate,$Actor,$Barrier,$Ready,
         $Candidate.lease_state -cne 'rollback-succeeded' -or
         $Candidate.rollback_calls -ne 1 -or $Candidate.commit_calls -ne 0 -or
         $Candidate.stage_calls -ne 0 -or $Candidate.closure_unknown -or
+        -not $Candidate.target_handles_closed -or -not $Candidate.is_closed -or
         $Candidate.cleanup_error -or $Candidate.native_error -ne 0 -or
-        $Candidate.close_receipts.Count -lt 2 -or
+        $Candidate.close_receipts.Count -lt 5 -or
         $DoneMarker.status -cne $Candidate.status -or
         $DoneMarker.issued_utc -cne $Candidate.done_utc -or
         $DoneMarker.settlement -cne $Candidate.settlement -or
+        $DoneMarker.rollback_calls -ne $Candidate.rollback_calls -or
+        $DoneMarker.stage_calls -ne $Candidate.stage_calls -or
         $DoneMarker.commit_calls -ne $Candidate.commit_calls -or
+        $DoneMarker.closure_unknown -ne $Candidate.closure_unknown -or
+        $DoneMarker.target_handles_closed -ne $Candidate.target_handles_closed -or
+        $DoneMarker.is_closed -ne $Candidate.is_closed -or
+        -not $DoneMarker.transaction_closed -or
         @($Candidate.close_receipts | Where-Object { $_ -cnotmatch ':closed$' }).Count -ne 0) {
         throw 'Control lacks active lease barrier or settled zero-stage rollback.'
     }
+    foreach ($requiredClose in @('writer:0:closed','anchor:0:closed',
+            'writer:1:closed','anchor:1:closed','transaction:closed')) {
+        if (@($Candidate.close_receipts | Where-Object { $_ -ceq $requiredClose }).Count -ne 1) {
+            throw "Control lacks a unique confirmed closure: $requiredClose"
+        }
+    }
+    if ($Ready.stream_checks[0].file_id -cne $Ready.root_id -or
+        $Ready.stream_checks[1].file_id -cne $Ready.approved_id -or
+        $Actor.postproof.stream_checks[0].file_id -cne $Actor.postproof.root_id -or
+        $Actor.postproof.stream_checks[1].file_id -cne $Actor.postproof.approved_id) {
+        throw 'Independent stream query was not bound to the frozen original identities.'
+    }
+    $rootFields=$Ready.root_row.Split('|')
     $approvedFields=$Ready.approved_row.Split('|')
     $approvedHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [byte[]](9,18,27,36,45,54))).ToLowerInvariant()
     $sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [byte[]](72,63,54,45,36,27))).ToLowerInvariant()
-    if ($approvedFields.Count -ne 8 -or
+    if ($rootFields.Count -ne 8 -or $rootFields[0] -cne '.' -or
+        $rootFields[1] -cne 'directory' -or
+        $rootFields[2] -cne $Ready.root_id -or
+        $Ready.root_id -cnotmatch '^[0-9a-f]{48}$' -or
+        $rootFields[3] -cne '-' -or $rootFields[4] -cne '-' -or
+        $rootFields[7] -cne 'default-stream-only' -or
+        $approvedFields.Count -ne 8 -or
         $approvedFields[0] -cne '61007000700072006f007600650064002e00620069006e00' -or
         $approvedFields[1] -cne 'file' -or
         $approvedFields[2] -cne $Ready.approved_id -or
+        $Ready.approved_id -cnotmatch '^[0-9a-f]{48}$' -or
         $approvedFields[3] -cne '6' -or $approvedFields[4] -cne $approvedHash -or
         $approvedFields[7] -cne 'default-stream-only' -or
         $Ready.sentinel_sha256 -cne $sentinelHash) {
@@ -104,6 +131,8 @@ function Assert-AcquireChildReceipt($Candidate,$Actor,$Barrier,$Ready,
         $Actor.postproof.approved_id -cne $Ready.approved_id -or
         $Actor.postproof.approved_row -cne $Ready.approved_row -or
         $Actor.postproof.sentinel_sha256 -cne $Ready.sentinel_sha256 -or
+        $Actor.postproof.sentinel_bytes -cne
+            [Convert]::ToBase64String([byte[]](72,63,54,45,36,27)) -or
         $Actor.postproof.child_bytes -cne [Convert]::ToBase64String([byte[]](81)) -or
         $Actor.postproof.child_sha256 -cne ([Convert]::ToHexString(
             [Security.Cryptography.SHA256]::HashData([byte[]](81))).ToLowerInvariant()) -or
@@ -119,18 +148,29 @@ function Assert-AcquireChildReceipt($Candidate,$Actor,$Barrier,$Ready,
         $childFields[7] -cne 'default-stream-only') {
         throw 'Control child identity, bytes, or stream row differs.'
     }
+    if ($Actor.postproof.stream_checks[2].file_id -cne $childFields[2]) {
+        throw 'Independent child stream query changed object identity.'
+    }
+    foreach ($encodedSecurity in @($rootFields[5],$rootFields[6],
+            $approvedFields[5],$approvedFields[6],$childFields[5],$childFields[6])) {
+        try { $decoded=[Convert]::FromBase64String($encodedSecurity) }
+        catch { throw 'Control security row is not valid Base64.' }
+        if ($decoded.Length -lt 2 -or ($decoded.Length % 2) -ne 0) {
+            throw 'Control security row is not UTF-16 data.'
+        }
+    }
     if ($attempt.admitted) {
         if ($attempt.native_error -ne 0 -or -not $attempt.written -or
-            $Candidate.status -cne 'admitted-stage-rejected-preserved' -or
+            $Candidate.status -cne 'admitted-stage-rejected-postproof-pending' -or
             -not $Candidate.stage_attempted -or -not $Candidate.stage_rejected -or
             $Candidate.stage_error -cne 'exact-manifest-mismatch' -or
-            $Actor.support_attempted) {
+            $Actor.support_attempted -or $null -ne $Actor.support) {
             throw 'Admitted child lacked pre-disposition Stage rejection and preservation.'
         }
         return 'admitted-stage-rejected-gate1-unverified'
     }
     if ($attempt.native_error -notin @(32,6800) -or $attempt.written -or
-        $Candidate.status -cne 'refused-intentional-abort-preserved' -or
+        $Candidate.status -cne 'refused-intentional-abort-postproof-pending' -or
         $Candidate.stage_attempted -or $Candidate.stage_rejected -or
         $Candidate.stage_error -or
         -not $Actor.support_attempted -or -not $Actor.support.admitted -or
@@ -159,6 +199,14 @@ $source=[ordered]@{commit=$sourceSha;
 $profile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $base=Join-Path (Join-Path $profile 'AppData/Local/Temp') 'Dark180-TxfPhaseB'
 
+function Assert-ControlPathChain([string]$Path) {
+    for ($item=[IO.DirectoryInfo]::new($Path);$null -ne $item;$item=$item.Parent) {
+        if (-not $item.Exists -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Control fixture ancestry is absent or reparse.'
+        }
+    }
+}
 function Assert-ControlScope {
     if ($env:DARK_PHASE_B_BATCH_GUID -or $Scope -cnotmatch '[0-9a-f]{32}$' -or
         $env:DARK_PHASE_B_NONCE -cnotmatch '^[0-9a-f]{32}$' -or
@@ -167,6 +215,7 @@ function Assert-ControlScope {
             [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Control child lacks an exact private fixture scope.'
     }
+    Assert-ControlPathChain $Scope
     Assert-PrivateDirectory $base
     Assert-PrivateDirectory $Scope
 }
@@ -203,11 +252,15 @@ public static class DarkAcquireChildStrictStreams {
     [DllImport("ntdll.dll")]
     static extern int NtQueryInformationFile(SafeFileHandle file,
         out IoStatusBlock status,byte[] data,uint size,int informationClass);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int kind,
+        byte[] data,uint size);
     public sealed class Result {
         public int ResultStatus {get;set;}
         public long IoStatus {get;set;}
         public long Information {get;set;}
         public int NamedStreams {get;set;}
+        public string FileId {get;set;}
     }
     public static Result Check(string path,bool directory) {
         using (SafeFileHandle file=Open(path,1|0x80|0x20000,7,IntPtr.Zero,3,
@@ -215,6 +268,11 @@ public static class DarkAcquireChildStrictStreams {
             if (file==null || file.IsInvalid)
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
                     "Active-Acquire independent stream open failed.");
+            byte[] id=new byte[24];
+            if (!GetFileInformationByHandleEx(file,18,id,(uint)id.Length))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Active-Acquire independent FileID query failed.");
+            string fileId=BitConverter.ToString(id).Replace("-","").ToLowerInvariant();
             int capacity=4096;
             while (capacity<=1048576) {
                 byte[] bytes=new byte[capacity];IoStatusBlock status;
@@ -249,14 +307,18 @@ public static class DarkAcquireChildStrictStreams {
                     offset+=(int)next;
                 }
                 return new Result {ResultStatus=result,IoStatus=io,Information=length,
-                    NamedStreams=0};
+                    NamedStreams=0,FileId=fileId};
             }
             throw new InvalidOperationException("Independent stream query exceeded one MiB.");
         }
     }
 }
 '@ -ErrorAction Stop
+        if ([IO.Directory]::Exists($target) -or [IO.File]::Exists($target)) {
+            throw 'Control fixture target already exists.'
+        }
         [void][IO.Directory]::CreateDirectory($target)
+        Assert-ControlPathChain $target
         [IO.File]::WriteAllBytes((Join-Path $target 'approved.bin'),[byte[]](9,18,27,36,45,54))
         [IO.File]::WriteAllBytes((Join-Path $Scope 'sentinel.bin'),[byte[]](72,63,54,45,36,27))
         $rows=[DarkPhaseBFixtureObserver]::Freeze($target)
@@ -265,7 +327,8 @@ public static class DarkAcquireChildStrictStreams {
             [DarkAcquireChildStrictStreams]::Check($target,$true),
             [DarkAcquireChildStrictStreams]::Check((Join-Path $target 'approved.bin'),$false)) |
             ForEach-Object { [ordered]@{result=$_.ResultStatus;io_status=$_.IoStatus;
-                information=$_.Information;named_streams=$_.NamedStreams} }
+                information=$_.Information;named_streams=$_.NamedStreams;
+                file_id=$_.FileId} }
         $digest=[DarkPhaseBFixtureObserver]::DigestRows($rows)
         $fields=@($sourceSha,(Hash-Text $env:DARK_PHASE_B_NONCE),$Scope,$target,
             $rows[0].Split('|')[2],$digest)
@@ -294,7 +357,17 @@ public static class DarkAcquireChildStrictStreams {
         $attemptRow=[ordered]@{admitted=$attempt.Admitted;native_error=$attempt.NativeError;
             written=$attempt.ByteWritten;attempt_utc=$attemptUtc}
         Write-Marker (Join-Path $Scope 'actor-done.json') $attemptRow
-        $null=Wait-Marker (Join-Path $Scope 'candidate-done.json') 12000
+        $done=Wait-Marker (Join-Path $Scope 'candidate-done.json') 12000
+        $expectedStatus=if ($attempt.Admitted) {'admitted-stage-rejected-postproof-pending'}
+            else {'refused-intentional-abort-postproof-pending'}
+        if ($done.status -cne $expectedStatus -or
+            $done.settlement -cne 'rollback-succeeded' -or
+            $done.rollback_calls -ne 1 -or $done.stage_calls -ne 0 -or
+            $done.commit_calls -ne 0 -or $done.closure_unknown -or
+            -not $done.target_handles_closed -or -not $done.transaction_closed -or
+            -not $done.is_closed) {
+            throw 'Control actor refuses after-release work without confirmed settlement.'
+        }
         $supportAttempted=$false;$support=$null
         if (-not $attempt.Admitted) {
             $supportAttempted=$true
@@ -304,18 +377,21 @@ public static class DarkAcquireChildStrictStreams {
         }
         $after=[DarkPhaseBFixtureObserver]::Freeze($target)
         $child=Read-KnownBytes (Join-Path $target 'late-child.bin') $false
+        $sentinelAfter=Read-KnownBytes (Join-Path $Scope 'sentinel.bin') $false
         $afterStreams=@(
             [DarkAcquireChildStrictStreams]::Check($target,$true),
             [DarkAcquireChildStrictStreams]::Check((Join-Path $target 'approved.bin'),$false),
             [DarkAcquireChildStrictStreams]::Check((Join-Path $target 'late-child.bin'),$false)) |
             ForEach-Object { [ordered]@{result=$_.ResultStatus;io_status=$_.IoStatus;
-                information=$_.Information;named_streams=$_.NamedStreams} }
+                information=$_.Information;named_streams=$_.NamedStreams;
+                file_id=$_.FileId} }
         $post=[ordered]@{observed_utc=[DateTime]::UtcNow.ToString('o');
             row_count=$after.Count;root_id=$after[0].Split('|')[2];
             root_row=$after[0];
             approved_id=$after[1].Split('|')[2];approved_row=$after[1];
             child_row=$after[2];child_bytes=$child.base64;child_sha256=$child.sha256;
-            sentinel_sha256=$sentinelSha;stream_checks=@($afterStreams)}
+            sentinel_sha256=$sentinelAfter.sha256;sentinel_bytes=$sentinelAfter.base64;
+            stream_checks=@($afterStreams)}
         Write-ControlRecord 'actor' ([ordered]@{attempt_phase='child-create-during-active-acquire';
             attempt_utc=$attemptUtc;
             barrier_digest=$barrier.digest;attempt=$attemptRow;support_attempted=$supportAttempted;
@@ -364,13 +440,13 @@ public static class DarkAcquireChildStrictStreams {
                 if (-not $stageRejected -or $lease.StageCalls -ne 0) {
                     throw 'Stage accepted an unapproved child or attempted a disposition.'
                 }
-                $status='admitted-stage-rejected-preserved'
+                $status='admitted-stage-rejected-postproof-pending'
             } else {
                 if ($attempt.native_error -notin @(32,6800) -or $attempt.written) {
                     throw 'Child refusal has an unsupported native status.'
                 }
                 if (-not $lease.Abort()) { throw 'Intentional rollback is unknown.' }
-                $status='refused-intentional-abort-preserved'
+                $status='refused-intentional-abort-postproof-pending'
             }
         } finally {
             if ($null -ne $lease) {
@@ -386,10 +462,29 @@ public static class DarkAcquireChildStrictStreams {
             settlement=$lease.Settlement;rollback_calls=$lease.RollbackCalls;
             commit_calls=$lease.CommitCalls;stage_calls=$lease.StageCalls;
             close_receipts=@($lease.CloseReceipts);closure_unknown=$lease.ClosureUnknown;
+            target_handles_closed=$lease.TargetHandlesClosed;is_closed=$lease.IsClosed;
             native_error=$lease.LastNativeError;cleanup_error=$cleanupError}
+        if ($record.cleanup_error -or $record.closure_unknown -or
+            $record.settlement -cne 'rollback-succeeded' -or
+            -not $record.target_handles_closed -or -not $record.is_closed -or
+            $record.stage_calls -ne 0 -or $record.commit_calls -ne 0 -or
+            $record.rollback_calls -ne 1 -or
+            @($record.close_receipts | Where-Object { $_ -cnotmatch ':closed$' }).Count -ne 0 -or
+            @($record.close_receipts | Where-Object { $_ -ceq 'transaction:closed' }).Count -ne 1) {
+            throw 'Control settlement or closure is unknown; after-release support is forbidden.'
+        }
+        foreach ($requiredClose in @('writer:0:closed','anchor:0:closed',
+                'writer:1:closed','anchor:1:closed')) {
+            if (@($record.close_receipts | Where-Object { $_ -ceq $requiredClose }).Count -ne 1) {
+                throw 'Control target closure is incomplete; after-release support is forbidden.'
+            }
+        }
         Write-Marker (Join-Path $Scope 'candidate-done.json') ([ordered]@{
             status=$status;issued_utc=$doneUtc;settlement=$record.settlement;
-            commit_calls=$record.commit_calls})
+            rollback_calls=$record.rollback_calls;stage_calls=$record.stage_calls;
+            commit_calls=$record.commit_calls;closure_unknown=$record.closure_unknown;
+            target_handles_closed=$record.target_handles_closed;is_closed=$record.is_closed;
+            transaction_closed=$true})
         Write-ControlRecord 'candidate' $record
     }
     return
@@ -399,11 +494,14 @@ if ($Scope) { throw 'Controller does not accept caller-selected fixture scope.' 
 if ($env:DARK_PHASE_B_BATCH_GUID -or $env:DARK_PHASE_B_NONCE) {
     throw 'Controller inherited a fixture capability.'
 }
+Assert-ControlPathChain (Join-Path $profile 'AppData/Local/Temp')
 if ([IO.Directory]::Exists($base)) { Assert-PrivateDirectory $base }
 else { New-PrivateScope $base }
+Assert-ControlPathChain $base
 $nonce=[Guid]::NewGuid().ToString('N')
 $Scope=Join-Path $base $nonce
 New-PrivateScope $Scope
+Assert-ControlPathChain $Scope
 $children=[Collections.Generic.List[object]]::new()
 function Start-ControlChild([string]$Role) {
     $start=[Diagnostics.ProcessStartInfo]::new()
@@ -423,7 +521,8 @@ function Start-ControlChild([string]$Role) {
 }
 function Read-ControlChild($Result,[string]$Role) {
     if ($null -eq $Result -or -not $Result.closed -or $Result.exit_code -ne 0 -or
-        $Result.capture_error -or $Result.kill_requested) {
+        $Result.capture_error -or $Result.kill_requested -or
+        -not [string]::IsNullOrEmpty($Result.stderr)) {
         throw 'Control child did not close successfully with complete capture.'
     }
     $lines=@($Result.stdout -split "`r?`n" | Where-Object { $_.StartsWith('DR_ACQUIRE_CHILD ') })
@@ -477,7 +576,10 @@ try {
     throw
 } finally {
     foreach ($child in $children) {
-        if (-not $child.process.HasExited) {
+        $closed=if ($child.role -ceq 'candidate') {
+            $null -ne $candidateResult -and $candidateResult.closed
+        } else { $null -ne $actorResult -and $actorResult.closed }
+        if (-not $closed -and -not $child.process.HasExited) {
             $child.kill_requested=$true
             try { $child.process.Kill($true) } catch { }
             [void]$child.process.WaitForExit(5000)
