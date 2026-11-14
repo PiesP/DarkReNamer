@@ -937,4 +937,201 @@ try {
         }
     }
 }
-Write-Host 'Phase B exact-manifest protocol tests passed.'
+$acquirePath=Join-Path $PSScriptRoot 'test-exact-manifest-txf-acquire-child.ps1'
+$acquireTokens=$null;$acquireErrors=$null
+$acquireAst=[Management.Automation.Language.Parser]::ParseFile($acquirePath,
+    [ref]$acquireTokens,[ref]$acquireErrors)
+if ($acquireErrors.Count -ne 0) { throw 'Active-Acquire control source does not parse.' }
+$deadlineSource=@($acquireAst.FindAll({param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value.Contains('public sealed class DarkAcquireChildDeadline')},$true))
+if ($deadlineSource.Count -ne 1) { throw 'Active-Acquire child deadline source is missing.' }
+Add-Type -TypeDefinition $deadlineSource[0].Value -ErrorAction Stop
+$normalDeadline=[DarkAcquireChildDeadline]::new(500)
+$normalDeadline.Dispose()
+Start-Sleep -Milliseconds 550 # A normally disposed child must not exit at its former deadline.
+$deadlineCode=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+    $deadlineSource[0].Value))
+$deadlineCommand='$code=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("' +
+    $deadlineCode + '")); Add-Type -TypeDefinition $code; ' +
+    '$null=[DarkAcquireChildDeadline]::new(150); Start-Sleep -Seconds 10'
+$deadlineChild=$null;$deadlineResult=$null
+try {
+    $deadlineChild=New-OwnedProtocolChild $deadlineCommand
+    $deadlineResult=Complete-OwnedChild $deadlineChild 5000
+    if (-not $deadlineResult.closed -or $deadlineResult.exit_code -ne 124 -or
+        $deadlineResult.capture_error -or
+        $deadlineResult.stderr -cnotmatch 'DR_ACQUIRE_CHILD_OWNED_DEADLINE') {
+        throw 'Child-local hard deadline did not exit 124 with its owned marker.'
+    }
+} finally {
+    if ($null -ne $deadlineChild -and
+        ($null -eq $deadlineResult -or -not $deadlineResult.closed)) {
+        try {
+            if (-not $deadlineChild.process.HasExited) { $deadlineChild.process.Kill($true) }
+            [void]$deadlineChild.process.WaitForExit(3000)
+        } finally { $deadlineChild.process.Dispose() }
+    }
+}
+$classifier=$acquireAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-AcquireChildReceipt'},$true)
+if ($null -eq $classifier) { throw 'Active-Acquire receipt classifier is missing.' }
+. ([scriptblock]::Create($classifier.Extent.Text))
+$pathGuard=$acquireAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-ControlPathChain'},$true)
+if ($null -eq $pathGuard) { throw 'Active-Acquire path-chain guard is missing.' }
+. ([scriptblock]::Create($pathGuard.Extent.Text))
+$pathRoot=Join-Path ([IO.Path]::GetTempPath()) ('dark240-chain-'+[Guid]::NewGuid().ToString('N'))
+$safePath=Join-Path $pathRoot 'safe'
+$linkPath=Join-Path $pathRoot 'link'
+try {
+    [void][IO.Directory]::CreateDirectory($safePath)
+    Assert-ControlPathChain $safePath
+    Assert-Rejected { Assert-ControlPathChain (Join-Path $pathRoot 'absent') } 'absent or reparse'
+    if (-not $IsWindows) {
+        $null=New-Item -ItemType SymbolicLink -Path $linkPath -Target $safePath
+        Assert-Rejected { Assert-ControlPathChain $linkPath } 'absent or reparse'
+    }
+} finally {
+    if ([IO.File]::Exists($linkPath) -or [IO.Directory]::Exists($linkPath)) {
+        Remove-Item -LiteralPath $linkPath -Force
+    }
+    [IO.Directory]::Delete($safePath)
+    [IO.Directory]::Delete($pathRoot)
+}
+$strictSource=@($acquireAst.FindAll({param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value.Contains('public static class DarkAcquireChildStrictStreams')},$true))
+if ($strictSource.Count -ne 1) { throw 'Independent strict stream helper source is missing.' }
+Add-Type -TypeDefinition $strictSource[0].Value -ErrorAction Stop
+
+$acquireSource=[ordered]@{commit=('a'*40);control_sha256=('b'*64);
+    module_sha256=('c'*64);observer_sha256=('d'*64);actor_sha256=('e'*64);
+    phase_b_sha256=('f'*64);registry_sha256=('7'*64)}
+$approvedHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](9,18,27,36,45,54))).ToLowerInvariant()
+$sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](72,63,54,45,36,27))).ToLowerInvariant()
+$ownerEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('S-1-5-21'))
+$sddlEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('O:SYG:SYD:AI'))
+$approved=('61007000700072006f007600650064002e00620069006e00|file|' +
+    ('3'*48) + '|6|' + $approvedHash + '|' + $ownerEncoded + '|' +
+    $sddlEncoded + '|default-stream-only')
+$root=('.|directory|' + ('2'*48) + '|-|-|' + $ownerEncoded + '|' +
+    $sddlEncoded + '|default-stream-only')
+$childHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [byte[]](81))).ToLowerInvariant()
+$childRow=('6c006100740065002d006300680069006c0064002e00620069006e00|file|' +
+    ('1'*48) + '|1|' + $childHash + '|' + $ownerEncoded + '|' +
+    $sddlEncoded + '|default-stream-only')
+$rootStream=@{result=0;io_status=0;information=24;named_streams=0;file_id=('2'*48)}
+$approvedStream=@{result=0;io_status=0;information=38;named_streams=0;file_id=('3'*48)}
+$childStream=@{result=0;io_status=0;information=38;named_streams=0;file_id=('1'*48)}
+$ready=@{phase='independent-freeze';issued_utc='2026-11-14T00:00:01.0000000Z';
+    row_count=2;manifest_digest=('9'*64);
+    root_id=('2'*48);root_row=$root;approved_id=('3'*48);approved_row=$approved;
+    sentinel_sha256=$sentinelHash;stream_checks=@($rootStream,$approvedStream)}
+$barrier=@{phase='active-acquire-before-stage';issued_utc='2026-11-14T00:00:02.0000000Z';
+    digest=$ready.manifest_digest;
+    lease_state='acquired';settlement='active-exact-set';held_count=2;
+    stage_calls=0;commit_calls=0}
+$candidate=@{schema='dark240-acquire-child-v1';role='candidate';source=$acquireSource;
+    gate1='unverified';target_collection=0;product=0;owned_deadline_ms=30000;
+    acquire_digest=$ready.manifest_digest;barrier_phase=$barrier.phase;
+    done_utc='2026-11-14T00:00:04.0000000Z';
+    settlement='rollback-succeeded';lease_state='rollback-succeeded';
+    rollback_calls=1;commit_calls=0;stage_calls=0;closure_unknown=$false;
+    target_handles_closed=$true;is_closed=$true;
+    cleanup_error=$null;native_error=0;close_receipts=@('writer:0:closed',
+        'anchor:0:closed','writer:1:closed','anchor:1:closed','transaction:closed');
+    status='refused-intentional-abort-postproof-pending';stage_attempted=$false;
+    stage_rejected=$false;stage_error=$null}
+$actor=@{schema='dark240-acquire-child-v1';role='actor';source=$acquireSource;
+    gate1='unverified';target_collection=0;product=0;owned_deadline_ms=30000;
+    attempt_phase='child-create-during-active-acquire';barrier_digest=$barrier.digest;
+    attempt_utc='2026-11-14T00:00:03.0000000Z';
+    attempt=@{admitted=$false;native_error=6800;written=$false;
+        attempt_utc='2026-11-14T00:00:03.0000000Z'};
+    support_attempted=$true;support=@{admitted=$true;native_error=0;written=$true};
+    postproof=@{observed_utc='2026-11-14T00:00:05.0000000Z';
+        row_count=3;root_id=$ready.root_id;root_row=$root;
+        approved_id=$ready.approved_id;approved_row=$approved;
+        sentinel_sha256=$ready.sentinel_sha256;
+        sentinel_bytes=[Convert]::ToBase64String([byte[]](72,63,54,45,36,27));
+        child_row=$childRow;
+        child_bytes=[Convert]::ToBase64String([byte[]](81));child_sha256=$childHash;
+        stream_checks=@($rootStream,$approvedStream,$childStream)}}
+$attemptMarker=$actor.attempt
+$doneMarker=@{status=$candidate.status;issued_utc=$candidate.done_utc;
+    settlement=$candidate.settlement;rollback_calls=$candidate.rollback_calls;
+    stage_calls=$candidate.stage_calls;commit_calls=$candidate.commit_calls;
+    closure_unknown=$candidate.closure_unknown;
+    target_handles_closed=$candidate.target_handles_closed;is_closed=$candidate.is_closed;
+    transaction_closed=$true}
+if ((Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource) -cne
+    'refused-during-active-acquire-gate1-unverified') {
+    throw 'Actual active-Acquire refusal classifier lost its narrow result.'
+}
+$candidate.status='admitted-stage-rejected-postproof-pending'
+$candidate.stage_attempted=$true;$candidate.stage_rejected=$true
+$candidate.stage_error='exact-manifest-mismatch'
+$actor.attempt=@{admitted=$true;native_error=0;written=$true;
+    attempt_utc=$actor.attempt_utc}
+$actor.support_attempted=$false;$actor.support=$null
+$attemptMarker=$actor.attempt;$doneMarker.status=$candidate.status
+if ((Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource) -cne
+    'admitted-stage-rejected-gate1-unverified') {
+    throw 'Actual admitted-child Stage-refusal classifier lost its narrow result.'
+}
+foreach ($change in @('stage-call','commit-call','rollback-unknown','original-drift',
+        'stream-incomplete','child-bytes','child-stream','actor-phase','source-drift',
+        'chronology','marker-mismatch','sentinel-drift','stream-id-drift',
+        'missing-transaction-close','duplicate-writer-close','unsafe-done-marker',
+        'root-row-malformed')) {
+    $badCandidate=$candidate | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    $badActor=$actor | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    switch ($change) {
+        'stage-call' { $badCandidate.stage_calls=1 }
+        'commit-call' { $badCandidate.commit_calls=1 }
+        'rollback-unknown' { $badCandidate.settlement='rollback-outcome-unknown' }
+        'original-drift' { $badActor.postproof.approved_row='changed' }
+        'stream-incomplete' { $badActor.postproof.stream_checks[0].io_status=38 }
+        'child-bytes' { $badActor.postproof.child_bytes='AA==' }
+        'child-stream' { $badActor.postproof.child_row=$badActor.postproof.child_row.Replace(
+            'default-stream-only','named-stream-present') }
+        'actor-phase' { $badActor.attempt_phase='late-child-after-last-close' }
+        'source-drift' { $badActor.source.actor_sha256='0'*64 }
+        'chronology' { $badActor.attempt_utc='2026-11-14T00:00:06.0000000Z' }
+        'marker-mismatch' { $badActor.attempt.native_error=32 }
+        'sentinel-drift' { $badActor.postproof.sentinel_bytes='AA==' }
+        'stream-id-drift' { $badActor.postproof.stream_checks[1].file_id='0'*48 }
+        'missing-transaction-close' { $badCandidate.close_receipts=@(
+            $badCandidate.close_receipts | Where-Object { $_ -cne 'transaction:closed' }) }
+        'duplicate-writer-close' { $badCandidate.close_receipts+=@('writer:1:closed') }
+        'root-row-malformed' { $badActor.postproof.root_row='malformed' }
+    }
+    $rejected=$false
+    $badDone=$doneMarker | ConvertTo-Json -Depth 6 | ConvertFrom-Json -AsHashtable
+    if ($change -ceq 'unsafe-done-marker') { $badDone.transaction_closed=$false }
+    try { $null=Assert-AcquireChildReceipt $badCandidate $badActor $barrier $ready `
+        $attemptMarker $badDone $acquireSource }
+    catch { $rejected=$true }
+    if (-not $rejected) { throw "Active-Acquire classifier accepted unsafe evidence: $change" }
+}
+$actor.attempt=@{admitted=$false;native_error=5;written=$false;
+    attempt_utc=$actor.attempt_utc}
+$actor.support_attempted=$true;$actor.support=@{admitted=$true;native_error=0;written=$true}
+$candidate.status='refused-intentional-abort-postproof-pending'
+$candidate.stage_attempted=$false;$candidate.stage_rejected=$false
+$candidate.stage_error=$null
+$attemptMarker=$actor.attempt;$doneMarker.status=$candidate.status
+$rejected=$false
+try { $null=Assert-AcquireChildReceipt $candidate $actor $barrier $ready `
+        $attemptMarker $doneMarker $acquireSource }
+catch { $rejected=$true }
+if (-not $rejected) { throw 'Unsupported native refusal was classified as an exclusion result.' }
+Write-Host 'Phase B and active-Acquire exact-manifest protocol tests passed.'

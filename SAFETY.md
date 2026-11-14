@@ -1137,6 +1137,26 @@ directory, ordinary file and named-stream controls. Hosted Windows execution
 is a source-bound diagnostic, not selected Windows 11 or full retained-root
 qualification. Existing fixture ADS refusals do not provide that qualification.
 
+The opt-in `exact-manifest-txf-acquire-child` diagnostic prepares one fresh
+private fixture and publishes its barrier after exact-set acquisition, before
+Stage. It requires either child refusal followed by confirmed rollback and an
+after-release support write, or pre-disposition manifest rejection followed by
+confirmed rollback and independent preservation of the original and new child.
+It never calls commit or supplies production authority. Same-handle NT status,
+actual stream byte count and FileID bindings complement the independent content
+and identity observer; a failed legacy BOOL/EOF read is not stream proof. Unknown
+closure blocks further support writes, and child-local hard deadlines attempt a nonzero process exit independently
+of the controller; unconfirmed native lifetime or closure remains failure. Raw
+fixtures and receipts are retained.
+
+This case remains in `Diagnostics`, excluded from push/PR `Current` tooling.
+Portable receipt and lifecycle checks do not establish its Windows native
+outcome or pass full Gate 1. If a later reviewed execution is admitted, select
+only this test ID through the maintained runner under the applicable source,
+resource and capture contract; manual CI `All` also runs unrelated diagnostics
+and is not a narrow replacement. Original collection/disposition and consuming
+launch allowances remain unchanged.
+
 The optional run-scoped fixture layout admits only the exact profile-Temp
 batch/case GUID grammar. A new batch freezes source, VM, SID, parent/batch
 FileIDs and the bounded authority bytes/hash; controller and child checks reject
