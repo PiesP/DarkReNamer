@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the reviewed cargo-audit source with the reviewed TLS lockfile."""
+"""Build the reviewed cargo-audit source with the reviewed dependency lockfile."""
 
 import argparse
 import hashlib
