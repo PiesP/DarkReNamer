@@ -13,3 +13,4 @@ docs/USER-GUIDE.md
 docs/USER-GUIDE.ko.md
 docs/history/WINDOWS-ACCEPTANCE.md
 scripts/release-run-instructions.txt
+verification/journal/README.md

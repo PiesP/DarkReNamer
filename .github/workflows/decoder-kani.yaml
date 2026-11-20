@@ -1,0 +1,51 @@
+name: Decoder verification
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/decoder-kani.yaml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'crates/darknamer-app/Cargo.toml'
+      - 'crates/darknamer-app/build.rs'
+      - 'crates/darknamer-app/src/rename/file_journal.rs'
+      - 'crates/darknamer-app/src/rename/file_journal/**'
+      - 'scripts/check-decoder-kani.sh'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/decoder-kani.yaml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'crates/darknamer-app/Cargo.toml'
+      - 'crates/darknamer-app/build.rs'
+      - 'crates/darknamer-app/src/rename/file_journal.rs'
+      - 'crates/darknamer-app/src/rename/file_journal/**'
+      - 'scripts/check-decoder-kani.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kani:
+    name: Check decoder cursor and extent with Kani
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned verifier
+        run: |
+          rustup toolchain install
+          cargo install --locked --version '=0.68.0' kani-verifier
+          cargo kani setup
+
+      - name: Prove decoder extent and cursor behavior
+        run: bash scripts/check-decoder-kani.sh

@@ -1,0 +1,35 @@
+name: Journal protocol model
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/journal-model.yaml'
+      - 'scripts/check-journal-model.sh'
+      - 'verification/journal/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/journal-model.yaml'
+      - 'scripts/check-journal-model.sh'
+      - 'verification/journal/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    name: Check journal protocol with TLC
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Explore journal states and run the negative controls
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          bash scripts/check-journal-model.sh
