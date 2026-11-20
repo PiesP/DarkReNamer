@@ -315,6 +315,39 @@ Select Python explicitly for the tooling subprocesses as well: the public
 release readback adapter otherwise resolves the Windows-style `python` command,
 which need not exist on Linux even when `python3` is available.
 
+## Journal contract checks
+
+Use the [journal protocol model and replay guide](verification/journal/README.md)
+to check the bounded recovery contract and replay selected orders through
+the normal portable executor and recovery entry points. The regular Linux and
+Windows CI test gates include the replay. The journal model workflow runs the
+TLC command when its model inputs or runner change.
+
+The decoder proof runs on x86-64 Linux with Kani 0.68.0 and its bundled CBMC
+6.11.0. Use the repository Rust toolchain to install the verifier and let Kani
+install its pinned compiler, `nightly-2026-08-21` (rustc `8925ea358`).
+
+```bash
+cargo install --locked --version '=0.68.0' kani-verifier
+cargo kani setup
+bash scripts/check-decoder-kani.sh
+```
+
+The [proof harness](crates/darknamer-app/src/rename/file_journal/decoder_verification.rs)
+calls the actual `Decoder::take`. It reaches the modeled cursor by reading a
+valid prefix. It explores payload lengths up to 16 bytes, every valid starting
+cursor, and every 64-bit count and frame identifier with unwind set to 2.
+The proof checks the returned slice extent and cursor advance on success, and
+the error kind, frame, and unchanged cursor on rejection. Cover checks reach
+a nonempty exact-end success, an empty read at end, a truncated 16-byte field,
+and arithmetic overflow. The shipped x86-64 Windows target has the same
+`usize` width. The proof applies to the isolated Rust operation under the
+stated bounds and the verifier's Linux compiler and standard library model.
+
+The journal model and decoder workflows report separately from branch
+protection. The decoder workflow selects the app's decoder source, proof
+harness, build and toolchain inputs, and proof runner changes.
+
 ## Python tooling runtime
 
 The repository supports ordinary CPython 3.11 or newer for local tooling. Hosted

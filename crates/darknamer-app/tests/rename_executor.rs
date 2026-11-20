@@ -3,14 +3,15 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use darknamer_app::rename::{
-    AppendCertainty, BackendError, BackendOperation, CancellationToken, EntryId, EntryIdentity,
-    EntryKind, ExecuteErrorKind, ExecutionControl, ExecutionFailure, ExecutionOutcome,
-    ExecutionPhase, ExecutionProgress, JournalCapacityKind, JournalCorruption, JournalDirection,
-    JournalError, JournalRecord, JournalStep, JournalStore, JournalTerminal,
-    MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal,
-    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest,
-    RecoveryReason, RecoveryState, RenameBackend, RenameExecutor, RenameIntent, RenameOperation,
-    RenamePlanner, RenameState, ResolvedSource, TemporaryPhase, preflight_plan,
+    AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, CancellationToken, EntryId,
+    EntryIdentity, EntryKind, ExecuteErrorKind, ExecutionControl, ExecutionFailure,
+    ExecutionOutcome, ExecutionPhase, ExecutionProgress, JournalAuthorization, JournalCapacityKind,
+    JournalCorruption, JournalDirection, JournalError, JournalRecord, JournalSnapshot, JournalStep,
+    JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES,
+    MemoryBackend, MemoryJournal, ModelRevision, MoveScope, MutationCertainty, PathKey,
+    PathSnapshot, PlanId, PlanRequest, RecoveryBlockKind, RecoveryOutcome, RecoveryReason,
+    RecoveryState, RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner,
+    RenameRecovery, RenameState, ResolvedSource, TemporaryPhase, preflight_plan,
     preflight_plan_cancellable, replay_journal,
 };
 
@@ -1859,7 +1860,57 @@ impl JournalStore for MatrixJournal {
     }
 }
 
+impl AuthorizedJournal for MatrixJournal {
+    fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError> {
+        self.inner.authorized_snapshot()
+    }
+
+    fn authorized_prepared(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Prepared(step, direction), |inner| {
+            inner.authorized_prepared(authorization, step, direction)
+        })
+    }
+
+    fn authorized_completed(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Completed(step, direction), |inner| {
+            inner.authorized_completed(authorization, step, direction)
+        })
+    }
+
+    fn authorized_not_applied(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::NotApplied(step, direction), |inner| {
+            inner.authorized_not_applied(authorization, step, direction)
+        })
+    }
+
+    fn authorized_terminal(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        terminal: JournalTerminal,
+    ) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Terminal(terminal), |inner| {
+            inner.authorized_terminal(authorization, terminal)
+        })
+    }
+}
+
 struct MatrixBackend {
+    apply_ambiguous_move: bool,
     inner: MemoryBackend,
     forced_rollback_at: Option<usize>,
     fault: Option<(usize, MutationCertainty)>,
@@ -1933,7 +1984,9 @@ impl RenameBackend for MatrixBackend {
                 certainty: MutationCertainty::NotApplied,
             }),
             Some(MutationCertainty::MayHaveApplied) => {
-                self.inner.rename_no_replace(operation)?;
+                if self.apply_ambiguous_move {
+                    self.inner.rename_no_replace(operation)?;
+                }
                 Err(BackendError {
                     operation: BackendOperation::Rename,
                     code: 995,
@@ -2174,6 +2227,7 @@ fn run_executor_matrix_case(
     let timeline = Rc::new(RefCell::new(Vec::new()));
     let mut backend = MatrixBackend {
         inner: fixture_backend,
+        apply_ambiguous_move: true,
         forced_rollback_at,
         fault: rename_fault,
         rename_attempts: 0,
@@ -2340,5 +2394,356 @@ fn run_executor_fault_matrix() -> Result<(), Box<dyn std::error::Error>> {
 fn exhaustive_executor_fault_matrix_preserves_transaction_invariants()
 -> Result<(), Box<dyn std::error::Error>> {
     run_executor_fault_matrix()?;
+    Ok(())
+}
+
+const CONTRACT_SOURCE: &str = "C:\\work\\a.txt";
+const CONTRACT_DESTINATION: &str = "C:\\work\\b.txt";
+const CONTRACT_SENTINEL: &str = "C:\\work\\sentinel.txt";
+
+fn contract_fixture(fault: Option<bool>) -> (MatrixBackend, MatrixJournal) {
+    let timeline = Rc::new(RefCell::new(Vec::new()));
+    let backend = MatrixBackend {
+        inner: MemoryBackend::new()
+            .with_file(CONTRACT_SOURCE, 1)
+            .with_file(CONTRACT_SENTINEL, 99),
+        forced_rollback_at: None,
+        apply_ambiguous_move: fault == Some(true),
+        fault: fault.map(|_| (1, MutationCertainty::MayHaveApplied)),
+        rename_attempts: 0,
+        timeline: Rc::clone(&timeline),
+    };
+    (backend, MatrixJournal::new(None, timeline))
+}
+
+fn assert_contract_files(backend: &MatrixBackend, source: Option<u128>, destination: Option<u128>) {
+    assert_eq!(backend.inner.file_id(CONTRACT_SOURCE), source);
+    assert_eq!(backend.inner.file_id(CONTRACT_DESTINATION), destination);
+    assert_eq!(backend.inner.file_id(CONTRACT_SENTINEL), Some(99));
+}
+
+fn assert_contract_records(journal: &MatrixJournal, expected: &[MatrixJournalCall]) {
+    let actual = journal
+        .inner
+        .records()
+        .iter()
+        .map(|record| match *record {
+            JournalRecord::Intent { .. } => MatrixJournalCall::Begin,
+            JournalRecord::Prepared { step, direction } => {
+                MatrixJournalCall::Prepared(step, direction)
+            }
+            JournalRecord::Completed { step, direction } => {
+                MatrixJournalCall::Completed(step, direction)
+            }
+            JournalRecord::NotApplied { step, direction } => {
+                MatrixJournalCall::NotApplied(step, direction)
+            }
+            JournalRecord::Terminal(terminal) => MatrixJournalCall::Terminal(terminal),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+fn restart_contract_journal(backend: &MatrixBackend, journal: &MatrixJournal) -> MatrixJournal {
+    // Keep the filesystem and retained records while obtaining fresh journal authority.
+    backend.timeline.borrow_mut().clear();
+    MatrixJournal {
+        inner: MemoryJournal::from_records(journal.inner.records().to_vec()),
+        ..MatrixJournal::new(None, Rc::clone(&backend.timeline))
+    }
+}
+
+#[test]
+fn journal_contract_unknown_forward_outcomes_reconcile_from_the_same_prepared_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    use JournalDirection::{Forward, Rollback};
+    use MatrixEvent::{Journal, Rename};
+    use MatrixJournalCall::{Begin, Completed, NotApplied, Prepared, Terminal};
+
+    let mut prepared_records = None;
+    for moved in [false, true] {
+        let (mut backend, mut journal) = contract_fixture(Some(moved));
+        let plan = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+        let report = RenameExecutor::new(&mut backend, &mut journal).execute(plan)?;
+
+        assert_eq!(
+            report.outcome(),
+            &ExecutionOutcome::RecoveryRequired {
+                failure: ExecutionFailure::Backend {
+                    step: 0,
+                    error: BackendError {
+                        operation: BackendOperation::Rename,
+                        code: 995,
+                        certainty: MutationCertainty::MayHaveApplied,
+                    },
+                },
+                rollback_failures: Box::new([]),
+            }
+        );
+        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.entries()[0].entry(), EntryId::new(0));
+        assert_eq!(report.entries()[0].state(), RenameState::Indeterminate);
+        assert_eq!(
+            *backend.timeline.borrow(),
+            [Journal(Begin), Journal(Prepared(0, Forward)), Rename(1)]
+        );
+        assert_contract_records(&journal, &[Begin, Prepared(0, Forward)]);
+        assert_eq!(
+            journal.inner.records(),
+            prepared_records
+                .get_or_insert_with(|| journal.inner.records().to_vec())
+                .as_slice()
+        );
+        assert_eq!(
+            journal.inner.recovery_state(),
+            RecoveryState::RecoveryRequired {
+                plan: Some(report.plan()),
+                completed_forward: 0,
+                completed_rollback: 0,
+                reason: RecoveryReason::PreparedOnly {
+                    step: 0,
+                    direction: Forward,
+                },
+            }
+        );
+        assert_contract_files(&backend, (!moved).then_some(1), moved.then_some(1));
+        assert_eq!(backend.inner.mutation_count(), usize::from(moved));
+
+        let mut journal = restart_contract_journal(&backend, &journal);
+        assert_eq!(
+            RenameRecovery::new(&mut backend, &mut journal).rollback(),
+            RecoveryOutcome::Recovered {
+                plan: report.plan(),
+                restored_steps: usize::from(moved),
+            }
+        );
+        let terminal = Terminal(JournalTerminal::RolledBack);
+        if moved {
+            assert_eq!(
+                *backend.timeline.borrow(),
+                [
+                    Journal(Completed(0, Forward)),
+                    Journal(Prepared(0, Rollback)),
+                    Rename(2),
+                    Journal(Completed(0, Rollback)),
+                    Journal(terminal),
+                ]
+            );
+            assert_contract_records(
+                &journal,
+                &[
+                    Begin,
+                    Prepared(0, Forward),
+                    Completed(0, Forward),
+                    Prepared(0, Rollback),
+                    Completed(0, Rollback),
+                    terminal,
+                ],
+            );
+            assert_eq!(
+                backend.inner.completed_moves(),
+                [
+                    (CONTRACT_SOURCE.to_owned(), CONTRACT_DESTINATION.to_owned()),
+                    (CONTRACT_DESTINATION.to_owned(), CONTRACT_SOURCE.to_owned()),
+                ]
+            );
+        } else {
+            assert_eq!(
+                *backend.timeline.borrow(),
+                [Journal(NotApplied(0, Forward)), Journal(terminal)]
+            );
+            assert_contract_records(
+                &journal,
+                &[
+                    Begin,
+                    Prepared(0, Forward),
+                    NotApplied(0, Forward),
+                    terminal,
+                ],
+            );
+            assert!(backend.inner.completed_moves().is_empty());
+        }
+        assert_contract_files(&backend, Some(1), None);
+        assert_eq!(journal.inner.recovery_state(), RecoveryState::Clean);
+
+        let mut journal = restart_contract_journal(&backend, &journal);
+        assert_eq!(
+            RenameRecovery::new(&mut backend, &mut journal).rollback(),
+            RecoveryOutcome::NotRequired
+        );
+        assert!(backend.timeline.borrow().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn journal_contract_clean_commit_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+    use JournalDirection::Forward;
+    use MatrixEvent::{Journal, Rename};
+    use MatrixJournalCall::{Begin, Completed, Prepared, Terminal};
+
+    let (mut backend, mut journal) = contract_fixture(None);
+    let plan = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(plan)?;
+    let terminal = Terminal(JournalTerminal::Committed);
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert_eq!(
+        *backend.timeline.borrow(),
+        [
+            Journal(Begin),
+            Journal(Prepared(0, Forward)),
+            Rename(1),
+            Journal(Completed(0, Forward)),
+            Journal(terminal),
+        ]
+    );
+    assert_contract_records(
+        &journal,
+        &[Begin, Prepared(0, Forward), Completed(0, Forward), terminal],
+    );
+    assert_contract_files(&backend, None, Some(1));
+    assert_eq!(journal.inner.recovery_state(), RecoveryState::Clean);
+
+    let mut journal = restart_contract_journal(&backend, &journal);
+    assert_eq!(
+        RenameRecovery::new(&mut backend, &mut journal).rollback(),
+        RecoveryOutcome::NotRequired
+    );
+    assert!(backend.timeline.borrow().is_empty());
+    assert_contract_files(&backend, None, Some(1));
+    Ok(())
+}
+
+#[test]
+fn journal_contract_refuses_collision_and_invalid_terminal_with_prepared_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut backend, mut journal) = contract_fixture(Some(true));
+    let plan = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(plan)?;
+
+    backend.inner.insert_file(CONTRACT_SOURCE, 2);
+    let mut restarted = restart_contract_journal(&backend, &journal);
+    assert_eq!(
+        RenameRecovery::new(&mut backend, &mut restarted).rollback(),
+        RecoveryOutcome::Blocked {
+            plan: Some(report.plan()),
+            reason: RecoveryBlockKind::StateMismatch,
+        }
+    );
+    assert_eq!(restarted.inner.records(), journal.inner.records());
+    assert!(backend.timeline.borrow().is_empty());
+    assert_contract_files(&backend, Some(2), Some(1));
+
+    for (moved, terminal) in [
+        (true, JournalTerminal::Committed),
+        (false, JournalTerminal::RolledBack),
+    ] {
+        // The selected identity is already at the terminal's expected name.
+        // The retained preparation still needs a matching resolution.
+        let (mut backend, mut journal) = contract_fixture(Some(moved));
+        let plan = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+        let report = RenameExecutor::new(&mut backend, &mut journal).execute(plan)?;
+        journal.inner.terminal(terminal)?;
+        let mut restarted = restart_contract_journal(&backend, &journal);
+        assert!(matches!(
+            restarted.inner.recovery_state(),
+            RecoveryState::RecoveryRequired {
+                reason: RecoveryReason::Corrupt(JournalCorruption::InvalidTerminal),
+                ..
+            }
+        ));
+        assert_eq!(
+            RenameRecovery::new(&mut backend, &mut restarted).rollback(),
+            RecoveryOutcome::Blocked {
+                plan: Some(report.plan()),
+                reason: RecoveryBlockKind::JournalCorrupt,
+            }
+        );
+        assert_eq!(restarted.inner.records(), journal.inner.records());
+        assert!(backend.timeline.borrow().is_empty());
+        assert_contract_files(&backend, (!moved).then_some(1), moved.then_some(1));
+    }
+    Ok(())
+}
+
+#[test]
+fn journal_contract_retries_a_reverse_move_after_an_uncertain_rollback()
+-> Result<(), Box<dyn std::error::Error>> {
+    use JournalDirection::{Forward, Rollback};
+    use MatrixEvent::{Journal, Rename};
+    use MatrixJournalCall::{Begin, Completed, NotApplied, Prepared, Terminal};
+
+    let (mut backend, mut journal) = contract_fixture(Some(true));
+    let plan = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(plan)?;
+
+    let mut journal = restart_contract_journal(&backend, &journal);
+    backend.fault = Some((2, MutationCertainty::MayHaveApplied));
+    backend.apply_ambiguous_move = false;
+    assert_eq!(
+        RenameRecovery::new(&mut backend, &mut journal).rollback(),
+        RecoveryOutcome::RecoveryRequired {
+            plan: report.plan(),
+            reason: darknamer_app::rename::RecoveryFailure::Backend(BackendError {
+                operation: BackendOperation::Rename,
+                code: 995,
+                certainty: MutationCertainty::MayHaveApplied,
+            }),
+        }
+    );
+    assert_eq!(
+        *backend.timeline.borrow(),
+        [
+            Journal(Completed(0, Forward)),
+            Journal(Prepared(0, Rollback)),
+            Rename(2),
+        ]
+    );
+    assert_contract_records(
+        &journal,
+        &[
+            Begin,
+            Prepared(0, Forward),
+            Completed(0, Forward),
+            Prepared(0, Rollback),
+        ],
+    );
+    assert_contract_files(&backend, None, Some(1));
+
+    let mut journal = restart_contract_journal(&backend, &journal);
+    assert_eq!(
+        RenameRecovery::new(&mut backend, &mut journal).rollback(),
+        RecoveryOutcome::Recovered {
+            plan: report.plan(),
+            restored_steps: 1,
+        }
+    );
+    let terminal = Terminal(JournalTerminal::RolledBack);
+    assert_eq!(
+        *backend.timeline.borrow(),
+        [
+            Journal(NotApplied(0, Rollback)),
+            Journal(Prepared(0, Rollback)),
+            Rename(3),
+            Journal(Completed(0, Rollback)),
+            Journal(terminal),
+        ]
+    );
+    assert_contract_records(
+        &journal,
+        &[
+            Begin,
+            Prepared(0, Forward),
+            Completed(0, Forward),
+            Prepared(0, Rollback),
+            NotApplied(0, Rollback),
+            Prepared(0, Rollback),
+            Completed(0, Rollback),
+            terminal,
+        ],
+    );
+    assert_contract_files(&backend, Some(1), None);
+    assert_eq!(backend.inner.mutation_count(), 2);
+    assert_eq!(journal.inner.recovery_state(), RecoveryState::Clean);
     Ok(())
 }

@@ -35,6 +35,7 @@ $expectedInstallCounts = @{
     'release.yaml' = 0
     'security.yaml' = 1
     'benchmark-planning.yaml' = 1
+    'decoder-kani.yaml' = 1
 }
 $installCount = 0
 foreach ($workflow in $workflows) {
@@ -53,8 +54,8 @@ foreach ($workflow in $workflows) {
         }
     }
 }
-if ($installCount -ne 6) {
-    throw "Expected six bootstrap workflow toolchain installations, found $installCount."
+if ($installCount -ne 7) {
+    throw "Expected seven bootstrap workflow toolchain installations, found $installCount."
 }
 
 $candidateText = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/release.yaml') -Raw

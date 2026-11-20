@@ -5,6 +5,9 @@
 //! retained-handle validation only; their ordinary file open is not a production
 //! confinement claim.
 
+#[cfg(kani)]
+mod decoder_verification;
+
 use std::fmt;
 use std::fs::File;
 #[cfg(not(windows))]
