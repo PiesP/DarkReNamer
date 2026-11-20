@@ -55,10 +55,10 @@
     },
     {
       "id": "cargo-deny",
-      "version": "0.20.2",
-      "archivePath": "cargo-deny-0.20.2-x86_64-pc-windows-msvc/cargo-deny.exe",
-      "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz",
-      "sha256": "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc"
+      "version": "0.21.0",
+      "archivePath": "cargo-deny-0.21.0-x86_64-pc-windows-msvc/cargo-deny.exe",
+      "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.21.0/cargo-deny-0.21.0-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "8c445ef95217269d3cee234b18e2f543f8f1653f4a9801d9439df24bfcef4824"
     },
     {
       "id": "cargo-about",
@@ -69,10 +69,10 @@
     },
     {
       "id": "cargo-cyclonedx",
-      "version": "0.5.9",
+      "version": "0.5.10",
       "archivePath": "cargo-cyclonedx.exe",
-      "url": "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.9/cargo-cyclonedx-x86_64-pc-windows-msvc.zip",
-      "sha256": "8750e00775661dcb75bc482c1a298839fd94e8a0c033b49905ba0f246ffed202"
+      "url": "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.10/cargo-cyclonedx-x86_64-pc-windows-msvc.zip",
+      "sha256": "b0cdf58875a4b3c83e13fbea19eb6a85d63498aeab90f50456179173c370b3ce"
     }
   ]
 }
