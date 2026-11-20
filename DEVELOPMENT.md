@@ -415,7 +415,7 @@ The scanner entries in `config/release-tool-integrity.json` own selected version
 and reviewed source or Windows artifact identities. `cargo-audit` 0.23.0 is
 built from its SHA-256-pinned published crate with
 `config/cargo-audit-0.23.0-patched.lock`; the published lock includes the reviewed
-`rustls` and `rustls-webpki` versions. The patch updates `h2` to 0.4.20.
+`rustls` and `rustls-webpki` versions. The patch selects `h2` 0.4.20 and `rustix` 1.1.6.
 `scripts/build-patched-cargo-audit.py` verifies both inputs
 before extraction or execution and uses `cargo build --locked` with isolated
 Cargo state. CI, the scheduled audit, and the Windows candidate installer use
