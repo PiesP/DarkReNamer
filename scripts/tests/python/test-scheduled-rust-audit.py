@@ -30,7 +30,7 @@ assert BUILD_SPEC is not None and BUILD_SPEC.loader is not None
 BUILDER = importlib.util.module_from_spec(BUILD_SPEC)
 BUILD_SPEC.loader.exec_module(BUILDER)
 
-# cargo-deny 0.20.2 producers: src/cargo-deny/main.rs (log),
+# cargo-deny 0.21.0 producers: src/cargo-deny/main.rs (log),
 # src/diag/grapher.rs (diagnostic), and src/cargo-deny/stats.rs (summary).
 LOGGER = {"type": "log", "fields": {
     "timestamp": "2026-10-05T00:00:00Z", "level": "WARN", "message": "ordinary warning",
@@ -81,7 +81,7 @@ arguments = sys.argv[1:]
 with open(os.environ["MOCK_CALLS"], "a", encoding="utf-8") as calls:
     calls.write(json.dumps({"name": name, "arguments": arguments}) + "\n")
 if arguments == ["--version"]:
-    expected = "cargo-audit 0.23.0" if name == "cargo-audit" else "cargo-deny 0.20.2"
+    expected = "cargo-audit 0.23.0" if name == "cargo-audit" else "cargo-deny 0.21.0"
     print("wrong version" if os.environ.get("MOCK_VERSION") == name else expected)
 elif name == "cargo-audit":
     mode = os.environ.get("MOCK_AUDIT", "clean")
@@ -396,12 +396,12 @@ class ScannerPinMetadataTests(unittest.TestCase):
 
     def test_reviewed_record_selects_versions_for_workflow_and_runner(self) -> None:
         pins = AUDIT.scanner_pins()
-        self.assertEqual(pins, {"cargo-audit": "0.23.0", "cargo-deny": "0.20.2"})
+        self.assertEqual(pins, {"cargo-audit": "0.23.0", "cargo-deny": "0.21.0"})
         with tempfile.TemporaryDirectory(prefix="darkrenamer-scanner-pins-") as directory:
             output = Path(directory) / "github-output"
             with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
                 self.assertEqual(AUDIT.main(["--emit-pins"]), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "audit-version=0.23.0\ndeny-version=0.20.2\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "audit-version=0.23.0\ndeny-version=0.21.0\n")
 
     def test_invalid_metadata_stops_before_scanner_execution(self) -> None:
         original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
@@ -482,7 +482,7 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 if arguments[1:] == ["--version"]:
                     if binary == "cargo-deny" and mode == "missing":
                         return subprocess.CompletedProcess(arguments, 127, "", "missing executable")
-                    version = "0.23.0" if binary == "cargo-audit" else "0.20.2"
+                    version = "0.23.0" if binary == "cargo-audit" else "0.21.0"
                     if binary == "cargo-deny" and mode == "version":
                         version = "wrong"
                     return subprocess.CompletedProcess(arguments, 0, f"{binary} {version}\n", "")
@@ -545,7 +545,7 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 self.assertNotIn("Result: clean", summary)
 
     def test_changed_reviewed_version_rejects_old_verified_executable(self) -> None:
-        with mock.patch.object(AUDIT, "scanner_pins", return_value={"cargo-audit": "0.23.1", "cargo-deny": "0.20.2"}):
+        with mock.patch.object(AUDIT, "scanner_pins", return_value={"cargo-audit": "0.23.1", "cargo-deny": "0.21.0"}):
             result, summary, calls = self.run_fixture("version")
         self.assertEqual(result, 1)
         self.assertIn("cargo-audit version mismatch", summary)

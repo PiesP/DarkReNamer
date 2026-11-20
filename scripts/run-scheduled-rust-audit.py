@@ -17,7 +17,7 @@ SCANNER_RECORD = Path(__file__).resolve().parent.parent / "config" / "release-to
 SCANNER_IDS = ("cargo-audit", "cargo-deny")
 # Parser semantics and negative fixtures are reviewed for these tool versions.
 # This is a compatibility gate, not an independent installation selection.
-SCANNER_REPORT_COMPATIBILITY = {"cargo-audit": "0.23.0", "cargo-deny": "0.20.2"}
+SCANNER_REPORT_COMPATIBILITY = {"cargo-audit": "0.23.0", "cargo-deny": "0.21.0"}
 # cargo-audit 0.23.0 auditor.rs logs these failures outside its JSON report.
 AUDIT_INDEX_FAILURES = (
     "warning: couldn't update crates.io index:",
@@ -159,7 +159,7 @@ def audit_result(process: subprocess.CompletedProcess[str]) -> str:
 
 
 def deny_record_error(item: object) -> str | None:
-    """Validate verdict fields emitted by the pinned cargo-deny 0.20.2."""
+    """Validate verdict fields emitted by the pinned cargo-deny 0.21.0."""
     # Producers: src/diag/grapher.rs, src/cargo-deny/main.rs and stats.rs.
     if not isinstance(item, dict):
         return "record is not an object"
