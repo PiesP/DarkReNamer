@@ -82,10 +82,10 @@ fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(
             "      - name: Duplicate scanner selection\n        run: \"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins\n\n      - name: Restore pinned Rust security tools\n",
         ),
         original.replace(
-            "hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py')",
+            "hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.23.0-patched.lock', 'scripts/build-patched-cargo-audit.py')",
             "steps.scanner-pins.outputs.audit-version",
         ),
-        original.replace("'config/cargo-audit-0.22.2-patched.lock', ", ""),
+        original.replace("'config/cargo-audit-0.23.0-patched.lock', ", ""),
         original.replace(
             "DENY_VERSION: ${{ steps.scanner-pins.outputs.deny-version }}",
             "DENY_VERSION: ${{ github.event.inputs.deny_version }}",

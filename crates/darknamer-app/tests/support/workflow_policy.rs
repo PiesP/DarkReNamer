@@ -861,7 +861,7 @@ pub(super) fn validate_ci_security_tools_cache_source(source: &str) -> Result<()
     const PATH: &str = ".github/workflows/ci.yaml";
     const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
     const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
-    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
+    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.23.0-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}";
     const PIN_COMMAND: &str =
         "\"$DARKRENAMER_PYTHON\" -I scripts/run-scheduled-rust-audit.py --emit-pins";
 

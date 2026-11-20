@@ -43,14 +43,14 @@
   "tools": [
     {
       "id": "cargo-audit",
-      "version": "0.22.2",
+      "version": "0.23.0",
       "source": {
-        "url": "https://static.crates.io/crates/cargo-audit/cargo-audit-0.22.2.crate",
-        "sha256": "700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a"
+        "url": "https://static.crates.io/crates/cargo-audit/cargo-audit-0.23.0.crate",
+        "sha256": "956f85aedfb64db887ec38466f982fc2b1ae55de726d4a12f2fddd5b812c6446"
       },
       "lock": {
-        "path": "config/cargo-audit-0.22.2-patched.lock",
-        "sha256": "3b0b43dc03a5d31392115c55813a8935ec92c14df8e4018b088c6436ada5368a"
+        "path": "config/cargo-audit-0.23.0-patched.lock",
+        "sha256": "5e54c7476a9485134baed5e4feacca0fe2bd45295d2a789bd3c639b7d07e5ffc"
       }
     },
     {

@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/darkrenamer-security-tools
-          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}
+          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.23.0-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}
 
       - name: Install pinned Rust security tools
         if: steps.security-tools-cache.outputs.cache-hit != 'true'
