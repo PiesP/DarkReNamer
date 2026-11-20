@@ -17,8 +17,8 @@ SCANNER_RECORD = Path(__file__).resolve().parent.parent / "config" / "release-to
 SCANNER_IDS = ("cargo-audit", "cargo-deny")
 # Parser semantics and negative fixtures are reviewed for these tool versions.
 # This is a compatibility gate, not an independent installation selection.
-SCANNER_REPORT_COMPATIBILITY = {"cargo-audit": "0.22.2", "cargo-deny": "0.20.2"}
-# cargo-audit 0.22.2 auditor.rs logs these failures outside its JSON report.
+SCANNER_REPORT_COMPATIBILITY = {"cargo-audit": "0.23.0", "cargo-deny": "0.20.2"}
+# cargo-audit 0.23.0 auditor.rs logs these failures outside its JSON report.
 AUDIT_INDEX_FAILURES = (
     "warning: couldn't update crates.io index:",
     "warning: couldn't open crates.io index:",

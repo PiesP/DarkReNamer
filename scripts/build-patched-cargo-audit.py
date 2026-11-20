@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the reviewed cargo-audit source with the reviewed TLS lockfile."""
+"""Build the reviewed cargo-audit source with the reviewed dependency lockfile."""
 
 import argparse
 import hashlib
@@ -31,7 +31,7 @@ def reviewed_source() -> tuple[dict, Path]:
     record = json.loads(RECORD.read_text(encoding="utf-8"))
     tool = record["tools"][0]
     version = tool["version"]
-    if tool["id"] != "cargo-audit" or version != "0.22.2":
+    if tool["id"] != "cargo-audit" or version != "0.23.0":
         raise ValueError("Unsupported cargo-audit source selection")
     source = tool["source"]
     lock = tool["lock"]

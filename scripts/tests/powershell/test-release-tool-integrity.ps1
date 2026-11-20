@@ -203,7 +203,7 @@ try {
         @{ label = 'component-url-array'; before = "`"url`": `"$($component.url)`""; after = "`"url`": [`"$($component.url)`"]"; field = 'url' }
         @{ label = 'component-digest-array'; before = "`"sha256`": `"$($component.sha256)`""; after = "`"sha256`": [`"$($component.sha256)`"]"; field = 'sha256' }
         @{ label = 'tool-id-array'; before = '"id": "cargo-audit"'; after = '"id": ["cargo-audit"]'; field = 'id' }
-        @{ label = 'tool-version-array'; before = '"version": "0.22.2"'; after = '"version": ["0.22.2"]'; field = 'version' }
+        @{ label = 'tool-version-array'; before = '"version": "0.23.0"'; after = '"version": ["0.23.0"]'; field = 'version' }
         @{ label = 'tool-source-array'; before = '"source": {'; after = '"source": [], "unused": {'; field = 'source' }
         @{ label = 'tool-lock-array'; before = '"lock": {'; after = '"lock": [], "unused": {'; field = 'lock' }
         @{ label = 'tool-url-array'; before = "`"url`": `"$($tool.source.url)`""; after = "`"url`": [`"$($tool.source.url)`"]"; field = 'url' }
@@ -261,8 +261,8 @@ try {
     Copy-Item -LiteralPath $installer -Destination $fixtureInstaller
     Copy-Item -LiteralPath (Join-Path $repoRoot 'rust-toolchain.toml') `
         -Destination (Join-Path $fixtureRepo 'rust-toolchain.toml')
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'config/cargo-audit-0.22.2-patched.lock') `
-        -Destination (Join-Path $fixtureConfig 'cargo-audit-0.22.2-patched.lock')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'config/cargo-audit-0.23.0-patched.lock') `
+        -Destination (Join-Path $fixtureConfig 'cargo-audit-0.23.0-patched.lock')
     $productionRecord = Get-Content -LiteralPath $sourceRecord -Raw | ConvertFrom-Json
     $downloadMap = @{}
 

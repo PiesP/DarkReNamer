@@ -81,7 +81,7 @@ arguments = sys.argv[1:]
 with open(os.environ["MOCK_CALLS"], "a", encoding="utf-8") as calls:
     calls.write(json.dumps({"name": name, "arguments": arguments}) + "\n")
 if arguments == ["--version"]:
-    expected = "cargo-audit 0.22.2" if name == "cargo-audit" else "cargo-deny 0.20.2"
+    expected = "cargo-audit 0.23.0" if name == "cargo-audit" else "cargo-deny 0.20.2"
     print("wrong version" if os.environ.get("MOCK_VERSION") == name else expected)
 elif name == "cargo-audit":
     mode = os.environ.get("MOCK_AUDIT", "clean")
@@ -263,7 +263,7 @@ class AuditResultTests(unittest.TestCase):
         return AUDIT.audit_result(subprocess.CompletedProcess([], returncode, json.dumps(report), stderr))
 
     def test_pinned_index_error_prefixes_reject_clean_reports(self) -> None:
-        # cargo-audit 0.22.2 auditor.rs status_warn!/status_err! producers.
+        # cargo-audit 0.23.0 auditor.rs status_warn!/status_err! producers.
         for message in (
             "warning: couldn't update crates.io index: registry unavailable",
             "warning: couldn't open crates.io index: cache unavailable",
@@ -325,13 +325,13 @@ class ScannerPinMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="darkrenamer-patched-audit-build-") as directory:
             root = Path(directory)
             (root / "config").mkdir()
-            lock = root / "config/cargo-audit-0.22.2-patched.lock"
-            lock.write_bytes((REPOSITORY_ROOT / "config/cargo-audit-0.22.2-patched.lock").read_bytes())
+            lock = root / "config/cargo-audit-0.23.0-patched.lock"
+            lock.write_bytes((REPOSITORY_ROOT / "config/cargo-audit-0.23.0-patched.lock").read_bytes())
             archive = root / "source.crate"
             with tarfile.open(archive, "w:gz") as package:
                 for name, contents in {
-                    "cargo-audit-0.22.2/Cargo.toml": b'[package]\nname = "cargo-audit"\nversion = "0.22.2"\n',
-                    "cargo-audit-0.22.2/Cargo.lock": b"unpatched upstream lock",
+                    "cargo-audit-0.23.0/Cargo.toml": b'[package]\nname = "cargo-audit"\nversion = "0.23.0"\n',
+                    "cargo-audit-0.23.0/Cargo.lock": b"unpatched upstream lock",
                 }.items():
                     item = tarfile.TarInfo(name)
                     item.size = len(contents)
@@ -345,12 +345,12 @@ class ScannerPinMetadataTests(unittest.TestCase):
                 observed.append(arguments)
                 if arguments[0] == "cargo":
                     self.assertIn("--locked", arguments)
-                    self.assertEqual((root / "work/source/cargo-audit-0.22.2/Cargo.lock").read_bytes(), lock.read_bytes())
+                    self.assertEqual((root / "work/source/cargo-audit-0.23.0/Cargo.lock").read_bytes(), lock.read_bytes())
                     binary = root / "work/target/release" / ("cargo-audit.exe" if os.name == "nt" else "cargo-audit")
                     binary.parent.mkdir(parents=True)
                     binary.write_bytes(b"fixture binary")
                     return subprocess.CompletedProcess(arguments, 0, "", "")
-                return subprocess.CompletedProcess(arguments, 0, "cargo-audit 0.22.2\n", "")
+                return subprocess.CompletedProcess(arguments, 0, "cargo-audit 0.23.0\n", "")
 
             with mock.patch.object(BUILDER, "ROOT", root), mock.patch.object(BUILDER, "RECORD", root / "config/release-tool-integrity.json"), mock.patch.object(BUILDER.subprocess, "run", side_effect=fake_run):
                 BUILDER.build(root / "bin", root / "work", archive, False)
@@ -361,8 +361,8 @@ class ScannerPinMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="darkrenamer-patched-audit-") as directory:
             root = Path(directory)
             (root / "config").mkdir()
-            lock = root / "config/cargo-audit-0.22.2-patched.lock"
-            lock.write_bytes((REPOSITORY_ROOT / "config/cargo-audit-0.22.2-patched.lock").read_bytes())
+            lock = root / "config/cargo-audit-0.23.0-patched.lock"
+            lock.write_bytes((REPOSITORY_ROOT / "config/cargo-audit-0.23.0-patched.lock").read_bytes())
             archive = root / "source.crate"
             archive.write_bytes(b"fixture source")
             record = json.loads(AUDIT.SCANNER_RECORD.read_text(encoding="utf-8"))
@@ -381,8 +381,8 @@ class ScannerPinMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="darkrenamer-patched-audit-h2-") as directory:
             root = Path(directory)
             (root / "config").mkdir()
-            lock = root / "config/cargo-audit-0.22.2-patched.lock"
-            original = (REPOSITORY_ROOT / "config/cargo-audit-0.22.2-patched.lock").read_text(encoding="utf-8")
+            lock = root / "config/cargo-audit-0.23.0-patched.lock"
+            original = (REPOSITORY_ROOT / "config/cargo-audit-0.23.0-patched.lock").read_text(encoding="utf-8")
             selected = 'name = "h2"\nversion = "0.4.20"'
             self.assertIn(selected, original)
             lock.write_text(original.replace(selected, 'name = "h2"\nversion = "0.4.16"'), encoding="utf-8")
@@ -396,12 +396,12 @@ class ScannerPinMetadataTests(unittest.TestCase):
 
     def test_reviewed_record_selects_versions_for_workflow_and_runner(self) -> None:
         pins = AUDIT.scanner_pins()
-        self.assertEqual(pins, {"cargo-audit": "0.22.2", "cargo-deny": "0.20.2"})
+        self.assertEqual(pins, {"cargo-audit": "0.23.0", "cargo-deny": "0.20.2"})
         with tempfile.TemporaryDirectory(prefix="darkrenamer-scanner-pins-") as directory:
             output = Path(directory) / "github-output"
             with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
                 self.assertEqual(AUDIT.main(["--emit-pins"]), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "audit-version=0.22.2\ndeny-version=0.20.2\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "audit-version=0.23.0\ndeny-version=0.20.2\n")
 
     def test_invalid_metadata_stops_before_scanner_execution(self) -> None:
         original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
@@ -413,9 +413,11 @@ class ScannerPinMetadataTests(unittest.TestCase):
             "duplicate": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "schemaVersion": 1,'),
             "case-ambiguous": original.replace('"schemaVersion": 1,', '"schemaVersion": 1, "SchemaVersion": 1,'),
             "missing": original.replace('"id": "cargo-audit",', '"id": "missing-audit",'),
-            "version": original.replace('"version": "0.22.2",', '"version": "0.22.2\nversion-injection",'),
+            "version": original.replace('"version": "0.23.0",', '"version": "0.23.0\nversion-injection",'),
             "url": original.replace('https://static.crates.io/crates/cargo-audit/', 'https://example.invalid/crates/cargo-audit/'),
-            "digest": original.replace('"sha256": "700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a"', '"sha256": ""'),
+            "digest": original.replace(
+                f'"sha256": "{audit_tool["source"]["sha256"]}"', '"sha256": ""'
+            ),
             "lock digest": json.dumps(invalid_lock_digest),
             "schema": original.replace('"schemaVersion": 1,', '"schemaVersion": 2,'),
             "boolean-schema": original.replace('"schemaVersion": 1,', '"schemaVersion": true,'),
@@ -442,8 +444,8 @@ class ScannerPinMetadataTests(unittest.TestCase):
 
     def test_new_selected_version_requires_separate_parser_review(self) -> None:
         original = AUDIT.SCANNER_RECORD.read_text(encoding="utf-8")
-        changed = original.replace('"version": "0.22.2",', '"version": "0.22.3",').replace(
-            'cargo-audit-0.22.2', 'cargo-audit-0.22.3'
+        changed = original.replace('"version": "0.23.0",', '"version": "0.23.1",').replace(
+            'cargo-audit-0.23.0', 'cargo-audit-0.23.1'
         )
         with tempfile.TemporaryDirectory(prefix="darkrenamer-unreviewed-scanner-") as directory:
             root = Path(directory)
@@ -480,7 +482,7 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 if arguments[1:] == ["--version"]:
                     if binary == "cargo-deny" and mode == "missing":
                         return subprocess.CompletedProcess(arguments, 127, "", "missing executable")
-                    version = "0.22.2" if binary == "cargo-audit" else "0.20.2"
+                    version = "0.23.0" if binary == "cargo-audit" else "0.20.2"
                     if binary == "cargo-deny" and mode == "version":
                         version = "wrong"
                     return subprocess.CompletedProcess(arguments, 0, f"{binary} {version}\n", "")
@@ -543,7 +545,7 @@ class VerifiedToolPathsTests(unittest.TestCase):
                 self.assertNotIn("Result: clean", summary)
 
     def test_changed_reviewed_version_rejects_old_verified_executable(self) -> None:
-        with mock.patch.object(AUDIT, "scanner_pins", return_value={"cargo-audit": "0.22.3", "cargo-deny": "0.20.2"}):
+        with mock.patch.object(AUDIT, "scanner_pins", return_value={"cargo-audit": "0.23.1", "cargo-deny": "0.20.2"}):
             result, summary, calls = self.run_fixture("version")
         self.assertEqual(result, 1)
         self.assertIn("cargo-audit version mismatch", summary)
@@ -777,7 +779,7 @@ class ScheduledRustAuditTests(unittest.TestCase):
         self.assertIn('"$DARKRENAMER_PYTHON" -I scripts/check-python-runtime.py --exact', job)
         self.assertIn('"$DARKRENAMER_PYTHON" -I scripts/run-scheduled-rust-audit.py --emit-pins', job)
         self.assertIn("path: ${{ runner.temp }}/darkrenamer-security-tools", job)
-        cache_identity = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.22.2-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}"
+        cache_identity = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('rust-toolchain.toml') }}-audit-${{ hashFiles('config/release-tool-integrity.json', 'config/cargo-audit-0.23.0-patched.lock', 'scripts/build-patched-cargo-audit.py') }}-deny-${{ steps.scanner-pins.outputs.deny-version }}"
         self.assertIn(cache_identity, job)
         self.assertIn(cache_identity, ci)
         self.assertNotIn("restore-keys:", job)
