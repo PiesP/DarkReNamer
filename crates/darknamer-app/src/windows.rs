@@ -9,9 +9,9 @@ use std::marker::PhantomData;
 #[cfg(test)]
 use std::mem::size_of;
 
-use std::os::windows::ffi::OsStrExt;
-
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::ptr::null;
@@ -227,10 +227,6 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
-
-use windows_sys::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-};
 
 #[cfg(test)]
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -1689,34 +1685,6 @@ pub(super) fn message(owner: HWND, text: &str, caption: &str) {
 )]
 const fn int_resource(id: u16) -> *const u16 {
     id as usize as *const u16
-}
-
-pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> io::Result<()> {
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(core::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(core::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers retained for
-    // this synchronous call; the source is the exact same-directory temp file
-    // created by this process and the destination is the settings leaf.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

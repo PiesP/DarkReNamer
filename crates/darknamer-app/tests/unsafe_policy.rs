@@ -109,6 +109,7 @@ const ALLOWED_BOUNDARIES: &[(&str, bool, bool)] = &[
     ("src/windows/list_view.rs", true, true),
     ("src/windows/menu.rs", false, false),
     ("src/windows/popup_menu.rs", false, true),
+    ("src/windows/preferences.rs", false, false),
     ("src/windows/recovery_ui.rs", false, false),
     ("src/windows/text_io.rs", false, false),
     ("src/windows/visual_capture.rs", false, false),
