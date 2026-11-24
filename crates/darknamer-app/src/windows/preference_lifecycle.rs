@@ -72,6 +72,29 @@ impl WriterStatus {
             })
     }
 
+    /// Returns true when this save acknowledges a previously failed generation.
+    fn record_event(&mut self, event: &PreferenceWriteEvent) -> bool {
+        match *event {
+            PreferenceWriteEvent::Saved { generation } => {
+                self.saved_generation = Some(
+                    self.saved_generation
+                        .map_or(generation, |saved| saved.max(generation)),
+                );
+                self.failed_generation
+                    .take_if(|failed| generation >= *failed)
+                    .is_some()
+            }
+            PreferenceWriteEvent::Failed { generation, .. } => {
+                self.failed_generation = Some(generation);
+                false
+            }
+            PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
+                self.terminal_observed = true;
+                false
+            }
+        }
+    }
+
     fn observe(
         &mut self,
         kind: PreferenceKind,
@@ -80,38 +103,21 @@ impl WriterStatus {
     ) -> Vec<String> {
         let mut messages = Vec::new();
         for event in events {
+            let recovered = self.record_event(&event);
+            if closing {
+                continue;
+            }
             let message = match event {
-                PreferenceWriteEvent::Saved { generation } => {
-                    self.saved_generation = Some(
-                        self.saved_generation
-                            .map_or(generation, |saved| saved.max(generation)),
-                    );
-                    if self
-                        .failed_generation
-                        .is_some_and(|failed| generation >= failed)
-                    {
-                        self.failed_generation = None;
-                        (!closing)
-                            .then(|| crate::i18n::common::preference_saved_again(&(kind.label())))
-                    } else {
-                        None
-                    }
+                PreferenceWriteEvent::Saved { .. } if recovered => {
+                    Some(crate::i18n::common::preference_saved_again(&(kind.label())))
                 }
-                PreferenceWriteEvent::Failed { generation, error } => {
-                    self.failed_generation = Some(generation);
-                    (!closing).then(|| {
-                        crate::i18n::common::preference_save_failed(&(kind.label()), &(error))
-                    })
-                }
-                PreferenceWriteEvent::Stopped => {
-                    self.terminal_observed = true;
-                    None
-                }
-                PreferenceWriteEvent::Panicked => {
-                    self.terminal_observed = true;
-                    (!closing)
-                        .then(|| crate::i18n::common::preference_writer_stopped(&(kind.label())))
-                }
+                PreferenceWriteEvent::Failed { error, .. } => Some(
+                    crate::i18n::common::preference_save_failed(&(kind.label()), &(error)),
+                ),
+                PreferenceWriteEvent::Panicked => Some(
+                    crate::i18n::common::preference_writer_stopped(&(kind.label())),
+                ),
+                PreferenceWriteEvent::Saved { .. } | PreferenceWriteEvent::Stopped => None,
             };
             if let Some(message) = message {
                 messages.push(message);
@@ -239,6 +245,23 @@ impl PreferencePersistence {
                 .is_some_and(|writer| !writer.is_finished() && self.language_status.acknowledged())
     }
 
+    fn record_language_event(&mut self, event: &PreferenceWriteEvent) {
+        self.language_status.record_event(event);
+        match *event {
+            PreferenceWriteEvent::Saved { generation } => self
+                .language_diagnostic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_saved(generation),
+            PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => self
+                .language_diagnostic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_terminal(),
+            PreferenceWriteEvent::Failed { .. } => {}
+        }
+    }
+
     /// Interprets each file's generations independently, suppressing notices while closing.
     pub(crate) fn drain(&mut self, closing: bool) -> Vec<String> {
         let columns = self
@@ -265,36 +288,7 @@ impl PreferencePersistence {
                 self.language_saved = Some(preference);
             }
             for event in events {
-                match &event {
-                    PreferenceWriteEvent::Saved { generation } => {
-                        self.language_diagnostic
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .note_saved(*generation);
-                        self.language_status.saved_generation = Some(
-                            self.language_status
-                                .saved_generation
-                                .map_or(*generation, |saved| saved.max(*generation)),
-                        );
-                        if self
-                            .language_status
-                            .failed_generation
-                            .is_some_and(|failed| *generation >= failed)
-                        {
-                            self.language_status.failed_generation = None;
-                        }
-                    }
-                    PreferenceWriteEvent::Failed { generation, .. } => {
-                        self.language_status.failed_generation = Some(*generation);
-                    }
-                    PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
-                        self.language_status.terminal_observed = true;
-                        self.language_diagnostic
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .note_terminal();
-                    }
-                }
+                self.record_language_event(&event);
                 match event {
                     PreferenceWriteEvent::Saved { generation }
                         if !closing
@@ -390,36 +384,7 @@ impl PreferencePersistence {
             // A final language failure can arrive after the closing pre-drain.
             let events = writer.drain_events();
             for event in events {
-                match event {
-                    PreferenceWriteEvent::Saved { generation } => {
-                        self.language_diagnostic
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .note_saved(generation);
-                        self.language_status.saved_generation = Some(
-                            self.language_status
-                                .saved_generation
-                                .map_or(generation, |saved| saved.max(generation)),
-                        );
-                        if self
-                            .language_status
-                            .failed_generation
-                            .is_some_and(|failed| generation >= failed)
-                        {
-                            self.language_status.failed_generation = None;
-                        }
-                    }
-                    PreferenceWriteEvent::Failed { generation, .. } => {
-                        self.language_status.failed_generation = Some(generation);
-                    }
-                    PreferenceWriteEvent::Stopped | PreferenceWriteEvent::Panicked => {
-                        self.language_status.terminal_observed = true;
-                        self.language_diagnostic
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .note_terminal();
-                    }
-                }
+                self.record_language_event(&event);
             }
         }
         if let Some(mut writer) = self.columns.take() {
