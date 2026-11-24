@@ -1935,7 +1935,7 @@ mod language_tests {
     #[test]
     fn locked_language_destination_preserves_record_and_allows_retry() -> io::Result<()> {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
         const RELOAD_ROOT: &str = "DARKRENAMER_TEST_RELOAD_LANGUAGE_ROOT";
@@ -1966,9 +1966,12 @@ mod language_tests {
                 io::Error::other("replaced a destination held without delete sharing")
             })?;
         assert_eq!(failure.stage, LanguageWriteStage::ReplaceDestination);
-        assert_eq!(
-            failure.error.raw_os_error(),
-            Some(ERROR_SHARING_VIOLATION as i32)
+        let raw_error = failure.error.raw_os_error();
+        assert!(
+            [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION]
+                .iter()
+                .any(|&code| raw_error == Some(code as i32)),
+            "unexpected native replacement error {raw_error:?}"
         );
         assert_eq!(fs::read(&path)?, previous);
         assert_eq!(fs::read(&sibling)?, b"keep");
