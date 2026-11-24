@@ -62,8 +62,7 @@ impl WriterStatus {
             && !self.submission_failed
             && self.failed_generation.is_none()
             && self.requested_generation.is_none_or(|requested| {
-                // Saturated generations cannot distinguish a new request from
-                // an old acknowledgment of the same number.
+                // The exhausted generation stays ineligible for the idle readiness signal.
                 requested > 0
                     && requested < u64::MAX
                     && self

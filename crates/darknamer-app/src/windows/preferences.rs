@@ -529,10 +529,10 @@ impl<T: Send + 'static> CoalescingWriter<T> {
         if self.is_finished() {
             return Err(io::Error::other(stopped));
         }
-        let generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("preference writer generation exhausted"))?;
+        let Some(generation) = self.next_generation.checked_add(1) else {
+            self.request_shutdown();
+            return Err(io::Error::other("preference writer generation exhausted"));
+        };
         let (lock, available) = self.queue.as_ref();
         let mut state = lock
             .lock()
@@ -1293,6 +1293,59 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![first, third]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_shutdown_retires_after_flushing_the_last_accepted_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        let (writes, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let mut writer = CoalescingWriter::spawn(
+            PathBuf::new(),
+            "exhausted-close",
+            || {},
+            move |_, generation, value| {
+                writes.send((generation, value)).map_err(io::Error::other)?;
+                if value == 1 {
+                    wait.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(io::Error::other)?;
+                }
+                Ok(())
+            },
+        )?;
+        writer.next_generation = u64::MAX - 2;
+        writer.submit(1, "stopped", "closing")?;
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(5))?,
+            (u64::MAX - 1, 1)
+        );
+        writer.submit(2, "stopped", "closing")?;
+        assert!(writer.shutdown_with(3, "stopped").is_err());
+        assert!(writer.shutdown_with(4, "stopped").is_err());
+        release.send(())?;
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(5))?,
+            (u64::MAX, 2)
+        );
+        for generation in [u64::MAX - 1, u64::MAX] {
+            assert!(matches!(
+                writer.events.recv_timeout(Duration::from_secs(5))?,
+                PreferenceWriteEvent::Saved { generation: saved } if saved == generation
+            ));
+        }
+        assert!(matches!(
+            writer.events.recv_timeout(Duration::from_secs(5))?,
+            PreferenceWriteEvent::Stopped
+        ));
+        writer
+            .join()
+            .map_err(|_| io::Error::other("writer panicked"))?;
         Ok(())
     }
 
