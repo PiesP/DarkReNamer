@@ -1,0 +1,56 @@
+name: Gate 1 synthetic KTM vote
+
+on:
+  push:
+    branches: [codex/gate1-enlistment-fixture]
+
+permissions:
+  contents: read
+
+jobs:
+  vote:
+    runs-on: windows-2025
+    timeout-minutes: 6
+    steps:
+      - name: Check out the experiment commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record runner and fixture identity
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $disk = Get-Volume -DriveLetter ([IO.Path]::GetTempPath().Substring(0,1))
+          $identity = [ordered]@{
+              commit = (git rev-parse HEAD)
+              source_sha256 = (Get-FileHash 'scripts/experiments/ktm-vote.ps1').Hash.ToLowerInvariant()
+              os = $os.Caption
+              build = $os.BuildNumber
+              powershell = $PSVersionTable.PSVersion.ToString()
+              image = $env:ImageVersion
+              filesystem = $disk.FileSystem
+              run = $env:GITHUB_RUN_ID
+              attempt = $env:GITHUB_RUN_ATTEMPT
+          }
+          $identity | ConvertTo-Json | Set-Content -Encoding utf8 identity.json
+          if ($identity.commit -cne $env:GITHUB_SHA -or $identity.filesystem -ne 'NTFS') {
+              throw 'Unexpected checkout or filesystem'
+          }
+
+      - name: Exercise the synthetic two-root vote
+        shell: pwsh
+        run: |
+          $probe = (Resolve-Path scripts/experiments/ktm-vote.ps1).Path
+          & pwsh -NoLogo -NoProfile -NonInteractive -File $probe | Tee-Object -FilePath fixture.log
+          exit $LASTEXITCODE
+
+      - name: Preserve the observations
+        if: success() || failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate1-fixture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            identity.json
+            fixture.log
+          retention-days: 7
