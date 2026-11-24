@@ -372,9 +372,10 @@ design dispositions below remain the safety authority.
 `darknamer-app` denies unsafe code by default, and the non-Windows library raises
 that policy to `forbid`. Narrow exceptions are attached only to the native UI
 module declaration in `src/lib.rs`, the `private_state`, `windows_backend`, and
-`windows_native` declarations in `src/rename/mod.rs`, and the native backend
-integration-test crate. Code
-outside those boundaries must remain safe Rust.
+`windows_native` declarations in `src/rename/mod.rs`, the Windows-only
+`atomic_replace` function in `src/windows/preferences.rs`, and the native
+backend integration-test crate.
+Code outside those boundaries must remain safe Rust.
 
 `unsafe_source_inventory_stays_within_reviewed_native_boundaries` in
 `tests/unsafe_policy.rs` restricts unsafe constructs to explicitly reviewed
@@ -392,8 +393,12 @@ and consumes only a complete double-NUL list. It does not change thread, process
 or user locales. Language selection changes presentation only; exact UTF-16
 names, sorting, legacy decoding, model revisions and rename/recovery authority
 remain at their existing owners. The independent language preference file uses
-the existing durable temporary-file replacement mechanism and retains its own
-read-failure write prohibition.
+the same publication boundary as column and appearance preferences and retains
+its own read-failure write prohibition. The persistence owner flushes, syncs and
+closes its same-directory temporary file before calling `MoveFileExW` with
+replace-existing and write-through flags. Both terminated UTF-16 path buffers
+stay alive throughout the call. A failed call returns the native error before
+the guard attempts to remove the temporary path it created.
 
 `rename/private_state.rs` is the reviewed exception for querying token SIDs,
 handle security descriptors and ACEs and passing a protected descriptor to

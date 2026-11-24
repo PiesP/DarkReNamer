@@ -529,10 +529,10 @@ impl<T: Send + 'static> CoalescingWriter<T> {
         if self.is_finished() {
             return Err(io::Error::other(stopped));
         }
-        let generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("preference writer generation exhausted"))?;
+        let Some(generation) = self.next_generation.checked_add(1) else {
+            self.request_shutdown();
+            return Err(io::Error::other("preference writer generation exhausted"));
+        };
         let (lock, available) = self.queue.as_ref();
         let mut state = lock
             .lock()
@@ -1072,8 +1072,41 @@ impl Drop for OwnedTemp {
 }
 
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "publishes the owned temporary file with a synchronous Win32 call"
+)]
 fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    crate::windows::atomic_replace_preferences(source, destination)
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers retained for
+    // this synchronous call; the source is the exact same-directory temp file
+    // created by this process and the destination is the settings leaf.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
@@ -1260,6 +1293,59 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![first, third]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_shutdown_retires_after_flushing_the_last_accepted_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        let (writes, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let mut writer = CoalescingWriter::spawn(
+            PathBuf::new(),
+            "exhausted-close",
+            || {},
+            move |_, generation, value| {
+                writes.send((generation, value)).map_err(io::Error::other)?;
+                if value == 1 {
+                    wait.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(io::Error::other)?;
+                }
+                Ok(())
+            },
+        )?;
+        writer.next_generation = u64::MAX - 2;
+        writer.submit(1, "stopped", "closing")?;
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(5))?,
+            (u64::MAX - 1, 1)
+        );
+        writer.submit(2, "stopped", "closing")?;
+        assert!(writer.shutdown_with(3, "stopped").is_err());
+        assert!(writer.shutdown_with(4, "stopped").is_err());
+        release.send(())?;
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(5))?,
+            (u64::MAX, 2)
+        );
+        for generation in [u64::MAX - 1, u64::MAX] {
+            assert!(matches!(
+                writer.events.recv_timeout(Duration::from_secs(5))?,
+                PreferenceWriteEvent::Saved { generation: saved } if saved == generation
+            ));
+        }
+        assert!(matches!(
+            writer.events.recv_timeout(Duration::from_secs(5))?,
+            PreferenceWriteEvent::Stopped
+        ));
+        writer
+            .join()
+            .map_err(|_| io::Error::other("writer panicked"))?;
         Ok(())
     }
 
@@ -1844,6 +1930,84 @@ mod tests {
 mod language_tests {
     use super::*;
     use std::time::Duration;
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_language_destination_preserves_record_and_allows_retry() -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        const RELOAD_ROOT: &str = "DARKRENAMER_TEST_RELOAD_LANGUAGE_ROOT";
+        if let Some(root) = std::env::var_os(RELOAD_ROOT) {
+            let reloaded = load_language_or_default(&PathBuf::from(root).join("journal"));
+            assert!(reloaded.failure.is_none() && !reloaded.missing);
+            assert_eq!(reloaded.preference, LanguagePreference::Korean);
+            println!("confirmed published language in a fresh process");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("환경設定");
+        let journal = parent.join("journal");
+        let path = language_path_for_journal_root(&journal);
+        save_language(&path, LanguagePreference::English)?;
+        let previous = fs::read(&path)?;
+        let sibling = parent.join(".ui-language-v1.unrelated.tmp");
+        fs::write(&sibling, b"keep")?;
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)?;
+
+        let failure = save_language_staged(&path, LanguagePreference::Korean)
+            .err()
+            .ok_or_else(|| {
+                io::Error::other("replaced a destination held without delete sharing")
+            })?;
+        assert_eq!(failure.stage, LanguageWriteStage::ReplaceDestination);
+        let raw_error = failure.error.raw_os_error();
+        assert!(
+            [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION]
+                .iter()
+                .any(|&code| raw_error == Some(code as i32)),
+            "unexpected native replacement error {raw_error:?}"
+        );
+        assert_eq!(fs::read(&path)?, previous);
+        assert_eq!(fs::read(&sibling)?, b"keep");
+        assert_eq!(
+            fs::read_dir(&parent)?
+                .collect::<io::Result<Vec<_>>>()?
+                .len(),
+            2
+        );
+        assert_eq!(
+            load_language_or_default(&journal).preference,
+            LanguagePreference::English
+        );
+
+        drop(held);
+        save_language(&path, LanguagePreference::Korean)?;
+        let reload = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "preferences::language_tests::locked_language_destination_preserves_record_and_allows_retry",
+                "--nocapture",
+            ])
+            .env(RELOAD_ROOT, &parent)
+            .output()?;
+        assert!(
+            reload.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reload.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&reload.stdout)
+                .contains("confirmed published language in a fresh process")
+        );
+        assert_eq!(fs::read(&sibling)?, b"keep");
+        Ok(())
+    }
 
     #[test]
     fn language_stage_preserves_the_original_error_metadata() {
