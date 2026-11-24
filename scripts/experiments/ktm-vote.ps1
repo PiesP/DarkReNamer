@@ -20,8 +20,8 @@ using Microsoft.Win32.SafeHandles;
 
 public static class Dark240Vote
 {
-    const uint QueryInformation = 0x0001;
-    const uint Enlist = 0x0004;
+    // WinNT.h TRANSACTION_RESOURCE_MANAGER_RIGHTS excludes TRANSACTION_COMMIT.
+    const uint TransactionResourceManagerRights = 0x120037;
     const uint PrePrepare = 0x0001;
     const uint Prepare = 0x0002;
     const uint Commit = 0x0004;
@@ -230,7 +230,7 @@ public static class Dark240Vote
         {
             try
             {
-                transaction = Checked(OpenTransaction(QueryInformation | Enlist, ref id), "OpenTransaction");
+                transaction = Checked(OpenTransaction(TransactionResourceManagerRights, ref id), "OpenTransaction");
                 if (Id(transaction) != id)
                     throw new IOException("Opened a different transaction.");
                 var description = new StringBuilder(64);
