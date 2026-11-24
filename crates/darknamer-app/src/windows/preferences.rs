@@ -1938,6 +1938,15 @@ mod language_tests {
         use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
+        const RELOAD_ROOT: &str = "DARKRENAMER_TEST_RELOAD_LANGUAGE_ROOT";
+        if let Some(root) = std::env::var_os(RELOAD_ROOT) {
+            let reloaded = load_language_or_default(&PathBuf::from(root).join("journal"));
+            assert!(reloaded.failure.is_none() && !reloaded.missing);
+            assert_eq!(reloaded.preference, LanguagePreference::Korean);
+            println!("confirmed published language in a fresh process");
+            return Ok(());
+        }
+
         let temp = tempfile::tempdir()?;
         let parent = temp.path().join("환경設定");
         let journal = parent.join("journal");
@@ -1976,9 +1985,23 @@ mod language_tests {
 
         drop(held);
         save_language(&path, LanguagePreference::Korean)?;
-        let reloaded = load_language_or_default(&journal);
-        assert!(reloaded.failure.is_none() && !reloaded.missing);
-        assert_eq!(reloaded.preference, LanguagePreference::Korean);
+        let reload = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "preferences::language_tests::locked_language_destination_preserves_record_and_allows_retry",
+                "--nocapture",
+            ])
+            .env(RELOAD_ROOT, &parent)
+            .output()?;
+        assert!(
+            reload.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reload.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&reload.stdout)
+                .contains("confirmed published language in a fresh process")
+        );
         assert_eq!(fs::read(&sibling)?, b"keep");
         Ok(())
     }
